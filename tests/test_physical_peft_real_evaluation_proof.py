@@ -110,6 +110,164 @@ def test_proof_stable_file_bytes_rejects_post_read_identity_change(
         proof._stable_file_bytes(target, max_bytes=1024, name="evidence")
 
 
+def _staged_asset_manifest(
+    proof: ModuleType,
+    *,
+    config_body: bytes,
+    gguf_body: bytes,
+) -> bytes:
+    payload = {
+        "license": proof._MODEL_LICENSE,
+        "license_reference": proof._MODEL_LICENSE_REFERENCE,
+        "model_files": [
+            {
+                "path": "config.json",
+                "sha256": _sha(config_body),
+                "size_bytes": len(config_body),
+            },
+            {
+                "path": proof._GGUF_FILE,
+                "sha256": _sha(gguf_body),
+                "size_bytes": len(gguf_body),
+            },
+        ],
+        "repository": proof._MODEL_REPOSITORY,
+        "revision": proof._MODEL_REVISION,
+        "runtime_versions": {"test-runtime": "1.0"},
+        "source_reference": proof._MODEL_SOURCE_REFERENCE,
+    }
+    return (proof._canonical_json(payload) + "\n").encode("utf-8")
+
+
+def test_proof_staged_assets_bind_exact_pilot_model_authority(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    config_body = b'{"model_type":"test"}'
+    gguf_body = b"gguf-bytes"
+    (model_dir / "config.json").write_bytes(config_body)
+    (tmp_path / "base.gguf").write_bytes(gguf_body)
+    model_manifest = _sha(b"model-dir-manifest")
+
+    monkeypatch.setattr(proof, "_MODEL_FILES", ("config.json",))
+    monkeypatch.setattr(proof, "_RUNTIME_PACKAGES", ("test-runtime",))
+    monkeypatch.setattr(proof, "_runtime_versions", lambda: {"test-runtime": "1.0"})
+    monkeypatch.setattr(
+        proof,
+        "model_directory_manifest_sha256",
+        lambda path: model_manifest,
+    )
+    pilot = SimpleNamespace(
+        model_dir_manifest_sha256=model_manifest,
+        base_sha256=_sha(gguf_body),
+    )
+    raw = _staged_asset_manifest(
+        proof,
+        config_body=config_body,
+        gguf_body=gguf_body,
+    )
+
+    verified = proof._verified_staged_assets(tmp_path, raw, pilot=pilot)
+
+    assert verified["repository"] == proof._MODEL_REPOSITORY
+    assert verified["revision"] == proof._MODEL_REVISION
+
+
+def test_proof_staged_assets_reject_post_pilot_model_change(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    config_body = b'{"model_type":"test"}'
+    gguf_body = b"gguf-bytes"
+    config = model_dir / "config.json"
+    config.write_bytes(config_body)
+    (tmp_path / "base.gguf").write_bytes(gguf_body)
+    model_manifest = _sha(b"model-dir-manifest")
+
+    monkeypatch.setattr(proof, "_MODEL_FILES", ("config.json",))
+    monkeypatch.setattr(proof, "_RUNTIME_PACKAGES", ("test-runtime",))
+    monkeypatch.setattr(proof, "_runtime_versions", lambda: {"test-runtime": "1.0"})
+    monkeypatch.setattr(
+        proof,
+        "model_directory_manifest_sha256",
+        lambda path: model_manifest,
+    )
+    pilot = SimpleNamespace(
+        model_dir_manifest_sha256=model_manifest,
+        base_sha256=_sha(gguf_body),
+    )
+    raw = _staged_asset_manifest(
+        proof,
+        config_body=config_body,
+        gguf_body=gguf_body,
+    )
+    config.write_bytes(b'{"model_type":"changed"}')
+
+    with pytest.raises(proof.ProofError, match="staged asset identity changed"):
+        proof._verified_staged_assets(tmp_path, raw, pilot=pilot)
+
+
+def _evaluation_report_fixture(proof: ModuleType) -> dict[str, object]:
+    digest = _sha(b"digest")
+    return {
+        "schema_version": 2,
+        "schema": "nika-physical-old-new-evaluation-report-v2",
+        "physical_pilot_evidence_sha256": digest,
+        "requested_experiment_id": proof._EXPERIMENT_ID,
+        "evaluation_set_sha256": digest,
+        "execution_config_sha256": digest,
+        "comparison_evidence_sha256": digest,
+        "experiment_id": "effect-id",
+        "experiment_status": "completed",
+        "selected_candidate_id": "candidate-ref",
+        "previous_champion_id": "base-ref",
+        "training_binding_sha256": digest,
+        "champion_binding_sha256": digest,
+        "champion_benchmark_sha256": digest,
+        "challenger_benchmark_sha256": digest,
+        "attestor_id": "attestor",
+        "attestor_sha256": digest,
+        "champion_provider_manifest_sha256": None,
+        "challenger_provider_manifest_sha256": None,
+        "definition_sha256": digest,
+        "observations_sha256": digest,
+        "observation_count": 2,
+    }
+
+
+def test_proof_rejects_inconsistent_comparison_evidence(
+    proof: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _evaluation_report_fixture(proof)
+    digest = str(report["physical_pilot_evidence_sha256"])
+    pilot = SimpleNamespace(
+        schema_version=6,
+        platform="windows",
+        completed_steps=2,
+        evidence_sha256=digest,
+        candidate_artifact_ref="candidate-ref",
+    )
+    monkeypatch.setattr(
+        proof,
+        "_comparison_evidence_sha256_from_report",
+        lambda value: _sha(b"different-comparison"),
+    )
+
+    with pytest.raises(proof.ProofError, match="digest is inconsistent"):
+        proof._verified_evaluation_report(
+            report,
+            pilot=pilot,
+            evaluation_set_sha256=digest,
+        )
+
+
 def _request(candidate_path: Path, candidate_body: bytes) -> bytes:
     digest = _sha(candidate_body)
     payload = {

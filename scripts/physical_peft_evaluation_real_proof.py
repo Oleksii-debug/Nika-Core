@@ -7,17 +7,43 @@ import os
 import re
 import stat
 import sys
+from importlib.metadata import version
 from pathlib import Path
 from typing import NoReturn
 
 from nika_core.learning_package import FrozenLearningPackage
 from nika_core.model_engineering import EvaluationCase, EvaluationPurpose, EvaluationSet
 from nika_core.model_gateway.contracts import ModelMessage, PrivacyClass
-from nika_core.training_peft_worker import candidate_artifact_path
+from nika_core.training_peft_worker import (
+    candidate_artifact_path,
+    model_directory_manifest_sha256,
+)
+from nika_core.training_physical_evaluation_driver import (
+    PhysicalEvaluationDriverError,
+    _comparison_evidence_sha256_from_report,
+)
 from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
 
 _MODEL_REPOSITORY = "amakhov/tiny-random-llama"
 _MODEL_REVISION = "fbf68d33cf68a9d1d4b71b3d098ae82c8c14443b"
+_MODEL_LICENSE = "Apache-2.0"
+_MODEL_FILES = (
+    "config.json",
+    "generation_config.json",
+    "model.safetensors",
+    "special_tokens_map.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+)
+_GGUF_FILE = "gguf/tiny-random-f16.gguf"
+_RUNTIME_PACKAGES = (
+    "torch",
+    "transformers",
+    "peft",
+    "accelerate",
+    "gguf",
+    "safetensors",
+)
 _MODEL_SOURCE_REFERENCE = (
     "https://huggingface.co/amakhov/tiny-random-llama/tree/" + _MODEL_REVISION
 )
@@ -30,11 +56,39 @@ _HELD_OUT_FILE = "held-out-evaluation.json"
 _RUNTIME_FILE = "physical-evaluation-runtime.json"
 _EVALUATION_CONFIG_FILE = "physical-evaluation.json"
 _EVALUATION_REPORT_FILE = "physical-old-new-evaluation-report.json"
+_EXPERIMENT_ID = "physical-old-new-real-proof-v1"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_JSON_BYTES = 1024 * 1024
 _MAX_EVIDENCE_REPORT_BYTES = 64 * 1024
 _MAX_EVIDENCE_CANDIDATE_BYTES = 128 * 1024 * 1024
 _MAX_EVIDENCE_MANIFEST_BYTES = 1024 * 1024
+_MAX_MODEL_ASSET_BYTES = 64 * 1024 * 1024
+_EVALUATION_REPORT_KEYS = frozenset(
+    {
+        "schema_version",
+        "schema",
+        "physical_pilot_evidence_sha256",
+        "requested_experiment_id",
+        "evaluation_set_sha256",
+        "execution_config_sha256",
+        "comparison_evidence_sha256",
+        "experiment_id",
+        "experiment_status",
+        "selected_candidate_id",
+        "previous_champion_id",
+        "training_binding_sha256",
+        "champion_binding_sha256",
+        "champion_benchmark_sha256",
+        "challenger_benchmark_sha256",
+        "attestor_id",
+        "attestor_sha256",
+        "champion_provider_manifest_sha256",
+        "challenger_provider_manifest_sha256",
+        "definition_sha256",
+        "observations_sha256",
+        "observation_count",
+    }
+)
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_OPEN_EXISTING = 3
@@ -255,6 +309,187 @@ def _write_new_file(path: Path, payload: bytes) -> None:
         raise ProofError("physical evaluation evidence could not be published") from exc
 
 
+def _runtime_versions() -> dict[str, str]:
+    result: dict[str, str] = {}
+    for package in _RUNTIME_PACKAGES:
+        installed = version(package)
+        if not installed or installed != installed.strip():
+            _fail(f"invalid installed runtime version: {package}")
+        result[package] = installed
+    return result
+
+
+def _verified_evaluation_report(
+    value: dict[str, object],
+    *,
+    pilot: PhysicalTrainingPilotReport,
+    evaluation_set_sha256: str,
+) -> dict[str, object]:
+    if frozenset(value) != _EVALUATION_REPORT_KEYS:
+        _fail("physical evaluation report fields are invalid")
+    if pilot.schema_version != 6 or pilot.platform != "windows":
+        _fail("old-vs-new proof requires a fresh Windows schema-v6 pilot")
+    if pilot.completed_steps != 2:
+        _fail("old-vs-new proof requires the exact two-step pilot tier")
+
+    required = {
+        "schema_version": 2,
+        "schema": "nika-physical-old-new-evaluation-report-v2",
+        "physical_pilot_evidence_sha256": pilot.evidence_sha256,
+        "requested_experiment_id": _EXPERIMENT_ID,
+        "evaluation_set_sha256": evaluation_set_sha256,
+        "selected_candidate_id": pilot.candidate_artifact_ref,
+    }
+    for key, expected in required.items():
+        if value.get(key) != expected:
+            _fail(f"physical evaluation report has wrong {key}")
+
+    status = value["experiment_status"]
+    if status not in {"completed", "promoted"}:
+        _fail("old-vs-new evaluation did not reach a canonical terminal state")
+    observation_count = value["observation_count"]
+    if type(observation_count) is not int or observation_count < 2:
+        _fail("old-vs-new evaluation did not persist both model observations")
+
+    for key in (
+        "physical_pilot_evidence_sha256",
+        "evaluation_set_sha256",
+        "execution_config_sha256",
+        "comparison_evidence_sha256",
+        "training_binding_sha256",
+        "champion_binding_sha256",
+        "champion_benchmark_sha256",
+        "challenger_benchmark_sha256",
+        "attestor_sha256",
+        "definition_sha256",
+        "observations_sha256",
+    ):
+        digest = value[key]
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            _fail(f"physical evaluation report has invalid {key}")
+
+    for key in (
+        "champion_provider_manifest_sha256",
+        "challenger_provider_manifest_sha256",
+    ):
+        digest = value[key]
+        if digest is not None and (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            _fail(f"physical evaluation report has invalid {key}")
+
+    for key in ("experiment_id", "previous_champion_id", "attestor_id"):
+        field = value[key]
+        if type(field) is not str or not field or field != field.strip():
+            _fail(f"physical evaluation report has invalid {key}")
+
+    try:
+        reproduced = _comparison_evidence_sha256_from_report(value)
+    except (
+        KeyError,
+        PhysicalEvaluationDriverError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise ProofError(
+            "physical evaluation comparison evidence cannot be reconstructed"
+        ) from exc
+    if reproduced != value["comparison_evidence_sha256"]:
+        _fail("physical evaluation comparison evidence digest is inconsistent")
+    return value
+
+
+def _verified_staged_assets(
+    root: Path,
+    raw: bytes,
+    *,
+    pilot: PhysicalTrainingPilotReport,
+) -> dict[str, object]:
+    value = _load_object_bytes(raw, name="staged-assets.json")
+    expected_keys = {
+        "license",
+        "license_reference",
+        "model_files",
+        "repository",
+        "revision",
+        "runtime_versions",
+        "source_reference",
+    }
+    if set(value) != expected_keys:
+        _fail("physical evaluation staged asset manifest fields are invalid")
+    if (
+        value["repository"] != _MODEL_REPOSITORY
+        or value["revision"] != _MODEL_REVISION
+        or value["license"] != _MODEL_LICENSE
+        or value["source_reference"] != _MODEL_SOURCE_REFERENCE
+        or value["license_reference"] != _MODEL_LICENSE_REFERENCE
+    ):
+        _fail("physical evaluation staged asset provenance changed")
+
+    runtime_versions = value["runtime_versions"]
+    if (
+        type(runtime_versions) is not dict
+        or set(runtime_versions) != set(_RUNTIME_PACKAGES)
+        or runtime_versions != _runtime_versions()
+    ):
+        _fail("physical evaluation runtime version evidence changed")
+
+    model_dir = (root / "model").resolve(strict=True)
+    try:
+        current_model_manifest = model_directory_manifest_sha256(model_dir)
+    except (OSError, TypeError, ValueError) as exc:
+        raise ProofError("physical evaluation model directory is invalid") from exc
+    if current_model_manifest != pilot.model_dir_manifest_sha256:
+        _fail("physical evaluation model directory changed after the pilot")
+
+    raw_files = value["model_files"]
+    expected_paths = set(_MODEL_FILES) | {_GGUF_FILE}
+    if type(raw_files) is not list or len(raw_files) != len(expected_paths):
+        _fail("physical evaluation staged asset inventory is invalid")
+
+    observed_paths: set[str] = set()
+    for entry in raw_files:
+        if type(entry) is not dict or set(entry) != {"path", "sha256", "size_bytes"}:
+            _fail("physical evaluation staged asset entry is invalid")
+        relative = entry["path"]
+        digest = entry["sha256"]
+        size_bytes = entry["size_bytes"]
+        if (
+            type(relative) is not str
+            or relative not in expected_paths
+            or relative in observed_paths
+            or type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or type(size_bytes) is not int
+            or size_bytes <= 0
+            or size_bytes > _MAX_MODEL_ASSET_BYTES
+        ):
+            _fail("physical evaluation staged asset entry is invalid")
+
+        source = root / "base.gguf" if relative == _GGUF_FILE else model_dir / relative
+        payload = _stable_file_bytes(
+            source,
+            max_bytes=_MAX_MODEL_ASSET_BYTES,
+            name=f"physical evaluation staged asset {relative}",
+        )
+        if len(payload) != size_bytes or _sha256_bytes(payload) != digest:
+            _fail(f"physical evaluation staged asset identity changed: {relative}")
+        if relative == _GGUF_FILE and digest != pilot.base_sha256:
+            _fail("physical evaluation base GGUF changed after the pilot")
+        observed_paths.add(relative)
+
+    if observed_paths != expected_paths:
+        _fail("physical evaluation staged asset inventory is incomplete")
+    return value
+
+
 def _evaluation_set() -> tuple[EvaluationSet, dict[str, object]]:
     case = EvaluationCase(
         case_id="held-out-physical-001",
@@ -457,7 +692,7 @@ def configure(root: Path, evaluator_script: Path) -> None:
             "license_ref": _EVALUATOR_LICENSE_REFERENCE,
         },
         "evaluation_set_path": os.fspath((root / _HELD_OUT_FILE).resolve(strict=True)),
-        "experiment_id": "physical-old-new-real-proof-v1",
+        "experiment_id": _EXPERIMENT_ID,
         "permission_fingerprint": "physical-evaluation-read-only-v1",
         "benchmark": {
             "timeout_seconds": 300.0,
@@ -518,42 +753,15 @@ def verify(root: Path) -> None:
         name=evaluation_report_path.name,
     )
     evaluation, _ = _evaluation_set()
-
-    required = {
-        "schema_version": 2,
-        "schema": "nika-physical-old-new-evaluation-report-v2",
-        "physical_pilot_evidence_sha256": report.evidence_sha256,
-        "evaluation_set_sha256": evaluation.content_sha256,
-    }
-    for key, expected in required.items():
-        if evaluation_report.get(key) != expected:
-            _fail(f"physical evaluation report has wrong {key}")
-
-    status = evaluation_report.get("experiment_status")
-    if status not in {"completed", "promoted"}:
-        _fail("old-vs-new evaluation did not reach a canonical terminal state")
-    observation_count = evaluation_report.get("observation_count")
-    if type(observation_count) is not int or observation_count < 2:
-        _fail("old-vs-new evaluation did not persist both model observations")
-    for key in (
-        "comparison_evidence_sha256",
-        "training_binding_sha256",
-        "champion_binding_sha256",
-        "champion_benchmark_sha256",
-        "challenger_benchmark_sha256",
-        "definition_sha256",
-        "observations_sha256",
-        "attestor_sha256",
-    ):
-        value = evaluation_report.get(key)
-        if (
-            type(value) is not str
-            or len(value) != 64
-            or any(character not in "0123456789abcdef" for character in value)
-        ):
-            _fail(f"physical evaluation report has invalid {key}")
-    if not evaluation_report.get("attestor_id"):
-        _fail("physical evaluation report is missing attestor identity")
+    evaluation_report = _verified_evaluation_report(
+        evaluation_report,
+        pilot=report,
+        evaluation_set_sha256=evaluation.content_sha256,
+    )
+    status = evaluation_report["experiment_status"]
+    observation_count = evaluation_report["observation_count"]
+    assert type(status) is str
+    assert type(observation_count) is int
 
     candidate = candidate_artifact_path(root / "run", report.candidate_artifact_ref)
     candidate = candidate.resolve(strict=True)
@@ -575,6 +783,11 @@ def verify(root: Path) -> None:
         max_bytes=_MAX_EVIDENCE_MANIFEST_BYTES,
         name="physical proof asset manifest",
     )
+    staged_assets = _verified_staged_assets(
+        root,
+        staged_assets_bytes,
+        pilot=report,
+    )
     report_sha256 = _sha256_bytes(evaluation_report_bytes)
     source_sha = os.environ.get("NIKA_CANDIDATE_SHA", "")
     if _SHA_RE.fullmatch(source_sha) is None:
@@ -592,7 +805,12 @@ def verify(root: Path) -> None:
         "observation_count": observation_count,
         "physical_pilot_evidence_sha256": report.evidence_sha256,
         "proof_source_sha": source_sha,
-        "schema": "nika-physical-old-new-real-proof-v1",
+        "model_dir_manifest_sha256": report.model_dir_manifest_sha256,
+        "base_sha256": report.base_sha256,
+        "staged_assets_sha256": _sha256_bytes(staged_assets_bytes),
+        "asset_repository": staged_assets["repository"],
+        "asset_revision": staged_assets["revision"],
+        "schema": "nika-physical-old-new-real-proof-v2",
     }
 
     evidence_dir = root / "evaluation-evidence"
