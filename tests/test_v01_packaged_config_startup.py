@@ -703,3 +703,38 @@ def test_shell_launch_boundary_does_not_swallow_process_exit(
         nika_windows.main([])
     assert caught.value.code == 73
 
+def test_packaged_main_runs_registered_cleanup_after_shell_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+    monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
+    events: list[str] = []
+
+    def build(
+        _config: AppConfig,
+        *,
+        defer_startup_recovery,
+        register_cleanup,
+        **_kwargs: object,
+    ) -> tuple[object, object]:
+        defer_startup_recovery(lambda: events.append("recovery"))
+        register_cleanup(lambda: events.append("cleanup"))
+        return object(), object()
+
+    def launch(
+        _bridge: object,
+        *,
+        title: str,
+        on_gui_started,
+    ) -> None:
+        assert title == f"Nika Core {config.app_version}"
+        on_gui_started()
+        events.append("shell")
+
+    monkeypatch.setattr(nika_windows, "build_windows_bridge", build)
+    monkeypatch.setattr(nika_windows, "launch_windows_shell", launch)
+
+    assert nika_windows.main([]) == 0
+    assert events == ["recovery", "shell", "cleanup"]
+
