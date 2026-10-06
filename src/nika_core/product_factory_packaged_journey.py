@@ -208,12 +208,12 @@ def packaged_task_direct_target(command: str) -> tuple[str, str | None] | None:
     ):
         if lowered in commands:
             return action, None
-        prefix = next(
-            (item for item in commands if lowered.startswith(item + " ")),
-            None,
+        prefixes = tuple(
+            item for item in commands if lowered.startswith(item + " ")
         )
-        if prefix is None:
+        if not prefixes:
             continue
+        prefix = max(prefixes, key=len)
         task_id = normalized[len(prefix) :].strip(" :#")
         try:
             parsed = UUID(task_id)
