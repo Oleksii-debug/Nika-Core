@@ -118,11 +118,21 @@ def test_router_forwards_only_canonical_target_id(tmp_path: Path) -> None:
 
     def control(payload: Mapping[str, Any]) -> UIResult:
         calls.append(("pause", payload))
-        return UIResult("desktop-handler", "completed", "paused", "tasks-heading")
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message="paused",
+            focus_id="tasks-heading",
+        )
 
     def status(task_id: str | None) -> UIResult:
         statuses.append(task_id)
-        return UIResult("desktop-handler", "completed", "status", "tasks-heading")
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message="status",
+            focus_id="tasks-heading",
+        )
 
     router = PackagedProductCommandRouter(
         products=ProductProjectCommandService(ProductProjectRepository(store)),
