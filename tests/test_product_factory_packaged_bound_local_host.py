@@ -1624,10 +1624,12 @@ async def test_worker_revalidates_binding_after_private_git_source_copy(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation_point", ("commit", "acceptance"))
+@pytest.mark.parametrize("cleanup_fails", (False, True))
 async def test_worker_revalidates_binding_after_private_candidate_effects(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
     mutation_point: str,
+    cleanup_fails: bool,
 ) -> None:
     store = _store(tmp_path)
     repository = _repository_ref()
@@ -1707,16 +1709,28 @@ async def test_worker_revalidates_binding_after_private_candidate_effects(
             acceptance_then_rebind,
         )
 
-    with pytest.raises(
-        PackagedBoundLocalProductFactoryHostError,
-        match="changed during contained-local execution",
-    ):
+    if cleanup_fails:
+        def cleanup_failure(git_plan) -> None:
+            raise OSError("injected cleanup failure")
+
+        monkeypatch.setattr(
+            local_worker_module,
+            "cleanup_private_git_workspace",
+            cleanup_failure,
+        )
+        expected_error = ContainedLocalWorkerError
+        expected_message = "cleanup could not be proven"
+    else:
+        expected_error = PackagedBoundLocalProductFactoryHostError
+        expected_message = "changed during contained-local execution"
+
+    with pytest.raises(expected_error, match=expected_message):
         await entry.program.host.worker.dispatch(request)
 
     assert rebound is True
     job_root = entry.program.worker.workspace_root_for(request.work_id)
-    assert not (job_root / "_nika_private_git").exists()
-    assert not (job_root / "worktree").exists()
+    assert (job_root / "_nika_private_git").exists() is cleanup_fails
+    assert (job_root / "worktree").exists() is cleanup_fails
     inspected = await entry.program.worker.inspect(request.work_id)
     assert inspected is not None
     assert inspected.phase == "manual_reconcile_required"

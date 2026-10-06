@@ -72,11 +72,16 @@ class ContainedLocalWorkerError(RuntimeError):
 
 
 class _RepositoryAuthorityChangedDuringPrivateEffect(Exception):
-    """Internal carrier preserving exact repository-authority failure after cleanup."""
+    """Internal carrier preserving authority/cleanup failures past generic rollback."""
 
-    def __init__(self, authority_error: Exception) -> None:
+    def __init__(
+        self,
+        authority_error: Exception,
+        cleanup_error: Exception | None = None,
+    ) -> None:
         super().__init__("repository authority changed during private candidate work")
         self.authority_error = authority_error
+        self.cleanup_error = cleanup_error
 
 
 class _JobExecutionLock:
@@ -1226,6 +1231,11 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             self._save_terminal(job, evidence, result)
             return result
         except _RepositoryAuthorityChangedDuringPrivateEffect as exc:
+            if exc.cleanup_error is not None:
+                raise ContainedLocalWorkerError(
+                    "repository authority changed during private candidate work "
+                    "and cleanup could not be proven"
+                ) from exc.cleanup_error
             raise exc.authority_error
         except WorkspaceSecurityError as exc:
             return self._rollback_private_failure(
@@ -1641,9 +1651,9 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             try:
                 cleanup_private_git_workspace(git_plan)
             except Exception as cleanup_exc:
-                raise ContainedLocalWorkerError(
-                    "repository authority changed during private candidate work "
-                    "and cleanup could not be proven"
+                raise _RepositoryAuthorityChangedDuringPrivateEffect(
+                    exc,
+                    cleanup_exc,
                 ) from cleanup_exc
             raise _RepositoryAuthorityChangedDuringPrivateEffect(exc) from exc
 
