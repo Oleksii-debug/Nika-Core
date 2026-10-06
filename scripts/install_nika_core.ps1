@@ -114,8 +114,11 @@ function Test-NikaPathWithin {
 function Get-NikaCanonicalDataRoot {
     $primaryDatabasePath = [System.Environment]::GetEnvironmentVariable("NIKA_DB_PATH")
     $compatDatabasePath = [System.Environment]::GetEnvironmentVariable("NIKA_DATABASE_PATH")
-    $hasPrimaryDatabasePath = -not [string]::IsNullOrWhiteSpace($primaryDatabasePath)
-    $hasCompatDatabasePath = -not [string]::IsNullOrWhiteSpace($compatDatabasePath)
+    # Environment-variable presence is authoritative. An explicitly present
+    # empty/whitespace alias must fail closed just like AppConfig.from_environment
+    # instead of being silently treated as "unset" by the installer.
+    $hasPrimaryDatabasePath = $null -ne $primaryDatabasePath
+    $hasCompatDatabasePath = $null -ne $compatDatabasePath
 
     $primaryIdentity = $null
     $compatIdentity = $null
