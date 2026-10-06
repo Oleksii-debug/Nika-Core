@@ -269,6 +269,21 @@ class ProductFactoryLocalRepositoryBindings:
             raise KeyError((project_id, repository_id))
         binding, identity = _binding_from_row(row)
         _require_filesystem_identity(binding.root, identity)
+        with self._store.connection() as conn:
+            current_row = conn.execute(
+                "SELECT * FROM product_factory_local_repository_bindings "
+                "WHERE project_id=? AND repository_id=?",
+                (project_id, repository_id),
+            ).fetchone()
+        if current_row is None:
+            raise ProductFactoryLocalRepositoryBindingError(
+                "local repository binding changed while resolving"
+            )
+        current_binding, current_identity = _binding_from_row(current_row)
+        if current_binding != binding or current_identity != identity:
+            raise ProductFactoryLocalRepositoryBindingError(
+                "local repository binding changed while resolving"
+            )
         return binding
 
     def resolve_for_plan(
@@ -459,6 +474,10 @@ def _binding_from_row(row: object) -> tuple[
         ) from exc
 
     root = pathlib.Path(root_path)
+    if not root.is_absolute():
+        raise ProductFactoryLocalRepositoryBindingError(
+            "invalid persisted root_path"
+        )
     identity = _FilesystemIdentity(
         root_path=root_path,
         root_device=root_device,
