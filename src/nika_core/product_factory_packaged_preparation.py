@@ -524,6 +524,7 @@ def _exact_command_tuple(
             )
     return value
 
+
 def _text_mapping(value: Mapping[str, str], label: str) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise PackagedProductFactoryPreparationError(f"{label} must be a mapping")

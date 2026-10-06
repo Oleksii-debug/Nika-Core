@@ -442,7 +442,6 @@ def test_prepare_rejects_structurally_deleted_execution_plan_before_effect(
     assert _task_count(store) == 0
 
 
-
 @pytest.mark.parametrize(
     ("target", "field", "value", "message"),
     (
@@ -516,6 +515,7 @@ def test_prepare_rejects_structurally_deleted_nested_graph_field_before_effect(
         service.prepare(plan)
 
     assert _task_count(store) == 0
+
 
 def test_prepare_uses_detached_snapshot_if_original_plan_mutates_mid_call(
     tmp_path: Path,
