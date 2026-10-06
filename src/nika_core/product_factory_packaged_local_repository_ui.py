@@ -194,16 +194,19 @@ class PackagedLocalRepositoryBindingCommands:
             )
 
         try:
-            binding = self._bindings.bind(
-                project_id=project_id,
-                repository=repository,
+            binding = self._bindings.bind_for_plan(
+                plan=plan,
+                repository_id=repository_id,
                 root=root,
                 expected_binding_version=expected_binding_version,
             )
         except (ProductFactoryLocalRepositoryBindingError, KeyError, OSError, ValueError):
             return _result(
                 "rejected",
-                "Не вдалося безпечно прив'язати вибраний локальний Git-репозиторій.",
+                (
+                    "Не вдалося безпечно прив'язати локальний Git-репозиторій. "
+                    "Перевірте актуальність ProductProject і JSON-плану."
+                ),
             )
         except Exception:
             return _result(

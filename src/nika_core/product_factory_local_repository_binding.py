@@ -88,9 +88,62 @@ class ProductFactoryLocalRepositoryBindings:
         root: pathlib.Path,
         expected_binding_version: int | None,
     ) -> ProductFactoryLocalRepositoryBinding:
+        return self._bind(
+            project_id=project_id,
+            repository=repository,
+            root=root,
+            expected_binding_version=expected_binding_version,
+            expected_project_version=None,
+        )
+
+    def bind_for_plan(
+        self,
+        *,
+        plan: PackagedProductFactoryExecutionPlan,
+        repository_id: str,
+        root: pathlib.Path,
+        expected_binding_version: int | None,
+    ) -> ProductFactoryLocalRepositoryBinding:
+        """Bind one exact loaded-plan repository without trusting UI identity fields."""
+
+        if type(plan) is not PackagedProductFactoryExecutionPlan:
+            raise TypeError("plan must be an exact PackagedProductFactoryExecutionPlan")
+        repository_id = _canonical_text(repository_id, "repository_id")
+        project = self._projects.get(plan.project_id)
+        _require_plan_project(plan, project)
+        matches = tuple(
+            repository
+            for repository in plan.graph.repositories
+            if repository.repository_id == repository_id
+        )
+        if len(matches) != 1:
+            raise ProductFactoryLocalRepositoryBindingError(
+                "execution-plan repository identity is unavailable"
+            )
+        return self._bind(
+            project_id=plan.project_id,
+            repository=matches[0],
+            root=root,
+            expected_binding_version=expected_binding_version,
+            expected_project_version=(
+                plan.expected_spec_version,
+                plan.expected_row_version,
+            ),
+        )
+
+    def _bind(
+        self,
+        *,
+        project_id: str,
+        repository: RepositoryRef,
+        root: pathlib.Path,
+        expected_binding_version: int | None,
+        expected_project_version: tuple[int, int] | None,
+    ) -> ProductFactoryLocalRepositoryBinding:
         project_id = _canonical_text(project_id, "project_id")
         repository = _snapshot_repository(repository)
         project = self._require_project_repository(project_id, repository.locator)
+        _require_expected_project_version(project, expected_project_version)
         if project.status != "active":
             raise ProductFactoryLocalRepositoryBindingError(
                 "local repository binding requires an active ProductProject"
@@ -108,6 +161,10 @@ class ProductFactoryLocalRepositoryBindings:
                 raise ProductFactoryLocalRepositoryBindingError(
                     "ProductProject changed while binding local repository"
                 )
+            _require_expected_project_version(
+                current_project,
+                expected_project_version,
+            )
             alias_rows = conn.execute(
                 "SELECT * FROM product_factory_local_repository_bindings "
                 "WHERE project_id = ? AND repository_id <> ?",
@@ -353,6 +410,32 @@ class ProductFactoryLocalRepositoryBindings:
                 "repository locator is not present in current ProductProject"
             )
         return project
+
+
+def _require_expected_project_version(
+    project: ProductProject,
+    expected: tuple[int, int] | None,
+) -> None:
+    if expected is None:
+        return
+    if (
+        type(expected) is not tuple
+        or len(expected) != 2
+        or type(expected[0]) is not int
+        or type(expected[1]) is not int
+        or expected[0] < 1
+        or expected[1] < 1
+    ):
+        raise ProductFactoryLocalRepositoryBindingError(
+            "expected ProductProject version is invalid"
+        )
+    if (
+        project.spec_version != expected[0]
+        or project.row_version != expected[1]
+    ):
+        raise ProductFactoryLocalRepositoryBindingError(
+            "execution plan is stale for the current ProductProject"
+        )
 
 
 def _require_plan_project(
