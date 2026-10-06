@@ -515,6 +515,7 @@ class ProductFactoryLocalRepositoryBindings:
             raise ProductFactoryLocalRepositoryBindingError(
                 "local repository binding changed while resolving"
             )
+        _require_filesystem_identity(binding.root, identity)
         return binding
 
     def validate_plan(
