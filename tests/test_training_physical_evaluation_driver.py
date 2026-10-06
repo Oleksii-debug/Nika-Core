@@ -553,6 +553,48 @@ def test_find_pilot_task_rejects_hidden_duplicate_beyond_recent_window(
 
 
 @pytest.mark.parametrize(
+    ("field", "stored_alias"),
+    (
+        ("workspace_id", b"evaluation-workspace"),
+        ("agent_id", b"physical-peft-pilot"),
+    ),
+)
+def test_find_pilot_task_rejects_matching_sqlite_storage_alias(
+    tmp_path: Path,
+    field: str,
+    stored_alias: bytes,
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    queue = TaskQueue(store)
+    queue.create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload={"job_id": "pilot-job", "kind": "physical_peft_pilot"},
+    )
+    alias = queue.create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload={"job_id": "pilot-job", "kind": "physical_peft_pilot"},
+    )
+    with store.connection() as conn:
+        conn.execute(
+            f"UPDATE tasks SET {field} = ? WHERE task_id = ?",
+            (stored_alias, alias.task_id),
+        )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="task identity storage is non-canonical",
+    ):
+        driver._find_pilot_task(
+            store,
+            workspace_id="evaluation-workspace",
+            job_id="pilot-job",
+        )
+
+
+@pytest.mark.parametrize(
     ("kind", "proof_sha256"),
     (
         ("physical_peft_pilot", None),
