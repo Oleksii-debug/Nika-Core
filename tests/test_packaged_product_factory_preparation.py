@@ -1230,6 +1230,7 @@ def test_preparation_preserves_persisted_team_review_authority(tmp_path: Path) -
     assert restored.state.binding.team_plan == team_plan
     assert restored.state.binding.reviewer_principals == reviewer_principals
 
+
 def test_product_revision_blocks_stale_review_checkpoint(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "trusted stale review.db")
     store.initialize()
