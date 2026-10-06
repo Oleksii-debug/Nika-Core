@@ -230,7 +230,7 @@ def test_executable_launch_guard_rejects_same_path_byte_replacement(
             raise AssertionError("changed executable must not cross launch guard")
 
 
-def test_typed_runner_rejects_same_path_replacement_after_admission(
+def test_typed_runner_rejects_same_path_replacement_after_runtime_admission(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -238,23 +238,22 @@ def test_typed_runner_rejects_same_path_replacement_after_admission(
     replacement = tmp_path / "replacement"
     shutil.copy2(pathlib.Path(sys.executable).resolve(strict=True), executable)
     replacement.write_bytes(b"replacement executable bytes")
-    original_prepare = execution_module._prepare_process_environment
+    original_admit = execution_module._pinned_runtime_argv
     replaced = False
     popen_called = False
 
-    def prepare_then_replace(
-        *,
-        source: object,
-        workspace_root: pathlib.Path,
-    ) -> dict[str, str]:
+    def admit_then_replace(
+        argv: object,
+        allowed_executables: object,
+    ) -> object:
         nonlocal replaced
-        prepared = original_prepare(
-            source=source,  # type: ignore[arg-type]
-            workspace_root=workspace_root,
+        admission = original_admit(
+            argv,  # type: ignore[arg-type]
+            allowed_executables,  # type: ignore[arg-type]
         )
         os.replace(replacement, executable)
         replaced = True
-        return prepared
+        return admission
 
     def forbidden_popen(*args: object, **kwargs: object) -> object:
         nonlocal popen_called
@@ -263,8 +262,8 @@ def test_typed_runner_rejects_same_path_replacement_after_admission(
 
     monkeypatch.setattr(
         execution_module,
-        "_prepare_process_environment",
-        prepare_then_replace,
+        "_pinned_runtime_argv",
+        admit_then_replace,
     )
     monkeypatch.setattr(execution_module.subprocess, "Popen", forbidden_popen)
 
@@ -310,6 +309,60 @@ def test_git_launch_rejects_same_path_change_against_earlier_digest(
             environment={},
             expected_executable_sha256=expected_sha256,
         )
+
+
+def test_private_git_rejects_replacement_after_host_git_admission(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, base_sha = _make_source_repository(tmp_path)
+    job_root = tmp_path / "jobs" / "job-admission-swap"
+    job_root.mkdir(parents=True)
+    plan = make_sterile_git_plan(
+        repository_root=repository,
+        job_root=job_root,
+        branch_name="toolsmith/job-admission-swap",
+        base_sha=base_sha,
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+    source_git = shutil.which("git")
+    if source_git is None:
+        pytest.skip("Git CLI unavailable")
+    executable = tmp_path / pathlib.Path(source_git).name
+    replacement = tmp_path / "replacement-git"
+    shutil.copy2(pathlib.Path(source_git).resolve(strict=True), executable)
+    replacement.write_bytes(b"replacement git bytes")
+    original_resolve = execution_module._resolve_host_git_executable
+    replaced = False
+    run_called = False
+
+    def resolve_then_replace(git_executable: str) -> object:
+        nonlocal replaced
+        admission = original_resolve(git_executable)
+        os.replace(replacement, executable)
+        replaced = True
+        return admission
+
+    def forbidden_run(*args: object, **kwargs: object) -> object:
+        nonlocal run_called
+        run_called = True
+        raise AssertionError("replaced Git executable reached subprocess.run")
+
+    monkeypatch.setattr(
+        execution_module,
+        "_resolve_host_git_executable",
+        resolve_then_replace,
+    )
+    monkeypatch.setattr(execution_module.subprocess, "run", forbidden_run)
+
+    with pytest.raises(
+        WorkspaceSecurityError,
+        match="executable authority changed before launch",
+    ):
+        prepare_private_git_workspace(plan, git_executable=str(executable))
+
+    assert replaced is True
+    assert run_called is False
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows CreateProcess boundary only")
