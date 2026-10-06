@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -757,6 +758,8 @@ def _complete_promoted_experiment(
 def _durable_loader_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    legacy_report: bool = False,
 ) -> tuple[Path, dict[str, object], driver.TrainingScaleProgressionProof]:
     root = (tmp_path / "previous-run").resolve()
     root.mkdir()
@@ -833,8 +836,12 @@ def _durable_loader_fixture(
         evaluation=evaluation,
     )
     evaluation_result = {
-        "schema_version": 1,
-        "schema": "nika-physical-old-new-evaluation-report-v1",
+        "schema_version": (
+            driver._LEGACY_REPORT_SCHEMA_VERSION
+            if legacy_report
+            else driver._REPORT_SCHEMA_VERSION
+        ),
+        "schema": driver._LEGACY_REPORT_SCHEMA if legacy_report else driver._REPORT_SCHEMA,
         "physical_pilot_evidence_sha256": pilot.evidence_sha256,
         "requested_experiment_id": config.experiment_id,
         "evaluation_set_sha256": claim["evaluation_set_sha256"],
@@ -852,6 +859,18 @@ def _durable_loader_fixture(
         "champion_provider_manifest_sha256": None,
         "challenger_provider_manifest_sha256": None,
     }
+    if not legacy_report:
+        snapshot = SQLiteExperimentRepository(store).get(experiment_id)
+        definition_sha256, observations_sha256, observation_count = (
+            driver.experiment_snapshot_evidence_identity(snapshot)
+        )
+        evaluation_result.update(
+            {
+                "definition_sha256": definition_sha256,
+                "observations_sha256": observations_sha256,
+                "observation_count": observation_count,
+            }
+        )
     eval_record, created = ledger.reserve_once(
         operation_key="physical-old-new-effect:" + "f" * 64,
         task_id=task.task_id,
@@ -891,6 +910,72 @@ def test_durable_progression_loader_restores_only_completed_promoted_authority(
 
     assert restored.canonical_payload() == proof.canonical_payload()
     assert restored.proof_sha256 == proof.proof_sha256
+
+
+def test_durable_progression_loader_rejects_legacy_evaluation_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, claim, _ = _durable_loader_fixture(
+        tmp_path,
+        monkeypatch,
+        legacy_report=True,
+    )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="canonical evaluation report",
+    ):
+        driver.load_trusted_scale_progression_proof(
+            root,
+            workspace_id="evaluation-workspace",
+            expected_claim=claim,
+        )
+
+
+@pytest.mark.parametrize("tamper", ("definition", "observations"))
+def test_durable_progression_loader_rejects_changed_experiment_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+) -> None:
+    root, claim, _ = _durable_loader_fixture(tmp_path, monkeypatch)
+    original_get = SQLiteExperimentRepository.get
+
+    def changed_get(
+        repository: SQLiteExperimentRepository,
+        experiment_id: str,
+    ) -> object:
+        snapshot = original_get(repository, experiment_id)
+        if experiment_id != "durable-progression-experiment":
+            return snapshot
+        if tamper == "definition":
+            policy = replace(
+                snapshot.definition.policy,
+                minimum_improvement=(
+                    float(snapshot.definition.policy.minimum_improvement) + 0.125
+                ),
+            )
+            definition = replace(snapshot.definition, policy=policy)
+            return replace(snapshot, definition=definition)
+        observations = list(snapshot.observations)
+        observations[0] = replace(
+            observations[0],
+            value=float(observations[0].value) + 0.125,
+        )
+        return replace(snapshot, observations=tuple(observations))
+
+    monkeypatch.setattr(SQLiteExperimentRepository, "get", changed_get)
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="experiment evidence changed after evaluation",
+    ):
+        driver.load_trusted_scale_progression_proof(
+            root,
+            workspace_id="evaluation-workspace",
+            expected_claim=claim,
+        )
 
 
 def test_higher_tier_evaluation_reuses_durable_predecessor_proof(
