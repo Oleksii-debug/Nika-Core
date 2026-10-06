@@ -4,10 +4,15 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
+from nika_core.artifacts.schema import (
+    ARTIFACT_REGISTRY_SCHEMA_VERSION,
+    initialize_artifact_registry_schema,
+)
 from nika_core.config import AppConfig
 from nika_core.data.experience_ledger_schema import EXPERIENCE_LEDGER_SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.diagnostics import HealthService, HealthStatus
+from nika_core.media.schema import MEDIA_SCHEMA_VERSION, initialize_media_schema
 from nika_core.model_artifact_schema import MODEL_ARTIFACT_SCHEMA_VERSION
 from nika_core.resources.contracts import ResourceSnapshot
 
@@ -243,4 +248,145 @@ def test_current_markers_with_behavior_changing_trigger_fail_schema_shape(
     assert checks["database.integrity"] is HealthStatus.PASS
     assert checks["database.foreign-keys"] is HealthStatus.PASS
     assert checks["database.schema.shape"] is HealthStatus.FAIL
+    assert report.overall is HealthStatus.FAIL
+
+
+def test_health_accepts_initialized_artifact_registry_schema(tmp_path: Path) -> None:
+    database = tmp_path / "Ніка дані" / "nika.db"
+    store = SQLiteStore(database)
+    store.initialize()
+    initialize_artifact_registry_schema(store)
+
+    report = _run(database)
+    checks = _check_map(report)
+
+    assert report.overall is HealthStatus.PASS
+    assert checks["database.schema.artifact-registry"] is HealthStatus.PASS
+    assert checks["database.schema.media"] is HealthStatus.PASS
+    assert checks["database.schema.shape"] is HealthStatus.PASS
+
+
+def test_health_accepts_initialized_media_schema(tmp_path: Path) -> None:
+    database = tmp_path / "Ніка дані" / "nika.db"
+    store = SQLiteStore(database)
+    store.initialize()
+    initialize_media_schema(store)
+
+    report = _run(database)
+    checks = _check_map(report)
+
+    assert report.overall is HealthStatus.PASS
+    assert checks["database.schema.artifact-registry"] is HealthStatus.PASS
+    assert checks["database.schema.media"] is HealthStatus.PASS
+    assert checks["database.schema.shape"] is HealthStatus.PASS
+
+
+def test_health_accepts_both_initialized_optional_schemas(tmp_path: Path) -> None:
+    database = tmp_path / "Ніка дані" / "nika.db"
+    store = SQLiteStore(database)
+    store.initialize()
+    initialize_artifact_registry_schema(store)
+    initialize_media_schema(store)
+
+    report = _run(database)
+    checks = _check_map(report)
+
+    assert report.overall is HealthStatus.PASS
+    assert checks["database.schema.artifact-registry"] is HealthStatus.PASS
+    assert checks["database.schema.media"] is HealthStatus.PASS
+    assert checks["database.schema.shape"] is HealthStatus.PASS
+
+
+def test_future_artifact_registry_schema_marker_fails_health(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    store = SQLiteStore(database)
+    store.initialize()
+    initialize_artifact_registry_schema(store)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO artifact_registry_schema_migrations(version, applied_at) "
+            "VALUES (?, ?)",
+            (
+                ARTIFACT_REGISTRY_SCHEMA_VERSION + 1,
+                "2026-10-06T01:45:00+00:00",
+            ),
+        )
+
+    report = _run(database)
+    checks = _check_map(report)
+
+    assert checks["database.schema.artifact-registry"] is HealthStatus.FAIL
+    assert checks["database.schema.shape"] is HealthStatus.PASS
+    assert report.overall is HealthStatus.FAIL
+
+
+def test_future_media_schema_marker_fails_health(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    store = SQLiteStore(database)
+    store.initialize()
+    initialize_media_schema(store)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO media_schema_migrations(version, applied_at) VALUES (?, ?)",
+            (
+                MEDIA_SCHEMA_VERSION + 1,
+                "2026-10-06T01:46:00+00:00",
+            ),
+        )
+
+    report = _run(database)
+    checks = _check_map(report)
+
+    assert checks["database.schema.media"] is HealthStatus.FAIL
+    assert checks["database.schema.shape"] is HealthStatus.PASS
+    assert report.overall is HealthStatus.FAIL
+
+
+
+def test_orphaned_artifact_registry_tables_fail_schema_shape(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    store = SQLiteStore(database)
+    store.initialize()
+    initialize_artifact_registry_schema(store)
+    with sqlite3.connect(database) as conn:
+        conn.execute("DROP TABLE artifact_registry_schema_migrations")
+
+    report = _run(database)
+    checks = _check_map(report)
+
+    assert checks["database.schema.artifact-registry"] is HealthStatus.PASS
+    assert checks["database.schema.shape"] is HealthStatus.FAIL
+    assert report.overall is HealthStatus.FAIL
+
+
+def test_initialized_media_schema_with_missing_owned_table_fails_shape(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "nika.db"
+    store = SQLiteStore(database)
+    store.initialize()
+    initialize_media_schema(store)
+    with sqlite3.connect(database) as conn:
+        conn.execute("DROP TABLE media_sources")
+
+    report = _run(database)
+    checks = _check_map(report)
+
+    assert checks["database.schema.media"] is HealthStatus.PASS
+    assert checks["database.schema.shape"] is HealthStatus.FAIL
+    assert report.overall is HealthStatus.FAIL
+
+def test_non_table_optional_migration_authority_fails_health(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    SQLiteStore(database).initialize()
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "CREATE VIEW artifact_registry_schema_migrations AS "
+            "SELECT 1 AS version, 'now' AS applied_at"
+        )
+
+    report = _run(database)
+    checks = _check_map(report)
+
+    assert checks["database.schema.artifact-registry"] is HealthStatus.FAIL
     assert report.overall is HealthStatus.FAIL
