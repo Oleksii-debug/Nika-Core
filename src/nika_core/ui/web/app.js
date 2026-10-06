@@ -469,8 +469,8 @@
       tasksList.appendChild(row);
     }
 
-    if (!selectionVisible) clearTaskSelection();
-    else setSelectedTaskControlsDisabled(false);
+    if (!selectionVisible) selectedTaskId = null;
+    setSelectedTaskControlsDisabled(selectedTaskId === null);
   }
 
   function renderTaskPage(snapshot) {
