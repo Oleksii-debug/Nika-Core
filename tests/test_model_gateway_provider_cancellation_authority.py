@@ -623,11 +623,13 @@ def test_stale_cancellation_count_cannot_authorize_provider_forged_cancel(
     ]
 
 
-def test_provider_cannot_launder_timeout_cancellation_into_late_success(
+@pytest.mark.parametrize("outcome", ["success", "typed_error", "untyped_error"])
+def test_provider_cannot_replace_timeout_with_late_outcome(
     tmp_path: Path,
+    outcome: str,
 ) -> None:
     audit = _audit(tmp_path)
-    primary = _CancellationSwallowingProvider(outcome="success")
+    primary = _CancellationSwallowingProvider(outcome=outcome)
     fallback = _FallbackProvider()
     gateway = ModelGateway(audit_log=audit)
     gateway.register(primary)
