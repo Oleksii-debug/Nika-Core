@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+import os
 from pathlib import Path
 
 import pytest
@@ -13,7 +15,14 @@ from nika_core.packaging.release import (
 )
 from nika_core.packaging.windows import default_windows_plan
 from nika_core.qa.release_gate import ReleaseGateEvidence, evaluate_release_gate
-from scripts.m11_release import project_version, resolve_release_version, resolve_source_sha
+from scripts import m11_release
+from scripts.m11_release import (
+    _hosted_windows_proof_enabled,
+    _task_ids,
+    project_version,
+    resolve_release_version,
+    resolve_source_sha,
+)
 
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
 
@@ -98,6 +107,8 @@ def test_release_source_sha_requires_exact_full_commit(monkeypatch: pytest.Monke
     with pytest.raises(ValueError, match="exact 40-character source SHA"):
         resolve_source_sha("deadbeef")
     with pytest.raises(ValueError, match="exact 40-character source SHA"):
+        resolve_source_sha(f" {SOURCE_SHA}")
+    with pytest.raises(ValueError, match="exact 40-character source SHA"):
         resolve_source_sha(None)
 
 
@@ -107,6 +118,163 @@ def test_release_source_sha_can_come_from_explicit_release_environment(
     monkeypatch.setenv("NIKA_SOURCE_SHA", SOURCE_SHA)
     monkeypatch.setenv("GITHUB_SHA", "f" * 40)
     assert resolve_source_sha(None) == SOURCE_SHA
+
+
+def test_packaged_data_adoption_proof_is_limited_to_hosted_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setenv("RUNNER_ENVIRONMENT", "github-hosted")
+    # The Linux test process must never run a frozen Windows migration fixture.
+    assert _hosted_windows_proof_enabled() is (os.name == "nt")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_pf11_evidence_reader_refuses_preexisting_writer_and_recovers(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "pf11.json"
+    project_id = "product-" + ("a" * 64)
+    payload = {
+        "route": "product_project",
+        "project_id": project_id,
+        "spec_version": 1,
+        "state": "active",
+        "command_center_state_proven": True,
+        "current_command_proven": True,
+        "current_command_focus_proven": True,
+        "bridge_state_project_id": project_id,
+        "bridge_state_spec_version": 1,
+        "bridge_state_status_count": 1,
+        "bridge_state_decision_count": 1,
+        "restart_selection_integrity_proven": True,
+        "bounded_projection_proven": True,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    evidence.write_text(json.dumps(payload), encoding="utf-8")
+
+    with evidence.open("r+b"):
+        with pytest.raises(RuntimeError, match="could not be read safely"):
+            m11_release._read_pf11_evidence(evidence)
+
+    assert m11_release._read_pf11_evidence(evidence) == payload
+
+
+def test_pf11_evidence_reader_rejects_swap_between_lstat_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "pf11.json"
+    evidence.write_text("{}", encoding="utf-8")
+    real_open = m11_release._open_readonly_nofollow_snapshot
+    swapped = False
+
+    def swapping_open(path: Path) -> int:
+        nonlocal swapped
+        if path == evidence and not swapped:
+            swapped = True
+            evidence.write_text('{"replacement":true}', encoding="utf-8")
+        return real_open(path)
+
+    monkeypatch.setattr(m11_release, "_open_readonly_nofollow_snapshot", swapping_open)
+
+    with pytest.raises(RuntimeError, match="changed before it was read"):
+        m11_release._read_pf11_evidence(evidence)
+
+
+def test_packaged_data_adoption_task_reader_closes_sqlite_handle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeConnection:
+        closed = False
+
+        def execute(self, _sql: str) -> list[tuple[str]]:
+            return [("task-a",), ("task-b",)]
+
+        def close(self) -> None:
+            self.closed = True
+
+    connection = FakeConnection()
+    monkeypatch.setattr(m11_release.sqlite3, "connect", lambda _path: connection)
+
+    assert _task_ids(Path("synthetic.db")) == {"task-a", "task-b"}
+    assert connection.closed is True
+
+
+def test_packaged_conflict_refusal_runs_exact_frozen_executable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "NikaCore.exe"
+    executable.write_bytes(b"frozen-executable")
+    cwd = tmp_path / "conflict-launch"
+    cwd.mkdir()
+    legacy_database = cwd / "data" / "nika_core.db"
+    legacy_database.parent.mkdir()
+    legacy_database.write_bytes(b"legacy-db")
+    canonical_database = tmp_path / "profile" / "NikaCore" / "nika_core.db"
+    canonical_database.parent.mkdir(parents=True)
+    canonical_database.write_bytes(b"canonical-db")
+    output = tmp_path / "conflict.json"
+    environment = {"LOCALAPPDATA": str(tmp_path / "profile")}
+    observed: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 4242
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, *, timeout: int) -> int:
+            observed["wait_timeout"] = timeout
+            return 1
+
+        def kill(self) -> None:
+            raise AssertionError("successful refusal proof must not kill the child")
+
+    process = FakeProcess()
+
+    def fake_popen(
+        command: list[str],
+        *,
+        env: dict[str, str],
+        cwd: Path,
+    ) -> FakeProcess:
+        observed["command"] = command
+        observed["environment"] = env
+        observed["cwd"] = cwd
+        return process
+
+    def fake_close_dialog(child: FakeProcess) -> None:
+        observed["dialog_process"] = child
+
+    monkeypatch.setattr(m11_release.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(m11_release, "_close_packaged_recovery_dialog", fake_close_dialog)
+
+    m11_release._run_packaged_conflict_refusal(
+        executable,
+        output=output,
+        environment=environment,
+        cwd=cwd,
+        legacy_database=legacy_database,
+        canonical_database=canonical_database,
+    )
+
+    assert observed["command"] == [
+        str(executable),
+        "--pf11-proof",
+        "--pf11-proof-output",
+        str(output),
+    ]
+    assert observed["environment"] is environment
+    assert observed["cwd"] == cwd
+    assert observed["dialog_process"] is process
+    assert observed["wait_timeout"] == 10
+    assert not output.exists()
+    assert legacy_database.read_bytes() == b"legacy-db"
+    assert canonical_database.read_bytes() == b"canonical-db"
 
 
 def test_third_party_notice_verification_fails_closed(tmp_path: Path) -> None:
@@ -125,6 +293,8 @@ def test_windows_plan_is_onedir_windowed_and_bundles_web_assets(tmp_path: Path) 
     web = tmp_path / "src" / "nika_core" / "ui" / "web"
     web.mkdir(parents=True)
     (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
     plan = default_windows_plan(tmp_path)
     args = plan.pyinstaller_args()
     assert "--onedir" in args
@@ -189,3 +359,124 @@ def test_release_gate_allows_final_release_only_with_complete_evidence() -> None
     assert result.production_release_ready is True
     assert result.stage == "NVDA_VERIFIED"
     assert result.blockers == ()
+
+def test_release_version_rejects_non_text_and_noncanonical_authority(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "nika-core"\nversion = 1\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="must be exact text"):
+        project_version(tmp_path)
+
+    pyproject.write_text(
+        '[project]\nname = "nika-core"\nversion = " 1.0.0"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="canonical text"):
+        project_version(tmp_path)
+
+    pyproject.write_text(
+        '[project]\nname = "nika-core"\nversion = "1.0.0"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="canonical text"):
+        resolve_release_version(tmp_path, "1.0.0 ")
+
+def test_release_source_sha_rejects_explicit_configured_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NIKA_SOURCE_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_SHA", "b" * 40)
+
+    with pytest.raises(ValueError, match="conflicts with configured NIKA_SOURCE_SHA"):
+        resolve_source_sha("c" * 40)
+
+    assert resolve_source_sha("A" * 40) == "a" * 40
+
+def test_release_source_sha_falls_back_to_github_when_release_env_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NIKA_SOURCE_SHA", raising=False)
+    monkeypatch.setenv("GITHUB_SHA", SOURCE_SHA.upper())
+
+    assert resolve_source_sha(None) == SOURCE_SHA
+
+def test_windows_plan_rejects_path_like_reserved_and_invalid_bundle_names(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
+    web = tmp_path / "src" / "nika_core" / "ui" / "web"
+    web.mkdir(parents=True)
+    (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
+    plan = default_windows_plan(tmp_path)
+
+    invalid_names = (
+        "../escape",
+        "Nika/Core",
+        r"Nika\Core",
+        "CON",
+        "COM1.txt",
+        "LPT³.log",
+        "NikaCore.",
+        "bad\x01name",
+        "a" * 256,
+    )
+    for invalid_name in invalid_names:
+        invalid = replace(plan, name=invalid_name)
+        with pytest.raises(ValueError):
+            invalid.pyinstaller_args()
+        with pytest.raises(ValueError):
+            _ = invalid.bundle_dir
+
+    with pytest.raises(TypeError, match="exact text"):
+        _ = replace(plan, name=123).bundle_dir  # type: ignore[arg-type]
+
+def test_windows_plan_accepts_unicode_single_component_bundle_name(tmp_path: Path) -> None:
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
+    web = tmp_path / "src" / "nika_core" / "ui" / "web"
+    web.mkdir(parents=True)
+    (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
+    plan = replace(default_windows_plan(tmp_path), name="Ніка Core")
+
+    assert plan.bundle_dir == tmp_path / "dist" / "Ніка Core"
+    args = plan.pyinstaller_args()
+    assert args[args.index("--name") + 1] == "Ніка Core"
+
+def test_windows_plan_rejects_behavioral_string_bundle_name(tmp_path: Path) -> None:
+    class BehavioralName(str):
+        def strip(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("behavioral string must not execute")
+
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
+    web = tmp_path / "src" / "nika_core" / "ui" / "web"
+    web.mkdir(parents=True)
+    (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
+    plan = replace(default_windows_plan(tmp_path), name=BehavioralName("NikaCore"))
+
+    with pytest.raises(TypeError, match="exact text"):
+        _ = plan.bundle_dir
+
+def test_windows_plan_accepts_maximum_component_length(tmp_path: Path) -> None:
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
+    web = tmp_path / "src" / "nika_core" / "ui" / "web"
+    web.mkdir(parents=True)
+    (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
+    name = "a" * 255
+    plan = replace(default_windows_plan(tmp_path), name=name)
+
+    assert plan.bundle_dir == tmp_path / "dist" / name
+    assert plan.pyinstaller_args()[plan.pyinstaller_args().index("--name") + 1] == name
+

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any
+from uuid import UUID
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.packaged_intelligence_mode import is_packaged_intelligence_mode_command
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.contracts import CommandRouteKind, ProductProjectDetail
 from nika_core.product_command.product_project_adapter import (
@@ -18,6 +21,12 @@ from nika_core.product_project import ProductProjectSpec
 from nika_core.ui.bridge_models import UIResult
 
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
+AgentBuilderCommandHandler = Callable[[Mapping[str, Any]], UIResult]
+TaskControlHandler = Callable[[Mapping[str, Any]], UIResult]
+TaskStatusHandler = Callable[[str | None], UIResult]
+ActivityReportHandler = Callable[[], UIResult]
+TrainingStatusHandler = Callable[[str], UIResult]
+IntelligenceModeCommandHandler = Callable[[str], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
 _PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
 _REOPEN_PREFIXES = (
@@ -35,6 +44,66 @@ _CURRENT_PROJECT_COMMANDS = frozenset(
         "покажи поточний productproject",
     }
 )
+_DAILY_ACTIVITY_REPORT_COMMANDS = frozenset(
+    {
+        "daily activity report",
+        "show daily activity report",
+        "nika daily activity report",
+        "щоденний звіт активності",
+        "покажи щоденний звіт активності",
+        "звіт діяльності nika",
+        "покажи звіт діяльності nika",
+    }
+)
+_TRAINING_STATUS_PREFIXES = (
+    "show training status",
+    "training status",
+    "покажи статус навчання",
+    "статус навчання",
+)
+_TASK_PAUSE_COMMANDS = frozenset(
+    {
+        "pause task",
+        "pause current task",
+        "призупини завдання",
+        "призупинити завдання",
+        "призупини поточне завдання",
+    }
+)
+_TASK_RESUME_COMMANDS = frozenset(
+    {
+        "resume task",
+        "resume current task",
+        "continue task",
+        "віднови завдання",
+        "відновити завдання",
+        "продовж завдання",
+        "продовжити завдання",
+    }
+)
+_TASK_STOP_COMMANDS = frozenset(
+    {
+        "stop task",
+        "cancel task",
+        "stop current task",
+        "зупини завдання",
+        "зупинити завдання",
+        "скасуй завдання",
+        "скасувати завдання",
+    }
+)
+_TASK_STATUS_COMMANDS = frozenset(
+    {
+        "current task",
+        "show current task",
+        "task status",
+        "current task status",
+        "поточне завдання",
+        "покажи поточне завдання",
+        "статус завдання",
+        "статус поточного завдання",
+    }
+)
 
 
 class PackagedProductJourneyError(ValueError):
@@ -42,6 +111,8 @@ class PackagedProductJourneyError(ValueError):
 
 
 def product_project_identity(normalized_goal: str) -> str:
+    if type(normalized_goal) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     goal = " ".join(normalized_goal.split())
     if not goal:
         raise PackagedProductJourneyError("product goal must not be empty")
@@ -56,9 +127,19 @@ def packaged_product_reopen_target(command: str) -> str | None:
     existing command classifier authoritative unless the user explicitly asks to open/reopen a
     ProductProject. The accepted id is canonicalized to lowercase before durable lookup.
     """
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split())
     lowered = normalized.casefold()
-    prefix = next((item for item in _REOPEN_PREFIXES if lowered.startswith(item)), None)
+    prefix = next(
+        (
+            item
+            for item in _REOPEN_PREFIXES
+            if lowered.startswith(item)
+            and lowered[len(item) : len(item) + 1] in ("", " ", ":", "#")
+        ),
+        None,
+    )
     if prefix is None:
         return None
     remainder = normalized[len(prefix) :].strip(" :#")
@@ -71,8 +152,104 @@ def packaged_product_reopen_target(command: str) -> str | None:
 
 def packaged_current_product_command(command: str) -> bool:
     """Recognize an exact keyboard command that reports the durable presentation selection."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split()).casefold().strip(" :")
     return normalized in _CURRENT_PROJECT_COMMANDS
+
+
+def packaged_daily_activity_report_command(command: str) -> bool:
+    """Recognize explicit read-only daily report commands without broad keyword capture."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split()).casefold().strip(" :.!?")
+    return normalized in _DAILY_ACTIVITY_REPORT_COMMANDS
+
+
+def packaged_training_status_target(command: str) -> str | None:
+    """Return the canonical task UUID for an explicit read-only training-status command."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split()).strip(" :.!?")
+    lowered = normalized.casefold()
+    prefix = next(
+        (
+            item
+            for item in _TRAINING_STATUS_PREFIXES
+            if lowered == item or lowered.startswith(item + " ")
+        ),
+        None,
+    )
+    if prefix is None:
+        return None
+    task_id = normalized[len(prefix) :].strip(" :#")
+    try:
+        parsed = UUID(task_id)
+    except (ValueError, AttributeError) as exc:
+        raise PackagedProductJourneyError(
+            "Вкажіть task_id після команди статусу навчання у канонічному UUID-форматі."
+        ) from exc
+    if str(parsed) != task_id:
+        raise PackagedProductJourneyError(
+            "Вкажіть task_id після команди статусу навчання у канонічному UUID-форматі."
+        )
+    return task_id
+
+
+def packaged_task_direct_target(command: str) -> tuple[str, str | None] | None:
+    """Recognize exact long-task controls and an optional canonical task UUID."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split()).strip(" :.!?")
+    lowered = normalized.casefold()
+    for action, commands in (
+        ("pause", _TASK_PAUSE_COMMANDS),
+        ("resume", _TASK_RESUME_COMMANDS),
+        ("stop", _TASK_STOP_COMMANDS),
+        ("status", _TASK_STATUS_COMMANDS),
+    ):
+        if lowered in commands:
+            return action, None
+        prefixes = tuple(
+            item for item in commands if lowered.startswith(item + " ")
+        )
+        if not prefixes:
+            continue
+        prefix = max(prefixes, key=len)
+        task_id = normalized[len(prefix) :].strip(" :#")
+        if len(task_id.split()) != 1:
+            return None
+        try:
+            parsed = UUID(task_id)
+        except (ValueError, AttributeError) as exc:
+            raise PackagedProductJourneyError(
+                "Вкажіть task_id у канонічному UUID-форматі після команди керування."
+            ) from exc
+        if str(parsed) != task_id:
+            raise PackagedProductJourneyError(
+                "Вкажіть task_id у канонічному UUID-форматі після команди керування."
+            )
+        return action, task_id
+    return None
+
+
+def packaged_task_direct_action(command: str) -> str | None:
+    """Return the action part of an exact direct task command."""
+    target = packaged_task_direct_target(command)
+    return target[0] if target is not None else None
+
+
+def _valid_selection_id(value: object) -> bool:
+    if type(value) is not str or not value or value != value.strip():
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return not any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in value
+    )
 
 
 class PackagedProductSelectionStore:
@@ -94,17 +271,24 @@ class PackagedProductSelectionStore:
     def load(self) -> str | None:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT project_id FROM packaged_product_selection WHERE slot = 1"
+                "SELECT typeof(project_id) AS id_type, "
+                "CAST(project_id AS BLOB) AS raw_id "
+                "FROM packaged_product_selection WHERE slot = 1"
             ).fetchone()
-        if row is None:
+        if row is None or row["id_type"] != "text":
             return None
-        project_id = str(row["project_id"]).strip()
-        return project_id or None
+        try:
+            project_id = row["raw_id"].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        return project_id if _valid_selection_id(project_id) else None
 
     def select(self, project_id: str) -> None:
+        if type(project_id) is not str:
+            raise PackagedProductJourneyError("selected ProductProject id must be text")
         normalized = project_id.strip()
-        if not normalized:
-            raise PackagedProductJourneyError("selected ProductProject id must not be empty")
+        if not _valid_selection_id(normalized):
+            raise PackagedProductJourneyError("selected ProductProject id contains invalid text")
         with self._store.connection() as conn:
             conn.execute(
                 "INSERT INTO packaged_product_selection(slot, project_id) VALUES (1, ?) "
@@ -118,11 +302,14 @@ class PackagedProductSelectionStore:
 
 
 class PackagedProductCommandRouter:
-    """Route packaged command input to durable ProductProject or ordinary task handling.
+    """Route packaged command input to durable ProductProject, read-only report, or task handling.
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
-    This boundary deliberately does not dispatch workers, deploy providers, Toolsmith, or any
-    high-impact external action. Those remain downstream explicit factory/security boundaries.
+    Explicit daily-report, training-status, intelligence-mode and long-task control intents
+    delegate only to injected incumbent handlers. Explicit Agent Builder intent delegates only
+    to an injected
+    safe-draft handler. Toolsmith remains a separate fail-closed route. No high-impact external
+    action is launched merely by command classification.
     """
 
     def __init__(
@@ -130,10 +317,26 @@ class PackagedProductCommandRouter:
         *,
         products: ProductProjectCommandService,
         ordinary_handler: OrdinaryCommandHandler,
+        agent_builder_handler: AgentBuilderCommandHandler | None = None,
+        task_pause_handler: TaskControlHandler | None = None,
+        task_resume_handler: TaskControlHandler | None = None,
+        task_stop_handler: TaskControlHandler | None = None,
+        task_status_handler: TaskStatusHandler | None = None,
+        activity_report_handler: ActivityReportHandler | None = None,
+        training_status_handler: TrainingStatusHandler | None = None,
+        intelligence_mode_handler: IntelligenceModeCommandHandler | None = None,
         selection_store: PackagedProductSelectionStore | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
+        self._agent_builder_handler = agent_builder_handler
+        self._task_pause_handler = task_pause_handler
+        self._task_resume_handler = task_resume_handler
+        self._task_stop_handler = task_stop_handler
+        self._task_status_handler = task_status_handler
+        self._activity_report_handler = activity_report_handler
+        self._training_status_handler = training_status_handler
+        self._intelligence_mode_handler = intelligence_mode_handler
         self._selection_store = selection_store
         self._active_project_id = selection_store.load() if selection_store is not None else None
 
@@ -200,12 +403,66 @@ class PackagedProductCommandRouter:
         )
 
     def create(self, payload: Mapping[str, Any]) -> UIResult:
-        command = str(payload.get("command", "")).strip()
+        raw_command = payload.get("command", "")
+        if type(raw_command) is not str:
+            raise PackagedProductJourneyError("Команда повинна бути текстом.")
+        command = raw_command.strip()
         if not command:
             raise PackagedProductJourneyError(
                 "Введіть команду перед створенням завдання."
             )
+        if "\x00" in command:
+            raise PackagedProductJourneyError("Команда містить недопустимий NUL-символ.")
+        try:
+            command.encode("utf-8")
+        except UnicodeEncodeError:
+            raise PackagedProductJourneyError(
+                "Команда містить некоректний текст Unicode."
+            ) from None
 
+        if packaged_daily_activity_report_command(command):
+            if self._activity_report_handler is None:
+                raise PackagedProductJourneyError(
+                    "Щоденний звіт активності недоступний у цьому запуску."
+                )
+            return self._activity_report_handler()
+
+        if is_packaged_intelligence_mode_command(command):
+            if self._intelligence_mode_handler is None:
+                raise PackagedProductJourneyError(
+                    "Керування режимом інтелекту недоступне у цьому запуску."
+                )
+            return self._intelligence_mode_handler(command)
+
+        training_task_id = packaged_training_status_target(command)
+        if training_task_id is not None:
+            if self._training_status_handler is None:
+                raise PackagedProductJourneyError(
+                    "Статус навчання недоступний у цьому запуску."
+                )
+            return self._training_status_handler(training_task_id)
+
+        task_direct = packaged_task_direct_target(command)
+        if task_direct is not None:
+            task_action, task_id = task_direct
+            if task_action == "status":
+                if self._task_status_handler is None:
+                    raise PackagedProductJourneyError(
+                        "Статус поточного завдання недоступний у цьому запуску."
+                    )
+                return self._task_status_handler(task_id)
+            handler = {
+                "pause": self._task_pause_handler,
+                "resume": self._task_resume_handler,
+                "stop": self._task_stop_handler,
+            }[task_action]
+            if handler is None:
+                raise PackagedProductJourneyError(
+                    f"Керування завданням «{task_action}» недоступне у цьому запуску."
+                )
+            # Direct command text and unrelated UI fields are classification input only.
+            # Only the canonical target identity crosses into incumbent task-control authority.
+            return handler({"task_id": task_id} if task_id is not None else {})
         if packaged_current_product_command(command):
             return self._describe_current_project()
 
@@ -218,10 +475,17 @@ class PackagedProductCommandRouter:
             return self._ordinary_handler(payload)
         if decision.route is CommandRouteKind.AMBIGUOUS:
             raise PackagedProductJourneyError(
-                "Команда одночасно схожа на ProductProject і Toolsmith. "
-                "Уточніть, чи це довготривалий продукт, "
-                "чи створення інструмента."
+                "Команда одночасно відповідає кільком спеціалізованим маршрутам. "
+                "Уточніть, чи потрібно створити ProductProject, агента через Agent Builder, "
+                "чи нову можливість Toolsmith."
             )
+        if decision.route is CommandRouteKind.AGENT_BUILDER:
+            if self._agent_builder_handler is None:
+                raise PackagedProductJourneyError(
+                    "Команда визначена як запит Agent Builder. Поточна packaged-композиція "
+                    "ще не підключила Agent Builder handler; звичайне завдання не створено."
+                )
+            return self._agent_builder_handler(payload)
         if decision.route is CommandRouteKind.TOOLSMITH:
             raise PackagedProductJourneyError(
                 "Команда визначена як запит на нову "

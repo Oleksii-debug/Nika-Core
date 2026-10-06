@@ -31,6 +31,11 @@ DIGEST = "1" * 64
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
 
 
+class _AllowReviewAuthority:
+    def verify(self, subject, evidence_refs):
+        return bool(subject.fingerprint and evidence_refs)
+
+
 def _graph() -> ProductRepositoryGraph:
     return ProductRepositoryGraph(
         project_id="product-1",
@@ -58,7 +63,7 @@ def _graph() -> ProductRepositoryGraph:
 
 def _planned() -> ProductFactoryCoordinator:
     graph = _graph()
-    coordinator = ProductFactoryCoordinator(graph)
+    coordinator = ProductFactoryCoordinator(graph, review_authority=_AllowReviewAuthority())
     coordinator.plan(
         base_shas={"repo-main": SHA_A},
         goals={"core": "Implement core", "ui": "Implement ui"},
@@ -82,6 +87,7 @@ def _successful_envelope(request, commands) -> WorkerResultEnvelope:
                 for index, command in enumerate(commands, start=1)
             ),
         ),
+        producer_actor_id="builder-1",
     )
 
 
@@ -113,7 +119,7 @@ def _forged(snapshot: CoordinatorSnapshot, records: tuple[WorkRecord, ...]) -> C
 
 
 def _restore(coordinator: ProductFactoryCoordinator, snapshot: CoordinatorSnapshot) -> None:
-    ProductFactoryCoordinator(_graph()).restore(
+    ProductFactoryCoordinator(_graph(), review_authority=_AllowReviewAuthority()).restore(
         snapshot,
         trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
     )
