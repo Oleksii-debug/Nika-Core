@@ -95,6 +95,7 @@ def build_packaged_local_durable_build_host(
     startup: PackagedLocalProductFactoryStartup,
     trusted_authority: TrustedExecutionAuthorityPort,
     output_policies: TrustedBuildOutputPolicyPort,
+    recovery_authority: TrustedExecutionAuthorityPort | None = None,
 ) -> DurableBuildExecutionHost:
     """Compose one canonical durable PF5 host around the local node adapter.
 
@@ -119,6 +120,24 @@ def build_packaged_local_durable_build_host(
         raise PackagedLocalBuildHostError(
             "PF5 composition requires TrustedBuildOutputPolicyPort"
         )
+    if recovery_authority is not None and not callable(
+        getattr(recovery_authority, "resolve", None)
+    ):
+        raise PackagedLocalBuildHostError(
+            "PF5 composition recovery authority must implement resolve"
+        )
+
+    checkpoints = SQLiteBuildExecutionCheckpointStore(
+        store,
+        host_task_id,
+        project_id,
+    )
+    has_checkpoint = checkpoints.has_checkpoint()
+    restore_authority = (
+        recovery_authority
+        if has_checkpoint and recovery_authority is not None
+        else trusted_authority
+    )
 
     registry = ExecutionNodeRegistry()
     registry.register(local_node)
@@ -129,12 +148,7 @@ def build_packaged_local_durable_build_host(
     coordinator = BuildExecutionCoordinator(
         registry,
         availability,
-        trusted_authority,
-    )
-    checkpoints = SQLiteBuildExecutionCheckpointStore(
-        store,
-        host_task_id,
-        project_id,
+        restore_authority,
     )
     node_port = build_packaged_local_build_execution_node(
         store,
@@ -150,8 +164,11 @@ def build_packaged_local_durable_build_host(
         output_policies,
         checkpoints,
     )
-    if checkpoints.has_checkpoint():
+    if has_checkpoint:
         host.restore_latest()
+        # Historical authority may validate durable identity only. Any later
+        # fresh/pre-effect transition must use the current launch authority.
+        coordinator.trusted_authority = trusted_authority
     return host
 
 
