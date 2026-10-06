@@ -355,6 +355,19 @@ function Verify-ManifestAndNotices {
         $actualHash = (Get-FileHash -LiteralPath $candidate -Algorithm SHA256).Hash.ToLowerInvariant()
         Require ($actualHash -eq ([string]$entry.sha256).ToLowerInvariant()) "Manifest SHA-256 mismatch: $relative"
     }
+    $actualFiles = @{}
+    foreach ($file in (Get-ChildItem -LiteralPath $BundleDir -File -Recurse -Force)) {
+        $relative = [System.IO.Path]::GetRelativePath($BundleDir, $file.FullName).Replace('\\', '/')
+        if ($relative -eq 'release-manifest.json') { continue }
+        Require (-not $actualFiles.ContainsKey($relative)) 'Bundle contains duplicate relative file identity.'
+        $actualFiles[$relative] = $true
+    }
+    $unexpectedCount = 0
+    foreach ($relative in $actualFiles.Keys) {
+        if (-not $listed.ContainsKey($relative)) { $unexpectedCount++ }
+    }
+    Require ($unexpectedCount -eq 0) "Bundle contains $unexpectedCount file(s) absent from release manifest."
+    Require ($actualFiles.Count -eq $listed.Count) 'Release manifest file set is incomplete or inconsistent.'
     Require ($listed.ContainsKey('NikaCore.exe')) 'Manifest does not list NikaCore.exe.'
     Require ($listed.ContainsKey('THIRD_PARTY_NOTICES.txt')) 'Manifest does not list THIRD_PARTY_NOTICES.txt.'
     Require ((Get-Item -LiteralPath $noticePath).Length -gt 0) 'THIRD_PARTY_NOTICES.txt is empty.'
