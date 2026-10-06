@@ -344,49 +344,127 @@ class CheckpointService:
 
     def latest(self, task_id: str) -> Checkpoint | None:
         task_id = _require_text(task_id, "task_id")
-        task_id_bytes = task_id.encode("utf-8")
         with self.store.connection() as conn:
-            row = conn.execute(
-                """
-                SELECT typeof(checkpoint_id) AS checkpoint_id_storage_type,
-                       length(CAST(checkpoint_id AS BLOB)) AS checkpoint_id_byte_length,
-                       substr(CAST(checkpoint_id AS BLOB), 1, ?) AS checkpoint_id_blob,
-                       typeof(task_id) AS task_id_storage_type,
-                       length(CAST(task_id AS BLOB)) AS task_id_byte_length,
-                       substr(CAST(task_id AS BLOB), 1, ?) AS task_id_blob,
-                       typeof(stage) AS stage_storage_type,
-                       length(CAST(stage AS BLOB)) AS stage_byte_length,
-                       substr(CAST(stage AS BLOB), 1, ?) AS stage_blob,
-                       typeof(payload_json) AS payload_storage_type,
-                       length(CAST(payload_json AS BLOB)) AS payload_byte_length,
-                       substr(CAST(payload_json AS BLOB), 1, ?) AS payload_blob,
-                       typeof(checksum_sha256) AS checksum_storage_type,
-                       length(CAST(checksum_sha256 AS BLOB)) AS checksum_byte_length,
-                       substr(CAST(checksum_sha256 AS BLOB), 1, ?) AS checksum_blob
-                FROM checkpoints
-                WHERE (typeof(task_id) = 'text' AND task_id = ?)
-                   OR (
-                       typeof(task_id) <> 'text'
-                       AND length(CAST(task_id AS BLOB)) = ?
-                       AND substr(CAST(task_id AS BLOB), 1, ?) = ?
-                   )
-                ORDER BY rowid DESC
-                LIMIT 1
-                """,
-                (
-                    _TEXT_MAX_BYTES + 1,
-                    _TEXT_MAX_BYTES + 1,
-                    _TEXT_MAX_BYTES + 1,
-                    _JSON_MAX_BYTES + 1,
-                    _CHECKSUM_HEX_LENGTH + 1,
-                    task_id,
-                    len(task_id_bytes),
-                    _TEXT_MAX_BYTES + 1,
-                    task_id_bytes,
-                ),
-            ).fetchone()
+            row = self._select_latest_row(
+                conn,
+                task_id=task_id,
+                stage=None,
+            )
         if row is None:
             return None
+        return self._checkpoint_from_row(
+            row,
+            expected_task_id=task_id,
+        )
+
+    def latest_for_stage_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        task_id: str,
+        stage: str,
+    ) -> Checkpoint | None:
+        """Read one stage from the caller's current SQLite snapshot."""
+
+        task_id = _require_text(task_id, "task_id")
+        stage = _require_text(stage, "stage")
+        row = self._select_latest_row(
+            conn,
+            task_id=task_id,
+            stage=stage,
+        )
+        if row is None:
+            return None
+        return self._checkpoint_from_row(
+            row,
+            expected_task_id=task_id,
+            expected_stage=stage,
+        )
+
+    @staticmethod
+    def _select_latest_row(
+        conn: sqlite3.Connection,
+        *,
+        task_id: str,
+        stage: str | None,
+    ) -> sqlite3.Row | None:
+        task_id_bytes = task_id.encode("utf-8")
+        where = """
+            (
+                (typeof(task_id) = 'text' AND task_id = ?)
+                OR (
+                    typeof(task_id) <> 'text'
+                    AND length(CAST(task_id AS BLOB)) = ?
+                    AND substr(CAST(task_id AS BLOB), 1, ?) = ?
+                )
+            )
+        """
+        parameters: list[object] = [
+            _TEXT_MAX_BYTES + 1,
+            _TEXT_MAX_BYTES + 1,
+            _TEXT_MAX_BYTES + 1,
+            _JSON_MAX_BYTES + 1,
+            _CHECKSUM_HEX_LENGTH + 1,
+            task_id,
+            len(task_id_bytes),
+            _TEXT_MAX_BYTES + 1,
+            task_id_bytes,
+        ]
+        if stage is not None:
+            stage_bytes = stage.encode("utf-8")
+            where += """
+                AND (
+                    (typeof(stage) = 'text' AND stage = ?)
+                    OR (
+                        typeof(stage) <> 'text'
+                        AND length(CAST(stage AS BLOB)) = ?
+                        AND substr(CAST(stage AS BLOB), 1, ?) = ?
+                    )
+                )
+            """
+            parameters.extend(
+                (
+                    stage,
+                    len(stage_bytes),
+                    _TEXT_MAX_BYTES + 1,
+                    stage_bytes,
+                )
+            )
+        return conn.execute(
+            """
+            SELECT typeof(checkpoint_id) AS checkpoint_id_storage_type,
+                   length(CAST(checkpoint_id AS BLOB)) AS checkpoint_id_byte_length,
+                   substr(CAST(checkpoint_id AS BLOB), 1, ?) AS checkpoint_id_blob,
+                   typeof(task_id) AS task_id_storage_type,
+                   length(CAST(task_id AS BLOB)) AS task_id_byte_length,
+                   substr(CAST(task_id AS BLOB), 1, ?) AS task_id_blob,
+                   typeof(stage) AS stage_storage_type,
+                   length(CAST(stage AS BLOB)) AS stage_byte_length,
+                   substr(CAST(stage AS BLOB), 1, ?) AS stage_blob,
+                   typeof(payload_json) AS payload_storage_type,
+                   length(CAST(payload_json AS BLOB)) AS payload_byte_length,
+                   substr(CAST(payload_json AS BLOB), 1, ?) AS payload_blob,
+                   typeof(checksum_sha256) AS checksum_storage_type,
+                   length(CAST(checksum_sha256 AS BLOB)) AS checksum_byte_length,
+                   substr(CAST(checksum_sha256 AS BLOB), 1, ?) AS checksum_blob
+            FROM checkpoints
+            WHERE
+            """
+            + where
+            + """
+            ORDER BY rowid DESC
+            LIMIT 1
+            """,
+            tuple(parameters),
+        ).fetchone()
+
+    @staticmethod
+    def _checkpoint_from_row(
+        row: sqlite3.Row,
+        *,
+        expected_task_id: str,
+        expected_stage: str | None = None,
+    ) -> Checkpoint:
         checkpoint_id = _decode_persisted_text(
             storage_type=row["checkpoint_id_storage_type"],
             byte_length=row["checkpoint_id_byte_length"],
@@ -399,7 +477,7 @@ class CheckpointService:
             blob=row["task_id_blob"],
             field_name="task_id",
         )
-        if persisted_task_id != task_id:
+        if persisted_task_id != expected_task_id:
             raise ValueError("Checkpoint task identity mismatch")
         stage = _decode_persisted_text(
             storage_type=row["stage_storage_type"],
@@ -407,6 +485,8 @@ class CheckpointService:
             blob=row["stage_blob"],
             field_name="stage",
         )
+        if expected_stage is not None and stage != expected_stage:
+            raise ValueError("Checkpoint stage identity mismatch")
         payload = _decode_persisted_payload(
             payload_storage_type=row["payload_storage_type"],
             payload_byte_length=row["payload_byte_length"],

@@ -142,3 +142,57 @@ def test_pf6_save_and_read_use_one_sqlite_authority_interval(tmp_path) -> None:
     )
     assert restored == snapshot
     assert store.connection_count == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    (
+        (
+            "stage",
+            b"product_factory.deployment.v1",
+            "stage storage must be SQLite TEXT",
+        ),
+        (
+            "checkpoint_id",
+            b"pf6-blob-checkpoint-id",
+            "checkpoint_id storage must be SQLite TEXT",
+        ),
+    ),
+)
+def test_pf6_latest_rejects_checkpoint_identity_storage_alias(
+    tmp_path,
+    field,
+    replacement,
+    message,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "p1"},
+    )
+    host = ProductFactoryDeploymentCheckpointHost(store)
+    snapshot = _empty_deployment_snapshot()
+    host.save(
+        host_task_id=task.task_id,
+        project_id="p1",
+        snapshot=snapshot,
+    )
+    newest_id = host.save(
+        host_task_id=task.task_id,
+        project_id="p1",
+        snapshot=snapshot,
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            f"UPDATE checkpoints SET {field} = ? WHERE checkpoint_id = ?",
+            (replacement, newest_id),
+        )
+
+    with pytest.raises(ProductFactoryDeploymentCheckpointError, match=message):
+        host.latest_snapshot(
+            host_task_id=task.task_id,
+            project_id="p1",
+        )
