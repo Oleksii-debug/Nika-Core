@@ -375,7 +375,9 @@ class C1MediumAppAcceptanceRunner:
             ),
         )
         if project.spec_version != 2:
-            raise C1MediumAppAcceptanceError("controlled ProductProject spec revision was not durable")
+            raise C1MediumAppAcceptanceError(
+                "controlled ProductProject spec revision was not durable"
+            )
 
         lease_ids = _prove_ownership(graph, team)
         binding = ProductProjectCoordinatorBinding(
