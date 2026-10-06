@@ -1416,6 +1416,69 @@ def test_static_storage_preflight_rejects_model_directory_manifest_drift(
     assert not output_root.exists()
 
 
+def test_static_storage_preflight_rejects_model_directory_size_aba(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root, parent_snapshot = driver._preflight_output_root(
+        tmp_path / "pilot-output"
+    )
+    base = tmp_path / "base.gguf"
+    base.write_bytes(b"GGUF")
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    model_file = model_dir / "tokenizer.json"
+    original = b"0123456789"
+    model_file.write_bytes(original)
+    expected_manifest = driver.model_directory_manifest_sha256(model_dir)
+    real_manifest = driver.model_directory_manifest_sha256
+    calls = 0
+    telemetry_called = False
+
+    def manifest_with_size_aba(path: Path) -> str:
+        nonlocal calls
+        assert path == model_dir
+        calls += 1
+        if calls == 1:
+            observed = real_manifest(path)
+            model_file.write_bytes(b"x")
+            return observed
+        if calls == 2:
+            model_file.write_bytes(original)
+            return real_manifest(path)
+        raise AssertionError("unexpected manifest call")
+
+    def disk_usage(_: object) -> SimpleNamespace:
+        nonlocal telemetry_called
+        telemetry_called = True
+        return SimpleNamespace(free=1_000_000)
+
+    monkeypatch.setattr(
+        driver,
+        "model_directory_manifest_sha256",
+        manifest_with_size_aba,
+    )
+    monkeypatch.setattr(driver.shutil, "disk_usage", disk_usage)
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="model_dir changed during storage preflight",
+    ):
+        driver._preflight_static_storage(
+            output_root=output_root,
+            expected_parent=parent_snapshot,
+            base_gguf_path=base,
+            model_dir=model_dir,
+            model_dir_manifest_sha256=expected_manifest,
+            initial_adapter_path=None,
+        )
+
+    assert calls == 2
+    assert telemetry_called is False
+    assert model_file.read_bytes() == original
+    assert not output_root.exists()
+
+
 def test_static_storage_preflight_rejects_output_volume_replacement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
