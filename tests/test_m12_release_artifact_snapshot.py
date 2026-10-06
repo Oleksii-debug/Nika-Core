@@ -51,23 +51,68 @@ def test_release_artifact_snapshot_rejects_lstat_open_substitution(
     snapshot_dir = tmp_path / "snapshot"
     snapshot_dir.mkdir()
 
-    real_open = release_evidence.os.open
+    real_open = release_evidence._open_release_artifact_source
     swapped = False
 
-    def swapping_open(path: os.PathLike[str] | str, flags: int, *args: object) -> int:
+    def swapping_open(path: Path) -> int:
         nonlocal swapped
-        if not swapped and Path(path) == source:
+        if not swapped and path == source:
             os.replace(replacement, source)
             swapped = True
-        return real_open(path, flags, *args)
+        return real_open(path)
 
-    monkeypatch.setattr(release_evidence.os, "open", swapping_open)
+    monkeypatch.setattr(release_evidence, "_open_release_artifact_source", swapping_open)
 
     with pytest.raises(RuntimeError, match="changed before snapshot"):
         _snapshot_release_artifact(source, snapshot_dir)
 
     assert swapped
     assert not (snapshot_dir / "verified-distributable.zip").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_release_artifact_snapshot_refuses_preexisting_writer_then_recovers(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "candidate.zip"
+    source_bytes = b"stable final artifact bytes"
+    source.write_bytes(source_bytes)
+    snapshot_dir = tmp_path / "snapshot"
+    snapshot_dir.mkdir()
+
+    with source.open("r+b"):
+        with pytest.raises(RuntimeError, match="could not be snapshotted safely"):
+            _snapshot_release_artifact(source, snapshot_dir)
+
+    assert not (snapshot_dir / "verified-distributable.zip").exists()
+    assert not list(snapshot_dir.glob(".m12-artifact-*.tmp"))
+
+    snapshot = _snapshot_release_artifact(source, snapshot_dir)
+    assert snapshot.read_bytes() == source_bytes
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_release_artifact_source_handle_denies_write_and_rename_until_close(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "candidate.zip"
+    renamed = tmp_path / "renamed.zip"
+    source.write_bytes(b"stable final artifact bytes")
+
+    descriptor = release_evidence._open_release_artifact_source(source)
+    try:
+        assert os.read(descriptor, 6) == b"stable"
+        with pytest.raises(OSError):
+            source.write_bytes(b"replacement")
+        with pytest.raises(OSError):
+            source.replace(renamed)
+    finally:
+        os.close(descriptor)
+
+    source.replace(renamed)
+    renamed.replace(source)
+    source.write_bytes(b"replacement")
+    assert source.read_bytes() == b"replacement"
 
 
 def test_main_binds_all_release_checks_to_one_private_snapshot(
