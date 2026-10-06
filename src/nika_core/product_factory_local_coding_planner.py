@@ -168,7 +168,10 @@ class ModelGatewayLocalCodingPlanner:
                 "planner repository tree identity differs from the CodingJob"
             )
 
-        roots = tuple(job.allowed_paths.roots)
+        roots = tuple(
+            normalize_job_relative_path(root).as_posix()
+            for root in job.allowed_paths.roots
+        )
         policy = WorkspacePathPolicy(roots)
         listing = self._git_bytes(
             repository_root,
@@ -298,7 +301,10 @@ class ModelGatewayLocalCodingPlanner:
                 "tree_digest": job.repository.tree_digest.casefold(),
                 "snapshot_sha256": snapshot_digest,
             },
-            "allowed_paths": list(job.allowed_paths.roots),
+            "allowed_paths": [
+                normalize_job_relative_path(root).as_posix()
+                for root in job.allowed_paths.roots
+            ],
             "acceptance_commands": [
                 {
                     "argv": list(command.argv),
@@ -323,13 +329,7 @@ class ModelGatewayLocalCodingPlanner:
             separators=(",", ":"),
         )
         request_hash = hashlib.sha256(
-            (
-                job.job_id
-                + "\x00"
-                + job.repository.base_sha.casefold()
-                + "\x00"
-                + snapshot_digest
-            ).encode("utf-8")
+            (job.job_id + "\x00" + user_text).encode("utf-8", errors="surrogatepass")
         ).hexdigest()[:32]
         return ModelRequest(
             request_id=f"product-factory-local-plan-{request_hash}",

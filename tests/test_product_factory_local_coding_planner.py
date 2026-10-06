@@ -190,6 +190,54 @@ def test_planner_reads_exact_base_objects_not_dirty_production_worktree(
     assert "VALUE = 999" not in request.messages[1].content
 
 
+def test_planner_normalizes_windows_style_allowed_root_for_model_context(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha, tree_sha = _repository(tmp_path)
+    provider = _Provider(_valid_response())
+    planner = _planner(repository, provider)
+    job = _job(
+        tmp_path,
+        base_sha=base_sha,
+        tree_sha=tree_sha,
+        allowed_paths=("src\\",),
+    )
+
+    _run(planner.plan(job))
+
+    payload = json.loads(provider.requests[0].messages[1].content)
+    assert payload["allowed_paths"] == ["src"]
+    assert payload["files"] == [
+        {"path": "src/value.py", "content": "VALUE = 1\n", "size_bytes": 10}
+    ]
+
+
+def test_planner_request_identity_binds_allowed_scope(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha, tree_sha = _repository(tmp_path)
+    provider = _Provider(_valid_response())
+    planner = _planner(repository, provider)
+    broad = _job(
+        tmp_path,
+        base_sha=base_sha,
+        tree_sha=tree_sha,
+        allowed_paths=("src",),
+    )
+    narrow = _job(
+        tmp_path,
+        base_sha=base_sha,
+        tree_sha=tree_sha,
+        allowed_paths=("src/value.py",),
+    )
+
+    _run(planner.plan(broad))
+    _run(planner.plan(narrow))
+
+    assert len(provider.requests) == 2
+    assert provider.requests[0].request_id != provider.requests[1].request_id
+
+
 def test_planner_rejects_stale_tree_identity_before_model_effect(
     tmp_path: pathlib.Path,
 ) -> None:
