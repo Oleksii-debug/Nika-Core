@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-
-import nika_core.training_scale as training_scale
+from types import SimpleNamespace
 
 import pytest
 
 import nika_core.training_physical_evaluation_driver as driver
+import nika_core.training_scale as training_scale
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
     ExperimentStatus,
