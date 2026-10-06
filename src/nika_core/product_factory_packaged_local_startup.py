@@ -91,6 +91,7 @@ class _PackagedLocalOllamaAuthority:
     artifact_pin_sha256: str | None
     model: str
     base_url: str
+    private_data_allowed: bool
     timeout_seconds: float
     expected_manifest_sha256: str | None
 
@@ -368,6 +369,7 @@ def _resolve_packaged_local_ollama_authority(
         ),
         model=model,
         base_url=base_url,
+        private_data_allowed=selection.private_data_allowed,
         timeout_seconds=selection.timeout_seconds,
         expected_manifest_sha256=expected_manifest_sha256,
     )
