@@ -80,9 +80,7 @@ def test_release_gates_execute_factory_operator_proof_on_packaged_exe() -> None:
         "src/nika_core/product_command/**",
         "src/nika_core/product_project.py",
         "src/nika_core/product_decisions.py",
-        "src/nika_core/product_factory_packaged_journey.py",
-        "src/nika_core/product_factory_packaged_planning.py",
-        "src/nika_core/product_factory_packaged_status.py",
+        "src/nika_core/product_factory_*.py",
     )
     for source_path in source_paths:
         assert m11.count(f'      - "{source_path}"') == 2
