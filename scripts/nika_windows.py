@@ -22,6 +22,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.default_actions import build_default_action_registry
 from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
 from nika_core.packaged_agent_builder import (
     PackagedAgentBuilderDraftHandler,
@@ -58,6 +59,16 @@ from nika_core.windows_autostart import WindowsAutostartService
 
 class _StartupRecoveryInventoryError(RuntimeError):
     """Fail-closed packaged startup boundary; never exposes raw recovery diagnostics."""
+
+
+_TERMINAL_TASK_STATES = frozenset(
+    {
+        TaskState.COMPLETED,
+        TaskState.FAILED,
+        TaskState.CANCELLED,
+        TaskState.ARCHIVED,
+    }
+)
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -169,6 +180,50 @@ def _training_status_result(
     )
 
 
+def _current_task_status_result(queue: TaskQueue) -> UIResult:
+    try:
+        unfinished = tuple(
+            record
+            for record in queue.list_recent(limit=50)
+            if record.state not in _TERMINAL_TASK_STATES
+        )
+    except Exception as exc:  # noqa: BLE001 - packaged boundary must fail closed
+        logging.getLogger(__name__).error(
+            "Current task status read failed: exception_type=%s",
+            type(exc).__name__,
+        )
+        return UIResult(
+            request_id="desktop-handler",
+            status="failed",
+            message="Не вдалося безпечно прочитати стан поточного завдання.",
+            focus_id="tasks-heading",
+        )
+    if not unfinished:
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message="Немає незавершеного завдання.",
+            focus_id="tasks-heading",
+        )
+    if len(unfinished) > 1:
+        return UIResult(
+            request_id="desktop-handler",
+            status="rejected",
+            message=(
+                f"Є кілька незавершених завдань ({len(unfinished)}); "
+                "відкрийте список «Завдання» для явного вибору."
+            ),
+            focus_id="tasks-heading",
+        )
+    record = unfinished[0]
+    return UIResult(
+        request_id="desktop-handler",
+        status="completed",
+        message=f"Поточне завдання: {record.task_id}; state {record.state.value}.",
+        focus_id="tasks-heading",
+    )
+
+
 def build_windows_bridge(
     config: AppConfig,
     *,
@@ -181,6 +236,7 @@ def build_windows_bridge(
     store.initialize()
     activity_reports = DailyActivityReportService(store)
     training_status = TrainingStatusService(CheckpointService(store))
+    task_queue = TaskQueue(store)
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
@@ -208,7 +264,7 @@ def build_windows_bridge(
         cloud_execution_authority_resolver=cloud_permissions.execution_authority_for_task,
     )
     backend = DesktopBackend(
-        queue=TaskQueue(store),
+        queue=task_queue,
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
@@ -252,6 +308,10 @@ def build_windows_bridge(
         products=products,
         ordinary_handler=create_ordinary_task,
         agent_builder_handler=PackagedAgentBuilderDraftHandler(agent_definitions),
+        task_pause_handler=backend.pause_task,
+        task_resume_handler=resume_ordinary_task,
+        task_stop_handler=backend.stop_agent,
+        task_status_handler=lambda: _current_task_status_result(task_queue),
         activity_report_handler=lambda: _daily_activity_report_result(
             activity_reports,
             day_provider=activity_report_day,
