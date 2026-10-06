@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any, NoReturn
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskPayloadCorruptionError, decode_task_payload
 from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.product_factory_deployment import (
     DeploymentFabric,
@@ -178,12 +179,12 @@ class ProductFactoryDeploymentCheckpointHost:
                 "Product Factory host task does not exist"
             )
         try:
-            payload = json.loads(str(row["payload_json"]))
-        except (TypeError, ValueError) as exc:
+            payload = decode_task_payload(row["payload_json"])
+        except TaskPayloadCorruptionError as exc:
             raise ProductFactoryDeploymentCheckpointError(
                 "Product Factory host task payload is invalid"
             ) from exc
-        if not isinstance(payload, dict) or payload.get("kind") != _HOST_KIND:
+        if payload.get("kind") != _HOST_KIND:
             raise ProductFactoryDeploymentCheckpointError(
                 "host task is not explicitly typed as Product Factory orchestration"
             )

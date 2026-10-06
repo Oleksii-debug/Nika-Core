@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskPayloadCorruptionError, decode_task_payload
 from nika_core.product_factory_coordinator import (
     ComponentWorkRequest,
     CoordinatorError,
@@ -615,10 +616,12 @@ class ProductFactoryCheckpointHost:
         if row is None:
             raise ProductFactoryCheckpointError("Product Factory host task does not exist")
         try:
-            payload = json.loads(row["payload_json"])
-        except (TypeError, ValueError) as exc:
-            raise ProductFactoryCheckpointError("Product Factory host task payload is invalid") from exc
-        if not isinstance(payload, dict) or payload.get("kind") != _HOST_KIND:
+            payload = decode_task_payload(row["payload_json"])
+        except TaskPayloadCorruptionError as exc:
+            raise ProductFactoryCheckpointError(
+                "Product Factory host task payload is invalid"
+            ) from exc
+        if payload.get("kind") != _HOST_KIND:
             raise ProductFactoryCheckpointError(
                 "host task is not explicitly typed as Product Factory orchestration"
             )

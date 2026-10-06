@@ -47,6 +47,10 @@ def route_command(text: str, *, active_project_id: str | None = None) -> Command
     high-confidence intents require an explicit user decision instead of silently choosing
     a long-lived or capability-building path.
     """
+    if type(text) is not str:
+        raise TypeError("command must be a plain string")
+    if active_project_id is not None and type(active_project_id) is not str:
+        raise TypeError("active ProductProject id must be a plain string")
     normalized = " ".join(text.split())
     if not normalized:
         raise ValueError("command must not be empty")
