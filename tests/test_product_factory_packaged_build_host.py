@@ -78,6 +78,8 @@ def _startup(tmp_path: Path) -> PackagedLocalProductFactoryStartup:
     workspace.mkdir()
     git = tmp_path / ("git.exe" if os.name == "nt" else "git")
     git.write_bytes(b"test-git-placeholder")
+    if os.name != "nt":
+        git.chmod(0o755)
     return PackagedLocalProductFactoryStartup(
         workspace_parent=workspace.resolve(),
         policy=ContainedLocalCodingPolicy(
