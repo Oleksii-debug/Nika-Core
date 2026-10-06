@@ -536,6 +536,29 @@ def _verified_asset_manifest(root: Path, raw: bytes) -> dict[str, object]:
     return value
 
 
+def _require_open_snapshot_identity(
+    path: Path,
+    descriptor: int,
+    *,
+    name: str,
+) -> None:
+    """Require one held descriptor to remain the exact regular pathname authority."""
+
+    try:
+        opened = os.fstat(descriptor)
+        current = os.lstat(path)
+    except OSError as exc:
+        raise ProofError(f"{name} identity could not be verified") from exc
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        _fail(f"{name} identity changed")
+
+
 def _verified_candidate_evidence_from_snapshot(
     path: Path,
     candidate_bytes: bytes,
@@ -547,6 +570,11 @@ def _verified_candidate_evidence_from_snapshot(
     descriptor: int | None = None
     try:
         descriptor = _open_readonly_snapshot(path)
+        _require_open_snapshot_identity(
+            path,
+            descriptor,
+            name="physical proof candidate verification snapshot",
+        )
         if (
             _stable_file_bytes(
                 path,
@@ -558,6 +586,11 @@ def _verified_candidate_evidence_from_snapshot(
             _fail("physical proof candidate changed before manifest verification")
         resolved = path.resolve(strict=True)
         manifest = candidate_adapter_manifest(resolved)
+        _require_open_snapshot_identity(
+            path,
+            descriptor,
+            name="physical proof candidate verification snapshot",
+        )
         if (
             _stable_file_bytes(
                 path,
@@ -568,18 +601,23 @@ def _verified_candidate_evidence_from_snapshot(
         ):
             _fail("physical proof candidate changed during manifest verification")
 
-        from safetensors import safe_open
+        from safetensors.torch import load as load_safetensors
 
-        with safe_open(os.fspath(resolved), framework="pt", device="cpu") as source:
-            tensor_names = sorted(source.keys())
-            if not tensor_names:
-                _fail("physical proof candidate contains no safetensors tensors")
-            total_elements = 0
-            for name in tensor_names:
-                tensor = source.get_tensor(name)
-                total_elements += int(tensor.numel())
-            if total_elements <= 0:
-                _fail("physical proof candidate tensors are empty")
+        tensors = load_safetensors(candidate_bytes)
+        tensor_names = sorted(tensors)
+        if not tensor_names:
+            _fail("physical proof candidate contains no safetensors tensors")
+        total_elements = 0
+        for name in tensor_names:
+            tensor = tensors[name]
+            total_elements += int(tensor.numel())
+        if total_elements <= 0:
+            _fail("physical proof candidate tensors are empty")
+        _require_open_snapshot_identity(
+            path,
+            descriptor,
+            name="physical proof candidate verification snapshot",
+        )
         if (
             _stable_file_bytes(
                 path,
