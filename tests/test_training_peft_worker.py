@@ -906,6 +906,55 @@ def test_complete_sequence_at_budget_is_accepted_without_partial_response() -> N
     assert len(item["attention_mask"]) == 8
 
 
+def test_tokenization_dataset_snapshots_reused_tokenizer_buffers() -> None:
+    class ReusedBufferTokenizer(_FakeTokenizer):
+        def __init__(self) -> None:
+            self.input_ids: list[int] = []
+            self.attention_mask: list[int] = []
+
+        def __call__(
+            self,
+            text: str,
+            *,
+            truncation: bool,
+            max_length: int,
+            add_special_tokens: bool,
+        ) -> dict[str, list[int]]:
+            encoded = super().__call__(
+                text,
+                truncation=truncation,
+                max_length=max_length,
+                add_special_tokens=add_special_tokens,
+            )
+            self.input_ids[:] = encoded["input_ids"]
+            self.attention_mask[:] = encoded["attention_mask"]
+            return {
+                "attention_mask": self.attention_mask,
+                "input_ids": self.input_ids,
+            }
+
+    dataset = peft._TokenizedDataset(
+        (
+            peft.TrainingExample("first", "one"),
+            peft.TrainingExample("second", "two"),
+        ),
+        ReusedBufferTokenizer(),
+        64,
+    )
+
+    first = dataset[0]
+    second = dataset[1]
+    assert first["input_ids"] != second["input_ids"]
+
+    evidence_sha256 = dataset.evidence_sha256
+    first["input_ids"].append(999)
+    first["attention_mask"].append(0)
+
+    assert dataset[0]["input_ids"][-1] != 999
+    assert len(dataset[0]["input_ids"]) == len(dataset[0]["attention_mask"])
+    assert dataset.evidence_sha256 == evidence_sha256
+
+
 class _FakeTokenizerFactory:
     @staticmethod
     def from_pretrained(*args: object, **kwargs: object) -> _FakeTokenizer:
