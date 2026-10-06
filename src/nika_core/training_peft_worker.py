@@ -1130,6 +1130,69 @@ def _read_regular_snapshot(
     return b"".join(chunks)
 
 
+def _normalize_checkpoint_marker_links(path: Path, *, code: str) -> None:
+    current = _require_regular_unlinked(path, code=code)
+    temporary = path.with_name(f".{path.name}.tmp")
+    if current.st_nlink == 1:
+        try:
+            temporary_stat = os.lstat(temporary)
+        except FileNotFoundError:
+            return
+        except OSError:
+            _fail(code)
+        if (
+            stat.S_ISLNK(temporary_stat.st_mode)
+            or _is_reparse(temporary_stat)
+            or not stat.S_ISREG(temporary_stat.st_mode)
+            or temporary_stat.st_nlink != 1
+        ):
+            _fail(code)
+        marker_bytes = _read_regular_snapshot(
+            path,
+            max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
+            code=code,
+        )
+        temporary_bytes = _read_regular_snapshot(
+            temporary,
+            max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
+            code=code,
+        )
+        if not hmac.compare_digest(marker_bytes, temporary_bytes):
+            _fail(code)
+        try:
+            os.unlink(temporary)
+        except OSError:
+            _fail(code)
+        recovered = _require_regular_unlinked(path, code=code)
+        if (
+            recovered.st_nlink != 1
+            or (recovered.st_dev, recovered.st_ino)
+            != (current.st_dev, current.st_ino)
+        ):
+            _fail(code)
+        return
+    if current.st_nlink != 2:
+        _fail(code)
+    linked_temporary = _require_regular_unlinked(temporary, code=code)
+    if (
+        linked_temporary.st_nlink != 2
+        or (linked_temporary.st_dev, linked_temporary.st_ino)
+        != (current.st_dev, current.st_ino)
+    ):
+        _fail(code)
+    try:
+        os.unlink(temporary)
+    except OSError:
+        _fail(code)
+    recovered = _require_regular_unlinked(path, code=code)
+    if (
+        recovered.st_nlink != 1
+        or (recovered.st_dev, recovered.st_ino)
+        != (current.st_dev, current.st_ino)
+    ):
+        _fail(code)
+
+
 def _parse_jsonl_record(raw_line: bytes) -> TrainingExample:
     if not raw_line or len(raw_line) > _MAX_LINE_BYTES:
         _fail("dataset_record_size_invalid")
@@ -2057,6 +2120,10 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         _fail("resume_path_mismatch")
     marker_path = candidate / _CHECKPOINT_MARKER
     try:
+        _normalize_checkpoint_marker_links(
+            marker_path,
+            code="resume_marker_invalid",
+        )
         marker_bytes = _read_regular_snapshot(
             marker_path,
             max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
@@ -2137,6 +2204,10 @@ def _completed_step_checkpoint(
         _fail("step_checkpoint_incomplete")
     except OSError:
         _fail("step_checkpoint_marker_invalid")
+    _normalize_checkpoint_marker_links(
+        marker_path,
+        code="step_checkpoint_marker_invalid",
+    )
     marker_bytes = _read_regular_snapshot(
         marker_path,
         max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
