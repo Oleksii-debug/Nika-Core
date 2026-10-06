@@ -151,6 +151,7 @@ def test_candidate_tokenization_evidence_is_required() -> None:
         ):
             proof._require_candidate_tokenization_sha256(manifest)
 
+
 def test_candidate_evidence_snapshot_rejects_manifest_path_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
