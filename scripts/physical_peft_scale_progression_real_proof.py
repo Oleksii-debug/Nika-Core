@@ -28,6 +28,7 @@ _TIER1_STEPS = 3
 _TIER1_CANDIDATE_REF = "models/nika-physical-scale-tier1-adapter"
 _EXPERIMENT_ID = "physical-scale-progression-real-proof-v1"
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+_MAX_JSON_BYTES = 1024 * 1024
 
 
 class ProofError(RuntimeError):
@@ -38,10 +39,33 @@ def _fail(message: str) -> NoReturn:
     raise ProofError(message)
 
 
+def _strict_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            _fail(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> NoReturn:
+    _fail(f"non-finite JSON constant: {value}")
+
+
 def _read_object(path: Path) -> dict[str, object]:
     try:
         raw = path.read_bytes()
-        value = json.loads(raw.decode("utf-8", errors="strict"))
+        if not raw or len(raw) > _MAX_JSON_BYTES:
+            _fail(f"JSON authority has invalid size: {path.name}")
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+    except ProofError:
+        raise
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ProofError(f"invalid JSON authority: {path.name}") from exc
     if type(value) is not dict:
