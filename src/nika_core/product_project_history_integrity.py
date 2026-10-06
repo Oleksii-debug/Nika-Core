@@ -61,8 +61,8 @@ class ProductProjectHistoricalIntegrityService:
         expected_spec_version: int | None = None,
         expected_row_version: int | None = None,
     ) -> ProductProjectHistoricalIntegrityReport:
-        if not project_id.strip():
-            raise ProductProjectError("project_id must not be empty")
+        if type(project_id) is not str or not project_id.strip():
+            raise ProductProjectError("project_id must be non-empty text")
 
         with self.store.connection() as conn:
             conn.execute("BEGIN")
@@ -73,8 +73,16 @@ class ProductProjectHistoricalIntegrityService:
             ).fetchone()
             if project is None:
                 raise KeyError(project_id)
-            spec_version = int(project["current_spec_version"])
-            row_version = int(project["row_version"])
+            spec_version = self._required_json_int(
+                project["current_spec_version"],
+                minimum=1,
+                label="ProductProject current_spec_version",
+            )
+            row_version = self._required_json_int(
+                project["row_version"],
+                minimum=0,
+                label="ProductProject row_version",
+            )
             self._validate_expected_versions(
                 spec_version,
                 row_version,
@@ -109,7 +117,10 @@ class ProductProjectHistoricalIntegrityService:
             lifecycle_events, idempotency_count = self._validate_causal_history(
                 conn,
                 project_id,
-                current_status=str(project["status"]),
+                current_status=self._required_text(
+                    project["status"],
+                    label="ProductProject status",
+                ),
                 current_row_version=row_version,
                 spec_rows=spec_rows,
                 research_rows=research_rows,
@@ -141,21 +152,41 @@ class ProductProjectHistoricalIntegrityService:
         expected_spec_version: int | None,
         expected_row_version: int | None,
     ) -> None:
-        if expected_spec_version is not None and spec_version != expected_spec_version:
-            raise StaleProjectVersionError(
-                f"stale ProductProject spec: expected {expected_spec_version}, "
-                f"current {spec_version}"
+        if expected_spec_version is not None:
+            ProductProjectHistoricalIntegrityService._required_json_int(
+                expected_spec_version,
+                minimum=1,
+                label="expected_spec_version",
             )
-        if expected_row_version is not None and row_version != expected_row_version:
-            raise StaleProjectVersionError(
-                f"stale ProductProject row: expected {expected_row_version}, "
-                f"current {row_version}"
+            if spec_version != expected_spec_version:
+                raise StaleProjectVersionError(
+                    f"stale ProductProject spec: expected {expected_spec_version}, "
+                    f"current {spec_version}"
+                )
+        if expected_row_version is not None:
+            ProductProjectHistoricalIntegrityService._required_json_int(
+                expected_row_version,
+                minimum=0,
+                label="expected_row_version",
             )
+            if row_version != expected_row_version:
+                raise StaleProjectVersionError(
+                    f"stale ProductProject row: expected {expected_row_version}, "
+                    f"current {row_version}"
+                )
+
+    @staticmethod
+    def _required_text(value: Any, *, label: str) -> str:
+        if type(value) is not str or not value.strip():
+            raise ProductProjectError(f"invalid text identity for {label}")
+        return value
 
     @staticmethod
     def _time(value: Any, *, label: str) -> datetime:
+        if type(value) is not str:
+            raise ProductProjectError(f"invalid timestamp for {label}")
         try:
-            parsed = datetime.fromisoformat(str(value))
+            parsed = datetime.fromisoformat(value)
         except (TypeError, ValueError) as exc:
             raise ProductProjectError(f"invalid timestamp for {label}") from exc
         if parsed.utcoffset() is None:
@@ -164,6 +195,8 @@ class ProductProjectHistoricalIntegrityService:
 
     @staticmethod
     def _json_object(value: Any, *, label: str) -> dict[str, Any]:
+        if type(value) is not str:
+            raise ProductProjectError(f"invalid JSON for {label}")
         try:
             parsed = json.loads(value)
         except (TypeError, json.JSONDecodeError) as exc:
@@ -181,8 +214,11 @@ class ProductProjectHistoricalIntegrityService:
     def _package_times(self, rows: list[Any]) -> dict[str, datetime]:
         result: dict[str, datetime] = {}
         for row in rows:
-            package_id = str(row["package_id"])
-            if not package_id.strip() or package_id in result:
+            package_id = self._required_text(
+                row["package_id"],
+                label="research package identity",
+            )
+            if package_id in result:
                 raise ProductProjectError("invalid or duplicate research package identity")
             payload = self._json_object(
                 row["payload_json"],
@@ -204,22 +240,39 @@ class ProductProjectHistoricalIntegrityService:
     ) -> dict[str, tuple[_DecisionVersion, ...]]:
         grouped: dict[str, list[_DecisionVersion]] = defaultdict(list)
         for row in rows:
-            decision_id = str(row["decision_id"])
-            if not decision_id.strip():
-                raise ProductProjectError("product decision identity must not be empty")
+            decision_id = self._required_text(
+                row["decision_id"],
+                label="product decision identity",
+            )
+            raw_evidence = row["evidence_package_ids_json"]
+            if type(raw_evidence) is not str:
+                raise ProductProjectError(
+                    f"invalid historical product decision: {decision_id}"
+                )
             try:
                 state = ProductDecisionState(row["state"])
-                evidence = tuple(json.loads(row["evidence_package_ids_json"]))
+                parsed_evidence = json.loads(raw_evidence)
             except (TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise ProductProjectError(
                     f"invalid historical product decision: {decision_id}"
                 ) from exc
+            if not isinstance(parsed_evidence, list) or any(
+                type(ref) is not str or not ref.strip()
+                for ref in parsed_evidence
+            ):
+                raise ProductProjectError(
+                    f"invalid historical product decision: {decision_id}"
+                )
             grouped[decision_id].append(
                 _DecisionVersion(
                     decision_id=decision_id,
-                    decision_version=int(row["decision_version"]),
+                    decision_version=self._required_json_int(
+                        row["decision_version"],
+                        minimum=1,
+                        label=f"product decision version {decision_id}",
+                    ),
                     state=state,
-                    evidence_package_ids=evidence,
+                    evidence_package_ids=tuple(parsed_evidence),
                     created_at=self._time(
                         row["created_at"],
                         label=f"product decision {decision_id}",
@@ -253,7 +306,11 @@ class ProductProjectHistoricalIntegrityService:
         reference_count = 0
         decision_reference_count = 0
         for row in rows:
-            version = int(row["spec_version"])
+            version = self._required_json_int(
+                row["spec_version"],
+                minimum=1,
+                label="ProductProject spec_version",
+            )
             created_at = self._time(
                 row["created_at"],
                 label=f"ProductProject spec version {version}",
@@ -381,7 +438,11 @@ class ProductProjectHistoricalIntegrityService:
         ).fetchall()
         by_type: dict[str, list[Any]] = defaultdict(list)
         for row in audit_rows:
-            by_type[str(row["event_type"])].append(row)
+            event_type = self._required_text(
+                row["event_type"],
+                label="ProductProject audit event type",
+            )
+            by_type[event_type].append(row)
 
         self._validate_creation_audit(by_type.get("product_project.created", []))
         self._validate_research_audits(
@@ -430,12 +491,24 @@ class ProductProjectHistoricalIntegrityService:
         self._time(rows[0]["created_at"], label="ProductProject creation audit")
 
     def _validate_research_audits(self, audit_rows: list[Any], research_rows: list[Any]) -> None:
-        package_ids = {str(row["package_id"]) for row in research_rows}
+        package_ids = {
+            self._required_text(
+                row["package_id"],
+                label="research package identity",
+            )
+            for row in research_rows
+        }
         audited: set[str] = set()
         for row in audit_rows:
             payload = self._json_object(row["payload_json"], label="research handoff audit")
-            package_id = str(payload.get("package_id", ""))
-            if not package_id.strip() or package_id in audited:
+            try:
+                package_id = self._required_text(
+                    payload.get("package_id"),
+                    label="research handoff audit package_id",
+                )
+            except ProductProjectError as exc:
+                raise ProductProjectError("invalid or duplicate research handoff audit") from exc
+            if package_id in audited:
                 raise ProductProjectError("invalid or duplicate research handoff audit")
             audited.add(package_id)
             self._time(row["created_at"], label=f"research handoff audit {package_id}")
@@ -450,8 +523,11 @@ class ProductProjectHistoricalIntegrityService:
         for row in audit_rows:
             payload = self._json_object(row["payload_json"], label="spec revision audit")
             try:
-                reason = str(payload["change_reason"])
-            except KeyError as exc:
+                reason = self._required_text(
+                    payload["change_reason"],
+                    label="ProductProject spec revision audit change_reason",
+                )
+            except (KeyError, ProductProjectError) as exc:
                 raise ProductProjectError("invalid ProductProject spec revision audit") from exc
             version = self._required_json_int(
                 payload.get("spec_version"),
@@ -472,17 +548,36 @@ class ProductProjectHistoricalIntegrityService:
 
     def _validate_decision_audits(self, audit_rows: list[Any], decision_rows: list[Any]) -> None:
         durable = {
-            (str(row["decision_id"]), int(row["decision_version"])): row
+            (
+                self._required_text(
+                    row["decision_id"],
+                    label="product decision identity",
+                ),
+                self._required_json_int(
+                    row["decision_version"],
+                    minimum=1,
+                    label="product decision version",
+                ),
+            ): row
             for row in decision_rows
         }
         audited: set[tuple[str, int]] = set()
         for row in audit_rows:
             payload = self._json_object(row["payload_json"], label="product decision audit")
             try:
-                decision_id = str(payload["decision_id"])
+                decision_id = self._required_text(
+                    payload["decision_id"],
+                    label="product decision audit decision_id",
+                )
                 state = ProductDecisionState(payload["state"])
-                evidence = tuple(payload["evidence_package_ids"])
-            except (KeyError, TypeError, ValueError) as exc:
+                raw_evidence = payload["evidence_package_ids"]
+                if not isinstance(raw_evidence, list) or any(
+                    type(ref) is not str or not ref.strip()
+                    for ref in raw_evidence
+                ):
+                    raise ValueError("invalid evidence_package_ids")
+                evidence = tuple(raw_evidence)
+            except (KeyError, TypeError, ValueError, ProductProjectError) as exc:
                 raise ProductProjectError("invalid product decision audit") from exc
             decision_version = self._required_json_int(
                 payload.get("decision_version"),
@@ -493,12 +588,25 @@ class ProductProjectHistoricalIntegrityService:
             durable_row = durable.get(key)
             if durable_row is None or key in audited:
                 raise ProductProjectError("product decision audit has no unique durable decision")
-            if state.value != str(durable_row["state"]):
+            durable_state = self._required_text(
+                durable_row["state"],
+                label="durable product decision state",
+            )
+            if state.value != durable_state:
                 raise ProductProjectError("product decision audit state drift")
+            raw_durable_evidence = durable_row["evidence_package_ids_json"]
+            if type(raw_durable_evidence) is not str:
+                raise ProductProjectError("invalid durable product decision evidence")
             try:
-                durable_evidence = tuple(json.loads(durable_row["evidence_package_ids_json"]))
+                parsed_durable_evidence = json.loads(raw_durable_evidence)
             except (TypeError, json.JSONDecodeError) as exc:
                 raise ProductProjectError("invalid durable product decision evidence") from exc
+            if not isinstance(parsed_durable_evidence, list) or any(
+                type(ref) is not str or not ref.strip()
+                for ref in parsed_durable_evidence
+            ):
+                raise ProductProjectError("invalid durable product decision evidence")
+            durable_evidence = tuple(parsed_durable_evidence)
             if evidence != durable_evidence:
                 raise ProductProjectError("product decision audit evidence drift")
             audited.add(key)
@@ -529,9 +637,15 @@ class ProductProjectHistoricalIntegrityService:
             try:
                 old_state = ProductProjectState(payload["previous_state"])
                 new_state = ProductProjectState(payload["new_state"])
-                reason = str(payload["reason"])
-                actor = str(payload["changed_by_ref"])
-            except (KeyError, TypeError, ValueError) as exc:
+                reason = self._required_text(
+                    payload["reason"],
+                    label="ProductProject lifecycle reason",
+                )
+                actor = self._required_text(
+                    payload["changed_by_ref"],
+                    label="ProductProject lifecycle changed_by_ref",
+                )
+            except (KeyError, TypeError, ValueError, ProductProjectError) as exc:
                 raise ProductProjectError("invalid ProductProject lifecycle audit") from exc
             row_version = self._required_json_int(
                 payload.get("row_version"),
@@ -587,15 +701,39 @@ class ProductProjectHistoricalIntegrityService:
             (project_id,),
         ).fetchall()
         durable_decisions = {
-            (str(row["decision_id"]), int(row["decision_version"])) for row in decision_rows
+            (
+                self._required_text(
+                    row["decision_id"],
+                    label="product decision identity",
+                ),
+                self._required_json_int(
+                    row["decision_version"],
+                    minimum=1,
+                    label="product decision version",
+                ),
+            )
+            for row in decision_rows
         }
         lifecycle_versions = {event.row_version for event in lifecycle}
         seen_keys: set[str] = set()
         for row in rows:
-            operation_key = str(row["operation_key"])
-            operation_kind = str(row["operation_kind"])
-            entity_id = str(row["entity_id"])
-            entity_version = int(row["entity_version"])
+            operation_key = self._required_text(
+                row["operation_key"],
+                label="ProductProject mutation operation_key",
+            )
+            operation_kind = self._required_text(
+                row["operation_kind"],
+                label="ProductProject mutation operation_kind",
+            )
+            entity_id = self._required_text(
+                row["entity_id"],
+                label="ProductProject mutation entity_id",
+            )
+            entity_version = self._required_json_int(
+                row["entity_version"],
+                minimum=1,
+                label="ProductProject mutation entity_version",
+            )
             if operation_key in seen_keys or not self._valid_idempotency_row(row):
                 raise ProductProjectError("invalid ProductProject mutation idempotency record")
             seen_keys.add(operation_key)
@@ -615,10 +753,12 @@ class ProductProjectHistoricalIntegrityService:
 
     @staticmethod
     def _valid_idempotency_row(row: Any) -> bool:
-        key = str(row["operation_key"])
-        fingerprint = str(row["input_fingerprint"])
+        key = row["operation_key"]
+        fingerprint = row["input_fingerprint"]
         return (
-            bool(key.strip())
+            type(key) is str
+            and bool(key.strip())
+            and type(fingerprint) is str
             and len(fingerprint) == 64
             and all(character in "0123456789abcdef" for character in fingerprint.lower())
         )
