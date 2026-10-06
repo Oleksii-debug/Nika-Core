@@ -105,6 +105,7 @@ def test_snapshot_lists_only_plan_repositories_without_root_path(
             "repository_id": "repo-1",
             "provider": "github",
             "locator": "Oleksii-debug/example",
+            "binding_status": "unbound",
             "bound": False,
             "binding_version": None,
         }
@@ -134,6 +135,7 @@ def test_explicit_bind_and_version_fenced_unbind_round_trip(
     assert bound.status == "completed"
     snapshot = operator.snapshot(project.project_id)
     item = snapshot["repositories"][0]
+    assert item["binding_status"] == "bound"
     assert item["bound"] is True
     assert item["binding_version"] == 1
     assert str(root) not in repr(snapshot)
@@ -193,6 +195,7 @@ def test_binding_projection_survives_restart_without_exposing_root(
                 "repository_id": repository.repository_id,
                 "provider": repository.provider,
                 "locator": repository.locator,
+                "binding_status": "bound",
                 "bound": True,
                 "binding_version": 1,
             }
@@ -265,7 +268,7 @@ def test_bind_rejects_payload_fields_that_try_to_supply_repository_authority(
     assert operator.snapshot(project.project_id)["repositories"][0]["bound"] is False
 
 
-def test_snapshot_fails_closed_if_bound_filesystem_identity_changes(
+def test_invalid_filesystem_binding_keeps_redacted_cas_and_can_be_repaired(
     tmp_path: pathlib.Path,
 ) -> None:
     store = _store(tmp_path)
@@ -284,13 +287,73 @@ def test_snapshot_fails_closed_if_bound_filesystem_identity_changes(
 
     moved = tmp_path / "moved"
     root.rename(moved)
-    root.mkdir()
-    (root / ".git").mkdir()
+    replacement = tmp_path / "replacement repository"
+    replacement.mkdir()
+    (replacement / ".git").mkdir()
 
     snapshot = operator.snapshot(project.project_id)
 
-    assert snapshot["status"] == "invalid"
-    assert snapshot["repositories"] == []
+    assert snapshot["status"] == "ready"
+    item = snapshot["repositories"][0]
+    assert item["binding_status"] == "invalid"
+    assert item["bound"] is False
+    assert item["binding_version"] == 1
+    assert str(root) not in repr(snapshot)
+    assert str(moved) not in repr(snapshot)
+
+    repaired = operator.bind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "root_path": str(replacement.resolve()),
+            "expected_binding_version": 1,
+        }
+    )
+    assert repaired.status == "completed"
+    repaired_item = operator.snapshot(project.project_id)["repositories"][0]
+    assert repaired_item["binding_status"] == "bound"
+    assert repaired_item["bound"] is True
+    assert repaired_item["binding_version"] == 2
+
+
+def test_bind_rejects_stale_plan_even_when_repository_locator_survives(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    operator = _operator(store, plan)
+    ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed after execution-plan admission",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="stale packaged repository plan",
+        idempotency_key="update:product-1:stale-plan",
+    )
+    replacement = tmp_path / "stale plan root"
+    replacement.mkdir()
+    (replacement / ".git").mkdir()
+
+    result = operator.bind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "root_path": str(replacement.resolve()),
+            "expected_binding_version": None,
+        }
+    )
+
+    assert result.status == "rejected"
+    assert operator.snapshot(project.project_id)["status"] == "invalid"
+    assert ProductFactoryLocalRepositoryBindings(store).current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) is None
 
 
 def test_missing_plan_snapshot_and_actions_fail_closed(

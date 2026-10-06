@@ -872,11 +872,23 @@
         || typeof item.locator !== "string"
         || !item.locator
         || typeof item.bound !== "boolean"
+        || !["unbound", "bound", "invalid"].includes(item.binding_status)
         || !(
           item.binding_version === null
           || (Number.isSafeInteger(item.binding_version) && item.binding_version > 0)
         )
-        || item.bound !== (item.binding_version !== null)
+        || (
+          item.binding_status === "unbound"
+          && (item.bound || item.binding_version !== null)
+        )
+        || (
+          item.binding_status === "bound"
+          && (!item.bound || item.binding_version === null)
+        )
+        || (
+          item.binding_status === "invalid"
+          && (item.bound || item.binding_version === null)
+        )
         || nextVersions.has(item.repository_id)
       ) return failClosed("Стан локальних прив’язок Product Factory несумісний.");
       nextVersions.set(item.repository_id, item.binding_version);
@@ -884,7 +896,13 @@
       option.value = item.repository_id;
       option.textContent = (
         `${item.repository_id} — ${item.provider}: ${item.locator}; `
-        + (item.bound ? `прив’язано, версія ${item.binding_version}` : "не прив’язано")
+        + (
+          item.binding_status === "bound"
+            ? `прив’язано, версія ${item.binding_version}`
+            : (item.binding_status === "invalid"
+              ? `прив’язка недійсна, версія ${item.binding_version}; вкажіть новий шлях`
+              : "не прив’язано")
+        )
       );
       options.push(option);
     }

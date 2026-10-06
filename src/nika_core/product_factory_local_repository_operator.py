@@ -52,13 +52,16 @@ class PackagedLocalRepositoryOperator:
                 payload,
                 require_root=True,
             )
-            repository = self._repository_for(project_id, repository_id)
+            plan = self._plan(project_id)
+            repository = self._repository_from_plan(plan, repository_id)
             root = _root_path(payload["root_path"])
             binding = self._bindings.bind(
                 project_id=project_id,
                 repository=repository,
                 root=root,
                 expected_binding_version=expected_version,
+                expected_project_spec_version=plan.expected_spec_version,
+                expected_project_row_version=plan.expected_row_version,
             )
         except (KeyError, TypeError, ValueError, OSError) as exc:
             _log_failure("bind", exc)
@@ -123,56 +126,75 @@ class PackagedLocalRepositoryOperator:
         try:
             plan = self._plan(project_id)
             repositories: list[dict[str, object]] = []
+            invalid_count = 0
             for repository in plan.graph.repositories:
+                version = self._bindings.current_binding_version(
+                    plan.project_id,
+                    repository.repository_id,
+                )
+                if version is None:
+                    repositories.append(
+                        _repository_state(
+                            repository,
+                            binding_status="unbound",
+                            bound=False,
+                            binding_version=None,
+                        )
+                    )
+                    continue
                 try:
                     binding = self._bindings.require(
                         plan.project_id,
                         repository.repository_id,
                     )
-                except KeyError:
-                    repositories.append(
-                        _repository_state(repository, bound=False, binding_version=None)
-                    )
-                    continue
                 except ProductFactoryLocalRepositoryBindingError as exc:
                     _log_failure("snapshot binding validation", exc)
-                    return {
-                        "status": "invalid",
-                        "project_id": plan.project_id,
-                        "repositories": [],
-                        "message": (
-                            "Збережена локальна прив’язка пошкоджена або більше "
-                            "не відповідає файловій системі."
-                        ),
-                    }
+                    invalid_count += 1
+                    repositories.append(
+                        _repository_state(
+                            repository,
+                            binding_status="invalid",
+                            bound=False,
+                            binding_version=version,
+                        )
+                    )
+                    continue
                 if (
                     binding.provider != repository.provider
                     or binding.locator != repository.locator
                 ):
-                    return {
-                        "status": "invalid",
-                        "project_id": plan.project_id,
-                        "repositories": [],
-                        "message": (
-                            "Збережена локальна прив’язка не відповідає "
-                            "поточному плану Product Factory."
-                        ),
-                    }
+                    invalid_count += 1
+                    repositories.append(
+                        _repository_state(
+                            repository,
+                            binding_status="invalid",
+                            bound=False,
+                            binding_version=version,
+                        )
+                    )
+                    continue
                 repositories.append(
                     _repository_state(
                         repository,
+                        binding_status="bound",
                         bound=True,
                         binding_version=binding.binding_version,
                     )
+                )
+            message = (
+                "Виберіть репозиторій з поточного плану та явно вкажіть "
+                "його локальний Git-корінь."
+            )
+            if invalid_count:
+                message += (
+                    " Недійсні прив’язки можна безпечно замінити, вказавши "
+                    "новий шлях; поточна CAS-версія збережена без розкриття старого шляху."
                 )
             return {
                 "status": "ready",
                 "project_id": plan.project_id,
                 "repositories": repositories,
-                "message": (
-                    "Виберіть репозиторій з поточного плану та явно вкажіть "
-                    "його локальний Git-корінь."
-                ),
+                "message": message,
             }
         except (KeyError, TypeError, ValueError, OSError) as exc:
             _log_failure("snapshot plan resolution", exc)
@@ -188,7 +210,13 @@ class PackagedLocalRepositoryOperator:
         project_id: str,
         repository_id: str,
     ) -> RepositoryRef:
-        plan = self._plan(project_id)
+        return self._repository_from_plan(self._plan(project_id), repository_id)
+
+    @staticmethod
+    def _repository_from_plan(
+        plan: PackagedProductFactoryExecutionPlan,
+        repository_id: str,
+    ) -> RepositoryRef:
         for repository in plan.graph.repositories:
             if repository.repository_id == repository_id:
                 return repository
@@ -201,6 +229,7 @@ class PackagedLocalRepositoryOperator:
             raise TypeError("execution-plan resolver returned an invalid carrier")
         if plan.project_id != project_id:
             raise ValueError("execution plan belongs to another ProductProject")
+        self._bindings.validate_plan(plan)
         return plan
 
 
@@ -256,6 +285,7 @@ def _text(value: object, label: str) -> str:
 def _repository_state(
     repository: RepositoryRef,
     *,
+    binding_status: str,
     bound: bool,
     binding_version: int | None,
 ) -> dict[str, object]:
@@ -263,6 +293,7 @@ def _repository_state(
         "repository_id": repository.repository_id,
         "provider": repository.provider,
         "locator": repository.locator,
+        "binding_status": binding_status,
         "bound": bound,
         "binding_version": binding_version,
     }
