@@ -792,6 +792,77 @@ def test_private_git_workspace_refuses_ambiguous_reuse(tmp_path: pathlib.Path) -
         prepare_private_git_workspace(plan)
 
 
+def test_private_git_workspace_readmits_mutated_environment(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha = _make_source_repository(tmp_path)
+    job_root = tmp_path / "jobs" / "job-mutated-environment"
+    job_root.mkdir(parents=True)
+    plan = make_sterile_git_plan(
+        repository_root=repository,
+        job_root=job_root,
+        branch_name="toolsmith/job-mutated-environment",
+        base_sha=base_sha,
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+    assert isinstance(plan.environment, dict)
+    plan.environment["GIT_CONFIG_COUNT"] = "1"
+    plan.environment["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+    plan.environment["GIT_CONFIG_VALUE_0"] = str(tmp_path / "hooks")
+
+    with pytest.raises(WorkspaceSecurityError, match="environment is not canonical"):
+        prepare_private_git_workspace(plan)
+
+    assert not plan.private_git_dir.exists()
+    assert not plan.worktree_root.exists()
+
+
+def test_private_git_workspace_uses_frozen_environment_snapshot(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, base_sha = _make_source_repository(tmp_path)
+    job_root = tmp_path / "jobs" / "job-environment-snapshot"
+    job_root.mkdir(parents=True)
+    plan = make_sterile_git_plan(
+        repository_root=repository,
+        job_root=job_root,
+        branch_name="toolsmith/job-environment-snapshot",
+        base_sha=base_sha,
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+    original_validate = execution_module.validate_sterile_git_environment
+    original_git = execution_module._git
+
+    def validate_then_mutate(environment: object) -> dict[str, str]:
+        snapshot = original_validate(environment)
+        assert isinstance(environment, dict)
+        environment["GIT_CONFIG_COUNT"] = "1"
+        environment["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+        environment["GIT_CONFIG_VALUE_0"] = str(tmp_path / "hooks")
+        return snapshot
+
+    def guarded_git(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        environment = kwargs.get("environment")
+        assert isinstance(environment, dict)
+        assert "GIT_CONFIG_COUNT" not in environment
+        assert "GIT_CONFIG_KEY_0" not in environment
+        assert "GIT_CONFIG_VALUE_0" not in environment
+        return original_git(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        execution_module,
+        "validate_sterile_git_environment",
+        validate_then_mutate,
+    )
+    monkeypatch.setattr(execution_module, "_git", guarded_git)
+
+    prepared = prepare_private_git_workspace(plan)
+
+    assert prepared.head_sha == base_sha
+    assert plan.environment["GIT_CONFIG_COUNT"] == "1"
+
+
 def test_typed_runner_preserves_literal_arguments_and_captures_output(
     tmp_path: pathlib.Path,
 ) -> None:

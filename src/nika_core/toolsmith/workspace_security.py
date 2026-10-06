@@ -86,6 +86,49 @@ def validate_git_branch_name(branch_name: object) -> str:
     return branch_name
 
 
+def _sterile_git_config_args() -> tuple[str, ...]:
+    null_hooks = "NUL" if os.name == "nt" else "/dev/null"
+    return (
+        "-c",
+        "credential.helper=",
+        "-c",
+        f"core.hooksPath={null_hooks}",
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "protocol.ext.allow=never",
+    )
+
+
+def validate_sterile_git_environment(environment: object) -> dict[str, str]:
+    if not isinstance(environment, collections.abc.Mapping):
+        raise WorkspaceSecurityError("sterile Git environment must be a string mapping")
+    snapshot: dict[str, str] = {}
+    for key, value in environment.items():
+        if type(key) is not str or type(value) is not str:
+            raise WorkspaceSecurityError("sterile Git environment must contain exact strings")
+        if "\x00" in key or "\x00" in value:
+            raise WorkspaceSecurityError("sterile Git environment must be NUL-free")
+        if key in snapshot:
+            raise WorkspaceSecurityError("sterile Git environment contains duplicate keys")
+        snapshot[key] = value
+    canonical = sterile_git_environment(snapshot)
+    if snapshot != canonical:
+        raise WorkspaceSecurityError("sterile Git environment is not canonical")
+    return dict(canonical)
+
+
+def validate_sterile_git_config_args(config_args: object) -> tuple[str, ...]:
+    canonical = _sterile_git_config_args()
+    if (
+        type(config_args) is not tuple
+        or any(type(argument) is not str for argument in config_args)
+        or config_args != canonical
+    ):
+        raise WorkspaceSecurityError("sterile Git config arguments are not canonical")
+    return canonical
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class WorkspacePathPolicy:
     allowed_roots: tuple[str, ...]
@@ -116,6 +159,8 @@ class SterileGitPlan:
 
     def __post_init__(self) -> None:
         validate_git_branch_name(self.branch_name)
+        validate_sterile_git_environment(self.environment)
+        validate_sterile_git_config_args(self.config_args)
         if len(self.base_sha) != 40 or any(
             character not in "0123456789abcdef" for character in self.base_sha.lower()
         ):
@@ -331,12 +376,18 @@ def sterile_git_environment(
     source: collections.abc.Mapping[str, str] | None = None,
 ) -> dict[str, str]:
     source_env = dict(os.environ if source is None else source)
-    environment = {
-        key: value
-        for key, value in source_env.items()
-        if key.upper() in _ALLOWED_ENVIRONMENT_VARIABLES
-        and key.upper() not in _GIT_CREDENTIAL_VARIABLES
-    }
+    environment: dict[str, str] = {}
+    for key, value in source_env.items():
+        if type(key) is not str or type(value) is not str:
+            raise WorkspaceSecurityError("Git environment must contain exact strings")
+        if "\x00" in key or "\x00" in value:
+            raise WorkspaceSecurityError("Git environment must be NUL-free")
+        normalized_key = key.upper()
+        if (
+            normalized_key in _ALLOWED_ENVIRONMENT_VARIABLES
+            and normalized_key not in _GIT_CREDENTIAL_VARIABLES
+        ):
+            environment[normalized_key] = value
     null_device = "NUL" if os.name == "nt" else "/dev/null"
     environment.update(
         {
@@ -388,16 +439,7 @@ def make_sterile_git_plan(
             "job workspace and production repository must be fully disjoint"
         )
 
-    config_args = (
-        "-c",
-        "credential.helper=",
-        "-c",
-        "core.hooksPath=NUL" if os.name == "nt" else "core.hooksPath=/dev/null",
-        "-c",
-        "protocol.file.allow=never",
-        "-c",
-        "protocol.ext.allow=never",
-    )
+    config_args = _sterile_git_config_args()
     return SterileGitPlan(
         repository_root=repository_root,
         private_git_dir=private_git_dir,

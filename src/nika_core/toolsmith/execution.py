@@ -29,6 +29,8 @@ from nika_core.toolsmith.workspace_security import (
     ensure_real_directory_root,
     sterile_process_environment,
     validate_git_branch_name,
+    validate_sterile_git_config_args,
+    validate_sterile_git_environment,
     validate_typed_argv,
 )
 
@@ -905,6 +907,8 @@ def prepare_private_git_workspace(
     git_executable: str = "git",
 ) -> PreparedGitWorkspace:
     _validate_branch_name(plan.branch_name)
+    git_environment = validate_sterile_git_environment(plan.environment)
+    git_config_args = validate_sterile_git_config_args(plan.config_args)
     job_root = _private_git_job_root(plan)
     git_admission = _resolve_host_git_executable(git_executable)
     git_executable = str(git_admission.executable)
@@ -917,7 +921,7 @@ def prepare_private_git_workspace(
     _git(
         (git_executable, "check-ref-format", "--branch", plan.branch_name),
         cwd=job_root,
-        environment=plan.environment,
+        environment=git_environment,
         expected_executable_sha256=git_executable_sha256,
     )
 
@@ -942,17 +946,17 @@ def prepare_private_git_workspace(
     _git(
         clone_argv,
         cwd=job_root,
-        environment=plan.environment,
+        environment=git_environment,
         expected_executable_sha256=git_executable_sha256,
     )
 
-    git_prefix = (git_executable, *plan.config_args, "--git-dir", str(plan.private_git_dir))
+    git_prefix = (git_executable, *git_config_args, "--git-dir", str(plan.private_git_dir))
     remote_names = tuple(
         item.strip()
         for item in _git(
             (*git_prefix, "remote"),
             cwd=job_root,
-            environment=plan.environment,
+            environment=git_environment,
             expected_executable_sha256=git_executable_sha256,
         ).stdout.splitlines()
         if item.strip()
@@ -961,7 +965,7 @@ def prepare_private_git_workspace(
         _git(
             (*git_prefix, "remote", "remove", remote_name),
             cwd=job_root,
-            environment=plan.environment,
+            environment=git_environment,
             expected_executable_sha256=git_executable_sha256,
         )
     remaining_remotes = tuple(
@@ -969,7 +973,7 @@ def prepare_private_git_workspace(
         for item in _git(
             (*git_prefix, "remote"),
             cwd=job_root,
-            environment=plan.environment,
+            environment=git_environment,
             expected_executable_sha256=git_executable_sha256,
         ).stdout.splitlines()
         if item.strip()
@@ -980,7 +984,7 @@ def prepare_private_git_workspace(
     base_result = _git(
         (*git_prefix, "rev-parse", "--verify", f"{plan.base_sha}^{{commit}}"),
         cwd=job_root,
-        environment=plan.environment,
+        environment=git_environment,
         expected_executable_sha256=git_executable_sha256,
     )
     if base_result.stdout.strip().lower() != plan.base_sha.lower():
@@ -1016,7 +1020,7 @@ def prepare_private_git_workspace(
             collision = subprocess.run(
                 collision_command,
                 cwd=job_root,
-                env=dict(plan.environment),
+                env=dict(git_environment),
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -1047,7 +1051,7 @@ def prepare_private_git_workspace(
             plan.base_sha,
         ),
         cwd=job_root,
-        environment=plan.environment,
+        environment=git_environment,
         expected_executable_sha256=git_executable_sha256,
     )
     if (plan.worktree_root / ".git").exists():
@@ -1056,7 +1060,7 @@ def prepare_private_git_workspace(
     head = _git(
         (*git_prefix, "rev-parse", "HEAD"),
         cwd=job_root,
-        environment=plan.environment,
+        environment=git_environment,
         expected_executable_sha256=git_executable_sha256,
     ).stdout.strip()
     tree_evidence = collect_tree_evidence(plan.worktree_root)
