@@ -483,6 +483,10 @@ class PackagedVoiceModelSetup:
         *,
         cancel_event: Event | None,
     ) -> None:
+        # Validate the canonical data root before any mkdir can follow a
+        # symlink/reparse point and create files outside Nika's authority.
+        self._require_regular_directory(self._data_root)
+        self._require_no_reparse_ancestors(self._data_root)
         voice_root = self._data_root / "voice"
         model_root = self._data_root / _MODEL_DIR
         voice_root.mkdir(parents=True, exist_ok=True)
