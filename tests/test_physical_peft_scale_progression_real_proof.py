@@ -71,6 +71,45 @@ def _package() -> FrozenLearningPackage:
     )
 
 
+def test_read_object_snapshot_is_bounded_and_stable(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "authority.json"
+    payload = b'{"value":1}'
+    target.write_bytes(payload)
+
+    value, raw = proof._read_object_snapshot(target)
+
+    assert value == {"value": 1}
+    assert raw == payload
+
+    monkeypatch.setattr(proof, "_MAX_JSON_BYTES", 4)
+    with pytest.raises(proof.ProofError, match="size or file type is invalid"):
+        proof._read_object_snapshot(target)
+
+
+def test_read_object_snapshot_rejects_wrong_held_identity(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "authority.json"
+    decoy = tmp_path / "decoy.json"
+    payload = b'{"value":1}'
+    target.write_bytes(payload)
+    decoy.write_bytes(payload)
+    monkeypatch.setattr(
+        proof,
+        "_open_readonly_snapshot",
+        lambda _path: proof.os.open(decoy, proof.os.O_RDONLY),
+    )
+
+    with pytest.raises(proof.ProofError, match="identity changed"):
+        proof._read_object_snapshot(target)
+
+
 def test_candidate_file_authority_binds_digest_and_manifest(
     proof: ModuleType,
     tmp_path: Path,
