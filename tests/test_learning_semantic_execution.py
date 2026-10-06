@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -582,3 +583,67 @@ def test_durable_execution_receipt_does_not_expose_semantic_payload(
     record = IdempotencyLedger(store).list_for_task("task-private")[0]
     assert secret not in repr(receipt)
     assert secret not in repr(record.result)
+
+
+
+def test_completed_replay_rejects_corrupted_durable_receipt_schema(
+    tmp_path: Path,
+) -> None:
+    store, memory, executor = _runtime(tmp_path)
+    candidate = _candidate()
+    verification = _verification(candidate)
+    task_id, intent, payload, address = _semantic_cases(candidate, verification)[0]
+    first = _apply(
+        executor,
+        task_id=task_id,
+        intent=intent,
+        candidate=candidate,
+        verification=verification,
+        payload=payload,
+        address=address,
+    )
+    assert first.replayed is False
+
+    ledger = IdempotencyLedger(store)
+    record = ledger.list_for_task(task_id)[0]
+    assert type(record.result) is dict
+    corrupted = dict(record.result)
+    corrupted["schema"] = "nika.learning-semantic-execution-receipt/forged"
+    encoded = json.dumps(
+        corrupted,
+        ensure_ascii=False,
+        sort_keys=True,
+        allow_nan=False,
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE idempotency_records SET result_json = ? WHERE operation_key = ?",
+            (encoded, record.operation_key),
+        )
+
+    before = memory.get(
+        scope=MemoryScope.AGENT,
+        owner_id=candidate.agent_id,
+        namespace="learning.replay",
+        key="memory-1",
+    )
+    assert before is not None
+
+    with pytest.raises(RuntimeError, match="result schema is unsupported"):
+        _apply(
+            executor,
+            task_id=task_id,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            payload=payload,
+            address=address,
+        )
+
+    after = memory.get(
+        scope=MemoryScope.AGENT,
+        owner_id=candidate.agent_id,
+        namespace="learning.replay",
+        key="memory-1",
+    )
+    assert after == before
