@@ -61,16 +61,20 @@ def launch_windows_shell(
 
     def finish_startup() -> None:
         try:
+            if not window.events.loaded.wait(20):
+                raise RuntimeError("packaged WebView did not reach loaded state")
             if on_gui_started is not None:
                 on_gui_started()
             window.show()
         except Exception as exc:  # noqa: BLE001 - relay worker-thread startup failure
             callback_failure.append(exc)
-            window.destroy()
+            if window.events.shown.is_set():
+                window.destroy()
 
-    if on_gui_started is not None:
-        window.events.shown += finish_startup
-    webview.start(gui="edgechromium")
+    if on_gui_started is None:
+        webview.start(gui="edgechromium")
+    else:
+        webview.start(finish_startup, gui="edgechromium")
     if callback_failure:
         raise callback_failure[0]
     return window
