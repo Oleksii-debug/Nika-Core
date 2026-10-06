@@ -69,10 +69,17 @@ class PreparedGitWorkspace:
     tree_evidence: TreeEvidence
 
     def __post_init__(self) -> None:
-        validate_git_commit_sha(self.head_sha, label="private workspace HEAD")
-        if self.head_sha.lower() != self.plan.base_sha.lower():
+        head_sha = validate_git_commit_sha(
+            self.head_sha,
+            label="private workspace HEAD",
+        )
+        base_sha = validate_git_commit_sha(
+            self.plan.base_sha,
+            label="pinned base SHA",
+        )
+        if head_sha.lower() != base_sha.lower():
             raise WorkspaceSecurityError("private workspace HEAD must equal the pinned base SHA")
-        if self.remotes:
+        if type(self.remotes) is not tuple or self.remotes:
             raise WorkspaceSecurityError("worker-private Git metadata must not retain remotes")
 
 
@@ -784,10 +791,6 @@ def run_typed_process(
     )
 
 
-def _validate_branch_name(branch_name: str) -> None:
-    validate_git_branch_name(branch_name)
-
-
 def _git(
     argv: collections.abc.Sequence[str],
     *,
@@ -908,9 +911,24 @@ def prepare_private_git_workspace(
     *,
     git_executable: str = "git",
 ) -> PreparedGitWorkspace:
-    _validate_branch_name(plan.branch_name)
+    repository_root = plan.repository_root
+    private_git_dir = plan.private_git_dir
+    worktree_root = plan.worktree_root
+    branch_name = validate_git_branch_name(plan.branch_name)
+    base_sha = validate_git_commit_sha(plan.base_sha)
     git_environment = validate_sterile_git_environment(plan.environment)
     git_config_args = validate_sterile_git_config_args(plan.config_args)
+    isolation_class = plan.isolation_class
+    plan = SterileGitPlan(
+        repository_root=repository_root,
+        private_git_dir=private_git_dir,
+        worktree_root=worktree_root,
+        branch_name=branch_name,
+        base_sha=base_sha,
+        environment=git_environment,
+        config_args=git_config_args,
+        isolation_class=isolation_class,
+    )
     job_root = _private_git_job_root(plan)
     git_admission = _resolve_host_git_executable(git_executable)
     git_executable = str(git_admission.executable)

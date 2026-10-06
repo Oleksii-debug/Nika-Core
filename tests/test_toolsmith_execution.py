@@ -806,6 +806,45 @@ def test_prepared_git_workspace_rejects_behavioral_head_sha(
         )
 
 
+def test_prepared_git_workspace_readmits_plan_base_sha_and_remotes(
+    tmp_path: pathlib.Path,
+) -> None:
+    production = tmp_path / "production-prepared-carrier"
+    job_root = tmp_path / "jobs" / "job-prepared-carrier"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+    plan = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
+        branch_name="toolsmith/job",
+        base_sha="a" * 40,
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+    tree_evidence = execution_module.TreeEvidence(
+        files=(),
+        digest="b" * 64,
+        total_bytes=0,
+    )
+    object.__setattr__(plan, "base_sha", "--help")
+
+    with pytest.raises(WorkspaceSecurityError, match="pinned base SHA"):
+        execution_module.PreparedGitWorkspace(
+            plan=plan,
+            head_sha="a" * 40,
+            remotes=(),
+            tree_evidence=tree_evidence,
+        )
+
+    object.__setattr__(plan, "base_sha", "a" * 40)
+    with pytest.raises(WorkspaceSecurityError, match="must not retain remotes"):
+        execution_module.PreparedGitWorkspace(
+            plan=plan,
+            head_sha="a" * 40,
+            remotes=[],
+            tree_evidence=tree_evidence,
+        )
+
+
 def test_private_git_workspace_refuses_ambiguous_reuse(tmp_path: pathlib.Path) -> None:
     repository, base_sha = _make_source_repository(tmp_path)
     job_root = tmp_path / "jobs" / "job-1"
@@ -894,6 +933,89 @@ def test_private_git_workspace_uses_frozen_environment_snapshot(
 
     assert prepared.head_sha == base_sha
     assert plan.environment["GIT_CONFIG_COUNT"] == "1"
+
+
+def test_private_git_workspace_readmits_mutated_base_sha(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha = _make_source_repository(tmp_path)
+    job_root = tmp_path / "jobs" / "job-mutated-base"
+    job_root.mkdir(parents=True)
+    plan = make_sterile_git_plan(
+        repository_root=repository,
+        job_root=job_root,
+        branch_name="toolsmith/job-mutated-base",
+        base_sha=base_sha,
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+    object.__setattr__(plan, "base_sha", "--help")
+
+    with pytest.raises(WorkspaceSecurityError, match="40-character hexadecimal SHA"):
+        prepare_private_git_workspace(plan)
+
+    assert not plan.private_git_dir.exists()
+    assert not plan.worktree_root.exists()
+
+
+def test_private_git_workspace_detaches_admitted_plan_snapshot(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, base_sha = _make_source_repository(tmp_path)
+    job_root = tmp_path / "jobs" / "job-plan-snapshot"
+    job_root.mkdir(parents=True)
+    original_branch = "toolsmith/job-plan-snapshot"
+    plan = make_sterile_git_plan(
+        repository_root=repository,
+        job_root=job_root,
+        branch_name=original_branch,
+        base_sha=base_sha,
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+    original_validate_branch = execution_module.validate_git_branch_name
+    original_validate_sha = execution_module.validate_git_commit_sha
+    branch_mutated = False
+    sha_mutated = False
+
+    def validate_branch_then_mutate(value: object) -> str:
+        nonlocal branch_mutated
+        admitted = original_validate_branch(value)
+        if not branch_mutated:
+            branch_mutated = True
+            object.__setattr__(plan, "branch_name", "toolsmith/hijacked")
+        return admitted
+
+    def validate_sha_then_mutate(
+        value: object,
+        *,
+        label: str = "base_sha",
+    ) -> str:
+        nonlocal sha_mutated
+        admitted = original_validate_sha(value, label=label)
+        if label == "base_sha" and not sha_mutated:
+            sha_mutated = True
+            object.__setattr__(plan, "base_sha", "0" * 40)
+        return admitted
+
+    monkeypatch.setattr(
+        execution_module,
+        "validate_git_branch_name",
+        validate_branch_then_mutate,
+    )
+    monkeypatch.setattr(
+        execution_module,
+        "validate_git_commit_sha",
+        validate_sha_then_mutate,
+    )
+
+    prepared = prepare_private_git_workspace(plan)
+
+    assert plan.branch_name == "toolsmith/hijacked"
+    assert plan.base_sha == "0" * 40
+    assert prepared.plan is not plan
+    assert prepared.plan.branch_name == original_branch
+    assert prepared.plan.base_sha == base_sha
+    assert prepared.head_sha == base_sha
 
 
 def test_typed_runner_preserves_literal_arguments_and_captures_output(
