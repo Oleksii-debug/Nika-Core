@@ -391,6 +391,23 @@ def test_posix_launch_guard_fails_closed_without_immutable_snapshot(
             raise AssertionError("unsealed executable must not reach launch")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sealed launch snapshot only")
+def test_posix_launch_snapshot_does_not_grant_execute_permission(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o600)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="pinned runtime executable is not executable",
+    ):
+        with guard:
+            raise AssertionError("non-executable source must not gain launch permission")
+
+
 def test_typed_runner_rejects_same_path_replacement_after_runtime_admission(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
