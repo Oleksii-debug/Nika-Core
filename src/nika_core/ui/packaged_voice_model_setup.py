@@ -214,6 +214,19 @@ class PackagedVoiceModelSetup:
                 "failed",
                 "Не вдалося запустити фоновий імпорт голосової моделі.",
             )
+        if type(future) is not Future:
+            coroutine.close()
+            with self._lock:
+                if generation == self._generation:
+                    self._active = False
+                    self._cancelling = False
+                    self._cancel_event = None
+                    self._last_status = "failed"
+                    self._last_message = "Не вдалося запустити фоновий імпорт голосової моделі."
+            return self._result(
+                "failed",
+                "Не вдалося запустити фоновий імпорт голосової моделі.",
+            )
         future.add_done_callback(
             lambda done: self._submission_done(
                 done,
