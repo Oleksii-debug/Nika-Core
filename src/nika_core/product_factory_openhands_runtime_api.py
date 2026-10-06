@@ -169,16 +169,16 @@ class OpenHandsRuntimeApiSandboxProvider:
             assert session is not None
             if session.status == "paused":
                 self._resume(control, session.runtime_id)
-                session = self._wait_until_running(
-                    control,
-                    endpoint.endpoint_id,
-                    expected_runtime_id=session.runtime_id,
-                    expected_url=endpoint.host,
-                )
             elif session.status != "running":
                 raise OpenHandsRuntimeApiError(
                     "OpenHands runtime is not available for bound-session recovery"
                 )
+            session = self._wait_until_running(
+                control,
+                endpoint.endpoint_id,
+                expected_runtime_id=session.runtime_id,
+                expected_url=endpoint.host,
+            )
             self._require_bound_session(session, endpoint)
             self._verify_agent_server_health(session)
             session_key = session.session_api_key
@@ -293,12 +293,11 @@ class OpenHandsRuntimeApiSandboxProvider:
                 return
             self._require_bound_session(session, endpoint)
             if succeeded:
-                self._request_json(
+                self._request_action(
                     control,
-                    "POST",
                     "/stop",
                     operation="runtime stop",
-                    json={"runtime_id": session.runtime_id},
+                    runtime_id=session.runtime_id,
                     timeout=30.0,
                 )
                 return
@@ -308,12 +307,11 @@ class OpenHandsRuntimeApiSandboxProvider:
                 raise OpenHandsRuntimeApiError(
                     "failed OpenHands work no longer has a preservable runtime"
                 )
-            self._request_json(
+            self._request_action(
                 control,
-                "POST",
                 "/pause",
                 operation="runtime pause",
-                json={"runtime_id": session.runtime_id},
+                runtime_id=session.runtime_id,
                 timeout=30.0,
             )
 
@@ -399,12 +397,11 @@ class OpenHandsRuntimeApiSandboxProvider:
             time.sleep(min(float(self._config.poll_interval_seconds), remaining))
 
     def _resume(self, control: httpx.Client, runtime_id: str) -> None:
-        self._request_json(
+        self._request_action(
             control,
-            "POST",
             "/resume",
             operation="runtime resume",
-            json={"runtime_id": runtime_id},
+            runtime_id=runtime_id,
             timeout=self._config.init_timeout_seconds,
         )
 
@@ -462,6 +459,26 @@ class OpenHandsRuntimeApiSandboxProvider:
                 "Runtime API client lacks X-API-Key authentication"
             )
         return client
+
+    @staticmethod
+    def _request_action(
+        client: httpx.Client,
+        path: str,
+        *,
+        operation: str,
+        runtime_id: str,
+        timeout: float,
+    ) -> None:
+        response = OpenHandsRuntimeApiSandboxProvider._request(
+            client,
+            "POST",
+            path,
+            operation=operation,
+            timeout=timeout,
+            json={"runtime_id": runtime_id},
+            allow_not_found=False,
+        )
+        assert response is not None
 
     @staticmethod
     def _request_json(
@@ -523,12 +540,11 @@ class OpenHandsRuntimeApiSandboxProvider:
     @staticmethod
     def _stop_best_effort(control: httpx.Client, runtime_id: str) -> None:
         try:
-            OpenHandsRuntimeApiSandboxProvider._request_json(
+            OpenHandsRuntimeApiSandboxProvider._request_action(
                 control,
-                "POST",
                 "/stop",
                 operation="failed-acquire cleanup",
-                json={"runtime_id": runtime_id},
+                runtime_id=runtime_id,
                 timeout=30.0,
             )
         except Exception:  # noqa: BLE001 - cleanup is best-effort after failed acquire
