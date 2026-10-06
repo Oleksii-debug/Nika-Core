@@ -156,12 +156,24 @@ class ModelGateway:
                     continue
                 terminal_error = error
             except asyncio.CancelledError:
-                self._audit(
-                    event_type="model.cancelled",
-                    request=request,
-                    payload={"provider_id": capabilities.provider_id},
-                )
-                cancelled = True
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    self._audit(
+                        event_type="model.cancelled",
+                        request=request,
+                        payload={"provider_id": capabilities.provider_id},
+                    )
+                    cancelled = True
+                else:
+                    error = ModelGatewayError(
+                        ModelErrorCode.PROVIDER_ERROR,
+                        "model provider failed without a typed Nika error",
+                        provider_id=capabilities.provider_id,
+                        retryable=False,
+                        failure_effect=ModelFailureEffect.UNKNOWN,
+                    )
+                    self._audit_failure(request, capabilities.provider_id, error)
+                    terminal_error = error
             except ModelGatewayError as raw_error:
                 error = self._normalize_provider_error(
                     raw_error, capabilities.provider_id
