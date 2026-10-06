@@ -614,6 +614,52 @@ def test_conflicting_retry_of_same_scoped_fill_id_fails_closed(tmp_path) -> None
     assert repo.commit_fill_and_account(fill, snapshot) is False
 
 
+def test_exact_fill_retry_fails_closed_when_account_state_is_missing(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    repo = TradingStateRepository(store)
+    repo.initialize()
+
+    fill = _fill(_INSTRUMENT_A, "retry-missing-account")
+    ledger = PortfolioLedger(Decimal(1000))
+    ledger.apply_fill(fill)
+    snapshot = ledger.snapshot({instrument_identity(_INSTRUMENT_A): Decimal(100)})
+    assert repo.commit_fill_and_account(fill, snapshot)
+
+    with store.connection() as conn:
+        conn.execute(
+            "DELETE FROM trading_research_run_account_state "
+            "WHERE workspace_id = ? AND run_id = ?",
+            ("workspace", "run"),
+        )
+
+    with pytest.raises(RuntimeError, match="fills exist without account state"):
+        repo.commit_fill_and_account(fill, snapshot)
+
+
+def test_exact_latest_fill_retry_rejects_conflicting_account_payload(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    repo = TradingStateRepository(store)
+    repo.initialize()
+
+    fill = _fill(_INSTRUMENT_A, "retry-conflicting-account")
+    ledger = PortfolioLedger(Decimal(1000))
+    ledger.apply_fill(fill)
+    snapshot = ledger.snapshot({instrument_identity(_INSTRUMENT_A): Decimal(100)})
+    assert repo.commit_fill_and_account(fill, snapshot)
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE trading_research_run_account_state SET payload = ? "
+            "WHERE workspace_id = ? AND run_id = ?",
+            ("{}", "workspace", "run"),
+        )
+
+    with pytest.raises(RuntimeError, match="conflicting durable account state"):
+        repo.commit_fill_and_account(fill, snapshot)
+
+
 def test_account_payload_fails_closed_when_fill_has_no_account_state(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
