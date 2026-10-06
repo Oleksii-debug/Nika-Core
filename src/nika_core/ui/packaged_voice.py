@@ -135,7 +135,7 @@ def _open_model_authority(path: Path) -> int:
 
 
 class _PinnedModelAuthority:
-    """Hold admitted model files immutable until the lazy native load consumes them."""
+    """Keep admitted model files immutable for the packaged voice feature lifetime."""
 
     def __init__(self, paths: tuple[Path, Path, Path]) -> None:
         self._lock = threading.Lock()
@@ -190,13 +190,11 @@ class _PinnedModelAuthority:
                 raise
             self._consuming = True
 
-        completed = False
         poisoned = False
         try:
             result = loader()
             with self._lock:
                 self._verify_locked()
-            completed = True
             return result
         except _ModelAuthorityError:
             poisoned = True
@@ -204,7 +202,7 @@ class _PinnedModelAuthority:
         finally:
             with self._lock:
                 self._consuming = False
-                if completed or poisoned or self._close_requested:
+                if poisoned or self._close_requested:
                     self._close_locked()
 
     def close(self) -> None:

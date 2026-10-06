@@ -194,6 +194,8 @@ def test_packaged_voice_build_is_lazy_and_preserves_current_vad_gate(
         assert turn["status"] == "idle"
     finally:
         feature.close()
+        assert feature._model_loader is not None
+        assert feature._model_loader._authority.closed is True
 
 
 def _lazy_test_request() -> SpeechToTextRequest:
@@ -427,6 +429,7 @@ def test_lazy_whisper_load_failure_allows_one_explicit_retry(
         response = await adapter.transcribe(_lazy_test_request())
         assert response.text == "повтор успішний"
         assert calls == 2
+        assert adapter._authority.closed is False
 
     try:
         asyncio.run(scenario())
