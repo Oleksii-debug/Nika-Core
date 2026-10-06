@@ -33,9 +33,13 @@ _MATERIAL_DOMAIN = b"nika-training-consumed-materials-v1\x00"
 _STEP_ID_DOMAIN = b"nika-training-step-v2\x00"
 _CHECKPOINT_PAYLOAD_DOMAIN = b"nika-peft-checkpoint-payload-v1\x00"
 _CHECKPOINT_MARKER = "nika_checkpoint.json"
-_CHECKPOINT_MARKER_SCHEMA_VERSION = 2
+_LEGACY_CHECKPOINT_MARKER_SCHEMA_VERSION = 2
+_CHECKPOINT_MARKER_SCHEMA_VERSION = 3
+_RESUME_STATE_SCHEMA_VERSION = 2
+_TOKENIZATION_DOMAIN = b"nika-peft-tokenization-v1\x00"
 _CANDIDATE_FILE = "adapter_model.safetensors"
 _MAX_CHECKPOINT_FILES = 4096
+_MAX_RESUME_LOAD_AUTHORITY_FILES = 128
 _MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
 _MAX_CHECKPOINT_MARKER_BYTES = 64 * 1024
 _MAX_RUNTIME_VERSION_BYTES = 256
@@ -54,6 +58,7 @@ _TRAINING_RUNTIME_METADATA_KEYS = {
 }
 _MAX_MODEL_DIR_FILES = 10_000
 _MAX_MODEL_DIR_BYTES = 16 * 1024 * 1024 * 1024
+_MAX_MODEL_LOAD_AUTHORITY_FILES = 128
 _MODEL_SNAPSHOT_DIR = "model-snapshot"
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
@@ -124,6 +129,30 @@ class ConsumedMaterials:
     training: tuple[TrainingExample, ...]
     validation: tuple[TrainingExample, ...]
     attestation_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ResumeCheckpointLoadAuthority:
+    checkpoint: Path
+    root_identity: tuple[int, int, int, int, int]
+    directories: tuple[
+        tuple[Path, tuple[int, int, int, int, int]],
+        ...,
+    ]
+    files: tuple[
+        tuple[Path, int, tuple[int, int, int, int, int]],
+        ...,
+    ]
+
+
+@dataclass(frozen=True, slots=True)
+class _TrainedAdapterSourceAuthority:
+    adapter_dir: Path
+    directory_identity: tuple[int, int, int, int, int]
+    files: tuple[
+        tuple[Path, int, tuple[int, int, int, int, int]],
+        ...,
+    ]
 
 
 def _fail(code: str) -> NoReturn:
@@ -1085,6 +1114,138 @@ def _model_directory_snapshot(config: TrainerConfig, job_root: Path) -> Path:
     return target
 
 
+def _close_foundation_load_authority(
+    authority: tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...],
+) -> None:
+    for _path, descriptor, _identity in authority:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _foundation_model_files(model_dir: Path) -> tuple[Path, ...]:
+    try:
+        paths = sorted(
+            model_dir.rglob("*"),
+            key=lambda item: item.relative_to(model_dir).as_posix(),
+        )
+    except OSError:
+        _fail("foundation_load_authority_invalid")
+    files: list[Path] = []
+    for path in paths:
+        try:
+            value = os.lstat(path)
+        except OSError:
+            _fail("foundation_load_authority_invalid")
+        if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
+            _fail("foundation_load_authority_invalid")
+        if stat.S_ISDIR(value.st_mode):
+            continue
+        if not stat.S_ISREG(value.st_mode):
+            _fail("foundation_load_authority_invalid")
+        files.append(path)
+        if len(files) > _MAX_MODEL_LOAD_AUTHORITY_FILES:
+            _fail("foundation_load_authority_file_limit")
+    if not files:
+        _fail("foundation_load_authority_invalid")
+    return tuple(files)
+
+
+def _open_foundation_load_authority(
+    model_dir: Path,
+    base_gguf: Path,
+    *,
+    expected_model_manifest_sha256: str,
+    expected_base_sha256: str,
+) -> tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...]:
+    try:
+        before_manifest = model_directory_manifest_sha256(model_dir)
+    except ValueError:
+        _fail("foundation_load_authority_invalid")
+    if before_manifest != expected_model_manifest_sha256:
+        _fail("model_dir_changed_before_load")
+
+    paths = (base_gguf, *_foundation_model_files(model_dir))
+    opened: list[tuple[Path, int, tuple[int, int, int, int, int]]] = []
+    try:
+        for path in paths:
+            before = _require_regular_unlinked(
+                path,
+                code="foundation_load_authority_invalid",
+            )
+            if before.st_nlink != 1:
+                _fail("foundation_load_authority_invalid")
+            descriptor = _open_readonly_snapshot(path)
+            opened_stat = os.fstat(descriptor)
+            identity = _stable_stat_identity(before)
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or _is_reparse(opened_stat)
+                or opened_stat.st_nlink != 1
+                or _stable_stat_identity(opened_stat) != identity
+            ):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                _fail("foundation_load_authority_invalid")
+            opened.append((path, descriptor, identity))
+
+        observed_base_sha256, _ = _hash_regular_snapshot(
+            base_gguf,
+            code="foundation_load_authority_invalid",
+        )
+        if not hmac.compare_digest(
+            observed_base_sha256,
+            expected_base_sha256,
+        ):
+            _fail("staged_base_digest_mismatch")
+        try:
+            after_open_manifest = model_directory_manifest_sha256(model_dir)
+        except ValueError:
+            _fail("foundation_load_authority_invalid")
+        if after_open_manifest != expected_model_manifest_sha256:
+            _fail("model_dir_changed_before_load")
+        return tuple(opened)
+    except PeftTrainerError:
+        _close_foundation_load_authority(tuple(opened))
+        raise
+    except OSError:
+        _close_foundation_load_authority(tuple(opened))
+        _fail("foundation_load_authority_invalid")
+
+
+def _verify_foundation_load_authority(
+    authority: tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...],
+    *,
+    model_dir: Path,
+    expected_model_manifest_sha256: str,
+) -> None:
+    try:
+        observed_manifest = model_directory_manifest_sha256(model_dir)
+    except ValueError:
+        _fail("foundation_changed_during_load")
+    if observed_manifest != expected_model_manifest_sha256:
+        _fail("foundation_changed_during_load")
+    for path, descriptor, identity in authority:
+        try:
+            opened = os.fstat(descriptor)
+        except OSError:
+            _fail("foundation_changed_during_load")
+        current = _require_regular_unlinked(
+            path,
+            code="foundation_changed_during_load",
+        )
+        if (
+            opened.st_nlink != 1
+            or current.st_nlink != 1
+            or _stable_stat_identity(opened) != identity
+            or _stable_stat_identity(current) != identity
+        ):
+            _fail("foundation_changed_during_load")
+
+
 def _require_directory_unlinked(path: Path, *, code: str) -> os.stat_result:
     try:
         value = os.lstat(path)
@@ -1870,6 +2031,23 @@ def _publish_initial_adapter_config(path: Path, payload: bytes) -> None:
         _fail("initial_adapter_config_write_failed")
 
 
+def _validated_initial_adapter_config(
+    manifest: dict[str, object],
+    *,
+    config: TrainerConfig,
+    request: ParsedRequest,
+) -> dict[str, object]:
+    if manifest.get("candidate_artifact_ref") != request.base_artifact_ref:
+        _fail("initial_adapter_artifact_ref_mismatch")
+    foundation_model_sha256 = _candidate_foundation_model_sha256(manifest)
+    if foundation_model_sha256 != config.base_gguf_sha256:
+        _fail("initial_adapter_foundation_model_mismatch")
+    adapter_config = manifest.get("adapter_config")
+    if type(adapter_config) is not dict:
+        _fail("initial_adapter_manifest_invalid")
+    return dict(adapter_config)
+
+
 def _stage_initial_adapter(
     config: TrainerConfig,
     request: ParsedRequest,
@@ -1905,19 +2083,136 @@ def _stage_initial_adapter(
             expected_sha256=config.initial_adapter_sha256,
         )
     manifest = candidate_adapter_manifest(target)
-    if manifest.get("candidate_artifact_ref") != request.base_artifact_ref:
-        _fail("initial_adapter_artifact_ref_mismatch")
-    foundation_model_sha256 = _candidate_foundation_model_sha256(manifest)
-    if foundation_model_sha256 != config.base_gguf_sha256:
-        _fail("initial_adapter_foundation_model_mismatch")
-    adapter_config = manifest.get("adapter_config")
-    if type(adapter_config) is not dict:
-        _fail("initial_adapter_manifest_invalid")
+    adapter_config = _validated_initial_adapter_config(
+        manifest,
+        config=config,
+        request=request,
+    )
     adapter_config_payload = _canonical_json_bytes(adapter_config)
     adapter_config_path = target_dir / "adapter_config.json"
     _publish_initial_adapter_config(adapter_config_path, adapter_config_payload)
     _adapter_config_snapshot(target_dir, request, config)
     return target_dir
+
+
+def _close_initial_adapter_load_authority(
+    authority: tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...],
+) -> None:
+    for _path, descriptor, _identity in authority:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _initial_adapter_directory_paths(adapter_dir: Path) -> tuple[Path, ...]:
+    try:
+        return tuple(
+            sorted(
+                adapter_dir.iterdir(),
+                key=lambda item: item.name,
+            )
+        )
+    except OSError:
+        _fail("initial_adapter_load_authority_invalid")
+
+
+def _open_initial_adapter_load_authority(
+    adapter_dir: Path,
+    *,
+    config: TrainerConfig,
+    request: ParsedRequest,
+) -> tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...]:
+    if config.initial_adapter_sha256 is None:
+        _fail("initial_adapter_authority_invalid")
+    candidate = adapter_dir / _CANDIDATE_FILE
+    config_path = adapter_dir / "adapter_config.json"
+    expected_paths = (config_path, candidate)
+    if _initial_adapter_directory_paths(adapter_dir) != expected_paths:
+        _fail("initial_adapter_load_authority_invalid")
+
+    opened: list[tuple[Path, int, tuple[int, int, int, int, int]]] = []
+    try:
+        for path in expected_paths:
+            before = _require_regular_unlinked(
+                path,
+                code="initial_adapter_load_authority_invalid",
+            )
+            if before.st_nlink != 1:
+                _fail("initial_adapter_load_authority_invalid")
+            descriptor = _open_readonly_snapshot(path)
+            opened_stat = os.fstat(descriptor)
+            identity = _stable_stat_identity(before)
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or _is_reparse(opened_stat)
+                or opened_stat.st_nlink != 1
+                or _stable_stat_identity(opened_stat) != identity
+            ):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                _fail("initial_adapter_load_authority_invalid")
+            opened.append((path, descriptor, identity))
+
+        candidate_sha256, _ = _hash_regular_snapshot(
+            candidate,
+            code="initial_adapter_load_authority_invalid",
+        )
+        if candidate_sha256 != config.initial_adapter_sha256:
+            _fail("initial_adapter_stage_digest_mismatch")
+        manifest = candidate_adapter_manifest(candidate)
+        adapter_config = _validated_initial_adapter_config(
+            manifest,
+            config=config,
+            request=request,
+        )
+        expected_config_bytes = _canonical_json_bytes(adapter_config)
+        observed_config_bytes = _read_regular_snapshot(
+            config_path,
+            max_bytes=256 * 1024,
+            code="initial_adapter_load_authority_invalid",
+        )
+        if not hmac.compare_digest(
+            observed_config_bytes,
+            expected_config_bytes,
+        ):
+            _fail("initial_adapter_config_mismatch")
+        _adapter_config_snapshot(adapter_dir, request, config)
+        return tuple(opened)
+    except PeftTrainerError:
+        _close_initial_adapter_load_authority(tuple(opened))
+        raise
+    except OSError:
+        _close_initial_adapter_load_authority(tuple(opened))
+        _fail("initial_adapter_load_authority_invalid")
+
+
+def _verify_initial_adapter_load_authority(
+    authority: tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...],
+    *,
+    adapter_dir: Path,
+) -> None:
+    expected_paths = tuple(path for path, _descriptor, _identity in authority)
+    if _initial_adapter_directory_paths(adapter_dir) != expected_paths:
+        _fail("initial_adapter_changed_during_load")
+    for path, descriptor, identity in authority:
+        try:
+            opened = os.fstat(descriptor)
+        except OSError:
+            _fail("initial_adapter_changed_during_load")
+        current = _require_regular_unlinked(
+            path,
+            code="initial_adapter_changed_during_load",
+        )
+        if (
+            opened.st_nlink != 1
+            or current.st_nlink != 1
+            or _stable_stat_identity(opened) != identity
+            or _stable_stat_identity(current) != identity
+        ):
+            _fail("initial_adapter_changed_during_load")
 
 
 def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root: Path) -> Path:
@@ -2073,16 +2368,23 @@ def _write_checkpoint_marker(
     request: ParsedRequest,
     consumed_sha256: str,
     checkpoint_payload_sha256: str,
+    tokenization_sha256: str | None = None,
 ) -> str:
     _require_sha256(checkpoint_payload_sha256, field="checkpoint_payload_sha256")
     marker = {
         "checkpoint_payload_sha256": checkpoint_payload_sha256,
         "consumed_materials_sha256": consumed_sha256,
         "job_fingerprint": request.job_fingerprint,
-        "schema_version": _CHECKPOINT_MARKER_SCHEMA_VERSION,
+        "schema_version": _LEGACY_CHECKPOINT_MARKER_SCHEMA_VERSION,
         "step_id": request.step_id,
         "step_number": request.step_index + 1,
     }
+    if tokenization_sha256 is not None:
+        marker["schema_version"] = _CHECKPOINT_MARKER_SCHEMA_VERSION
+        marker["tokenization_sha256"] = _require_sha256(
+            tokenization_sha256,
+            field="checkpoint_tokenization_sha256",
+        )
     encoded = _canonical_json_bytes(marker)
     if len(encoded) > _MAX_CHECKPOINT_MARKER_BYTES:
         _fail("checkpoint_marker_too_large")
@@ -2149,7 +2451,7 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         if state:
             _fail("initial_resume_state_invalid")
         return None
-    expected = {
+    legacy_expected = {
         "checkpoint_marker_sha256",
         "checkpoint_payload_sha256",
         "checkpoint_step",
@@ -2157,7 +2459,20 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         "relative_path",
         "schema_version",
     }
-    if set(state) != expected or state.get("schema_version") != _SCHEMA_VERSION:
+    current_expected = legacy_expected | {"tokenization_sha256"}
+    state_keys = set(state)
+    state_version = state.get("schema_version")
+    if state_keys == legacy_expected and state_version == _SCHEMA_VERSION:
+        pass
+    elif (
+        state_keys == current_expected
+        and state_version == _RESUME_STATE_SCHEMA_VERSION
+    ):
+        _require_sha256(
+            state.get("tokenization_sha256"),
+            field="resume_tokenization_sha256",
+        )
+    else:
         _fail("resume_state_invalid")
     if state.get("job_fingerprint") != request.job_fingerprint:
         _fail("resume_job_mismatch")
@@ -2217,6 +2532,7 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         "step_number",
     }
     current_marker_keys = legacy_marker_keys | {"step_id"}
+    tokenization_marker_keys = current_marker_keys | {"tokenization_sha256"}
     if type(marker) is not dict:
         _fail("resume_marker_identity_mismatch")
     marker_keys = set(marker)
@@ -2225,12 +2541,23 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
             _fail("resume_marker_identity_mismatch")
     elif marker_keys == current_marker_keys:
         if (
+            marker.get("schema_version")
+            != _LEGACY_CHECKPOINT_MARKER_SCHEMA_VERSION
+            or marker.get("step_id") != request.previous_step_id
+        ):
+            _fail("resume_marker_identity_mismatch")
+    elif marker_keys == tokenization_marker_keys:
+        if (
             marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
             or marker.get("step_id") != request.previous_step_id
+            or marker.get("tokenization_sha256")
+            != state.get("tokenization_sha256")
         ):
             _fail("resume_marker_identity_mismatch")
     else:
         _fail("resume_marker_identity_mismatch")
+    if state_version == _RESUME_STATE_SCHEMA_VERSION and marker_keys != tokenization_marker_keys:
+        _fail("resume_tokenization_evidence_mismatch")
     if (
         marker.get("job_fingerprint") != request.job_fingerprint
         or marker.get("step_number") != request.step_index
@@ -2249,6 +2576,7 @@ def _completed_step_checkpoint(
     request: ParsedRequest,
     *,
     consumed_sha256: str,
+    tokenization_sha256: str | None = None,
 ) -> tuple[Path, str, str] | None:
     checkpoint = _checkpoint_dir(job_root, request.step_index + 1)
     try:
@@ -2297,6 +2625,7 @@ def _completed_step_checkpoint(
         "step_number",
     }
     current_keys = legacy_keys | {"step_id"}
+    tokenization_keys = current_keys | {"tokenization_sha256"}
     if type(marker) is not dict:
         _fail("step_checkpoint_marker_identity_mismatch")
     marker_keys = set(marker)
@@ -2305,12 +2634,29 @@ def _completed_step_checkpoint(
             _fail("step_checkpoint_marker_identity_mismatch")
     elif marker_keys == current_keys:
         if (
+            marker.get("schema_version")
+            != _LEGACY_CHECKPOINT_MARKER_SCHEMA_VERSION
+            or marker.get("step_id") != request.step_id
+        ):
+            _fail("step_checkpoint_marker_identity_mismatch")
+    elif marker_keys == tokenization_keys:
+        if (
             marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
             or marker.get("step_id") != request.step_id
         ):
             _fail("step_checkpoint_marker_identity_mismatch")
     else:
         _fail("step_checkpoint_marker_identity_mismatch")
+    if tokenization_sha256 is not None:
+        expected_tokenization_sha256 = _require_sha256(
+            tokenization_sha256,
+            field="step_tokenization_sha256",
+        )
+        if (
+            marker_keys != tokenization_keys
+            or marker.get("tokenization_sha256") != expected_tokenization_sha256
+        ):
+            _fail("step_checkpoint_tokenization_mismatch")
     if (
         marker.get("job_fingerprint") != request.job_fingerprint
         or marker.get("step_number") != request.step_index + 1
@@ -2476,6 +2822,302 @@ def _snapshot_resume_checkpoint(
         _fail("resume_checkpoint_snapshot_failed")
 
 
+def _resume_checkpoint_load_entries(
+    checkpoint: Path,
+    *,
+    code: str,
+    file_limit_code: str | None = None,
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    try:
+        paths = sorted(
+            checkpoint.rglob("*"),
+            key=lambda item: item.relative_to(checkpoint).as_posix(),
+        )
+    except OSError:
+        _fail(code)
+
+    directories: list[Path] = []
+    files: list[Path] = []
+    seen_paths: set[str] = set()
+    total_bytes = 0
+    for path in paths:
+        relative = path.relative_to(checkpoint).as_posix()
+        if relative in {_CHECKPOINT_MARKER, f".{_CHECKPOINT_MARKER}.tmp"}:
+            _fail(code)
+        folded = relative.casefold()
+        if folded in seen_paths:
+            _fail(code)
+        seen_paths.add(folded)
+        try:
+            value = os.lstat(path)
+        except OSError:
+            _fail(code)
+        if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
+            _fail(code)
+        if stat.S_ISDIR(value.st_mode):
+            directories.append(path)
+            continue
+        if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+            _fail(code)
+        files.append(path)
+        total_bytes += value.st_size
+        if len(files) > _MAX_RESUME_LOAD_AUTHORITY_FILES:
+            _fail(file_limit_code or code)
+        if total_bytes > _MAX_CHECKPOINT_BYTES:
+            _fail(code)
+    if not files:
+        _fail(code)
+    return tuple(directories), tuple(files)
+
+
+def _close_resume_checkpoint_load_authority(
+    authority: _ResumeCheckpointLoadAuthority,
+) -> None:
+    for _path, descriptor, _identity in authority.files:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _verify_resume_checkpoint_load_authority(
+    authority: _ResumeCheckpointLoadAuthority,
+    *,
+    expected_payload_sha256: str,
+    code: str = "resume_checkpoint_changed_during_load",
+) -> None:
+    expected_digest = _require_sha256(
+        expected_payload_sha256,
+        field="resume_checkpoint_payload_sha256",
+    )
+    root = _require_directory_unlinked(authority.checkpoint, code=code)
+    directories, files = _resume_checkpoint_load_entries(
+        authority.checkpoint,
+        code=code,
+    )
+    if _stable_stat_identity(root) != authority.root_identity:
+        _fail(code)
+    if directories != tuple(path for path, _identity in authority.directories):
+        _fail(code)
+    if files != tuple(path for path, _descriptor, _identity in authority.files):
+        _fail(code)
+
+    for path, identity in authority.directories:
+        current = _require_directory_unlinked(path, code=code)
+        if _stable_stat_identity(current) != identity:
+            _fail(code)
+    for path, descriptor, identity in authority.files:
+        try:
+            opened = os.fstat(descriptor)
+        except OSError:
+            _fail(code)
+        current = _require_regular_unlinked(path, code=code)
+        if (
+            opened.st_nlink != 1
+            or current.st_nlink != 1
+            or _stable_stat_identity(opened) != identity
+            or _stable_stat_identity(current) != identity
+        ):
+            _fail(code)
+    try:
+        observed_digest = _checkpoint_payload_manifest_sha256(
+            authority.checkpoint
+        )
+    except PeftTrainerError:
+        _fail(code)
+    if not hmac.compare_digest(observed_digest, expected_digest):
+        _fail(code)
+
+
+def _open_resume_checkpoint_load_authority(
+    checkpoint: Path,
+    *,
+    expected_payload_sha256: str,
+) -> _ResumeCheckpointLoadAuthority:
+    expected_digest = _require_sha256(
+        expected_payload_sha256,
+        field="resume_checkpoint_payload_sha256",
+    )
+    root = _require_directory_unlinked(
+        checkpoint,
+        code="resume_load_authority_invalid",
+    )
+    directories, files = _resume_checkpoint_load_entries(
+        checkpoint,
+        code="resume_load_authority_invalid",
+        file_limit_code="resume_load_authority_file_limit",
+    )
+    directory_authority = tuple(
+        (
+            path,
+            _stable_stat_identity(
+                _require_directory_unlinked(
+                    path,
+                    code="resume_load_authority_invalid",
+                )
+            ),
+        )
+        for path in directories
+    )
+    opened: list[
+        tuple[Path, int, tuple[int, int, int, int, int]]
+    ] = []
+    try:
+        for path in files:
+            before = _require_regular_unlinked(
+                path,
+                code="resume_load_authority_invalid",
+            )
+            descriptor = _open_readonly_snapshot(path)
+            opened_stat = os.fstat(descriptor)
+            identity = _stable_stat_identity(before)
+            if (
+                before.st_nlink != 1
+                or opened_stat.st_nlink != 1
+                or not stat.S_ISREG(opened_stat.st_mode)
+                or _is_reparse(opened_stat)
+                or _stable_stat_identity(opened_stat) != identity
+            ):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                _fail("resume_load_authority_invalid")
+            opened.append((path, descriptor, identity))
+
+        authority = _ResumeCheckpointLoadAuthority(
+            checkpoint=checkpoint,
+            root_identity=_stable_stat_identity(root),
+            directories=directory_authority,
+            files=tuple(opened),
+        )
+        _verify_resume_checkpoint_load_authority(
+            authority,
+            expected_payload_sha256=expected_digest,
+            code="resume_load_authority_invalid",
+        )
+        return authority
+    except PeftTrainerError:
+        for _path, descriptor, _identity in opened:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+    except OSError:
+        for _path, descriptor, _identity in opened:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        _fail("resume_load_authority_invalid")
+
+
+def _close_trained_adapter_source_authority(
+    authority: _TrainedAdapterSourceAuthority,
+) -> None:
+    for _path, descriptor, _identity in authority.files:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _verify_trained_adapter_source_authority(
+    authority: _TrainedAdapterSourceAuthority,
+    *,
+    code: str = "trained_adapter_source_changed",
+) -> None:
+    current_dir = _require_directory_unlinked(
+        authority.adapter_dir,
+        code=code,
+    )
+    if _stable_stat_identity(current_dir) != authority.directory_identity:
+        _fail(code)
+    expected_paths = (
+        authority.adapter_dir / "adapter_config.json",
+        authority.adapter_dir / _CANDIDATE_FILE,
+    )
+    if tuple(path for path, _descriptor, _identity in authority.files) != expected_paths:
+        _fail(code)
+    for path, descriptor, identity in authority.files:
+        try:
+            opened = os.fstat(descriptor)
+        except OSError:
+            _fail(code)
+        current = _require_regular_unlinked(path, code=code)
+        if (
+            opened.st_nlink != 1
+            or current.st_nlink != 1
+            or _stable_stat_identity(opened) != identity
+            or _stable_stat_identity(current) != identity
+        ):
+            _fail(code)
+
+
+def _open_trained_adapter_source_authority(
+    adapter_dir: Path,
+) -> _TrainedAdapterSourceAuthority:
+    directory = _require_directory_unlinked(
+        adapter_dir,
+        code="trained_adapter_source_invalid",
+    )
+    paths = (
+        adapter_dir / "adapter_config.json",
+        adapter_dir / _CANDIDATE_FILE,
+    )
+    opened: list[
+        tuple[Path, int, tuple[int, int, int, int, int]]
+    ] = []
+    try:
+        for path in paths:
+            before = _require_regular_unlinked(
+                path,
+                code="trained_adapter_source_invalid",
+            )
+            if before.st_nlink != 1:
+                _fail("trained_adapter_source_invalid")
+            descriptor = _open_readonly_snapshot(path)
+            opened_stat = os.fstat(descriptor)
+            identity = _stable_stat_identity(before)
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or _is_reparse(opened_stat)
+                or opened_stat.st_nlink != 1
+                or _stable_stat_identity(opened_stat) != identity
+            ):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                _fail("trained_adapter_source_invalid")
+            opened.append((path, descriptor, identity))
+        authority = _TrainedAdapterSourceAuthority(
+            adapter_dir=adapter_dir,
+            directory_identity=_stable_stat_identity(directory),
+            files=tuple(opened),
+        )
+        _verify_trained_adapter_source_authority(
+            authority,
+            code="trained_adapter_source_invalid",
+        )
+        return authority
+    except PeftTrainerError:
+        for _path, descriptor, _identity in opened:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+    except OSError:
+        for _path, descriptor, _identity in opened:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        _fail("trained_adapter_source_invalid")
+
+
 class _TokenizedDataset:
     def __init__(
         self,
@@ -2483,9 +3125,12 @@ class _TokenizedDataset:
         tokenizer: Any,
         max_length: int,
     ) -> None:
-        self._items: list[dict[str, object]] = []
+        self._items: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
+        digest = hashlib.sha256()
+        digest.update(_TOKENIZATION_DOMAIN)
+        digest.update(_canonical_json_bytes({"max_length": max_length}))
         eos = tokenizer.eos_token or ""
-        for example in examples:
+        for index, example in enumerate(examples):
             text = f"{example.prompt}\n{example.response}{eos}"
             encoded = tokenizer(
                 text,
@@ -2501,17 +3146,59 @@ class _TokenizedDataset:
                 or not input_ids
                 or len(input_ids) > max_length
                 or len(input_ids) != len(attention_mask)
+                or any(
+                    type(token) is not int or not 0 <= token <= (1 << 63) - 1
+                    for token in input_ids
+                )
+                or any(type(mask) is not int or mask not in (0, 1) for mask in attention_mask)
             ):
                 _fail("response_tokens_truncated")
-            self._items.append(
-                {"attention_mask": attention_mask, "input_ids": input_ids}
+            frozen_input_ids = tuple(input_ids)
+            frozen_attention_mask = tuple(attention_mask)
+            self._items.append((frozen_input_ids, frozen_attention_mask))
+            digest.update(
+                _canonical_json_bytes(
+                    {
+                        "index": index,
+                        "item": {
+                            "attention_mask": frozen_attention_mask,
+                            "input_ids": frozen_input_ids,
+                        },
+                    }
+                )
             )
+        digest.update(_canonical_json_bytes({"record_count": len(self._items)}))
+        self.evidence_sha256 = digest.hexdigest()
 
     def __len__(self) -> int:
         return len(self._items)
 
     def __getitem__(self, index: int) -> dict[str, object]:
-        return self._items[index]
+        input_ids, attention_mask = self._items[index]
+        return {
+            "attention_mask": list(attention_mask),
+            "input_ids": list(input_ids),
+        }
+
+
+def _tokenization_evidence_sha256(
+    training: _TokenizedDataset,
+    validation: _TokenizedDataset,
+) -> str:
+    payload = {
+        "schema": "nika-peft-tokenization-v1",
+        "training_sha256": _require_sha256(
+            training.evidence_sha256,
+            field="training_tokenization_sha256",
+        ),
+        "validation_sha256": _require_sha256(
+            validation.evidence_sha256,
+            field="validation_tokenization_sha256",
+        ),
+    }
+    return hashlib.sha256(
+        _TOKENIZATION_DOMAIN + _canonical_json_bytes(payload)
+    ).hexdigest()
 
 
 def _import_training_stack() -> tuple[Any, ...]:
@@ -2711,30 +3398,63 @@ def _existing_candidate_sha256(
         or before.st_nlink != 1
     ):
         _fail("candidate_replay_invalid")
+
+    authority_fd: int | None = None
     try:
+        authority_fd = _open_readonly_snapshot(candidate)
+        opened = os.fstat(authority_fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or _stable_stat_identity(opened) != _stable_stat_identity(before)
+            or opened.st_nlink != 1
+        ):
+            _fail("candidate_replay_changed")
+
         observed_manifest = candidate_adapter_manifest(candidate)
-    except (PeftTrainerError, OSError, RuntimeError, TypeError, ValueError):
+        middle_open = os.fstat(authority_fd)
+        middle_path = _require_regular_unlinked(
+            candidate,
+            code="candidate_replay_changed",
+        )
+        if (
+            _stable_stat_identity(middle_open) != _stable_stat_identity(opened)
+            or _stable_stat_identity(middle_path) != _stable_stat_identity(opened)
+            or middle_open.st_nlink != 1
+            or middle_path.st_nlink != 1
+        ):
+            _fail("candidate_replay_changed")
+        if observed_manifest != expected_manifest:
+            _fail("candidate_replay_identity_mismatch")
+
+        digest, size = _hash_regular_snapshot(
+            candidate,
+            code="candidate_replay_changed",
+        )
+        after_open = os.fstat(authority_fd)
+        after_path = _require_regular_unlinked(
+            candidate,
+            code="candidate_replay_changed",
+        )
+        if (
+            size <= 0
+            or _stable_stat_identity(after_open) != _stable_stat_identity(opened)
+            or _stable_stat_identity(after_path) != _stable_stat_identity(opened)
+            or after_open.st_nlink != 1
+            or after_path.st_nlink != 1
+        ):
+            _fail("candidate_replay_changed")
+        return digest
+    except PeftTrainerError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError):
         _fail("candidate_replay_invalid")
-    if observed_manifest != expected_manifest:
-        _fail("candidate_replay_identity_mismatch")
-    middle = _require_regular_unlinked(candidate, code="candidate_replay_changed")
-    if (
-        (middle.st_dev, middle.st_ino) != (before.st_dev, before.st_ino)
-        or middle.st_nlink != 1
-    ):
-        _fail("candidate_replay_changed")
-    digest, size = _hash_regular_snapshot(
-        candidate,
-        code="candidate_replay_changed",
-    )
-    after = _require_regular_unlinked(candidate, code="candidate_replay_changed")
-    if (
-        size <= 0
-        or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
-        or after.st_nlink != 1
-    ):
-        _fail("candidate_replay_changed")
-    return digest
+    finally:
+        if authority_fd is not None:
+            try:
+                os.close(authority_fd)
+            except OSError:
+                pass
 
 
 def _train_one_step(
@@ -2771,13 +3491,15 @@ def _train_one_step(
     previous_checkpoint = _resume_checkpoint(job_root, request)
     resume_checkpoint = previous_checkpoint
     resume_snapshot_root: Path | None = None
+    resume_payload_sha256: str | None = None
     if previous_checkpoint is not None:
+        resume_payload_sha256 = _require_sha256(
+            request.resume_state.get("checkpoint_payload_sha256"),
+            field="resume_checkpoint_payload_sha256",
+        )
         resume_checkpoint = _snapshot_resume_checkpoint(
             previous_checkpoint,
-            expected_payload_sha256=_require_sha256(
-                request.resume_state.get("checkpoint_payload_sha256"),
-                field="resume_checkpoint_payload_sha256",
-            ),
+            expected_payload_sha256=resume_payload_sha256,
             job_root=job_root,
         )
         resume_snapshot_root = resume_checkpoint.parent
@@ -2786,8 +3508,27 @@ def _train_one_step(
         if previous_checkpoint is None
         else None
     )
+    foundation_load_authority: tuple[
+        tuple[Path, int, tuple[int, int, int, int, int]], ...
+    ] = ()
+    initial_adapter_load_authority: tuple[
+        tuple[Path, int, tuple[int, int, int, int, int]], ...
+    ] = ()
+    resume_load_authority: _ResumeCheckpointLoadAuthority | None = None
 
     try:
+        foundation_load_authority = _open_foundation_load_authority(
+            staged_model_dir,
+            staged_base,
+            expected_model_manifest_sha256=config.model_dir_manifest_sha256,
+            expected_base_sha256=config.base_gguf_sha256,
+        )
+        if initial_adapter_dir is not None:
+            initial_adapter_load_authority = _open_initial_adapter_load_authority(
+                initial_adapter_dir,
+                config=config,
+                request=request,
+            )
         tokenizer = AutoTokenizer.from_pretrained(
             os.fspath(staged_model_dir),
             gguf_file=os.fspath(staged_base),
@@ -2811,6 +3552,38 @@ def _train_one_step(
             _fail("model_dir_changed_during_load")
         if after_load_manifest != config.model_dir_manifest_sha256:
             _fail("model_dir_changed_during_load")
+        training_dataset = _TokenizedDataset(
+            consumed.training,
+            tokenizer,
+            config.max_sequence_length,
+        )
+        validation_dataset = _TokenizedDataset(
+            consumed.validation,
+            tokenizer,
+            config.max_sequence_length,
+        )
+        tokenization_sha256 = _tokenization_evidence_sha256(
+            training_dataset,
+            validation_dataset,
+        )
+        if request.step_index > 0:
+            resume_tokenization = request.resume_state.get("tokenization_sha256")
+            if (
+                type(resume_tokenization) is not str
+                or not hmac.compare_digest(
+                    resume_tokenization,
+                    tokenization_sha256,
+                )
+            ):
+                _fail("resume_tokenization_evidence_mismatch")
+        _verify_foundation_load_authority(
+            foundation_load_authority,
+            model_dir=staged_model_dir,
+            expected_model_manifest_sha256=config.model_dir_manifest_sha256,
+        )
+        _close_foundation_load_authority(foundation_load_authority)
+        foundation_load_authority = ()
+
         if previous_checkpoint is None and initial_adapter_dir is None:
             lora = LoraConfig(
                 r=config.lora_r,
@@ -2833,6 +3606,15 @@ def _train_one_step(
             )
             if adapter_dir is None:
                 _fail("training_adapter_state_missing")
+            if previous_checkpoint is not None:
+                if resume_checkpoint is None or resume_payload_sha256 is None:
+                    _fail("resume_load_authority_invalid")
+                resume_load_authority = (
+                    _open_resume_checkpoint_load_authority(
+                        resume_checkpoint,
+                        expected_payload_sha256=resume_payload_sha256,
+                    )
+                )
             model = PeftModel.from_pretrained(
                 model,
                 os.fspath(adapter_dir),
@@ -2850,11 +3632,23 @@ def _train_one_step(
             safe_serialize=safe_serialize,
             torch=torch,
         )
+        if initial_adapter_load_authority:
+            if initial_adapter_dir is None:
+                _fail("initial_adapter_load_authority_invalid")
+            _verify_initial_adapter_load_authority(
+                initial_adapter_load_authority,
+                adapter_dir=initial_adapter_dir,
+            )
+            _close_initial_adapter_load_authority(
+                initial_adapter_load_authority
+            )
+            initial_adapter_load_authority = ()
 
         completed_step = _completed_step_checkpoint(
             job_root,
             request,
             consumed_sha256=consumed.attestation_sha256,
+            tokenization_sha256=tokenization_sha256,
         )
         replay_marker_sha256: str | None = None
         replay_payload_sha256: str | None = None
@@ -2862,16 +3656,6 @@ def _train_one_step(
             checkpoint, replay_marker_sha256, replay_payload_sha256 = completed_step
             adapter_dir = checkpoint / "adapter"
         else:
-            training_dataset = _TokenizedDataset(
-                consumed.training,
-                tokenizer,
-                config.max_sequence_length,
-            )
-            validation_dataset = _TokenizedDataset(
-                consumed.validation,
-                tokenizer,
-                config.max_sequence_length,
-            )
             collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
             trainer_root = _ensure_child_directory(
                 job_root,
@@ -2924,55 +3708,114 @@ def _train_one_step(
                 os.fspath(adapter_dir),
                 safe_serialization=True,
             )
+        if resume_load_authority is not None:
+            if resume_payload_sha256 is None:
+                _fail("resume_load_authority_invalid")
+            _verify_resume_checkpoint_load_authority(
+                resume_load_authority,
+                expected_payload_sha256=resume_payload_sha256,
+            )
+            _close_resume_checkpoint_load_authority(
+                resume_load_authority
+            )
+            resume_load_authority = None
     except PeftTrainerError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
         _fail("training_step_failed")
     finally:
+        if resume_load_authority is not None:
+            _close_resume_checkpoint_load_authority(
+                resume_load_authority
+            )
+        if foundation_load_authority:
+            _close_foundation_load_authority(foundation_load_authority)
+        if initial_adapter_load_authority:
+            _close_initial_adapter_load_authority(
+                initial_adapter_load_authority
+            )
         if "torch" in locals() and hasattr(torch, "cuda") and torch.cuda.is_available():
             torch.cuda.empty_cache()
         if resume_snapshot_root is not None:
             shutil.rmtree(resume_snapshot_root, ignore_errors=True)
 
     adapter_file = adapter_dir / _CANDIDATE_FILE
-    _validate_serialized_adapter_weights(
-        adapter_file,
-        safe_open=safe_open,
-        torch=torch,
-        invalid_code="adapter_candidate_invalid",
-        non_finite_code="adapter_candidate_non_finite",
-    )
-    after_step_adapter_sha256, _ = _hash_regular_snapshot(
-        adapter_file,
-        code="adapter_candidate_invalid",
-    )
-    if after_step_adapter_sha256 == before_step_adapter_sha256:
-        _fail("training_step_no_weight_mutation")
-    trained_adapter_tensors_sha256 = _adapter_tensor_sha256(
-        adapter_file,
-        safe_open=safe_open,
-        safe_serialize=safe_serialize,
-        torch=torch,
-        invalid_code="adapter_candidate_invalid",
-        non_finite_code="adapter_candidate_non_finite",
-    )
-    if hmac.compare_digest(
-        loaded_adapter_tensors_sha256,
-        trained_adapter_tensors_sha256,
-    ):
-        _fail("training_step_no_tensor_mutation")
+    candidate_adapter_config: dict[str, object] | None = None
+    candidate_tensors: dict[str, Any] | None = None
+    trained_source_authority = _open_trained_adapter_source_authority(adapter_dir)
+    try:
+        _validate_serialized_adapter_weights(
+            adapter_file,
+            safe_open=safe_open,
+            torch=torch,
+            invalid_code="adapter_candidate_invalid",
+            non_finite_code="adapter_candidate_non_finite",
+        )
+        after_step_adapter_sha256, _ = _hash_regular_snapshot(
+            adapter_file,
+            code="adapter_candidate_invalid",
+        )
+        if after_step_adapter_sha256 == before_step_adapter_sha256:
+            _fail("training_step_no_weight_mutation")
+        trained_adapter_tensors_sha256 = _adapter_tensor_sha256(
+            adapter_file,
+            safe_open=safe_open,
+            safe_serialize=safe_serialize,
+            torch=torch,
+            invalid_code="adapter_candidate_invalid",
+            non_finite_code="adapter_candidate_non_finite",
+        )
+        if hmac.compare_digest(
+            loaded_adapter_tensors_sha256,
+            trained_adapter_tensors_sha256,
+        ):
+            _fail("training_step_no_tensor_mutation")
+        checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
+        if request.step_index + 1 == request.max_steps:
+            candidate_adapter_config = _adapter_config_snapshot(
+                adapter_dir,
+                request,
+                config,
+            )
+            with safe_open(
+                os.fspath(adapter_file),
+                framework="pt",
+                device="cpu",
+            ) as source:
+                candidate_tensors = {
+                    name: source.get_tensor(name)
+                    for name in sorted(source.keys())
+                }
+            if not candidate_tensors:
+                _fail("adapter_candidate_empty")
+            materialized_tensor_sha256 = _canonical_adapter_tensor_sha256(
+                candidate_tensors,
+                safe_serialize=safe_serialize,
+                torch=torch,
+                invalid_code="adapter_candidate_invalid",
+                non_finite_code="adapter_candidate_non_finite",
+            )
+            if not hmac.compare_digest(
+                materialized_tensor_sha256,
+                trained_adapter_tensors_sha256,
+            ):
+                _fail("candidate_tensor_source_mismatch")
+        _verify_trained_adapter_source_authority(trained_source_authority)
+    finally:
+        _close_trained_adapter_source_authority(trained_source_authority)
+
     previous_adapter_tensors_sha256 = (
         loaded_adapter_tensors_sha256
         if previous_checkpoint is not None or initial_adapter_dir is not None
         else None
     )
-    checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
     if replay_payload_sha256 is None:
         marker_sha256 = _write_checkpoint_marker(
             checkpoint,
             request=request,
             consumed_sha256=consumed.attestation_sha256,
             checkpoint_payload_sha256=checkpoint_payload_sha256,
+            tokenization_sha256=tokenization_sha256,
         )
     else:
         if (
@@ -2987,12 +3830,15 @@ def _train_one_step(
         "checkpoint_step": request.step_index + 1,
         "job_fingerprint": request.job_fingerprint,
         "relative_path": checkpoint.relative_to(job_root).as_posix(),
-        "schema_version": _SCHEMA_VERSION,
+        "schema_version": _RESUME_STATE_SCHEMA_VERSION,
+        "tokenization_sha256": tokenization_sha256,
     }
 
     if request.step_index + 1 < request.max_steps:
         return resume_state, None
 
+    if candidate_adapter_config is None or candidate_tensors is None:
+        _fail("trained_adapter_source_invalid")
     candidate = candidate_artifact_path(config.output_root, request.candidate_artifact_ref)
     candidate_parent = _ensure_child_directory(
         job_root,
@@ -3003,14 +3849,14 @@ def _train_one_step(
         _fail("candidate_publish_failed")
     if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
         _fail("checkpoint_payload_changed_before_candidate")
-    adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
         request=request,
         config=config,
         consumed=consumed,
-        adapter_config=adapter_config,
+        adapter_config=candidate_adapter_config,
         previous_adapter_tensors_sha256=previous_adapter_tensors_sha256,
         trained_adapter_tensors_sha256=trained_adapter_tensors_sha256,
+        tokenization_sha256=tokenization_sha256,
     )
     try:
         expected_manifest = json.loads(
@@ -3036,24 +3882,8 @@ def _train_one_step(
     temporary_identity: tuple[int, int] | None = None
     published = False
     try:
-        with safe_open(os.fspath(adapter_file), framework="pt", device="cpu") as source:
-            tensors = {name: source.get_tensor(name) for name in sorted(source.keys())}
-        if not tensors:
-            _fail("adapter_candidate_empty")
-        materialized_tensor_sha256 = _canonical_adapter_tensor_sha256(
-            tensors,
-            safe_serialize=safe_serialize,
-            torch=torch,
-            invalid_code="adapter_candidate_invalid",
-            non_finite_code="adapter_candidate_non_finite",
-        )
-        if not hmac.compare_digest(
-            materialized_tensor_sha256,
-            trained_adapter_tensors_sha256,
-        ):
-            _fail("candidate_tensor_source_mismatch")
         safe_save_file(
-            tensors,
+            candidate_tensors,
             os.fspath(temporary),
             metadata={"nika_adapter_manifest": manifest_json},
         )
@@ -3204,6 +4034,7 @@ def _candidate_manifest_json(
     adapter_config: dict[str, object],
     previous_adapter_tensors_sha256: str | None,
     trained_adapter_tensors_sha256: str,
+    tokenization_sha256: str | None = None,
 ) -> str:
     payload = {
         "adapter_config": adapter_config,
@@ -3236,6 +4067,11 @@ def _candidate_manifest_json(
             "seed": config.seed,
         },
     }
+    if tokenization_sha256 is not None:
+        payload["tokenization_sha256"] = _require_sha256(
+            tokenization_sha256,
+            field="candidate_tokenization_sha256",
+        )
     if config.initial_adapter is not None:
         payload["foundation_model_sha256"] = config.base_gguf_sha256
         payload["schema"] = "nika-peft-candidate-v3"
@@ -3272,7 +4108,8 @@ def _validate_candidate_manifest_payload(
         expected = tensor_expected | {"foundation_model_sha256"}
     else:
         _fail("candidate_manifest_invalid")
-    if set(value) != expected:
+    manifest_keys = set(value)
+    if manifest_keys not in (expected, expected | {"tokenization_sha256"}):
         _fail("candidate_manifest_invalid")
 
     base_ref = value["base_artifact_ref"]
@@ -3310,6 +4147,8 @@ def _validate_candidate_manifest_payload(
     ]
     if schema == "nika-peft-candidate-v3":
         digest_fields.append("foundation_model_sha256")
+    if "tokenization_sha256" in value:
+        digest_fields.append("tokenization_sha256")
     for field in digest_fields:
         if type(value[field]) is not str or _HEX_RE.fullmatch(value[field]) is None:
             _fail("candidate_manifest_invalid")

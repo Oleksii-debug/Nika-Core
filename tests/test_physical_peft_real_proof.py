@@ -126,3 +126,27 @@ def test_verified_asset_manifest_rejects_duplicate_json_keys(tmp_path: Path) -> 
 
     with pytest.raises(proof.ProofError, match="invalid JSON"):
         proof._verified_asset_manifest(tmp_path, raw)
+
+
+def test_candidate_tokenization_evidence_is_required() -> None:
+    proof = _proof_module()
+    digest = "ab" * 32
+
+    assert (
+        proof._require_candidate_tokenization_sha256(
+            {"tokenization_sha256": digest}
+        )
+        == digest
+    )
+
+    for manifest in (
+        {},
+        {"tokenization_sha256": "A" * 64},
+        {"tokenization_sha256": "0" * 63},
+        {"tokenization_sha256": 7},
+    ):
+        with pytest.raises(
+            proof.ProofError,
+            match="lacks canonical tokenization evidence",
+        ):
+            proof._require_candidate_tokenization_sha256(manifest)
