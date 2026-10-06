@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 
 from nika_core.data.sqlite import SQLiteStore
 
-
 _MAX_IDENTITY_UTF8_BYTES = 4096
 _IDENTITY_ERROR = "work ownership identity must be exact canonical bounded non-empty text"
 
