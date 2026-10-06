@@ -16,7 +16,10 @@ from nika_core.product_factory_deployment import (
     Platform,
     ResourceEnvelope,
 )
-from nika_core.product_factory_packaged_build_authority import PackagedBuildAuthorityRuntime
+from nika_core.product_factory_local_coding import ContainedLocalCodingPolicy
+from nika_core.product_factory_packaged_build_authority import (
+    PackagedBuildAuthorityRuntime,
+)
 from nika_core.product_factory_packaged_build_continuation import (
     PackagedReviewedBuildContinuation,
 )
@@ -28,7 +31,6 @@ from nika_core.product_factory_packaged_local_startup import (
     PackagedLocalProductFactoryStartup,
 )
 from nika_core.product_factory_packaged_preparation import PreparedProductFactory
-from nika_core.product_factory_local_coding import ContainedLocalCodingPolicy
 from nika_core.toolsmith.contracts import ResourceBudget
 
 PROJECT_ID = "product-" + "a" * 64
@@ -97,7 +99,7 @@ def test_continuation_does_nothing_without_accepted_work(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         continuation_module,
-        "build_packaged_local_durable_build_host",
+        "build_configured_packaged_reviewed_build_controller",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("PF5 host must not be built without accepted work")
         ),
@@ -127,7 +129,7 @@ def test_continuation_validates_all_accepted_membership_before_pf5(tmp_path, mon
 
     monkeypatch.setattr(
         continuation_module,
-        "build_packaged_local_durable_build_host",
+        "build_configured_packaged_reviewed_build_controller",
         forbidden_host,
     )
 
@@ -160,30 +162,34 @@ def test_continuation_advances_each_accepted_component_in_snapshot_order(
             }
         ),
     )
-    host = object()
     calls = []
 
-    monkeypatch.setattr(
-        continuation_module,
-        "build_packaged_local_durable_build_host",
-        lambda *_args, **_kwargs: host,
-    )
-
     class Controller:
-        def __init__(self, runtime, received_host):
-            assert runtime is continuation.activated.runtime
-            assert received_host is host
-
         def advance_component(self, *, state, component_id):
             calls.append((state, component_id))
             return SimpleNamespace(
                 spec=SimpleNamespace(request=SimpleNamespace(project_id=PROJECT_ID))
             )
 
+    def build_controller(
+        store_value,
+        *,
+        host_task_id,
+        project_id,
+        startup,
+        activation,
+    ):
+        assert store_value is store
+        assert host_task_id == "host-task"
+        assert project_id == PROJECT_ID
+        assert startup is continuation.startup
+        assert activation is continuation.activated
+        return Controller()
+
     monkeypatch.setattr(
         continuation_module,
-        "PackagedReviewedBuildLoopController",
-        Controller,
+        "build_configured_packaged_reviewed_build_controller",
+        build_controller,
     )
     prepared = _prepared(
         [
