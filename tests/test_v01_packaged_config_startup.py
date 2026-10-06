@@ -476,6 +476,7 @@ def test_shell_launch_failure_is_accessible_private_and_returns_error(
     monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
     bridge = object()
     products = object()
+
     def build(
         _config: AppConfig,
         *,
@@ -556,6 +557,7 @@ def test_shell_launch_boundary_does_not_swallow_process_exit(
 ) -> None:
     config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
     monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
+
     def build(
         _config: AppConfig,
         *,
