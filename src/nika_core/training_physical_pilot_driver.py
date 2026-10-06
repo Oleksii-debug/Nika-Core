@@ -1230,24 +1230,31 @@ def _preflight_static_storage(
             _fail("mandatory PEFT staging size exceeds supported bounds")
         required_bytes += adapter_bytes
 
+    parent_lock = _open_windows_output_parent_stability_lock(
+        output_root.parent,
+        expected_parent,
+    )
     try:
-        parent_before = os.lstat(output_root.parent)
-        if (
-            stat.S_ISLNK(parent_before.st_mode)
-            or _is_reparse(parent_before)
-            or not stat.S_ISDIR(parent_before.st_mode)
-            or (parent_before.st_dev, parent_before.st_ino)
-            != (expected_parent.st_dev, expected_parent.st_ino)
-        ):
-            _fail("output_root parent changed before storage preflight")
-        usage = shutil.disk_usage(output_root.parent)
-        parent_after = os.lstat(output_root.parent)
-    except PhysicalPilotDriverError:
-        raise
-    except (OSError, ValueError) as exc:
-        raise PhysicalPilotDriverError(
-            "output volume free space could not be inspected"
-        ) from exc
+        try:
+            parent_before = os.lstat(output_root.parent)
+            if (
+                stat.S_ISLNK(parent_before.st_mode)
+                or _is_reparse(parent_before)
+                or not stat.S_ISDIR(parent_before.st_mode)
+                or (parent_before.st_dev, parent_before.st_ino)
+                != (expected_parent.st_dev, expected_parent.st_ino)
+            ):
+                _fail("output_root parent changed before storage preflight")
+            usage = shutil.disk_usage(output_root.parent)
+            parent_after = os.lstat(output_root.parent)
+        except PhysicalPilotDriverError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise PhysicalPilotDriverError(
+                "output volume free space could not be inspected"
+            ) from exc
+    finally:
+        _close_windows_output_parent_stability_lock(parent_lock)
     if (
         stat.S_ISLNK(parent_after.st_mode)
         or _is_reparse(parent_after)
