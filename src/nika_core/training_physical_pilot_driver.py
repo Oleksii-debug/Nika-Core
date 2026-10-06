@@ -110,6 +110,11 @@ _SCALE_TIER_KEYS = frozenset(
 )
 _MAX_SCALE_VALUE = (1 << 63) - 1
 _RESOURCE_KEYS = frozenset({"max_cpu_percent", "max_memory_percent"})
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _TRAINER_KEYS = frozenset(
     {
         "max_sequence_length",
@@ -132,12 +137,116 @@ def _fail(message: str) -> NoReturn:
     raise PhysicalPilotDriverError(message)
 
 
+def _open_authority_snapshot(path: Path) -> int:
+    """Open an authority file while denying concurrent write/delete replacement."""
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows authority snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(getattr(os, "O_NONBLOCK", 0))
+    return os.open(path, flags)
+
+
+
 def _read_bounded_file(path: Path, *, max_bytes: int, name: str) -> bytes:
+    """Read one bounded authority file while rejecting path/content replacement."""
+
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive exact integer")
+    descriptor: int | None = None
     try:
-        with path.open("rb") as handle:
+        before = os.lstat(path)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+        ):
+            _fail(f"{name} must be a canonical non-linked regular file")
+        if before.st_size <= 0 or before.st_size > max_bytes:
+            _fail(f"{name} size is invalid")
+        descriptor = _open_authority_snapshot(path)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            _fail(f"{name} changed before it was opened")
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = None
             payload = handle.read(max_bytes + 1)
+            after_open = os.fstat(handle.fileno())
+        current = os.lstat(path)
+    except PhysicalPilotDriverError:
+        raise
     except OSError as exc:
         raise PhysicalPilotDriverError(f"{name} could not be read") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    identities = (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
+        (
+            after_open.st_dev,
+            after_open.st_ino,
+            after_open.st_size,
+            after_open.st_mtime_ns,
+        ),
+        (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+    )
+    if (
+        len(set(identities)) != 1
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+        or len(payload) != before.st_size
+    ):
+        _fail(f"{name} changed while it was being read")
     if not payload or len(payload) > max_bytes:
         _fail(f"{name} size is invalid")
     return payload
@@ -667,20 +776,68 @@ def _is_reparse(value: os.stat_result) -> bool:
 
 
 def _require_windows_pe_executable(path: Path) -> None:
+    descriptor: int | None = None
     try:
-        with path.open("rb") as handle:
-            dos_header = handle.read(64)
-            if len(dos_header) != 64 or dos_header[:2] != b"MZ":
-                _fail("trainer_executable is not a valid Windows PE executable")
-            pe_offset = int.from_bytes(dos_header[60:64], "little")
-            if not 64 <= pe_offset <= 16 * 1024 * 1024:
-                _fail("trainer_executable has an invalid Windows PE header offset")
-            handle.seek(pe_offset)
-            signature = handle.read(4)
+        before = os.lstat(path)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+        ):
+            _fail("trainer_executable must remain a canonical non-linked file")
+        descriptor = _open_authority_snapshot(path)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            _fail("trainer_executable changed before its PE header was opened")
+        dos_header = os.read(descriptor, 64)
+        pe_offset = (
+            int.from_bytes(dos_header[60:64], "little")
+            if len(dos_header) == 64 and dos_header[:2] == b"MZ"
+            else None
+        )
+        signature = b""
+        if pe_offset is not None and 64 <= pe_offset <= 16 * 1024 * 1024:
+            os.lseek(descriptor, pe_offset, os.SEEK_SET)
+            signature = os.read(descriptor, 4)
+        after_open = os.fstat(descriptor)
+        current = os.lstat(path)
+    except PhysicalPilotDriverError:
+        raise
     except OSError as exc:
         raise PhysicalPilotDriverError(
             "trainer_executable Windows PE header could not be read"
         ) from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    identities = (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
+        (
+            after_open.st_dev,
+            after_open.st_ino,
+            after_open.st_size,
+            after_open.st_mtime_ns,
+        ),
+        (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+    )
+    if (
+        len(set(identities)) != 1
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+    ):
+        _fail("trainer_executable changed while its Windows PE header was read")
+    if len(dos_header) != 64 or dos_header[:2] != b"MZ":
+        _fail("trainer_executable is not a valid Windows PE executable")
+    if pe_offset is None or not 64 <= pe_offset <= 16 * 1024 * 1024:
+        _fail("trainer_executable has an invalid Windows PE header offset")
     if signature != b"PE\0\0":
         _fail("trainer_executable is not a valid Windows PE executable")
 
@@ -688,10 +845,24 @@ def _require_windows_pe_executable(path: Path) -> None:
 def _stable_file_sha256(path: Path, *, name: str) -> str:
     """Hash one canonical file while rejecting identity/content races."""
 
+    descriptor: int | None = None
     try:
         before = os.lstat(path)
-        with path.open("rb") as handle:
-            opened = os.fstat(handle.fileno())
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+        ):
+            _fail(f"{name} must be a canonical non-linked regular file")
+        descriptor = _open_authority_snapshot(path)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            _fail(f"{name} changed before it was opened")
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = None
             digest = hashlib.sha256()
             total = 0
             while True:
@@ -702,8 +873,16 @@ def _stable_file_sha256(path: Path, *, name: str) -> str:
                 total += len(chunk)
             after = os.fstat(handle.fileno())
         current = os.lstat(path)
+    except PhysicalPilotDriverError:
+        raise
     except OSError as exc:
         raise PhysicalPilotDriverError(f"{name} could not be snapshotted") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     identities = (
         (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
         (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
