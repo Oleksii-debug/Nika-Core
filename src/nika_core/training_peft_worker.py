@@ -2480,10 +2480,10 @@ def _train_one_step(
             adapter_dir = checkpoint / "adapter"
         else:
             training_dataset = _TokenizedDataset(
-            consumed.training,
-            tokenizer,
-            config.max_sequence_length,
-        )
+                consumed.training,
+                tokenizer,
+                config.max_sequence_length,
+            )
             validation_dataset = _TokenizedDataset(
                 consumed.validation,
                 tokenizer,
@@ -2620,7 +2620,6 @@ def _train_one_step(
         _fail("candidate_publish_failed")
     if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
         _fail("checkpoint_payload_changed_before_candidate")
-    temporary = _reserve_candidate_temporary(candidate)
     adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
         request=request,
@@ -2649,6 +2648,7 @@ def _train_one_step(
             _fail("checkpoint_payload_changed_after_candidate_replay")
         return resume_state, existing_candidate_sha256
 
+    temporary = _reserve_candidate_temporary(candidate)
     temporary_sha256: str | None = None
     temporary_identity: tuple[int, int] | None = None
     published = False
