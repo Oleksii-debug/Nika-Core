@@ -6,8 +6,10 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskPayloadCorruptionError, TaskQueue
 from nika_core.product_factory_build_execution import (
     BuildExecutionRecord,
+    BuildExecutionSpec,
     BuildExecutionState,
 )
+from nika_core.product_factory_build_execution_host import DurableBuildExecutionHost
 from nika_core.product_factory_deployment import ExecutionNode
 from nika_core.product_factory_packaged_build_authority import (
     PackagedBuildAuthorityRuntime,
@@ -127,9 +129,9 @@ class PackagedReviewedBuildRunner:
 
     @staticmethod
     def _advance_one(
-        host,
+        host: DurableBuildExecutionHost,
         work_id: str,
-        spec,
+        spec: BuildExecutionSpec,
     ) -> BuildExecutionRecord:
         record = host.submit(spec)
         if record.state in {
