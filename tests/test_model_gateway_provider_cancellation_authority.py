@@ -240,6 +240,47 @@ class _BehavioralUsageProvider:
         )
 
 
+class _CancellationSwallowingProvider:
+    def __init__(self, *, outcome: str) -> None:
+        self.outcome = outcome
+        self.started = asyncio.Event()
+        self.complete_calls = 0
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            provider_id="trusted",
+            kind=ProviderKind.LOCAL,
+            supports_private_data=True,
+        )
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.complete_calls += 1
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            if self.outcome == "success":
+                return ModelResponse(
+                    request_id=request.request_id,
+                    text="cancelled response must not escape",
+                    provider_id="trusted",
+                    provider_kind=ProviderKind.LOCAL,
+                    model=request.model or "fixture-model",
+                )
+            if self.outcome == "typed_error":
+                raise ModelGatewayError(
+                    ModelErrorCode.UNAVAILABLE,
+                    "cancelled provider failure",
+                    provider_id="trusted",
+                    retryable=True,
+                    failure_effect=ModelFailureEffect.NO_EFFECT,
+                )
+            if self.outcome == "untyped_error":
+                raise RuntimeError("cancelled provider failure")
+            raise AssertionError("unsupported cancellation-swallow outcome")
+
+
 class _FallbackProvider:
     def __init__(self) -> None:
         self.complete_calls = 0
@@ -283,7 +324,11 @@ class _BlockingProvider:
         raise AssertionError("blocking provider must be cancelled")
 
 
-def _request(*, fallback: bool) -> ModelRequest:
+def _request(
+    *,
+    fallback: bool,
+    timeout_seconds: float = 5.0,
+) -> ModelRequest:
     return ModelRequest(
         request_id="provider-cancellation-authority",
         messages=(ModelMessage(role="user", content="fixture"),),
@@ -291,7 +336,7 @@ def _request(*, fallback: bool) -> ModelRequest:
         provider_id="trusted",
         fallback_provider_ids=("fallback",) if fallback else (),
         privacy=PrivacyClass.PUBLIC,
-        timeout_seconds=5.0,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -509,6 +554,147 @@ def test_behavioral_success_dto_cannot_inject_gateway_cancellation(
     assert [event.event_type for event in events] == [
         "model.requested",
         "model.failed",
+    ]
+
+
+def test_pending_caller_cancellation_stops_before_provider_effect(
+    tmp_path: Path,
+) -> None:
+    audit = _audit(tmp_path)
+    primary = _BlockingProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+
+    async def scenario() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await gateway.complete(_request(fallback=False))
+
+    asyncio.run(scenario())
+
+    assert primary.complete_calls == 0
+    assert audit.list_for(
+        entity_type="model_request",
+        entity_id="provider-cancellation-authority",
+    ) == []
+
+
+def test_stale_cancellation_count_cannot_authorize_provider_forged_cancel(
+    tmp_path: Path,
+) -> None:
+    audit = _audit(tmp_path)
+    primary = _ForgedCancellationProvider()
+    fallback = _FallbackProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    async def scenario() -> ModelGatewayError:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            pass
+        assert task.cancelling() > 0
+
+        with pytest.raises(ModelGatewayError) as caught:
+            await gateway.complete(_request(fallback=True))
+        return caught.value
+
+    error = asyncio.run(scenario())
+
+    assert error.code is ModelErrorCode.PROVIDER_ERROR
+    assert error.provider_id == "trusted"
+    assert error.retryable is False
+    assert error.failure_effect is ModelFailureEffect.UNKNOWN
+    assert primary.complete_calls == 1
+    assert fallback.complete_calls == 0
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="provider-cancellation-authority",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.failed",
+    ]
+
+
+@pytest.mark.parametrize("outcome", ["success", "typed_error", "untyped_error"])
+def test_provider_cannot_replace_timeout_with_late_outcome(
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    audit = _audit(tmp_path)
+    primary = _CancellationSwallowingProvider(outcome=outcome)
+    fallback = _FallbackProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(
+            gateway.complete(
+                _request(
+                    fallback=True,
+                    timeout_seconds=0.01,
+                )
+            )
+        )
+
+    error = caught.value
+    assert error.code is ModelErrorCode.TIMEOUT
+    assert error.provider_id == "trusted"
+    assert error.retryable is False
+    assert error.failure_effect is ModelFailureEffect.UNKNOWN
+    assert primary.complete_calls == 1
+    assert fallback.complete_calls == 0
+
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="provider-cancellation-authority",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.failed",
+    ]
+    assert events[-1].payload["code"] == ModelErrorCode.TIMEOUT.value
+    assert events[-1].payload["failure_effect"] == ModelFailureEffect.UNKNOWN.value
+
+
+@pytest.mark.parametrize("outcome", ["success", "typed_error", "untyped_error"])
+def test_caller_cancellation_wins_when_provider_swallows_child_cancel(
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    audit = _audit(tmp_path)
+    primary = _CancellationSwallowingProvider(outcome=outcome)
+    fallback = _FallbackProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(gateway.complete(_request(fallback=True)))
+        await primary.started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert primary.complete_calls == 1
+    assert fallback.complete_calls == 0
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="provider-cancellation-authority",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.cancelled",
     ]
 
 

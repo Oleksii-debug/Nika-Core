@@ -99,6 +99,17 @@ class ModelGateway:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         providers = self._select_candidates(request)
         self._validate_privacy_route(request, providers)
+
+        # Deliver cancellation already targeting this gateway task before any
+        # provider effect. A previously delivered-and-suppressed cancellation
+        # can leave Task.cancelling() non-zero, so only a later increment is
+        # authoritative for this request.
+        await asyncio.sleep(0)
+        current_task = asyncio.current_task()
+        cancellation_baseline = (
+            current_task.cancelling() if current_task is not None else 0
+        )
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request.timeout_seconds
 
@@ -141,6 +152,7 @@ class ModelGateway:
             missing_response = False
             terminal_error: ModelGatewayError | None = None
             cancelled = False
+            provider_finished_at: float | None = None
             try:
                 async with asyncio.timeout(remaining):
                     provider_task = asyncio.create_task(
@@ -154,28 +166,48 @@ class ModelGateway:
                     canonical_response, response_error, missing_response = (
                         await provider_task
                     )
+                    provider_finished_at = loop.time()
             except TimeoutError:
-                error = ModelGatewayError(
-                    ModelErrorCode.TIMEOUT,
-                    "model request exceeded its deadline",
-                    provider_id=capabilities.provider_id,
-                    retryable=capabilities.supports_hard_cancellation,
-                    failure_effect=ModelFailureEffect.UNKNOWN,
-                )
-                self._audit_failure(request, capabilities.provider_id, error)
-                if self._can_fallback(error=error, index=index, providers=providers):
-                    self._audit_fallback(request, registered, providers[index + 1], error)
-                    continue
-                terminal_error = error
-            except asyncio.CancelledError:
-                current_task = asyncio.current_task()
-                if current_task is not None and current_task.cancelling():
-                    self._audit(
-                        event_type="model.cancelled",
-                        request=request,
-                        payload={"provider_id": capabilities.provider_id},
-                    )
+                if self._admit_caller_cancellation(
+                    request,
+                    capabilities.provider_id,
+                    cancellation_baseline,
+                ):
                     cancelled = True
+                else:
+                    error = ModelGatewayError(
+                        ModelErrorCode.TIMEOUT,
+                        "model request exceeded its deadline",
+                        provider_id=capabilities.provider_id,
+                        retryable=capabilities.supports_hard_cancellation,
+                        failure_effect=ModelFailureEffect.UNKNOWN,
+                    )
+                    self._audit_failure(request, capabilities.provider_id, error)
+                    if self._can_fallback(
+                        error=error,
+                        index=index,
+                        providers=providers,
+                    ):
+                        self._audit_fallback(
+                            request,
+                            registered,
+                            providers[index + 1],
+                            error,
+                        )
+                        continue
+                    terminal_error = error
+            except asyncio.CancelledError:
+                if self._admit_caller_cancellation(
+                    request,
+                    capabilities.provider_id,
+                    cancellation_baseline,
+                ):
+                    cancelled = True
+                elif loop.time() >= deadline:
+                    terminal_error = self._late_provider_timeout(
+                        request,
+                        capabilities.provider_id,
+                    )
                 else:
                     error = ModelGatewayError(
                         ModelErrorCode.PROVIDER_ERROR,
@@ -187,23 +219,68 @@ class ModelGateway:
                     self._audit_failure(request, capabilities.provider_id, error)
                     terminal_error = error
             except ModelGatewayError as raw_error:
-                error = self._normalize_provider_error(
-                    raw_error, capabilities.provider_id
-                )
-                self._audit_failure(request, capabilities.provider_id, error)
-                if self._can_fallback(error=error, index=index, providers=providers):
-                    self._audit_fallback(request, registered, providers[index + 1], error)
-                    continue
-                terminal_error = error
+                if self._admit_caller_cancellation(
+                    request,
+                    capabilities.provider_id,
+                    cancellation_baseline,
+                ):
+                    cancelled = True
+                elif loop.time() >= deadline:
+                    terminal_error = self._late_provider_timeout(
+                        request,
+                        capabilities.provider_id,
+                    )
+                else:
+                    error = self._normalize_provider_error(
+                        raw_error, capabilities.provider_id
+                    )
+                    self._audit_failure(request, capabilities.provider_id, error)
+                    if self._can_fallback(
+                        error=error,
+                        index=index,
+                        providers=providers,
+                    ):
+                        self._audit_fallback(
+                            request,
+                            registered,
+                            providers[index + 1],
+                            error,
+                        )
+                        continue
+                    terminal_error = error
             except Exception:  # noqa: BLE001 - provider implementations are untrusted
-                error = ModelGatewayError(
-                    ModelErrorCode.PROVIDER_ERROR,
-                    "model provider failed without a typed Nika error",
-                    provider_id=capabilities.provider_id,
-                    retryable=False,
-                )
-                self._audit_failure(request, capabilities.provider_id, error)
-                terminal_error = error
+                if self._admit_caller_cancellation(
+                    request,
+                    capabilities.provider_id,
+                    cancellation_baseline,
+                ):
+                    cancelled = True
+                elif loop.time() >= deadline:
+                    terminal_error = self._late_provider_timeout(
+                        request,
+                        capabilities.provider_id,
+                    )
+                else:
+                    error = ModelGatewayError(
+                        ModelErrorCode.PROVIDER_ERROR,
+                        "model provider failed without a typed Nika error",
+                        provider_id=capabilities.provider_id,
+                        retryable=False,
+                    )
+                    self._audit_failure(request, capabilities.provider_id, error)
+                    terminal_error = error
+            else:
+                if self._admit_caller_cancellation(
+                    request,
+                    capabilities.provider_id,
+                    cancellation_baseline,
+                ):
+                    cancelled = True
+                elif provider_finished_at is None or provider_finished_at >= deadline:
+                    terminal_error = self._late_provider_timeout(
+                        request,
+                        capabilities.provider_id,
+                    )
 
             # Raise after the provider exception handler so provider-controlled
             # diagnostics are not retained as public cause/context chains.
@@ -270,6 +347,40 @@ class ModelGateway:
             trusted_provider_kind=trusted_provider_kind,
         )
         return canonical_response, response_error, False
+
+    def _late_provider_timeout(
+        self,
+        request: ModelRequest,
+        provider_id: str,
+    ) -> ModelGatewayError:
+        error = ModelGatewayError(
+            ModelErrorCode.TIMEOUT,
+            "model request exceeded its deadline",
+            provider_id=provider_id,
+            retryable=False,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
+        self._audit_failure(request, provider_id, error)
+        return error
+
+    def _admit_caller_cancellation(
+        self,
+        request: ModelRequest,
+        provider_id: str,
+        cancellation_baseline: int,
+    ) -> bool:
+        current_task = asyncio.current_task()
+        if (
+            current_task is None
+            or current_task.cancelling() <= cancellation_baseline
+        ):
+            return False
+        self._audit(
+            event_type="model.cancelled",
+            request=request,
+            payload={"provider_id": provider_id},
+        )
+        return True
 
     def _authorize_cloud_effect(
         self,
