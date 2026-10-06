@@ -275,6 +275,20 @@ class ProviderCapabilities:
     effect_network_host: str | None = None
 
 
+class ModelAuditError(RuntimeError):
+    """Configured durable model audit evidence could not be persisted."""
+
+    def __init__(
+        self,
+        *,
+        provider_id: str,
+        failure_effect: ModelFailureEffect,
+    ) -> None:
+        super().__init__("model audit evidence could not be recorded")
+        self.provider_id = provider_id
+        self.failure_effect = failure_effect
+
+
 class ModelGatewayError(RuntimeError):
     def __init__(
         self,

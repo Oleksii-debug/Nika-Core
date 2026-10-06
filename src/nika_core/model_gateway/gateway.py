@@ -7,6 +7,7 @@ from math import isfinite
 from typing import Protocol
 
 from .contracts import (
+    ModelAuditError,
     ModelErrorCode,
     ModelFailureEffect,
     ModelGatewayError,
@@ -123,9 +124,11 @@ class ModelGateway:
                 fallback_provider_ids=(),
                 timeout_seconds=remaining,
             )
-            self._audit(
+            self._audit_required(
                 event_type="model.requested",
                 request=request,
+                provider_id=capabilities.provider_id,
+                failure_effect=ModelFailureEffect.NO_EFFECT,
                 payload={
                     "provider_id": capabilities.provider_id,
                     "provider_kind": capabilities.kind.value,
@@ -137,56 +140,65 @@ class ModelGateway:
             self._authorize_cloud_effect(attempt_request, capabilities)
 
             response: ModelResponse | None = None
-            terminal_error: ModelGatewayError | None = None
+            attempt_error: ModelGatewayError | None = None
             cancelled = False
             try:
                 async with asyncio.timeout(remaining):
                     response = await provider.complete(attempt_request)
             except TimeoutError:
-                error = ModelGatewayError(
+                attempt_error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
                     "model request exceeded its deadline",
                     provider_id=capabilities.provider_id,
                     retryable=capabilities.supports_hard_cancellation,
                     failure_effect=ModelFailureEffect.UNKNOWN,
                 )
-                self._audit_failure(request, capabilities.provider_id, error)
-                if self._can_fallback(error=error, index=index, providers=providers):
-                    self._audit_fallback(request, registered, providers[index + 1], error)
-                    continue
-                terminal_error = error
             except asyncio.CancelledError:
-                self._audit(
-                    event_type="model.cancelled",
-                    request=request,
-                    payload={"provider_id": capabilities.provider_id},
-                )
                 cancelled = True
             except ModelGatewayError as raw_error:
-                error = self._normalize_provider_error(
+                attempt_error = self._normalize_provider_error(
                     raw_error, capabilities.provider_id
                 )
-                self._audit_failure(request, capabilities.provider_id, error)
-                if self._can_fallback(error=error, index=index, providers=providers):
-                    self._audit_fallback(request, registered, providers[index + 1], error)
-                    continue
-                terminal_error = error
             except Exception:  # noqa: BLE001 - provider implementations are untrusted
-                error = ModelGatewayError(
+                attempt_error = ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
                     "model provider failed without a typed Nika error",
                     provider_id=capabilities.provider_id,
                     retryable=False,
                 )
-                self._audit_failure(request, capabilities.provider_id, error)
-                terminal_error = error
 
-            # Raise after the provider exception handler so provider-controlled
-            # diagnostics are not retained as public cause/context chains.
+            # Provider-controlled exceptions are no longer active here. Keeping
+            # evidence writes outside their handlers prevents a failing audit
+            # sink from retaining raw provider diagnostics as exception context.
             if cancelled:
+                self._audit_required(
+                    event_type="model.cancelled",
+                    request=request,
+                    provider_id=capabilities.provider_id,
+                    failure_effect=ModelFailureEffect.UNKNOWN,
+                    payload={"provider_id": capabilities.provider_id},
+                )
                 raise asyncio.CancelledError()
-            if terminal_error is not None:
-                raise terminal_error
+            if attempt_error is not None:
+                self._audit_failure(
+                    request,
+                    capabilities.provider_id,
+                    attempt_error,
+                )
+                if self._can_fallback(
+                    error=attempt_error,
+                    index=index,
+                    providers=providers,
+                ):
+                    self._audit_fallback(
+                        request,
+                        registered,
+                        providers[index + 1],
+                        attempt_error,
+                    )
+                    continue
+                raise attempt_error
+
             if response is None:
                 error = ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
@@ -213,9 +225,11 @@ class ModelGateway:
             if canonical_response is None:
                 raise AssertionError("validated model response snapshot is unavailable")
 
-            self._audit(
+            self._audit_required(
                 event_type="model.completed",
                 request=request,
+                provider_id=canonical_response.provider_id,
+                failure_effect=ModelFailureEffect.UNKNOWN,
                 payload={
                     "provider_id": canonical_response.provider_id,
                     "model_fingerprint": model_identity_fingerprint(canonical_response.model),
@@ -508,9 +522,11 @@ class ModelGateway:
     def _audit_failure(
         self, request: ModelRequest, provider_id: str, error: ModelGatewayError
     ) -> None:
-        self._audit(
+        self._audit_required(
             event_type="model.failed",
             request=request,
+            provider_id=provider_id,
+            failure_effect=error.failure_effect,
             payload={
                 "provider_id": provider_id,
                 "model_fingerprint": model_identity_fingerprint(request.model),
@@ -526,9 +542,11 @@ class ModelGateway:
         fallback: _RegisteredProvider,
         error: ModelGatewayError,
     ) -> None:
-        self._audit(
+        self._audit_required(
             event_type="model.fallback",
             request=request,
+            provider_id=current.capabilities.provider_id,
+            failure_effect=error.failure_effect,
             payload={
                 "from_provider_id": current.capabilities.provider_id,
                 "to_provider_id": fallback.capabilities.provider_id,
@@ -572,6 +590,30 @@ class ModelGateway:
             ModelErrorCode.INVALID_REQUEST,
             "provider_id or provider_kind is required when several providers are registered",
         )
+
+    def _audit_required(
+        self,
+        *,
+        event_type: str,
+        request: ModelRequest,
+        provider_id: str,
+        failure_effect: ModelFailureEffect,
+        payload: dict[str, object],
+    ) -> None:
+        audit_failed = False
+        try:
+            self._audit(
+                event_type=event_type,
+                request=request,
+                payload=payload,
+            )
+        except Exception:  # noqa: BLE001 - durable audit is an integration boundary
+            audit_failed = True
+        if audit_failed:
+            raise ModelAuditError(
+                provider_id=provider_id,
+                failure_effect=failure_effect,
+            ) from None
 
     def _audit(
         self,
