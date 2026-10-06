@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import NoReturn
+from urllib.parse import urlsplit
 
 from nika_core.product_factory_orchestration import (
     ProductComponent,
@@ -184,7 +185,7 @@ def _decode_repository(value: object, index: int) -> RepositoryRef:
                 f"{label}.repository_id",
             ),
             provider=_canonical_text(item["provider"], f"{label}.provider"),
-            locator=_canonical_text(item["locator"], f"{label}.locator"),
+            locator=_repository_locator(item["locator"], f"{label}.locator"),
             default_branch=_canonical_text(
                 item["default_branch"],
                 f"{label}.default_branch",
@@ -196,6 +197,23 @@ def _decode_repository(value: object, index: int) -> RepositoryRef:
         raise PackagedExecutionPlanAdmissionError(
             f"{label} is invalid: {exc}"
         ) from exc
+
+
+def _repository_locator(value: object, label: str) -> str:
+    locator = _canonical_text(value, label)
+    if "://" not in locator:
+        return locator
+    try:
+        parsed = urlsplit(locator)
+    except ValueError as exc:
+        raise PackagedExecutionPlanAdmissionError(
+            f"{label} URL authority is invalid"
+        ) from exc
+    if parsed.username is not None or parsed.password is not None:
+        raise PackagedExecutionPlanAdmissionError(
+            f"{label} must not contain inline URL credentials"
+        )
+    return locator
 
 
 def _decode_component(value: object, index: int) -> ProductComponent:
