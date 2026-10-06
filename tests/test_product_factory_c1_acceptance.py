@@ -4,8 +4,45 @@ from pathlib import Path
 
 from nika_core.product_factory_c1_acceptance import (
     C1MediumAppAcceptanceRunner,
+    C1ReviewEvidenceAuthority,
     _storage_files,
 )
+from nika_core.product_factory_review_authority import ProductFactoryReviewSubject
+
+
+def test_c1_review_evidence_authority_requires_exact_issued_subject() -> None:
+    authority = C1ReviewEvidenceAuthority()
+    subject = ProductFactoryReviewSubject(
+        project_id="product-c1-medium-expense-manager",
+        component_id="04-desktop-ui",
+        work_id="work-c1-ui",
+        repository_id="repo-c1-medium-expense-manager",
+        base_sha="0" * 40,
+        result_sha="1" * 40,
+        diff_digest="2" * 64,
+        attempt=1,
+        producer_actor_id="c1-producer:desktop",
+        reviewer_id="c1-reviewer:qa",
+        accepted=True,
+    )
+    evidence_ref = authority.authorize(subject)
+    assert authority.verify(subject, (evidence_ref,)) is True
+    assert authority.verify(subject, ("c1-review-authority:forged",)) is False
+
+    other = ProductFactoryReviewSubject(
+        project_id=subject.project_id,
+        component_id=subject.component_id,
+        work_id=subject.work_id,
+        repository_id=subject.repository_id,
+        base_sha=subject.base_sha,
+        result_sha=subject.result_sha,
+        diff_digest=subject.diff_digest,
+        attempt=subject.attempt,
+        producer_actor_id=subject.producer_actor_id,
+        reviewer_id="c1-reviewer:other",
+        accepted=subject.accepted,
+    )
+    assert authority.verify(other, (evidence_ref,)) is False
 
 
 def test_c1_generated_storage_closes_sqlite_connections_deterministically() -> None:
