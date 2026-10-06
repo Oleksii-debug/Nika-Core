@@ -1383,6 +1383,39 @@ def test_prepare_rejects_control_bearing_identity_before_effect(
     assert _task_count(store) == 0
 
 
+@pytest.mark.parametrize(
+    ("target", "field"),
+    [
+        ("plan", "project_id"),
+        ("repository", "locator"),
+        ("repository", "credential_ref"),
+        ("component", "component_id"),
+    ],
+)
+def test_prepare_rejects_non_utf8_identity_before_effect(
+    tmp_path: Path,
+    target: str,
+    field: str,
+) -> None:
+    store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
+        _fixture(tmp_path)
+    )
+    carrier = plan
+    if target == "repository":
+        carrier = plan.graph.repositories[0]
+    elif target == "component":
+        carrier = plan.graph.components[0]
+    object.__setattr__(carrier, field, "\ud800")
+
+    with pytest.raises(
+        PackagedProductFactoryPreparationError,
+        match="valid UTF-8 identity text",
+    ):
+        service.prepare(plan)
+
+    assert _task_count(store) == 0
+
+
 def test_prepare_normalizes_tampered_graph_invariant_failure_before_effect(
     tmp_path: Path,
 ) -> None:
