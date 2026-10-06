@@ -265,8 +265,18 @@ class PackagedReviewedBuildLoopController:
             record = self.build_host.prepare(work_id)
 
         if record.state is BuildExecutionState.PREPARED:
-            self.build_host.begin_dispatch(work_id)
-            record = self.build_host.execute(work_id)
+            try:
+                self.build_host.begin_dispatch(work_id)
+            except BuildExecutionError:
+                current = self.build_host.coordinator.get(work_id)
+                if current.state not in {
+                    BuildExecutionState.WAITING_FOR_NODE,
+                    BuildExecutionState.WAITING_FOR_AUTHORITY,
+                }:
+                    raise
+                record = self.build_host.retry(work_id)
+            else:
+                record = self.build_host.execute(work_id)
         elif record.state is BuildExecutionState.DISPATCHING:
             record = self.build_host.execute(work_id)
 
