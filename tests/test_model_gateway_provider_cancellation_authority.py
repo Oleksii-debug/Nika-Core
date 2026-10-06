@@ -147,6 +147,37 @@ class _BehavioralProviderIdentityProvider:
         raise error
 
 
+class _BehavioralCompleteLookupProvider:
+    def __init__(self) -> None:
+        self.complete_calls = 0
+
+    def __getattribute__(self, name: str) -> object:
+        if name == "complete":
+            task = asyncio.current_task()
+            if task is not None:
+                task.cancel()
+        return super().__getattribute__(name)
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            provider_id="trusted",
+            kind=ProviderKind.LOCAL,
+            supports_private_data=True,
+        )
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.complete_calls += 1
+        await asyncio.sleep(0)
+        return ModelResponse(
+            request_id=request.request_id,
+            text="lookup cancellation must not complete",
+            provider_id="trusted",
+            provider_kind=ProviderKind.LOCAL,
+            model=request.model or "fixture-model",
+        )
+
+
 class _FallbackProvider:
     def __init__(self) -> None:
         self.complete_calls = 0
@@ -343,6 +374,37 @@ def test_behavioral_provider_error_carrier_cannot_escape_gateway_normalization(
     assert error.__cause__ is None
     assert error.__context__ is None
     assert primary.complete_calls == 1
+    assert fallback.complete_calls == 0
+
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="provider-cancellation-authority",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.failed",
+    ]
+
+
+def test_provider_complete_lookup_cannot_cancel_gateway_task(
+    tmp_path: Path,
+) -> None:
+    audit = _audit(tmp_path)
+    primary = _BehavioralCompleteLookupProvider()
+    fallback = _FallbackProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(gateway.complete(_request(fallback=True)))
+
+    error = caught.value
+    assert error.code is ModelErrorCode.PROVIDER_ERROR
+    assert error.provider_id == "trusted"
+    assert error.retryable is False
+    assert error.failure_effect is ModelFailureEffect.UNKNOWN
+    assert primary.complete_calls == 0
     assert fallback.complete_calls == 0
 
     events = audit.list_for(
