@@ -637,3 +637,31 @@ def test_candidate_tokenization_snapshot_binds_pilot_tensor_identity(
             b"candidate-bytes",
             pilot=pilot,
         )
+
+
+def test_candidate_tokenization_snapshot_fails_closed_if_manifest_path_mutates(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_bytes = b"exact-candidate-snapshot"
+    pilot = SimpleNamespace(
+        candidate_artifact_ref="candidate-ref",
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256=_sha(b"trained-tensors"),
+    )
+
+    def mutating_manifest(path: Path) -> dict[str, object]:
+        Path(path).write_bytes(b"mutated-after-snapshot")
+        return _candidate_manifest_fixture(
+            tokenization_sha256=_sha(b"unbound-tokenization"),
+        )
+
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", mutating_manifest)
+
+    with pytest.raises(proof.ProofError):
+        proof._verified_candidate_tokenization_from_snapshot(
+            tmp_path.resolve(),
+            candidate_bytes,
+            pilot=pilot,
+        )
