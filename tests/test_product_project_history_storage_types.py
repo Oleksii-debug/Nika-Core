@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from dataclasses import replace
@@ -486,23 +487,41 @@ def test_history_rejects_approved_decision_actor_drift(tmp_path) -> None:
 
 def test_history_accepts_legacy_approved_decision_writer_fingerprint(tmp_path) -> None:
     store, projects = _project(tmp_path)
-    _decision(store, projects)
-    legacy_actor = "policy://product-owner"
-    legacy_rationale = "Reject this option after review"
-    legacy_fingerprint = ProductProjectHistoricalIntegrityService._fingerprint(
-        {
-            "project_id": "project-1",
-            "decision_id": "decision-1",
-            "option_id": "option-1",
-            "state": ProductDecisionState.APPROVED.value,
-            "rationale": legacy_rationale,
-            "decided_by_ref": legacy_actor,
-        }
+    _research(projects)
+    current = projects.get("project-1")
+    legacy_actor = "policy://власник"
+    legacy_rationale = "Схвалено після перевірки"
+    ProductDecisionRepository(store).record(
+        "project-1",
+        ProductDecision(
+            decision_id="decision-legacy",
+            option_id="option-1",
+            state=ProductDecisionState.REJECTED,
+            rationale=legacy_rationale,
+            decided_by_ref=legacy_actor,
+        ),
+        expected_row_version=current.row_version,
+        idempotency_key="decision:legacy-approved",
     )
+    legacy_payload = {
+        "project_id": "project-1",
+        "decision_id": "decision-legacy",
+        "option_id": "option-1",
+        "state": ProductDecisionState.APPROVED.value,
+        "rationale": legacy_rationale,
+        "decided_by_ref": legacy_actor,
+    }
+    legacy_canonical = json.dumps(
+        legacy_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    legacy_fingerprint = hashlib.sha256(legacy_canonical.encode()).hexdigest()
     with store.connection() as conn:
         conn.execute(
             "UPDATE product_decisions SET state=? "
-            "WHERE project_id='project-1' AND decision_id='decision-1'",
+            "WHERE project_id='project-1' AND decision_id='decision-legacy'",
             (ProductDecisionState.APPROVED.value,),
         )
         conn.execute(
@@ -534,6 +553,7 @@ def test_history_accepts_legacy_approved_decision_writer_fingerprint(tmp_path) -
 
     report = ProductProjectHistoricalIntegrityService(store).validate("project-1")
     assert report.mutation_idempotency_count == 1
+
 
 def test_history_rejects_trusted_approval_authority_actor_drift(tmp_path) -> None:
     store, projects = _project(tmp_path)
