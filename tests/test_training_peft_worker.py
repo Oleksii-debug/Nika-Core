@@ -425,20 +425,22 @@ def test_request_rejects_private_local_artifact_refs(tmp_path: Path) -> None:
 def test_base_gguf_copy_is_digest_bound(tmp_path: Path) -> None:
     request, base = _parsed(tmp_path)
     config = _config(tmp_path, request, base)
-    job_root = peft._job_root(config, request)
+    job_root = peft._ensure_job_root(config, request)
 
     staged = peft._copy_verified_base(config, request, job_root)
     assert staged.read_bytes() == base
 
     config.base_gguf.write_bytes(b"wrong")
+    other_job = tmp_path / "other-job"
+    other_job.mkdir()
     with pytest.raises(peft.PeftTrainerError, match="base_gguf_digest_mismatch"):
-        peft._copy_verified_base(config, request, tmp_path / "other-job")
+        peft._copy_verified_base(config, request, other_job)
 
 
 def test_staged_base_is_durable_after_source_loss(tmp_path: Path) -> None:
     request, base = _parsed(tmp_path)
     config = _config(tmp_path, request, base)
-    job_root = peft._job_root(config, request)
+    job_root = peft._ensure_job_root(config, request)
     staged = peft._copy_verified_base(config, request, job_root)
     config.base_gguf.unlink()
 
@@ -446,6 +448,17 @@ def test_staged_base_is_durable_after_source_loss(tmp_path: Path) -> None:
 
     assert replayed == staged
     assert replayed.read_bytes() == base
+
+
+def test_staged_base_tamper_fails_closed_without_source_fallback(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._ensure_job_root(config, request)
+    staged = peft._copy_verified_base(config, request, job_root)
+    staged.write_bytes(b"tampered-staged-base")
+
+    with pytest.raises(peft.PeftTrainerError, match="staged_base_digest_mismatch"):
+        peft._copy_verified_base(config, request, job_root)
 
 
 def test_base_gguf_copy_rejects_logical_base_divergence_without_warm_start(
