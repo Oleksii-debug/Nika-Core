@@ -5,14 +5,9 @@ from dataclasses import dataclass
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_coordinator import WorkState
-from nika_core.product_factory_packaged_build_host import (
-    build_packaged_local_durable_build_host,
-)
-from nika_core.product_factory_packaged_build_loop import (
-    PackagedReviewedBuildLoopController,
-)
 from nika_core.product_factory_packaged_build_settings import (
     ActivatedPackagedBuildRuntime,
+    build_configured_packaged_reviewed_build_controller,
 )
 from nika_core.product_factory_packaged_local_startup import (
     PackagedLocalProductFactoryStartup,
@@ -77,18 +72,12 @@ class PackagedReviewedBuildContinuation:
                 component_id=record.request.component_id,
             )
 
-        host = build_packaged_local_durable_build_host(
+        controller = build_configured_packaged_reviewed_build_controller(
             self.store,
             host_task_id=prepared.host_task_id,
             project_id=project_id,
-            node=self.activated.node,
             startup=self.startup,
-            trusted_authority=self.activated.runtime.trusted_execution,
-            output_policies=self.activated.runtime.output_policies,
-        )
-        controller = PackagedReviewedBuildLoopController(
-            self.activated.runtime,
-            host,
+            activation=self.activated,
         )
         for record in accepted:
             advanced = controller.advance_component(
