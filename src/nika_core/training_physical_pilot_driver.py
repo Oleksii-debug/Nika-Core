@@ -37,6 +37,7 @@ from nika_core.training_physical_evaluation_driver import (
     load_trusted_scale_progression_proof,
 )
 from nika_core.training_physical_pilot import (
+    PHYSICAL_TRAINING_MAX_STEPS,
     PhysicalTrainingPilotError,
     PhysicalTrainingPilotReport,
     run_physical_training_pilot,
@@ -1151,6 +1152,24 @@ def _selected_scale_tier(
     return index, plan.tiers[index]
 
 
+def _physical_training_max_steps(
+    *,
+    tier_index: int,
+    tier: TrainingScaleTier,
+) -> int:
+    if type(tier_index) is not int or tier_index < 0:
+        _fail("physical training tier index is invalid")
+    if type(tier) is not TrainingScaleTier:
+        raise TypeError("tier must be exact TrainingScaleTier")
+    if tier.max_steps < 2:
+        _fail("physical training tier must allow the durable two-step proof boundary")
+    if tier_index == 0:
+        return 2
+    if tier.max_steps > PHYSICAL_TRAINING_MAX_STEPS:
+        _fail("physical training tier max_steps exceeds the physical execution ceiling")
+    return tier.max_steps
+
+
 def _physical_training_task_payload(
     *,
     job_id: str,
@@ -1323,6 +1342,10 @@ def run_physical_pilot_from_config(
         validation_bytes=validation_bytes,
     )
     tier_index, scale_tier = _selected_scale_tier(config, scale_plan)
+    training_max_steps = _physical_training_max_steps(
+        tier_index=tier_index,
+        tier=scale_tier,
+    )
     progression_proof = _preflight_higher_tier(
         config,
         trusted_progression_proof=trusted_progression_proof,
@@ -1374,7 +1397,7 @@ def run_physical_pilot_from_config(
             candidate_artifact_ref=config.candidate_artifact_ref,
             material_evidence=materials.evidence,
             execution_plan_sha256=initial_worker.execution_plan_sha256,
-            max_steps=2,
+            max_steps=training_max_steps,
             progression_proof=progression_proof,
         )
     except TrainingScaleError as exc:
@@ -1401,7 +1424,7 @@ def run_physical_pilot_from_config(
         training_material_sha256=materials.training_material_sha256,
         scale_authorization_sha256=scale_authorization.authorization_sha256,
         candidate_artifact_ref=config.candidate_artifact_ref,
-        max_steps=2,
+        max_steps=training_max_steps,
     )
     resources = _resource_manager(
         store=store,
