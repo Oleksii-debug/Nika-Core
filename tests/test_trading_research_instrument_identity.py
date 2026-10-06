@@ -382,6 +382,60 @@ def test_replay_book_state_does_not_alias_shared_approval_id_across_venues() -> 
     ).positions) == 2
 
 
+@pytest.mark.parametrize("bad_slice", (True, 1.5))
+def test_order_and_replay_chronology_reject_non_integer_slices(bad_slice: object) -> None:
+    with pytest.raises(TradingResearchError, match="submitted_slice must be a non-negative integer"):
+        OrderIntent(
+            "bad-strategy-slice",
+            _INSTRUMENT_A,
+            Side.BUY,
+            OrderType.MARKET,
+            Decimal(1),
+            _NOW,
+            bad_slice,
+        )
+
+    intent = OrderIntent(
+        "valid-intent",
+        _INSTRUMENT_A,
+        Side.BUY,
+        OrderType.MARKET,
+        Decimal(1),
+        _NOW,
+        0,
+    )
+    authority = _authority("integer-chronology")
+    policy = ExecutionPolicy("integer-chronology")
+
+    with pytest.raises(TradingResearchError, match="approved_slice must be a non-negative integer"):
+        RiskApprovedOrder(
+            "bad-approval-slice",
+            intent,
+            authority,
+            _NOW,
+            bad_slice,
+            policy,
+        )
+
+    with pytest.raises(TradingResearchError, match="filled_slice must be an integer"):
+        SimulatedFill(
+            fill_id="bad-fill-slice",
+            approval_id="approval",
+            intent_id=intent.intent_id,
+            authority=authority,
+            instrument=_INSTRUMENT_A,
+            side=Side.BUY,
+            quantity=Decimal(1),
+            price=Decimal(100),
+            fee=Decimal(0),
+            filled_at=_NOW,
+            filled_slice=bad_slice,
+        )
+
+    with pytest.raises(TradingResearchError, match="slice index must be a non-negative integer"):
+        TimeSlice(bad_slice, _NOW, (_quote(_INSTRUMENT_A),))
+
+
 def test_execution_uses_host_submission_not_strategy_proposal_metadata() -> None:
     intent = OrderIntent(
         "strategy-controlled-id",
