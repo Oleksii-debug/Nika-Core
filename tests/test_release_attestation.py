@@ -152,6 +152,7 @@ def test_attestation_rejects_verified_result_for_other_digest(tmp_path: Path) ->
     with pytest.raises(ValueError, match="exact artifact digest"):
         build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
 
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -203,7 +204,6 @@ def test_m12_workflow_keeps_signing_privilege_on_trusted_main_only() -> None:
         "--deny-self-hosted-runners",
     ):
         assert expected in workflow
-
 
 
 def test_attestation_refuses_archive_swapped_after_prehuman_check(
@@ -312,6 +312,7 @@ def test_attestation_verification_reader_accepts_utf8_bom(tmp_path: Path) -> Non
     assert attestation_module._read_verification(verification) == [
         {"verificationResult": {}}
     ]
+
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
 def test_attestation_verification_reader_refuses_preexisting_writer(tmp_path: Path) -> None:

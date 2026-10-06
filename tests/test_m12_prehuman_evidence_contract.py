@@ -82,6 +82,7 @@ def test_current_m12_prehuman_evidence_contract_is_accepted(tmp_path: Path) -> N
 
     assert _verify(artifact, evidence) == ()
 
+
 @pytest.mark.parametrize("schema_value", (None, 2, 3, 5, "4", True))
 def test_prehuman_verifier_requires_exact_schema_version(
     tmp_path: Path,
@@ -97,6 +98,7 @@ def test_prehuman_verifier_requires_exact_schema_version(
     findings = _verify(artifact, evidence)
 
     assert "distributable:schema-version" in findings
+
 
 @pytest.mark.parametrize("field", REQUIRED_TRUE_FIELDS)
 @pytest.mark.parametrize("unsafe_value", (False, 1, "true", None))
@@ -116,6 +118,7 @@ def test_prehuman_verifier_requires_each_automated_gate_exact_true(
 
     assert f"distributable:required-true:{field}" in findings
 
+
 @pytest.mark.parametrize("field", REQUIRED_FALSE_FIELDS)
 @pytest.mark.parametrize("unsafe_value", (True, 0, "false", None))
 def test_prehuman_verifier_requires_automation_only_truth_exact_false(
@@ -133,6 +136,7 @@ def test_prehuman_verifier_requires_automation_only_truth_exact_false(
     findings = _verify(artifact, evidence)
 
     assert f"distributable:required-false:{field}" in findings
+
 
 @pytest.mark.parametrize("unsafe_value", ("", " 0.0.2", "0.0.2\n", "x" * 129, True, None))
 def test_prehuman_verifier_requires_bounded_product_version(
@@ -161,6 +165,7 @@ def test_prehuman_verifier_binds_product_version_to_trusted_release_identity(
     findings = _verify(artifact, evidence)
 
     assert "distributable:product-version" in findings
+
 
 @pytest.mark.parametrize(
     "unsafe_expected_version",
@@ -199,6 +204,7 @@ def test_prehuman_schema_does_not_silently_accept_unknown_fields(tmp_path: Path)
     findings = _verify(artifact, evidence)
 
     assert "distributable:evidence-keys" in findings
+
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
 def test_prehuman_evidence_reader_refuses_preexisting_writer(tmp_path: Path) -> None:
