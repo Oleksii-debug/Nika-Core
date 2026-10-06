@@ -2410,29 +2410,20 @@ class _TokenizedDataset:
         self._items: list[dict[str, object]] = []
         eos = tokenizer.eos_token or ""
         for example in examples:
-            prompt_prefix = f"{example.prompt}\n"
-            text = f"{prompt_prefix}{example.response}{eos}"
-            prompt_encoded = tokenizer(
-                prompt_prefix,
-                truncation=True,
-                max_length=max_length,
-                add_special_tokens=True,
-            )
+            text = f"{example.prompt}\n{example.response}{eos}"
             encoded = tokenizer(
                 text,
                 truncation=True,
-                max_length=max_length,
+                max_length=max_length + 1,
                 add_special_tokens=True,
             )
-            prompt_ids = prompt_encoded.get("input_ids")
             input_ids = encoded.get("input_ids")
             attention_mask = encoded.get("attention_mask")
             if (
-                type(prompt_ids) is not list
-                or type(input_ids) is not list
+                type(input_ids) is not list
                 or type(attention_mask) is not list
-                or len(prompt_ids) >= max_length
-                or len(input_ids) <= len(prompt_ids)
+                or not input_ids
+                or len(input_ids) > max_length
                 or len(input_ids) != len(attention_mask)
             ):
                 _fail("response_tokens_truncated")
