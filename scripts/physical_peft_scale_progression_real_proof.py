@@ -417,6 +417,12 @@ def verify(root: Path) -> None:
         or initial_size != tier0.candidate_byte_count
     ):
         _fail("tier-1 warm-start adapter changed after promotion")
+    initial_manifest = candidate_adapter_manifest(initial_adapter)
+    initial_tensors_sha256 = initial_manifest.get(
+        "trained_adapter_tensors_sha256"
+    )
+    if type(initial_tensors_sha256) is not str:
+        _fail("tier-0 promoted adapter lacks canonical tensor identity")
 
     tier1_root = root / "tier1-run"
     tier1 = _pilot_report(tier1_root)
@@ -425,6 +431,8 @@ def verify(root: Path) -> None:
         or tier1.platform != "windows"
         or tier1.base_sha256 != tier0.candidate_sha256
         or tier1.candidate_artifact_ref != _TIER1_CANDIDATE_REF
+        or tier1.previous_adapter_tensors_sha256
+        != initial_tensors_sha256
         or tier1.previous_adapter_tensors_sha256
         == tier1.trained_adapter_tensors_sha256
     ):
@@ -464,6 +472,9 @@ def verify(root: Path) -> None:
         or manifest.get("base_artifact_ref")
         != tier0.candidate_artifact_ref
         or manifest.get("candidate_artifact_ref") != _TIER1_CANDIDATE_REF
+        or manifest.get("base_artifact_sha256") != tier0.candidate_sha256
+        or manifest.get("previous_adapter_tensors_sha256")
+        != initial_tensors_sha256
         or manifest.get("foundation_model_sha256") != base_gguf_sha256
     ):
         _fail("tier-1 candidate manifest does not bind warm-start foundation authority")
