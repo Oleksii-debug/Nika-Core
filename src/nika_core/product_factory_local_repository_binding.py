@@ -100,6 +100,25 @@ class ProductFactoryLocalRepositoryBindings:
 
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            current_project = self._require_project_repository(
+                project_id,
+                repository.locator,
+            )
+            if current_project != project or current_project.status != "active":
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "ProductProject changed while binding local repository"
+                )
+            alias_rows = conn.execute(
+                "SELECT * FROM product_factory_local_repository_bindings "
+                "WHERE project_id = ? AND repository_id <> ?",
+                (project_id, repository.repository_id),
+            ).fetchall()
+            for alias_row in alias_rows:
+                _, alias_identity = _binding_from_row(alias_row)
+                if _same_physical_repository(identity, alias_identity):
+                    raise ProductFactoryLocalRepositoryBindingError(
+                        "local repository root is already bound to another repository identity"
+                    )
             row = conn.execute(
                 "SELECT binding_version FROM product_factory_local_repository_bindings "
                 "WHERE project_id = ? AND repository_id = ?",
@@ -258,6 +277,21 @@ class ProductFactoryLocalRepositoryBindings:
             raise KeyError((project_id, repository_id))
         binding, identity = _binding_from_row(row)
         _require_filesystem_identity(binding.root, identity)
+        with self._store.connection() as conn:
+            current_row = conn.execute(
+                "SELECT * FROM product_factory_local_repository_bindings "
+                "WHERE project_id=? AND repository_id=?",
+                (project_id, repository_id),
+            ).fetchone()
+        if current_row is None:
+            raise ProductFactoryLocalRepositoryBindingError(
+                "local repository binding changed while resolving"
+            )
+        current_binding, current_identity = _binding_from_row(current_row)
+        if current_binding != binding or current_identity != identity:
+            raise ProductFactoryLocalRepositoryBindingError(
+                "local repository binding changed while resolving"
+            )
         return binding
 
     def resolve_for_plan(
@@ -393,6 +427,20 @@ def _require_filesystem_identity(
         )
 
 
+def _same_physical_repository(
+    first: _FilesystemIdentity,
+    second: _FilesystemIdentity,
+) -> bool:
+    return (
+        first.root_device == second.root_device
+        and first.root_inode == second.root_inode
+        and first.git_metadata_kind == second.git_metadata_kind
+        and first.git_metadata_device == second.git_metadata_device
+        and first.git_metadata_inode == second.git_metadata_inode
+        and first.gitfile_sha256 == second.gitfile_sha256
+    )
+
+
 def _binding_from_row(row: object) -> tuple[
     ProductFactoryLocalRepositoryBinding,
     _FilesystemIdentity,
@@ -434,6 +482,10 @@ def _binding_from_row(row: object) -> tuple[
         ) from exc
 
     root = pathlib.Path(root_path)
+    if not root.is_absolute():
+        raise ProductFactoryLocalRepositoryBindingError(
+            "invalid persisted root_path"
+        )
     identity = _FilesystemIdentity(
         root_path=root_path,
         root_device=root_device,
