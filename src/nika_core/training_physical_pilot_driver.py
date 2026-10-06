@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
 import os
 import re
 import stat
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -33,10 +33,14 @@ from nika_core.training_peft_worker import (
     candidate_artifact_path,
     model_directory_manifest_sha256,
 )
+from nika_core.training_physical_evaluation_driver import (
+    load_trusted_scale_progression_proof,
+)
 from nika_core.training_physical_pilot import (
     PhysicalTrainingPilotError,
     PhysicalTrainingPilotReport,
     run_physical_training_pilot,
+    write_physical_training_pilot_report,
 )
 from nika_core.training_runtime import (
     ArtifactIdentity,
@@ -44,20 +48,27 @@ from nika_core.training_runtime import (
     TrainingRunEvidence,
     TrainingRuntime,
 )
-from nika_core.training_scale import TrainingScalePlan, TrainingScaleTier, authorize_training_scale
+from nika_core.training_scale import (
+    TrainingScaleError,
+    TrainingScalePlan,
+    TrainingScaleProgressionProof,
+    TrainingScaleTier,
+    authorize_training_scale,
+)
 
 _LOG = logging.getLogger(__name__)
-_CONFIG_SCHEMA_VERSION = 1
+_LEGACY_CONFIG_SCHEMA_VERSION = 1
+_SCALE_PLAN_CONFIG_SCHEMA_VERSION = 2
+_CONFIG_SCHEMA_VERSION = 3
 _CONFIG_MAX_BYTES = 64 * 1024
 _FROZEN_PACKAGE_MAX_BYTES = 1024 * 1024
 _TRAINER_MAX_RECORDS = 1_000_000
 _MAX_TEXT_BYTES = 4096
-_MAX_REPORT_BYTES = 64 * 1024
 _TARGET_MODULE_RE = re.compile(r"^[A-Za-z0-9._:+/-]{1,256}$")
 _RUNTIME_VERSION_KEYS = frozenset(
     {"torch", "transformers", "peft", "accelerate", "gguf", "safetensors"}
 )
-_TOP_LEVEL_KEYS = frozenset(
+_TOP_LEVEL_KEYS_V1 = frozenset(
     {
         "schema_version",
         "workspace_id",
@@ -79,7 +90,25 @@ _TOP_LEVEL_KEYS = frozenset(
         "trainer_parameters",
     }
 )
+_TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS_V1 | {"scale_plan"}
+_TOP_LEVEL_KEYS_V3 = _TOP_LEVEL_KEYS_V2 | {
+    "initial_adapter_path",
+    "progression_proof",
+    "scale_tier_id",
+}
 _DESCRIPTOR_KEYS = frozenset({"model_id", "source_reference", "license_reference"})
+_SCALE_PLAN_KEYS = frozenset({"plan_id", "tiers"})
+_SCALE_TIER_KEYS = frozenset(
+    {
+        "tier_id",
+        "max_training_records",
+        "max_training_bytes",
+        "max_validation_records",
+        "max_validation_bytes",
+        "max_steps",
+    }
+)
+_MAX_SCALE_VALUE = (1 << 63) - 1
 _RESOURCE_KEYS = frozenset({"max_cpu_percent", "max_memory_percent"})
 _TRAINER_KEYS = frozenset(
     {
@@ -344,6 +373,129 @@ class TrainerParameters:
 
 
 @dataclass(frozen=True, slots=True)
+class ScalePlanConfig:
+    plan_id: str
+    tiers: tuple[TrainingScaleTier, ...]
+
+    @classmethod
+    def from_value(cls, value: object) -> ScalePlanConfig:
+        if type(value) is not dict or frozenset(value) != _SCALE_PLAN_KEYS:
+            _fail("scale_plan fields are invalid")
+        raw_tiers = value["tiers"]
+        if type(raw_tiers) is not list:
+            _fail("scale_plan.tiers must be a bounded list")
+        tiers: list[TrainingScaleTier] = []
+        for index, raw_tier in enumerate(raw_tiers):
+            if type(raw_tier) is not dict or frozenset(raw_tier) != _SCALE_TIER_KEYS:
+                _fail(f"scale_plan.tiers[{index}] fields are invalid")
+            try:
+                tier = TrainingScaleTier(
+                    tier_id=_require_text(
+                        raw_tier["tier_id"],
+                        name=f"scale_plan.tiers[{index}].tier_id",
+                    ),
+                    max_training_records=_require_int(
+                        raw_tier["max_training_records"],
+                        name=f"scale_plan.tiers[{index}].max_training_records",
+                        minimum=1,
+                        maximum=_MAX_SCALE_VALUE,
+                    ),
+                    max_training_bytes=_require_int(
+                        raw_tier["max_training_bytes"],
+                        name=f"scale_plan.tiers[{index}].max_training_bytes",
+                        minimum=1,
+                        maximum=_MAX_SCALE_VALUE,
+                    ),
+                    max_validation_records=_require_int(
+                        raw_tier["max_validation_records"],
+                        name=f"scale_plan.tiers[{index}].max_validation_records",
+                        minimum=1,
+                        maximum=_MAX_SCALE_VALUE,
+                    ),
+                    max_validation_bytes=_require_int(
+                        raw_tier["max_validation_bytes"],
+                        name=f"scale_plan.tiers[{index}].max_validation_bytes",
+                        minimum=1,
+                        maximum=_MAX_SCALE_VALUE,
+                    ),
+                    max_steps=_require_int(
+                        raw_tier["max_steps"],
+                        name=f"scale_plan.tiers[{index}].max_steps",
+                        minimum=1,
+                        maximum=_MAX_SCALE_VALUE,
+                    ),
+                )
+            except TrainingScaleError as exc:
+                raise PhysicalPilotDriverError(
+                    f"scale_plan.tiers[{index}] is invalid"
+                ) from exc
+            tiers.append(tier)
+        try:
+            canonical = TrainingScalePlan(
+                plan_id=_require_text(value["plan_id"], name="scale_plan.plan_id"),
+                evaluation_set_sha256="0" * 64,
+                tiers=tuple(tiers),
+            )
+        except TrainingScaleError as exc:
+            raise PhysicalPilotDriverError("scale_plan is invalid") from exc
+        return cls(plan_id=canonical.plan_id, tiers=canonical.tiers)
+
+
+def _progression_claim_from_value(value: object) -> dict[str, object]:
+    if type(value) is not dict:
+        _fail("progression_proof must be an exact object")
+    expected = {
+        "authorization_sha256",
+        "base_artifact_ref",
+        "base_sha256",
+        "candidate_artifact_ref",
+        "candidate_sha256",
+        "comparison_evidence_sha256",
+        "evaluation_set_sha256",
+        "execution_plan_sha256",
+        "frozen_package_sha256",
+        "job_fingerprint",
+        "job_id",
+        "plan_sha256",
+        "tier_index",
+        "training_material_sha256",
+    }
+    if set(value) != expected:
+        _fail("progression_proof fields do not match the strict schema")
+    for field in (
+        "authorization_sha256",
+        "base_sha256",
+        "candidate_sha256",
+        "comparison_evidence_sha256",
+        "evaluation_set_sha256",
+        "execution_plan_sha256",
+        "frozen_package_sha256",
+        "job_fingerprint",
+        "plan_sha256",
+        "training_material_sha256",
+    ):
+        _require_sha256(value[field], name=f"progression_proof.{field}")
+    _require_text(value["job_id"], name="progression_proof.job_id")
+    base_ref = _require_logical_artifact_ref(
+        value["base_artifact_ref"],
+        name="progression_proof.base_artifact_ref",
+    )
+    candidate_ref = _require_logical_artifact_ref(
+        value["candidate_artifact_ref"],
+        name="progression_proof.candidate_artifact_ref",
+    )
+    _require_int(
+        value["tier_index"],
+        name="progression_proof.tier_index",
+        minimum=0,
+        maximum=_MAX_SCALE_VALUE,
+    )
+    if base_ref == candidate_ref:
+        _fail("progression_proof cannot overwrite the base artifact")
+    return dict(value)
+
+
+@dataclass(frozen=True, slots=True)
 class PhysicalPilotConfig:
     workspace_id: str
     project_id: str
@@ -362,6 +514,10 @@ class PhysicalPilotConfig:
     runtime_versions: tuple[tuple[str, str], ...]
     resource_budget: ResourceBudgetConfig
     trainer_parameters: TrainerParameters
+    scale_plan: ScalePlanConfig | None = None
+    scale_tier_id: str | None = None
+    initial_adapter_path: Path | None = None
+    progression_proof_payload: dict[str, object] | None = None
 
     @classmethod
     def from_json(cls, raw: str | bytes) -> PhysicalPilotConfig:
@@ -379,10 +535,42 @@ class PhysicalPilotConfig:
             )
         except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise PhysicalPilotDriverError("physical pilot config is invalid JSON") from exc
-        if type(value) is not dict or frozenset(value) != _TOP_LEVEL_KEYS:
+        if type(value) is not dict:
             _fail("physical pilot config fields are invalid")
-        if value["schema_version"] != _CONFIG_SCHEMA_VERSION:
+        schema_version = value.get("schema_version")
+        if type(schema_version) is not int:
             _fail("unsupported physical pilot config schema")
+        scale_tier_id: str | None = None
+        initial_adapter_path: Path | None = None
+        progression_proof_payload: dict[str, object] | None = None
+        if schema_version == _LEGACY_CONFIG_SCHEMA_VERSION:
+            expected_keys = _TOP_LEVEL_KEYS_V1
+            scale_plan = None
+        elif schema_version == _SCALE_PLAN_CONFIG_SCHEMA_VERSION:
+            expected_keys = _TOP_LEVEL_KEYS_V2
+            if frozenset(value) != expected_keys:
+                _fail("physical pilot config fields are invalid")
+            scale_plan = ScalePlanConfig.from_value(value["scale_plan"])
+        elif schema_version == _CONFIG_SCHEMA_VERSION:
+            expected_keys = _TOP_LEVEL_KEYS_V3
+            if frozenset(value) != expected_keys:
+                _fail("physical pilot config fields are invalid")
+            scale_plan = ScalePlanConfig.from_value(value["scale_plan"])
+            scale_tier_id = _require_text(
+                value["scale_tier_id"],
+                name="scale_tier_id",
+            )
+            initial_adapter_path = _require_absolute_path(
+                value["initial_adapter_path"],
+                name="initial_adapter_path",
+            )
+            progression_proof_payload = _progression_claim_from_value(
+                value["progression_proof"]
+            )
+        else:
+            _fail("unsupported physical pilot config schema")
+        if frozenset(value) != expected_keys:
+            _fail("physical pilot config fields are invalid")
 
         raw_versions = value["runtime_versions"]
         if type(raw_versions) is not dict or frozenset(raw_versions) != _RUNTIME_VERSION_KEYS:
@@ -428,7 +616,26 @@ class PhysicalPilotConfig:
             runtime_versions=runtime_versions,
             resource_budget=ResourceBudgetConfig.from_value(value["resource_budget"]),
             trainer_parameters=TrainerParameters.from_value(value["trainer_parameters"]),
+            scale_plan=scale_plan,
+            scale_tier_id=scale_tier_id,
+            initial_adapter_path=initial_adapter_path,
+            progression_proof_payload=progression_proof_payload,
         )
+        if config.scale_tier_id is not None:
+            claim = config.progression_proof_payload
+            if config.scale_plan is None or claim is None:
+                _fail("higher-tier config is missing scale authority claim")
+            matching = tuple(
+                index
+                for index, tier in enumerate(config.scale_plan.tiers)
+                if tier.tier_id == config.scale_tier_id
+            )
+            if len(matching) != 1 or matching[0] == 0:
+                _fail("scale_tier_id must select a declared higher tier")
+            if claim["tier_index"] != matching[0] - 1:
+                _fail("progression_proof does not claim the previous scale tier")
+            if claim["candidate_artifact_ref"] != config.base_artifact_ref:
+                _fail("higher-tier base artifact must be the promoted candidate")
         try:
             TrainingJobSpec(
                 job_id=config.job_id,
@@ -477,6 +684,41 @@ def _require_windows_pe_executable(path: Path) -> None:
     if signature != b"PE\0\0":
         _fail("trainer_executable is not a valid Windows PE executable")
 
+
+def _stable_file_sha256(path: Path, *, name: str) -> str:
+    """Hash one canonical file while rejecting identity/content races."""
+
+    try:
+        before = os.lstat(path)
+        with path.open("rb") as handle:
+            opened = os.fstat(handle.fileno())
+            digest = hashlib.sha256()
+            total = 0
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                total += len(chunk)
+            after = os.fstat(handle.fileno())
+        current = os.lstat(path)
+    except OSError as exc:
+        raise PhysicalPilotDriverError(f"{name} could not be snapshotted") from exc
+    identities = (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+        (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+    )
+    if (
+        len(set(identities)) != 1
+        or total != before.st_size
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+    ):
+        _fail(f"{name} changed while it was being snapshotted")
+    return digest.hexdigest()
 
 def _require_existing_file(path: Path, *, name: str) -> Path:
     try:
@@ -606,6 +848,7 @@ def _build_worker(
     local_root: Path,
     base_gguf_path: Path,
     model_dir: Path,
+    initial_adapter_path: Path | None,
     output_root: Path,
     parameters: TrainerParameters,
     max_records: int,
@@ -615,6 +858,7 @@ def _build_worker(
     environment = build_trainer_environment(
         base_gguf=base_gguf_path,
         model_dir=model_dir,
+        initial_adapter=initial_adapter_path,
         output_root=output_root,
         max_records=max_records,
         max_sequence_length=parameters.max_sequence_length,
@@ -643,20 +887,7 @@ def _candidate_descriptor(
     config: PhysicalPilotConfig,
     candidate_path: Path,
     completed: TrainingRunEvidence,
-    trainer_record: ArtifactRecord,
 ) -> ModelArtifactDescriptor:
-    manifest = candidate_adapter_manifest(candidate_path)
-    expected = {
-        "base_artifact_ref": config.base_artifact_ref,
-        "base_artifact_sha256": completed.base_artifact.sha256,
-        "candidate_artifact_ref": completed.candidate_artifact_ref,
-        "job_fingerprint": completed.job_fingerprint,
-        "trainer_artifact_id": trainer_record.artifact_id,
-        "trainer_sha256": trainer_record.sha256,
-        "step_number": completed.next_step,
-    }
-    if any(manifest.get(key) != value for key, value in expected.items()):
-        _fail("candidate embedded manifest does not match completed physical pilot identity")
     if completed.candidate_sha256 is None:
         _fail("completed physical pilot is missing candidate digest")
     try:
@@ -677,52 +908,166 @@ def _candidate_descriptor(
     )
 
 
-def _write_report(path: Path, report: PhysicalTrainingPilotReport) -> None:
-    payload = (report.to_json() + "\n").encode("utf-8")
-    if len(payload) > _MAX_REPORT_BYTES:
-        _fail("physical pilot report exceeds the output byte limit")
-    if path.exists():
-        _fail("physical pilot report already exists")
-    temporary: Path | None = None
+def _scale_plan_for_physical_pilot(
+    config: PhysicalPilotConfig,
+    *,
+    evaluation_set_sha256: str,
+    training_records: int,
+    training_bytes: int,
+    validation_records: int,
+    validation_bytes: int,
+) -> TrainingScalePlan:
+    if config.scale_plan is None:
+        return TrainingScalePlan(
+            plan_id="physical-pilot",
+            evaluation_set_sha256=evaluation_set_sha256,
+            tiers=(
+                TrainingScaleTier(
+                    tier_id="pilot",
+                    max_training_records=training_records,
+                    max_training_bytes=training_bytes,
+                    max_validation_records=validation_records,
+                    max_validation_bytes=validation_bytes,
+                    max_steps=2,
+                ),
+            ),
+        )
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
-            prefix=".physical-pilot-report.",
-            suffix=".tmp",
-            dir=path.parent,
-            delete=False,
-        ) as handle:
-            temporary = Path(handle.name)
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if _is_windows():
-            os.rename(temporary, path)
-        else:
-            os.link(temporary, path, follow_symlinks=False)
-            temporary.unlink()
-        temporary = None
-    except FileExistsError as exc:
+        return TrainingScalePlan(
+            plan_id=config.scale_plan.plan_id,
+            evaluation_set_sha256=evaluation_set_sha256,
+            tiers=config.scale_plan.tiers,
+        )
+    except TrainingScaleError as exc:
         raise PhysicalPilotDriverError(
-            "physical pilot report already exists"
+            "configured training scale plan is invalid for the frozen package"
         ) from exc
-    except OSError as exc:
-        raise PhysicalPilotDriverError(
-            "physical pilot report could not be persisted"
-        ) from exc
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
 
+
+def _selected_scale_tier(
+    config: PhysicalPilotConfig,
+    plan: TrainingScalePlan,
+) -> tuple[int, TrainingScaleTier]:
+    tier_id = (
+        plan.tiers[0].tier_id
+        if config.scale_tier_id is None
+        else config.scale_tier_id
+    )
+    matching = tuple(
+        index for index, tier in enumerate(plan.tiers) if tier.tier_id == tier_id
+    )
+    if len(matching) != 1:
+        _fail("configured scale tier is not declared by the scale plan")
+    index = matching[0]
+    if index == 0:
+        if (
+            config.progression_proof_payload is not None
+            or config.initial_adapter_path is not None
+        ):
+            _fail("pilot tier must not carry higher-tier continuation authority")
+    elif (
+        config.progression_proof_payload is None
+        or config.initial_adapter_path is None
+    ):
+        _fail("higher training scale requires progression claim and promoted adapter")
+    return index, plan.tiers[index]
+
+
+def _physical_training_task_payload(
+    *,
+    job_id: str,
+    plan: TrainingScalePlan,
+    tier_index: int,
+    progression_proof: TrainingScaleProgressionProof | None,
+) -> dict[str, object]:
+    canonical_plan = plan.revalidated()
+    if type(tier_index) is not int or not 0 <= tier_index < len(canonical_plan.tiers):
+        _fail("physical training task scale tier index is invalid")
+    tier = canonical_plan.tiers[tier_index]
+    if tier_index == 0:
+        if progression_proof is not None:
+            _fail("pilot training task must not carry progression authority")
+        kind = "physical_peft_pilot"
+        proof_sha256 = None
+        proof_payload = None
+    else:
+        if type(progression_proof) is not TrainingScaleProgressionProof:
+            _fail("higher-tier training task requires trusted progression authority")
+        trusted = progression_proof.revalidated()
+        kind = "physical_peft_scale_tier"
+        proof_sha256 = trusted.proof_sha256
+        proof_payload = trusted.canonical_payload()
+    return {
+        "job_id": job_id,
+        "kind": kind,
+        "progression_proof": proof_payload,
+        "progression_proof_sha256": proof_sha256,
+        "scale_plan": canonical_plan.canonical_payload(),
+        "scale_plan_sha256": canonical_plan.plan_sha256,
+        "scale_tier_id": tier.tier_id,
+    }
+
+
+def _preflight_higher_tier(
+    config: PhysicalPilotConfig,
+    *,
+    trusted_progression_proof: TrainingScaleProgressionProof | None,
+    plan: TrainingScalePlan,
+    tier_index: int,
+    initial_adapter_path: Path | None,
+    material_base_sha256: str,
+) -> TrainingScaleProgressionProof | None:
+    if tier_index == 0:
+        if trusted_progression_proof is not None:
+            _fail("pilot tier must not carry trusted progression authority")
+        return None
+    claim = config.progression_proof_payload
+    if claim is None or initial_adapter_path is None:
+        _fail("higher training scale authority claim is incomplete")
+    if type(trusted_progression_proof) is not TrainingScaleProgressionProof:
+        _fail("higher training scale requires independently trusted progression authority")
+    proof = trusted_progression_proof.revalidated()
+    if claim != proof.canonical_payload():
+        _fail("progression claim does not match trusted progression authority")
+    if proof.plan_sha256 != plan.plan_sha256:
+        _fail("progression_proof belongs to another scale plan")
+    if proof.tier_index != tier_index - 1:
+        _fail("progression_proof cannot skip a scale tier")
+    if proof.evaluation_set_sha256 != plan.evaluation_set_sha256:
+        _fail("progression_proof uses a different held-out set")
+    if (
+        proof.candidate_artifact_ref != config.base_artifact_ref
+        or proof.candidate_sha256 != material_base_sha256
+    ):
+        _fail("higher-tier package must continue from the promoted candidate")
+    observed_sha256 = _stable_file_sha256(
+        initial_adapter_path,
+        name="initial_adapter_path",
+    )
+    if observed_sha256 != material_base_sha256:
+        _fail("initial_adapter_path does not match the higher-tier package base")
+    try:
+        manifest = candidate_adapter_manifest(initial_adapter_path)
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise PhysicalPilotDriverError(
+            "initial_adapter_path is not a canonical promoted PEFT candidate"
+        ) from exc
+    if manifest.get("candidate_artifact_ref") != config.base_artifact_ref:
+        _fail("initial_adapter_path carries a different logical artifact reference")
+    return proof
 
 def run_physical_pilot_from_config(
     config: PhysicalPilotConfig,
+    *,
+    trusted_progression_proof: TrainingScaleProgressionProof | None = None,
 ) -> PhysicalTrainingPilotReport:
     if type(config) is not PhysicalPilotConfig:
         raise TypeError("config must be exact PhysicalPilotConfig")
+    if config.scale_tier_id is None:
+        if trusted_progression_proof is not None:
+            _fail("pilot execution must not receive progression authority")
+    elif type(trusted_progression_proof) is not TrainingScaleProgressionProof:
+        _fail("higher-tier execution requires independently trusted progression authority")
     if not _is_windows():
         _fail("physical PEFT pilot driver must execute on Windows")
 
@@ -745,6 +1090,14 @@ def run_physical_pilot_from_config(
     if base_gguf_path.suffix.casefold() != ".gguf":
         _fail("base_gguf_path must use the .gguf suffix")
     model_dir = _require_existing_directory(config.model_dir, name="model_dir")
+    initial_adapter_path: Path | None = None
+    if config.initial_adapter_path is not None:
+        initial_adapter_path = _require_existing_file(
+            config.initial_adapter_path,
+            name="initial_adapter_path",
+        )
+        if initial_adapter_path.suffix.casefold() != ".safetensors":
+            _fail("initial_adapter_path must use the .safetensors suffix")
     try:
         model_directory_manifest_sha256(model_dir)
     except ValueError as exc:
@@ -752,9 +1105,12 @@ def run_physical_pilot_from_config(
             "model_dir is not a canonical local model directory"
         ) from exc
     output_root = _preflight_output_root(config.output_root)
+    protected_roots = (blob_store_root, model_dir)
+    if initial_adapter_path is not None:
+        protected_roots += (initial_adapter_path.parent,)
     _require_disjoint_output_root(
         output_root,
-        protected_roots=(blob_store_root, model_dir),
+        protected_roots=protected_roots,
     )
 
     package_bytes = _read_bounded_file(
@@ -780,6 +1136,23 @@ def run_physical_pilot_from_config(
         total_records,
     ) = _material_totals(materials)
     runtime_metadata = build_training_runtime_metadata(dict(config.runtime_versions))
+    scale_plan = _scale_plan_for_physical_pilot(
+        config,
+        evaluation_set_sha256=materials.evidence.evaluation_set_sha256,
+        training_records=training_records,
+        training_bytes=training_bytes,
+        validation_records=validation_records,
+        validation_bytes=validation_bytes,
+    )
+    tier_index, scale_tier = _selected_scale_tier(config, scale_plan)
+    progression_proof = _preflight_higher_tier(
+        config,
+        trusted_progression_proof=trusted_progression_proof,
+        plan=scale_plan,
+        tier_index=tier_index,
+        initial_adapter_path=initial_adapter_path,
+        material_base_sha256=materials.evidence.base_artifact_sha256,
+    )
 
     output_root = _create_output_root(output_root)
     database_path = output_root / "physical-pilot.sqlite3"
@@ -804,6 +1177,7 @@ def run_physical_pilot_from_config(
         local_root=trainer_executable.parent,
         base_gguf_path=base_gguf_path,
         model_dir=model_dir,
+        initial_adapter_path=initial_adapter_path,
         output_root=output_root,
         parameters=config.trainer_parameters,
         max_records=total_records,
@@ -813,34 +1187,31 @@ def run_physical_pilot_from_config(
         config.base_artifact_ref,
         materials.evidence.base_artifact_sha256,
     )
-    scale_plan = TrainingScalePlan(
-        plan_id="physical-pilot",
-        evaluation_set_sha256=materials.evidence.evaluation_set_sha256,
-        tiers=(
-            TrainingScaleTier(
-                tier_id="pilot",
-                max_training_records=training_records,
-                max_training_bytes=training_bytes,
-                max_validation_records=validation_records,
-                max_validation_bytes=validation_bytes,
-                max_steps=2,
-            ),
-        ),
-    )
-    scale_authorization = authorize_training_scale(
-        plan=scale_plan,
-        tier_id="pilot",
-        job_id=config.job_id,
-        base_artifact=base_artifact,
-        candidate_artifact_ref=config.candidate_artifact_ref,
-        material_evidence=materials.evidence,
-        execution_plan_sha256=initial_worker.execution_plan_sha256,
-        max_steps=2,
-    )
+    try:
+        scale_authorization = authorize_training_scale(
+            plan=scale_plan,
+            tier_id=scale_tier.tier_id,
+            job_id=config.job_id,
+            base_artifact=base_artifact,
+            candidate_artifact_ref=config.candidate_artifact_ref,
+            material_evidence=materials.evidence,
+            execution_plan_sha256=initial_worker.execution_plan_sha256,
+            max_steps=2,
+            progression_proof=progression_proof,
+        )
+    except TrainingScaleError as exc:
+        raise PhysicalPilotDriverError(
+            "training data or progression proof exceeds the configured scale tier"
+        ) from exc
     task = TaskQueue(store).create(
         workspace_id=config.workspace_id,
         agent_id="physical-peft-pilot",
-        payload={"job_id": config.job_id, "kind": "physical_peft_pilot"},
+        payload=_physical_training_task_payload(
+            job_id=config.job_id,
+            plan=scale_plan,
+            tier_index=tier_index,
+            progression_proof=progression_proof,
+        ),
     )
     spec = TrainingJobSpec(
         job_id=config.job_id,
@@ -892,6 +1263,7 @@ def run_physical_pilot_from_config(
             local_root=trainer_executable.parent,
             base_gguf_path=base_gguf_path,
             model_dir=model_dir,
+            initial_adapter_path=initial_adapter_path,
             output_root=output_root,
             parameters=config.trainer_parameters,
             max_records=total_records,
@@ -914,11 +1286,10 @@ def run_physical_pilot_from_config(
             config=config,
             candidate_path=candidate_path,
             completed=completed,
-            trainer_record=trainer_record,
         ),
         candidate_root=output_root,
     )
-    _write_report(report_path, report)
+    write_physical_training_pilot_report(report, report_path)
     _LOG.info(
         "physical PEFT pilot completed: job_id=%s candidate_sha256=%s",
         report.job_id,
@@ -936,6 +1307,36 @@ def _read_config(path: Path) -> PhysicalPilotConfig:
     return PhysicalPilotConfig.from_json(raw)
 
 
+def _trusted_progression_for_cli(
+    config: PhysicalPilotConfig,
+    *,
+    source_root: Path | None,
+) -> TrainingScaleProgressionProof | None:
+    if type(config) is not PhysicalPilotConfig:
+        raise TypeError("config must be exact PhysicalPilotConfig")
+    if config.scale_tier_id is None:
+        if source_root is not None:
+            _fail("pilot-tier execution must not receive a trusted progression root")
+        return None
+    if config.progression_proof_payload is None:
+        _fail("higher-tier config is missing its progression claim")
+    if source_root is None:
+        _fail("higher-tier CLI execution requires --trusted-progression-root")
+    root = source_root
+    if not root.is_absolute():
+        try:
+            root = root.resolve(strict=True)
+        except OSError as exc:
+            raise PhysicalPilotDriverError(
+                "trusted progression root is unavailable"
+            ) from exc
+    return load_trusted_scale_progression_proof(
+        root,
+        workspace_id=config.workspace_id,
+        expected_claim=config.progression_proof_payload,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the canonical Windows physical PEFT pause/reopen/resume pilot."
@@ -944,6 +1345,15 @@ def build_parser() -> argparse.ArgumentParser:
         "config",
         type=Path,
         help="Path to the local UTF-8 physical-pilot JSON manifest.",
+    )
+    parser.add_argument(
+        "--trusted-progression-root",
+        type=Path,
+        default=None,
+        help=(
+            "Previous physical-training output root containing the completed "
+            "promoted evaluation authority required by schema-v3 higher-tier runs."
+        ),
     )
     return parser
 
@@ -956,7 +1366,14 @@ def main(argv: list[str] | None = None) -> int:
         if not config_path.is_absolute():
             config_path = config_path.resolve(strict=True)
         config = _read_config(config_path)
-        report = run_physical_pilot_from_config(config)
+        trusted_progression = _trusted_progression_for_cli(
+            config,
+            source_root=args.trusted_progression_root,
+        )
+        report = run_physical_pilot_from_config(
+            config,
+            trusted_progression_proof=trusted_progression,
+        )
     except (
         KeyError,
         OSError,

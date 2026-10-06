@@ -233,6 +233,7 @@ sys.stdout.write(json.dumps(response))
     materials = _resolved_materials(tmp_path)
     spec = _spec(materials)
     worker, registry, artifact_id = _worker(tmp_path, trainer)
+    assert worker.last_accepted_consumed_materials_sha256 is None
 
     result = worker.step(
         spec=spec,
@@ -245,6 +246,11 @@ sys.stdout.write(json.dumps(response))
     record = registry.get(artifact_id)
     assert observed["protocol_version"] == 3
     assert len(worker.execution_plan_sha256) == 64
+    assert worker.protocol_job_fingerprint(spec) == observed["job_fingerprint"]
+    assert worker.verified_trainer_deployment_identity() == ArtifactIdentity(
+        artifact_id,
+        record.sha256,
+    )
     assert observed["trainer_artifact_id"] == artifact_id
     assert observed["trainer_sha256"] == record.sha256
     assert observed["command_sha256"] == observed["job"]["command_sha256"]
@@ -264,6 +270,9 @@ sys.stdout.write(json.dumps(response))
     assert isinstance(envelope, dict)
     assert envelope["command_sha256"] == observed["command_sha256"]
     assert envelope["consumed_materials_sha256"] == (
+        observed["training_materials"]["required_consumed_materials_sha256"]
+    )
+    assert worker.last_accepted_consumed_materials_sha256 == (
         observed["training_materials"]["required_consumed_materials_sha256"]
     )
     assert envelope["trainer_artifact_id"] == artifact_id
@@ -745,6 +754,7 @@ sys.stdout.write(json.dumps(response))
 
     assert exc_info.value.code == "training_subprocess_material_attestation_mismatch"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+    assert worker.last_accepted_consumed_materials_sha256 is None
 
 
 def test_material_swap_after_final_parent_reverify_is_detected_by_trainer_attestation(

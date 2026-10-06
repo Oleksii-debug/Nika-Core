@@ -12,6 +12,8 @@ import re
 import stat
 import tempfile
 from dataclasses import dataclass
+
+import nika_core.training_scale as training_scale
 from pathlib import Path
 from typing import NoReturn
 
@@ -52,11 +54,22 @@ from nika_core.training_evaluation_champion import bind_champion_for_attested_ev
 from nika_core.training_evaluation_champion_execution import run_attested_champion_benchmark
 from nika_core.training_evaluation_comparison import (
     AttestedTrainingComparisonResult,
+    attested_training_comparison_evidence_sha256,
+    experiment_snapshot_evidence_identity,
     run_attested_old_vs_new_comparison,
 )
 from nika_core.training_evaluation_execution import run_attested_challenger_benchmark
 from nika_core.training_evaluation_subprocess import RegistrySubprocessLoadedModelAttestor
+from nika_core.training_materials import reconstruct_training_material_evidence
 from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
+from nika_core.training_scale import (
+    TrainingScaleAuthorization,
+    TrainingScaleError,
+    TrainingScalePlan,
+    TrainingScaleProgressionProof,
+    authorize_training_scale,
+    build_scale_progression_proof,
+)
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingJobSpec,
@@ -67,7 +80,10 @@ from nika_core.training_runtime import (
 
 _LOG = logging.getLogger(__name__)
 _CONFIG_SCHEMA_VERSION = 1
-_REPORT_SCHEMA_VERSION = 1
+_LEGACY_REPORT_SCHEMA_VERSION = 1
+_REPORT_SCHEMA_VERSION = 2
+_LEGACY_REPORT_SCHEMA = "nika-physical-old-new-evaluation-report-v1"
+_REPORT_SCHEMA = "nika-physical-old-new-evaluation-report-v2"
 _CONFIG_MAX_BYTES = 128 * 1024
 _EVALUATION_SET_MAX_BYTES = 8 * 1024 * 1024
 _FROZEN_PACKAGE_MAX_BYTES = 16 * 1024 * 1024
@@ -88,7 +104,47 @@ _WINDOWS_OPEN_EXISTING = 3
 _WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
 _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
-_REPORT_KEYS = frozenset(
+_SCALE_TIER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$")
+_LEGACY_TRAINING_TASK_KEYS = frozenset({"job_id", "kind"})
+_SCALE_TRAINING_TASK_KEYS = frozenset(
+    {
+        "job_id",
+        "kind",
+        "progression_proof_sha256",
+        "scale_plan_sha256",
+        "scale_tier_id",
+    }
+)
+_SCALE_TRAINING_TASK_KEYS_WITH_PLAN = frozenset(
+    {*_SCALE_TRAINING_TASK_KEYS, "scale_plan"}
+)
+_SCALE_TRAINING_TASK_KEYS_WITH_CHAIN = frozenset(
+    {*_SCALE_TRAINING_TASK_KEYS_WITH_PLAN, "progression_proof"}
+)
+_EVALUATION_OPERATION_TYPE = "training.physical_old_new_evaluation"
+_SCALE_PROGRESSION_OPERATION_TYPE = "training.physical_scale_progression"
+_SCALE_PROGRESSION_RESULT_KEYS = frozenset(
+    {"schema", "proof_sha256", "proof"}
+)
+_SCALE_PROGRESSION_PROOF_KEYS = frozenset(
+    {
+        "authorization_sha256",
+        "base_artifact_ref",
+        "base_sha256",
+        "candidate_artifact_ref",
+        "candidate_sha256",
+        "comparison_evidence_sha256",
+        "evaluation_set_sha256",
+        "execution_plan_sha256",
+        "frozen_package_sha256",
+        "job_fingerprint",
+        "job_id",
+        "plan_sha256",
+        "tier_index",
+        "training_material_sha256",
+    }
+)
+_REPORT_KEYS_V1 = frozenset(
     {
         "schema_version",
         "schema",
@@ -108,6 +164,15 @@ _REPORT_KEYS = frozenset(
         "attestor_sha256",
         "champion_provider_manifest_sha256",
         "challenger_provider_manifest_sha256",
+    }
+)
+_REPORT_KEYS = frozenset(
+    {
+        *_REPORT_KEYS_V1,
+        "champion_binding_sha256",
+        "definition_sha256",
+        "observations_sha256",
+        "observation_count",
     }
 )
 
@@ -294,13 +359,63 @@ def _canonical_file(path: Path, *, name: str) -> os.stat_result:
     return snapshot
 
 
+def _open_authority_snapshot(path: Path) -> int:
+    """Open one immutable authority read snapshot across supported platforms."""
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows authority snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(getattr(os, "O_NONBLOCK", 0))
+    return os.open(path, flags)
+
+
 def _require_windows_pe_executable(path: Path, *, name: str) -> None:
     before = _canonical_file(path, name=name)
     descriptor: int | None = None
     try:
-        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
-        flags |= int(getattr(os, "O_NOFOLLOW", 0))
-        descriptor = os.open(path, flags)
+        descriptor = _open_authority_snapshot(path)
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
@@ -341,9 +456,7 @@ def _read_regular_file(path: Path, *, name: str, max_bytes: int) -> bytes:
         _fail(f"{name} size is outside the admitted range")
     descriptor: int | None = None
     try:
-        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
-        flags |= int(getattr(os, "O_NOFOLLOW", 0))
-        descriptor = os.open(path, flags)
+        descriptor = _open_authority_snapshot(path)
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
@@ -593,6 +706,13 @@ def _policy_from_value(value: object) -> PromotionPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class _ScaleProgressionContext:
+    plan: TrainingScalePlan
+    authorization: TrainingScaleAuthorization
+    run: TrainingRunEvidence
+
+
+@dataclass(frozen=True, slots=True)
 class PhysicalEvaluationConfig:
     workspace_id: str
     project_id: str
@@ -769,19 +889,87 @@ def _physical_report(output_root: Path) -> PhysicalTrainingPilotReport:
         ) from exc
 
 
+def _matches_physical_training_task_payload(
+    payload: object,
+    *,
+    job_id: str,
+) -> bool:
+    if type(payload) is not dict or payload.get("job_id") != job_id:
+        return False
+    keys = frozenset(payload)
+    if keys == _LEGACY_TRAINING_TASK_KEYS:
+        return payload.get("kind") == "physical_peft_pilot"
+    if keys not in {
+        _SCALE_TRAINING_TASK_KEYS,
+        _SCALE_TRAINING_TASK_KEYS_WITH_PLAN,
+        _SCALE_TRAINING_TASK_KEYS_WITH_CHAIN,
+    }:
+        return False
+    kind = payload.get("kind")
+    if kind not in {"physical_peft_pilot", "physical_peft_scale_tier"}:
+        return False
+    plan_sha256 = payload.get("scale_plan_sha256")
+    if type(plan_sha256) is not str or _SHA256_RE.fullmatch(plan_sha256) is None:
+        return False
+    tier_id = payload.get("scale_tier_id")
+    if type(tier_id) is not str or _SCALE_TIER_ID_RE.fullmatch(tier_id) is None:
+        return False
+    proof_sha256 = payload.get("progression_proof_sha256")
+    if kind == "physical_peft_pilot":
+        if proof_sha256 is not None:
+            return False
+    elif type(proof_sha256) is not str or _SHA256_RE.fullmatch(proof_sha256) is None:
+        return False
+    if keys == _SCALE_TRAINING_TASK_KEYS:
+        return True
+    try:
+        plan = TrainingScalePlan.from_canonical_payload(payload.get("scale_plan"))
+    except (TrainingScaleError, TypeError, ValueError):
+        return False
+    if plan.plan_sha256 != plan_sha256:
+        return False
+    matching = tuple(
+        index for index, tier in enumerate(plan.tiers) if tier.tier_id == tier_id
+    )
+    if len(matching) != 1:
+        return False
+    tier_index = matching[0]
+    if (kind == "physical_peft_pilot") != (tier_index == 0):
+        return False
+    if keys != _SCALE_TRAINING_TASK_KEYS_WITH_CHAIN:
+        return True
+    raw_progression = payload.get("progression_proof")
+    if tier_index == 0:
+        return raw_progression is None
+    try:
+        prior = _task_progression_proof(
+            raw_progression,
+            expected_sha256=proof_sha256,
+        )
+    except (PhysicalEvaluationDriverError, TrainingScaleError, TypeError, ValueError):
+        return False
+    return (
+        prior.plan_sha256 == plan.plan_sha256
+        and prior.tier_index == tier_index - 1
+        and prior.evaluation_set_sha256 == plan.evaluation_set_sha256
+    )
+
+
 def _find_pilot_task(
     store: SQLiteStore,
     *,
     workspace_id: str,
     job_id: str,
 ) -> TaskRecord:
-    expected_payload = {"job_id": job_id, "kind": "physical_peft_pilot"}
     matches = tuple(
         task
         for task in TaskQueue(store).list_recent(limit=500)
         if task.workspace_id == workspace_id
         and task.agent_id == "physical-peft-pilot"
-        and task.payload == expected_payload
+        and _matches_physical_training_task_payload(
+            task.payload,
+            job_id=job_id,
+        )
     )
     if len(matches) != 1:
         _fail("physical pilot database must contain exactly one matching training task")
@@ -902,6 +1090,435 @@ def _candidate(
         )
     except (TypeError, ValueError) as exc:
         raise PhysicalEvaluationDriverError("physical model candidate is invalid") from exc
+
+
+def _reconstruct_scale_progression_context(
+    *,
+    task: TaskRecord,
+    package: FrozenLearningPackage,
+    workspace_id: str,
+    pilot: PhysicalTrainingPilotReport,
+    run: TrainingRunEvidence,
+) -> _ScaleProgressionContext | None:
+    payload = task.payload
+    raw_plan = payload.get("scale_plan")
+    if raw_plan is None:
+        return None
+    try:
+        plan = TrainingScalePlan.from_canonical_payload(raw_plan)
+        matching = tuple(
+            index
+            for index, tier in enumerate(plan.tiers)
+            if tier.tier_id == payload["scale_tier_id"]
+        )
+        if len(matching) != 1:
+            _fail("durable training task scale tier is not unique")
+        tier_index = matching[0]
+        previous_proof: TrainingScaleProgressionProof | None = None
+        if tier_index == 0:
+            if payload.get("progression_proof") is not None:
+                _fail("pilot training task unexpectedly carries progression authority")
+        else:
+            if "progression_proof" not in payload:
+                return None
+            previous_proof = _task_progression_proof(
+                payload["progression_proof"],
+                expected_sha256=payload.get("progression_proof_sha256"),
+            )
+        materials = reconstruct_training_material_evidence(
+            package,
+            workspace_id=workspace_id,
+        )
+        authorization = authorize_training_scale(
+            plan=plan,
+            tier_id=payload["scale_tier_id"],
+            job_id=pilot.job_id,
+            base_artifact=run.base_artifact,
+            candidate_artifact_ref=pilot.candidate_artifact_ref,
+            material_evidence=materials,
+            execution_plan_sha256=pilot.execution_plan_sha256,
+            max_steps=pilot.completed_steps,
+            progression_proof=previous_proof,
+        )
+    except (KeyError, TrainingScaleError, TypeError, ValueError) as exc:
+        raise PhysicalEvaluationDriverError(
+            "physical scale authority could not be reconstructed from durable run evidence"
+        ) from exc
+    if (
+        plan.plan_sha256 != payload.get("scale_plan_sha256")
+        or materials.training_material_sha256 != pilot.training_material_sha256
+        or authorization.authorization_sha256 != pilot.scale_authorization_sha256
+    ):
+        _fail("physical scale authority does not match completed training evidence")
+    return _ScaleProgressionContext(
+        plan=plan,
+        authorization=authorization,
+        run=run,
+    )
+
+
+def _scale_progression_record_identity(
+    proof: TrainingScaleProgressionProof,
+) -> tuple[str, str, dict[str, object]]:
+    if type(proof) is not TrainingScaleProgressionProof:
+        raise TypeError("proof must be an exact TrainingScaleProgressionProof")
+    canonical = proof.revalidated()
+    result = {
+        "schema": "nika-physical-scale-progression-record-v1",
+        "proof_sha256": canonical.proof_sha256,
+        "proof": canonical.canonical_payload(),
+    }
+    encoded = json.dumps(
+        result,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    fingerprint = hashlib.sha256(
+        b"nika-physical-scale-progression-record-v1\0" + encoded
+    ).hexdigest()
+    return (
+        f"physical-scale-progression:{canonical.proof_sha256}",
+        f"sha256:{fingerprint}",
+        result,
+    )
+
+
+def _persist_scale_progression_record(
+    *,
+    ledger: IdempotencyLedger,
+    task_id: str,
+    proof: TrainingScaleProgressionProof,
+) -> IdempotencyRecord:
+    operation_key, input_fingerprint, result = _scale_progression_record_identity(proof)
+    try:
+        record, created = ledger.reserve_once(
+            operation_key=operation_key,
+            task_id=task_id,
+            operation_type=_SCALE_PROGRESSION_OPERATION_TYPE,
+            input_fingerprint=input_fingerprint,
+        )
+    except IdempotencyConflictError as exc:
+        raise PhysicalEvaluationDriverError(
+            "durable physical scale progression identity conflicts with existing state"
+        ) from exc
+    if created:
+        return ledger.complete_pending_if_matches(
+            operation_key=record.operation_key,
+            task_id=record.task_id,
+            operation_type=record.operation_type,
+            input_fingerprint=record.input_fingerprint,
+            created_at=record.created_at,
+            result=result,
+        )
+    if (
+        record.status is not IdempotencyStatus.COMPLETED
+        or type(record.result) is not dict
+        or frozenset(record.result) != _SCALE_PROGRESSION_RESULT_KEYS
+        or dict(record.result) != result
+    ):
+        _fail("durable physical scale progression record is incomplete or inconsistent")
+    return record
+
+
+def _scale_progression_claim(value: object) -> dict[str, object]:
+    if type(value) is not dict or frozenset(value) != _SCALE_PROGRESSION_PROOF_KEYS:
+        _fail("scale progression claim is not a canonical proof payload")
+    for key in (
+        "authorization_sha256",
+        "base_sha256",
+        "candidate_sha256",
+        "comparison_evidence_sha256",
+        "evaluation_set_sha256",
+        "execution_plan_sha256",
+        "frozen_package_sha256",
+        "job_fingerprint",
+        "plan_sha256",
+        "training_material_sha256",
+    ):
+        _sha256_text(value[key], name=f"scale progression claim {key}")
+    for key in ("base_artifact_ref", "candidate_artifact_ref", "job_id"):
+        _require_text(value[key], name=f"scale progression claim {key}")
+    tier_index = value["tier_index"]
+    if type(tier_index) is not int or not 0 <= tier_index <= 1024:
+        _fail("scale progression claim tier_index is invalid")
+    if value["base_artifact_ref"] == value["candidate_artifact_ref"]:
+        _fail("scale progression claim cannot overwrite its base artifact")
+    return dict(value)
+
+
+def _task_progression_proof(
+    value: object,
+    *,
+    expected_sha256: object,
+) -> TrainingScaleProgressionProof:
+    claim = _scale_progression_claim(value)
+    expected = _sha256_text(
+        expected_sha256,
+        name="task progression proof_sha256",
+    )
+    restored = training_scale._build_progression_proof(
+        plan_sha256=claim["plan_sha256"],
+        tier_index=claim["tier_index"],
+        authorization_sha256=claim["authorization_sha256"],
+        job_id=claim["job_id"],
+        job_fingerprint=claim["job_fingerprint"],
+        base_artifact_ref=claim["base_artifact_ref"],
+        base_sha256=claim["base_sha256"],
+        candidate_artifact_ref=claim["candidate_artifact_ref"],
+        candidate_sha256=claim["candidate_sha256"],
+        frozen_package_sha256=claim["frozen_package_sha256"],
+        training_material_sha256=claim["training_material_sha256"],
+        execution_plan_sha256=claim["execution_plan_sha256"],
+        comparison_evidence_sha256=claim["comparison_evidence_sha256"],
+        evaluation_set_sha256=claim["evaluation_set_sha256"],
+    )
+    if restored.proof_sha256 != expected:
+        _fail("task progression proof payload does not match its durable digest")
+    return restored
+
+
+def _completed_progression_record(
+    ledger: IdempotencyLedger,
+    *,
+    task_id: str,
+    expected_claim: dict[str, object],
+) -> IdempotencyRecord:
+    matches: list[IdempotencyRecord] = []
+    for record in ledger.list_for_task(
+        task_id,
+        status=IdempotencyStatus.COMPLETED,
+    ):
+        if record.operation_type != _SCALE_PROGRESSION_OPERATION_TYPE:
+            continue
+        result = record.result
+        if (
+            type(result) is dict
+            and frozenset(result) == _SCALE_PROGRESSION_RESULT_KEYS
+            and result.get("schema") == "nika-physical-scale-progression-record-v1"
+            and result.get("proof") == expected_claim
+        ):
+            matches.append(record)
+    if len(matches) != 1:
+        _fail("exactly one completed durable scale progression record is required")
+    return matches[0]
+
+
+def _completed_progression_evaluation_record(
+    ledger: IdempotencyLedger,
+    *,
+    task_id: str,
+    comparison_evidence_sha256: str,
+) -> IdempotencyRecord:
+    matches: list[IdempotencyRecord] = []
+    for record in ledger.list_for_task(
+        task_id,
+        status=IdempotencyStatus.COMPLETED,
+    ):
+        if record.operation_type != _EVALUATION_OPERATION_TYPE:
+            continue
+        result = record.result
+        if (
+            type(result) is dict
+            and result.get("comparison_evidence_sha256")
+            == comparison_evidence_sha256
+        ):
+            matches.append(record)
+    if len(matches) != 1:
+        _fail("exactly one completed promoted evaluation record is required")
+    return matches[0]
+
+
+def _validate_progression_evaluation_authority(
+    *,
+    result: object,
+    repository: SQLiteExperimentRepository,
+    pilot: PhysicalTrainingPilotReport,
+    claim: dict[str, object],
+) -> None:
+    if type(result) is not dict or frozenset(result) != _REPORT_KEYS:
+        _fail("progression evaluation record is not a canonical evaluation report")
+    if (
+        result["schema_version"] != _REPORT_SCHEMA_VERSION
+        or result["schema"] != _REPORT_SCHEMA
+        or result["physical_pilot_evidence_sha256"] != pilot.evidence_sha256
+        or result["experiment_status"] != ExperimentStatus.PROMOTED.value
+        or result["selected_candidate_id"] != claim["candidate_artifact_ref"]
+        or result["previous_champion_id"] != claim["base_artifact_ref"]
+        or result["comparison_evidence_sha256"]
+        != claim["comparison_evidence_sha256"]
+        or result["evaluation_set_sha256"] != claim["evaluation_set_sha256"]
+    ):
+        _fail("promoted evaluation record does not match scale progression authority")
+    for key in (
+        "physical_pilot_evidence_sha256",
+        "evaluation_set_sha256",
+        "execution_config_sha256",
+        "comparison_evidence_sha256",
+        "training_binding_sha256",
+        "champion_benchmark_sha256",
+        "challenger_benchmark_sha256",
+        "attestor_sha256",
+        "definition_sha256",
+        "observations_sha256",
+    ):
+        _sha256_text(result[key], name=f"progression evaluation {key}")
+    observation_count = result["observation_count"]
+    if type(observation_count) is not int or observation_count < 0:
+        _fail("progression evaluation observation_count is invalid")
+    for key in (
+        "champion_provider_manifest_sha256",
+        "challenger_provider_manifest_sha256",
+    ):
+        value = result[key]
+        if value is not None:
+            _sha256_text(value, name=f"progression evaluation {key}")
+    if (
+        _comparison_evidence_sha256_from_report(result)
+        != result["comparison_evidence_sha256"]
+    ):
+        _fail("progression evaluation comparison evidence digest is inconsistent")
+    experiment_id = _require_text(
+        result["experiment_id"],
+        name="progression evaluation experiment_id",
+    )
+    try:
+        snapshot = repository.get(experiment_id)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PhysicalEvaluationDriverError(
+            "promoted experiment state is unavailable for scale progression"
+        ) from exc
+    if (
+        snapshot.status is not ExperimentStatus.PROMOTED
+        or snapshot.selected_candidate_id != claim["candidate_artifact_ref"]
+        or snapshot.previous_champion_id != claim["base_artifact_ref"]
+        or snapshot.definition.champion.candidate_id != claim["base_artifact_ref"]
+        or len(snapshot.definition.challengers) != 1
+        or snapshot.definition.challengers[0].candidate_id
+        != claim["candidate_artifact_ref"]
+    ):
+        _fail("durable promoted experiment does not match scale progression authority")
+    definition_sha256, observations_sha256, observed_count = (
+        experiment_snapshot_evidence_identity(snapshot)
+    )
+    if (
+        result["definition_sha256"] != definition_sha256
+        or result["observations_sha256"] != observations_sha256
+        or observation_count != observed_count
+    ):
+        _fail("durable promoted experiment evidence changed after evaluation")
+
+
+def load_trusted_scale_progression_proof(
+    output_root: Path,
+    *,
+    workspace_id: str,
+    expected_claim: dict[str, object],
+) -> TrainingScaleProgressionProof:
+    """Restore one proof only from completed Nika-owned durable evaluation state."""
+
+    root = _canonical_directory(
+        output_root,
+        name="trusted progression output root",
+    )
+    claim = _scale_progression_claim(expected_claim)
+    pilot = _physical_report(root)
+    database_path = root / "physical-pilot.sqlite3"
+    _canonical_file(database_path, name="physical pilot database")
+    store = SQLiteStore(database_path)
+    store.initialize()
+    task = _find_pilot_task(
+        store,
+        workspace_id=_require_text(workspace_id, name="workspace_id"),
+        job_id=pilot.job_id,
+    )
+    _verify_completed_checkpoint(store, task=task, report=pilot)
+
+    raw_plan = task.payload.get("scale_plan")
+    try:
+        plan = TrainingScalePlan.from_canonical_payload(raw_plan)
+    except (TrainingScaleError, TypeError, ValueError) as exc:
+        raise PhysicalEvaluationDriverError(
+            "durable training task does not carry a canonical scale plan"
+        ) from exc
+    if (
+        task.payload.get("scale_plan_sha256") != plan.plan_sha256
+        or claim["plan_sha256"] != plan.plan_sha256
+    ):
+        _fail("durable scale plan does not match requested progression claim")
+    matching = tuple(
+        index
+        for index, tier in enumerate(plan.tiers)
+        if tier.tier_id == task.payload.get("scale_tier_id")
+    )
+    if len(matching) != 1 or claim["tier_index"] != matching[0]:
+        _fail("durable training tier does not match progression claim")
+
+    expected_run_values = {
+        "authorization_sha256": pilot.scale_authorization_sha256,
+        "base_sha256": pilot.base_sha256,
+        "candidate_artifact_ref": pilot.candidate_artifact_ref,
+        "candidate_sha256": pilot.candidate_sha256,
+        "execution_plan_sha256": pilot.execution_plan_sha256,
+        "frozen_package_sha256": pilot.frozen_package_sha256,
+        "job_fingerprint": pilot.job_fingerprint,
+        "job_id": pilot.job_id,
+        "training_material_sha256": pilot.training_material_sha256,
+        "evaluation_set_sha256": plan.evaluation_set_sha256,
+    }
+    if any(claim[key] != value for key, value in expected_run_values.items()):
+        _fail("progression claim does not match completed physical training evidence")
+
+    ledger = IdempotencyLedger(store)
+    progression = _completed_progression_record(
+        ledger,
+        task_id=task.task_id,
+        expected_claim=claim,
+    )
+    result = progression.result
+    if type(result) is not dict:
+        _fail("completed progression record has no canonical result")
+    stored_proof_sha256 = _sha256_text(
+        result["proof_sha256"],
+        name="progression record proof_sha256",
+    )
+    evaluation = _completed_progression_evaluation_record(
+        ledger,
+        task_id=task.task_id,
+        comparison_evidence_sha256=claim["comparison_evidence_sha256"],
+    )
+    _validate_progression_evaluation_authority(
+        result=evaluation.result,
+        repository=SQLiteExperimentRepository(store),
+        pilot=pilot,
+        claim=claim,
+    )
+
+    restored = training_scale._build_progression_proof(
+        plan_sha256=claim["plan_sha256"],
+        tier_index=claim["tier_index"],
+        authorization_sha256=claim["authorization_sha256"],
+        job_id=claim["job_id"],
+        job_fingerprint=claim["job_fingerprint"],
+        base_artifact_ref=claim["base_artifact_ref"],
+        base_sha256=claim["base_sha256"],
+        candidate_artifact_ref=claim["candidate_artifact_ref"],
+        candidate_sha256=claim["candidate_sha256"],
+        frozen_package_sha256=claim["frozen_package_sha256"],
+        training_material_sha256=claim["training_material_sha256"],
+        execution_plan_sha256=claim["execution_plan_sha256"],
+        comparison_evidence_sha256=claim["comparison_evidence_sha256"],
+        evaluation_set_sha256=claim["evaluation_set_sha256"],
+    )
+    if (
+        restored.canonical_payload() != claim
+        or restored.proof_sha256 != stored_proof_sha256
+        or progression.operation_key
+        != f"physical-scale-progression:{stored_proof_sha256}"
+    ):
+        _fail("completed progression record does not reproduce canonical proof identity")
+    return restored
 
 
 def _register_evaluator(
@@ -1113,7 +1730,7 @@ def _canonical_report_payload(
     comparison_payload = result.evidence_payload()
     return {
         "schema_version": _REPORT_SCHEMA_VERSION,
-        "schema": "nika-physical-old-new-evaluation-report-v1",
+        "schema": _REPORT_SCHEMA,
         "physical_pilot_evidence_sha256": pilot.evidence_sha256,
         "requested_experiment_id": requested_experiment_id,
         "evaluation_set_sha256": evaluation_set.content_sha256,
@@ -1124,6 +1741,7 @@ def _canonical_report_payload(
         "selected_candidate_id": comparison_payload["selected_candidate_id"],
         "previous_champion_id": comparison_payload["previous_champion_id"],
         "training_binding_sha256": comparison_payload["training_binding_sha256"],
+        "champion_binding_sha256": comparison_payload["champion_binding_sha256"],
         "champion_benchmark_sha256": comparison_payload["champion_benchmark_sha256"],
         "challenger_benchmark_sha256": comparison_payload["challenger_benchmark_sha256"],
         "attestor_id": comparison_payload["attestor_id"],
@@ -1134,7 +1752,44 @@ def _canonical_report_payload(
         "challenger_provider_manifest_sha256": comparison_payload.get(
             "challenger_provider_manifest_sha256"
         ),
+        "definition_sha256": comparison_payload["definition_sha256"],
+        "observations_sha256": comparison_payload["observations_sha256"],
+        "observation_count": comparison_payload["observation_count"],
     }
+
+
+def _comparison_evidence_sha256_from_report(
+    result: dict[str, object],
+) -> str:
+    payload: dict[str, object] = {
+        "schema": "nika-attested-training-comparison-v1",
+        "experiment_id": result["experiment_id"],
+        "experiment_status": result["experiment_status"],
+        "selected_candidate_id": result["selected_candidate_id"],
+        "previous_champion_id": result["previous_champion_id"],
+        "training_binding_sha256": result["training_binding_sha256"],
+        "champion_binding_sha256": result["champion_binding_sha256"],
+        "champion_benchmark_sha256": result["champion_benchmark_sha256"],
+        "challenger_benchmark_sha256": result["challenger_benchmark_sha256"],
+        "attestor_id": result["attestor_id"],
+        "attestor_sha256": result["attestor_sha256"],
+        "definition_sha256": result["definition_sha256"],
+        "observations_sha256": result["observations_sha256"],
+        "observation_count": result["observation_count"],
+    }
+    for key in (
+        "champion_provider_manifest_sha256",
+        "challenger_provider_manifest_sha256",
+    ):
+        value = result[key]
+        if value is not None:
+            payload[key] = value
+    try:
+        return attested_training_comparison_evidence_sha256(payload)
+    except (TypeError, ValueError) as exc:
+        raise PhysicalEvaluationDriverError(
+            "physical evaluation report cannot reproduce comparison evidence identity"
+        ) from exc
 
 
 def _validate_recovered_report_payload(
@@ -1149,11 +1804,23 @@ def _validate_recovered_report_payload(
     attestor_id: str,
     attestor_sha256: str,
 ) -> dict[str, object]:
-    if type(result) is not dict or frozenset(result) != _REPORT_KEYS:
+    if type(result) is not dict:
+        _fail("completed evaluation ledger result is not a canonical report payload")
+    schema_version = result.get("schema_version")
+    if type(schema_version) is not int:
+        _fail("completed evaluation ledger result uses an invalid report schema version")
+    if schema_version == _LEGACY_REPORT_SCHEMA_VERSION:
+        expected_keys = _REPORT_KEYS_V1
+        expected_schema = _LEGACY_REPORT_SCHEMA
+    elif schema_version == _REPORT_SCHEMA_VERSION:
+        expected_keys = _REPORT_KEYS
+        expected_schema = _REPORT_SCHEMA
+    else:
+        _fail("completed evaluation ledger result uses an unsupported report schema")
+    if frozenset(result) != expected_keys:
         _fail("completed evaluation ledger result is not a canonical report payload")
     if (
-        result["schema_version"] != _REPORT_SCHEMA_VERSION
-        or result["schema"] != "nika-physical-old-new-evaluation-report-v1"
+        result["schema"] != expected_schema
         or result["physical_pilot_evidence_sha256"] != pilot.evidence_sha256
         or result["requested_experiment_id"] != requested_experiment_id
         or result["evaluation_set_sha256"] != evaluation_set.content_sha256
@@ -1164,7 +1831,7 @@ def _validate_recovered_report_payload(
         or result["attestor_sha256"] != attestor_sha256
     ):
         _fail("completed evaluation ledger result does not match current physical authority")
-    for key in (
+    sha_keys = [
         "physical_pilot_evidence_sha256",
         "evaluation_set_sha256",
         "execution_config_sha256",
@@ -1173,8 +1840,21 @@ def _validate_recovered_report_payload(
         "champion_benchmark_sha256",
         "challenger_benchmark_sha256",
         "attestor_sha256",
-    ):
+    ]
+    if schema_version == _REPORT_SCHEMA_VERSION:
+        sha_keys.extend(
+            (
+                "champion_binding_sha256",
+                "definition_sha256",
+                "observations_sha256",
+            )
+        )
+    for key in sha_keys:
         _sha256_text(result[key], name=f"ledger result {key}")
+    if schema_version == _REPORT_SCHEMA_VERSION:
+        observation_count = result["observation_count"]
+        if type(observation_count) is not int or observation_count < 0:
+            _fail("ledger result observation_count must be a non-negative integer")
     for key in (
         "champion_provider_manifest_sha256",
         "challenger_provider_manifest_sha256",
@@ -1182,6 +1862,12 @@ def _validate_recovered_report_payload(
         value = result[key]
         if value is not None:
             _sha256_text(value, name=f"ledger result {key}")
+    if (
+        schema_version == _REPORT_SCHEMA_VERSION
+        and _comparison_evidence_sha256_from_report(result)
+        != result["comparison_evidence_sha256"]
+    ):
+        _fail("completed evaluation ledger comparison evidence digest is inconsistent")
     if result["experiment_status"] not in {"completed", "promoted"}:
         _fail("completed evaluation ledger result is not terminal")
     for key in ("selected_candidate_id", "previous_champion_id", "attestor_id"):
@@ -1200,7 +1886,7 @@ def _reserve_evaluation_effect(
         return ledger.reserve_once(
             operation_key=operation_key,
             task_id=task_id,
-            operation_type="training.physical_old_new_evaluation",
+            operation_type=_EVALUATION_OPERATION_TYPE,
             input_fingerprint=input_fingerprint,
         )
     except IdempotencyConflictError as exc:
@@ -1247,6 +1933,18 @@ def _validate_recovered_experiment(
         or snapshot.previous_champion_id != report_payload["previous_champion_id"]
     ):
         _fail("completed evaluation ledger conflicts with terminal Experiment decision")
+    if report_payload["schema_version"] == _REPORT_SCHEMA_VERSION:
+        definition_sha256, observations_sha256, observation_count = (
+            experiment_snapshot_evidence_identity(snapshot)
+        )
+        if (
+            report_payload["definition_sha256"] != definition_sha256
+            or report_payload["observations_sha256"] != observations_sha256
+            or report_payload["observation_count"] != observation_count
+        ):
+            _fail(
+                "completed evaluation ledger conflicts with Experiment evidence identity"
+            )
 
 
 def _mark_evaluation_uncertain(
@@ -1602,6 +2300,7 @@ async def _run_attested_comparison(
     task: TaskRecord,
     pilot: PhysicalTrainingPilotReport,
     evaluation_set: EvaluationSet,
+    scale_progression: _ScaleProgressionContext | None,
     training_binding: object,
     champion_binding: object,
     champion: ModelCandidate,
@@ -1744,6 +2443,26 @@ async def _run_attested_comparison(
             experiment_id=experiment_id,
             repository=repository,
         )
+        if (
+            scale_progression is not None
+            and comparison.experiment_snapshot.status is ExperimentStatus.PROMOTED
+        ):
+            try:
+                progression_proof = build_scale_progression_proof(
+                    plan=scale_progression.plan,
+                    authorization=scale_progression.authorization,
+                    run=scale_progression.run,
+                    comparison=comparison,
+                )
+            except (TrainingScaleError, TypeError, ValueError) as exc:
+                raise PhysicalEvaluationDriverError(
+                    "promoted comparison could not produce canonical scale progression"
+                ) from exc
+            _persist_scale_progression_record(
+                ledger=ledger,
+                task_id=task.task_id,
+                proof=progression_proof,
+            )
         payload = _canonical_report_payload(
             requested_experiment_id=config.experiment_id,
             pilot=pilot,
@@ -1869,6 +2588,13 @@ def run_physical_evaluation_from_config(
         candidate_sha256=pilot.candidate_sha256,
         checkpoint_id=pilot.completed_checkpoint_id,
     )
+    scale_progression = _reconstruct_scale_progression_context(
+        task=task,
+        package=package,
+        workspace_id=config.workspace_id,
+        pilot=pilot,
+        run=completed,
+    )
     try:
         training_binding = bind_training_result_for_evaluation(
             spec=spec,
@@ -1901,6 +2627,7 @@ def run_physical_evaluation_from_config(
             task=task,
             pilot=pilot,
             evaluation_set=evaluation_set,
+            scale_progression=scale_progression,
             training_binding=training_binding,
             champion_binding=champion_binding,
             champion=champion,
