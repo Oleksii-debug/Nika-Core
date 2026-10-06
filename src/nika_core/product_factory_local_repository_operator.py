@@ -52,11 +52,11 @@ class PackagedLocalRepositoryOperator:
                 payload,
                 require_root=True,
             )
-            repository = self._repository_for(project_id, repository_id)
+            plan = self._plan(project_id)
             root = _root_path(payload["root_path"])
-            binding = self._bindings.bind(
-                project_id=project_id,
-                repository=repository,
+            binding = self._bindings.bind_for_plan(
+                plan=plan,
+                repository_id=repository_id,
                 root=root,
                 expected_binding_version=expected_version,
             )
@@ -87,9 +87,9 @@ class PackagedLocalRepositoryOperator:
             )
             if expected_version is None:
                 raise ValueError("unbind requires an exact binding version")
-            self._repository_for(project_id, repository_id)
-            self._bindings.unbind(
-                project_id=project_id,
+            plan = self._plan(project_id)
+            self._bindings.unbind_for_plan(
+                plan=plan,
                 repository_id=repository_id,
                 expected_binding_version=expected_version,
             )
@@ -122,6 +122,7 @@ class PackagedLocalRepositoryOperator:
             }
         try:
             plan = self._plan(project_id)
+            self._bindings.require_plan_current(plan)
             repositories: list[dict[str, object]] = []
             for repository in plan.graph.repositories:
                 try:
