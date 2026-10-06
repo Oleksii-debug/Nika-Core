@@ -462,6 +462,135 @@ def test_output_root_stability_lock_denies_rename_until_closed(tmp_path: Path) -
     assert moved.is_dir()
 
 
+def test_evaluation_rejects_database_replacement_after_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = (tmp_path / "physical-output-root").resolve()
+    root.mkdir()
+    database_path = root / "physical-pilot.sqlite3"
+    SQLiteStore(database_path).initialize()
+    displaced = root / "displaced.sqlite3"
+
+    monkeypatch.setattr(
+        driver,
+        "_open_database_stability_lock",
+        lambda *args, **kwargs: None,
+    )
+
+    def replace_database(
+        _: driver.PhysicalEvaluationConfig,
+        *,
+        output_root: Path,
+        database_path: Path,
+    ) -> dict[str, object]:
+        assert output_root == root
+        database_path.rename(displaced)
+        database_path.write_bytes(b"replacement")
+        return {"schema": "synthetic"}
+
+    monkeypatch.setattr(
+        driver,
+        "_run_physical_evaluation_with_stable_database",
+        replace_database,
+    )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="physical pilot database changed",
+    ):
+        driver._run_physical_evaluation_from_stable_root(
+            _config(tmp_path),
+            output_root=root,
+        )
+
+    assert displaced.is_file()
+    assert database_path.read_bytes() == b"replacement"
+
+
+def test_trusted_progression_rejects_database_replacement_after_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = (tmp_path / "trusted-progression-root").resolve()
+    root.mkdir()
+    database_path = root / "physical-pilot.sqlite3"
+    SQLiteStore(database_path).initialize()
+    displaced = root / "displaced.sqlite3"
+
+    monkeypatch.setattr(
+        driver,
+        "_open_database_stability_lock",
+        lambda *args, **kwargs: None,
+    )
+
+    def replace_database(
+        _: Path,
+        *,
+        database_path: Path,
+        workspace_id: str,
+        expected_claim: dict[str, object],
+    ) -> object:
+        assert workspace_id == "evaluation-workspace"
+        assert expected_claim == {}
+        database_path.rename(displaced)
+        database_path.write_bytes(b"replacement")
+        return object()
+
+    monkeypatch.setattr(
+        driver,
+        "_load_trusted_scale_progression_proof_from_stable_database",
+        replace_database,
+    )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="physical pilot database changed",
+    ):
+        driver._load_trusted_scale_progression_proof_from_root(
+            root,
+            workspace_id="evaluation-workspace",
+            expected_claim={},
+        )
+
+    assert displaced.is_file()
+    assert database_path.read_bytes() == b"replacement"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_database_stability_lock_allows_sqlite_write_and_denies_rename(
+    tmp_path: Path,
+) -> None:
+    database_path = (tmp_path / "physical-pilot.sqlite3").resolve()
+    store = SQLiteStore(database_path)
+    store.initialize()
+    snapshot = driver._canonical_file(
+        database_path,
+        name="physical pilot database",
+    )
+    moved = tmp_path / "moved.sqlite3"
+
+    descriptor = driver._open_database_stability_lock(
+        database_path,
+        snapshot,
+        name="physical pilot database",
+    )
+    try:
+        created = TaskQueue(store).create(
+            workspace_id="evaluation-workspace",
+            agent_id="physical-peft-pilot",
+            payload={"job_id": "pilot-job", "kind": "physical_peft_pilot"},
+        )
+        assert created.task_id
+        with pytest.raises(OSError):
+            database_path.rename(moved)
+    finally:
+        driver._close_database_stability_lock(descriptor)
+
+    database_path.rename(moved)
+    assert moved.is_file()
+
+
 def test_find_pilot_task_requires_exact_unique_identity(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "pilot.sqlite3")
     store.initialize()

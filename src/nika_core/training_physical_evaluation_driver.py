@@ -388,6 +388,120 @@ def _canonical_file(path: Path, *, name: str) -> os.stat_result:
     return snapshot
 
 
+def _require_file_identity(
+    path: Path,
+    expected_snapshot: os.stat_result,
+    *,
+    name: str,
+) -> None:
+    try:
+        current = os.lstat(path)
+    except OSError as exc:
+        raise PhysicalEvaluationDriverError(f"{name} is unavailable") from exc
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino)
+        != (expected_snapshot.st_dev, expected_snapshot.st_ino)
+    ):
+        _fail(f"{name} changed during authority use")
+
+
+def _open_database_stability_lock(
+    path: Path,
+    expected_snapshot: os.stat_result,
+    *,
+    name: str,
+) -> int:
+    """Hold one database inode stable while allowing incumbent SQLite reads/writes."""
+
+    descriptor: int | None = None
+    try:
+        if os.name == "nt":
+            try:
+                import ctypes
+                import msvcrt
+            except ImportError as exc:
+                raise OSError("Windows database stability support is unavailable") from exc
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            create_file = kernel32.CreateFileW
+            create_file.argtypes = [
+                ctypes.c_wchar_p,
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+                ctypes.c_uint32,
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+            ]
+            create_file.restype = ctypes.c_void_p
+            handle = create_file(
+                os.fspath(path),
+                _WINDOWS_GENERIC_READ,
+                _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+                None,
+                _WINDOWS_OPEN_EXISTING,
+                _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )
+            invalid_handle = ctypes.c_void_p(-1).value
+            if handle is None or handle == invalid_handle:
+                raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+            try:
+                descriptor = msvcrt.open_osfhandle(
+                    int(handle),
+                    os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+                )
+            except (OSError, OverflowError, ValueError):
+                close_handle = kernel32.CloseHandle
+                close_handle.argtypes = [ctypes.c_void_p]
+                close_handle.restype = ctypes.c_int
+                close_handle(ctypes.c_void_p(handle))
+                raise
+        else:
+            flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+            flags |= int(getattr(os, "O_NOFOLLOW", 0))
+            flags |= int(getattr(os, "O_NONBLOCK", 0))
+            descriptor = os.open(path, flags)
+
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino)
+            != (expected_snapshot.st_dev, expected_snapshot.st_ino)
+        ):
+            _fail(f"{name} changed before stability lock acquisition")
+        _require_file_identity(path, expected_snapshot, name=name)
+        return descriptor
+    except PhysicalEvaluationDriverError:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+    except (AttributeError, OSError, TypeError, ValueError) as exc:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise PhysicalEvaluationDriverError(
+            f"{name} could not be locked for stable authority use"
+        ) from exc
+
+
+def _close_database_stability_lock(descriptor: int | None) -> None:
+    if descriptor is None:
+        return
+    try:
+        os.close(descriptor)
+    except OSError:
+        pass
+
+
 def _open_authority_snapshot(path: Path) -> int:
     """Open one immutable authority read snapshot across supported platforms."""
 
@@ -1547,10 +1661,47 @@ def _load_trusted_scale_progression_proof_from_root(
     workspace_id: str,
     expected_claim: dict[str, object],
 ) -> TrainingScaleProgressionProof:
+    database_path = root / "physical-pilot.sqlite3"
+    database_snapshot = _canonical_file(
+        database_path,
+        name="physical pilot database",
+    )
+    database_lock = _open_database_stability_lock(
+        database_path,
+        database_snapshot,
+        name="physical pilot database",
+    )
+    try:
+        _require_file_identity(
+            database_path,
+            database_snapshot,
+            name="physical pilot database",
+        )
+        restored = _load_trusted_scale_progression_proof_from_stable_database(
+            root,
+            database_path=database_path,
+            workspace_id=workspace_id,
+            expected_claim=expected_claim,
+        )
+        _require_file_identity(
+            database_path,
+            database_snapshot,
+            name="physical pilot database",
+        )
+        return restored
+    finally:
+        _close_database_stability_lock(database_lock)
+
+
+def _load_trusted_scale_progression_proof_from_stable_database(
+    root: Path,
+    *,
+    database_path: Path,
+    workspace_id: str,
+    expected_claim: dict[str, object],
+) -> TrainingScaleProgressionProof:
     claim = _scale_progression_claim(expected_claim)
     pilot = _physical_report(root)
-    database_path = root / "physical-pilot.sqlite3"
-    _canonical_file(database_path, name="physical pilot database")
     store = SQLiteStore(database_path)
     store.initialize()
     task = _find_pilot_task(
@@ -2710,7 +2861,42 @@ def _run_physical_evaluation_from_stable_root(
     _canonical_report_output_path(report_path)
 
     database_path = output_root / "physical-pilot.sqlite3"
-    _canonical_file(database_path, name="physical pilot database")
+    database_snapshot = _canonical_file(
+        database_path,
+        name="physical pilot database",
+    )
+    database_lock = _open_database_stability_lock(
+        database_path,
+        database_snapshot,
+        name="physical pilot database",
+    )
+    try:
+        _require_file_identity(
+            database_path,
+            database_snapshot,
+            name="physical pilot database",
+        )
+        payload = _run_physical_evaluation_with_stable_database(
+            config,
+            output_root=output_root,
+            database_path=database_path,
+        )
+        _require_file_identity(
+            database_path,
+            database_snapshot,
+            name="physical pilot database",
+        )
+        return payload
+    finally:
+        _close_database_stability_lock(database_lock)
+
+
+def _run_physical_evaluation_with_stable_database(
+    config: PhysicalEvaluationConfig,
+    *,
+    output_root: Path,
+    database_path: Path,
+) -> dict[str, object]:
     pilot = _physical_report(output_root)
 
     candidate_path = config.candidate_model_path.resolve(strict=True)
