@@ -595,6 +595,7 @@ def test_effect_uses_detached_plan_snapshot_when_original_is_mutated(
     assert bridge.begin_calls[0][2] == "toml-editor"
     assert bridge.begin_calls[0][4] == ("canonical-registry-search",)
 
+
 def test_bridge_exact_work_guard_blocks_before_resume_effect(tmp_path: Path) -> None:
     store, _repository, _preparation, prepared, request, _plan = _fixture(tmp_path)
     escalation = RecordingEscalation()
