@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import sqlite3
 import unicodedata
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -21,6 +22,11 @@ class MemoryService:
     def __init__(self, store: SQLiteStore, audit: AuditLog | None = None) -> None:
         self._store = store
         self._audit = audit
+
+    @property
+    def sqlite_store(self) -> SQLiteStore:
+        """Return the canonical SQLite authority used by this service."""
+        return self._store
 
     def put(
         self,
@@ -81,6 +87,64 @@ class MemoryService:
         expires_at: datetime | None,
         expected_updated_at: datetime | None | object,
     ) -> MemoryRecord:
+        with self._store.connection() as conn:
+            # Every mutation that assigns updated_at shares one writer boundary.
+            # This prevents an unconditional writer from deriving a revision from a
+            # stale pre-CAS snapshot and reusing another committed revision token.
+            conn.execute("BEGIN IMMEDIATE")
+            return self._put_with_connection(
+                conn,
+                scope=scope,
+                owner_id=owner_id,
+                namespace=namespace,
+                key=key,
+                value=value,
+                user_approved=user_approved,
+                expires_at=expires_at,
+                expected_updated_at=expected_updated_at,
+            )
+
+    def compare_and_put_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scope: MemoryScope,
+        owner_id: str,
+        namespace: str,
+        key: str,
+        value: Any,
+        expected_updated_at: datetime | None,
+        user_approved: bool = False,
+        expires_at: datetime | None = None,
+    ) -> MemoryRecord:
+        """Conditionally write inside a caller-owned canonical SQLite transaction."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        return self._put_with_connection(
+            conn,
+            scope=scope,
+            owner_id=owner_id,
+            namespace=namespace,
+            key=key,
+            value=value,
+            user_approved=user_approved,
+            expires_at=expires_at,
+            expected_updated_at=expected_updated_at,
+        )
+
+    def _put_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scope: MemoryScope,
+        owner_id: str,
+        namespace: str,
+        key: str,
+        value: Any,
+        user_approved: bool,
+        expires_at: datetime | None,
+        expected_updated_at: datetime | None | object,
+    ) -> MemoryRecord:
         scope = _require_scope(scope)
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)
@@ -110,97 +174,19 @@ class MemoryService:
             body.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise ValueError("memory JSON contains invalid Unicode") from exc
-        committed_record: MemoryRecord | None = None
-        with self._store.connection() as conn:
-            # Every mutation that assigns updated_at shares one writer boundary.
-            # This prevents an unconditional writer from deriving a revision from a
-            # stale pre-CAS snapshot and reusing another committed revision token.
-            conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute(
-                "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
-                "AND namespace = ? AND memory_key = ?",
-                (scope.value, owner_id, namespace, key),
-            ).fetchone()
-            existing_record = _record_from_row(existing) if existing is not None else None
-            if expected is not _UNCONDITIONAL and existing_record is not None:
-                expiry = existing_record.expires_at
-                if expiry is not None and _as_utc(expiry) <= datetime.now(UTC):
-                    cursor = conn.execute(
-                        "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
-                        "AND namespace = ? AND memory_key = ? AND updated_at = ? "
-                        "AND expires_at = ?",
-                        (
-                            scope.value,
-                            owner_id,
-                            namespace,
-                            key,
-                            existing["updated_at"],
-                            existing["expires_at"],
-                        ),
-                    )
-                    if cursor.rowcount != 1:
-                        raise MemoryConflictError(
-                            "memory record revision changed before expiry cleanup"
-                        )
-                    existing = None
-                    existing_record = None
-            _require_expected_revision(existing_record, expected)
-            now = _next_revision(
-                existing_record.updated_at if existing_record is not None else None
-            )
-            created_at = existing["created_at"] if existing is not None else now.isoformat()
-            conn.execute(
-                """INSERT INTO memory_records(
-                    scope, owner_id, namespace, memory_key, value_json, user_approved,
-                    expires_at, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(scope, owner_id, namespace, memory_key) DO UPDATE SET
-                    value_json = excluded.value_json,
-                    user_approved = excluded.user_approved,
-                    expires_at = excluded.expires_at,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    scope.value,
-                    owner_id,
-                    namespace,
-                    key,
-                    body,
-                    int(user_approved),
-                    expires_at.isoformat() if expires_at else None,
-                    created_at,
-                    now.isoformat(),
-                ),
-            )
-            if self._audit is not None:
-                self._audit.append_with_connection(
-                    conn,
-                    event_type="memory.upserted",
-                    entity_type="memory",
-                    entity_id=f"{scope.value}:{owner_id}:{namespace}:{key}",
-                    payload={
-                        "scope": scope.value,
-                        "owner_id": owner_id,
-                        "namespace": namespace,
-                        "key": key,
-                        "expires": expires_at is not None,
-                        "user_approved": user_approved,
-                        "conditional": expected is not _UNCONDITIONAL,
-                    },
-                )
-            committed = conn.execute(
-                "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
-                "AND namespace = ? AND memory_key = ?",
-                (scope.value, owner_id, namespace, key),
-            ).fetchone()
-            if committed is None:
-                raise RuntimeError("memory record disappeared during write")
-            committed_record = _record_from_row(committed)
-            committed_expiry = committed_record.expires_at
-            if (
-                committed_expiry is not None
-                and _as_utc(committed_expiry) <= datetime.now(UTC)
-            ):
+        # Every mutation that assigns updated_at shares one writer boundary.
+        # This prevents an unconditional writer from deriving a revision from a
+        # stale pre-CAS snapshot and reusing another committed revision token.
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
+            "AND namespace = ? AND memory_key = ?",
+            (scope.value, owner_id, namespace, key),
+        ).fetchone()
+        existing_record = _record_from_row(existing) if existing is not None else None
+        if expected is not _UNCONDITIONAL and existing_record is not None:
+            expiry = existing_record.expires_at
+            if expiry is not None and _as_utc(expiry) <= datetime.now(UTC):
                 cursor = conn.execute(
                     "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
                     "AND namespace = ? AND memory_key = ? AND updated_at = ? "
@@ -210,15 +196,92 @@ class MemoryService:
                         owner_id,
                         namespace,
                         key,
-                        committed["updated_at"],
-                        committed["expires_at"],
+                        existing["updated_at"],
+                        existing["expires_at"],
                     ),
                 )
                 if cursor.rowcount != 1:
                     raise MemoryConflictError(
-                        "memory record revision changed during write finalization"
+                        "memory record revision changed before expiry cleanup"
                     )
-                committed_record = None
+                existing = None
+                existing_record = None
+        _require_expected_revision(existing_record, expected)
+        now = _next_revision(
+            existing_record.updated_at if existing_record is not None else None
+        )
+        created_at = existing["created_at"] if existing is not None else now.isoformat()
+        conn.execute(
+            """INSERT INTO memory_records(
+                scope, owner_id, namespace, memory_key, value_json, user_approved,
+                expires_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope, owner_id, namespace, memory_key) DO UPDATE SET
+                value_json = excluded.value_json,
+                user_approved = excluded.user_approved,
+                expires_at = excluded.expires_at,
+                updated_at = excluded.updated_at
+            """,
+            (
+                scope.value,
+                owner_id,
+                namespace,
+                key,
+                body,
+                int(user_approved),
+                expires_at.isoformat() if expires_at else None,
+                created_at,
+                now.isoformat(),
+            ),
+        )
+        if self._audit is not None:
+            self._audit.append_with_connection(
+                conn,
+                event_type="memory.upserted",
+                entity_type="memory",
+                entity_id=f"{scope.value}:{owner_id}:{namespace}:{key}",
+                payload={
+                    "scope": scope.value,
+                    "owner_id": owner_id,
+                    "namespace": namespace,
+                    "key": key,
+                    "expires": expires_at is not None,
+                    "user_approved": user_approved,
+                    "conditional": expected is not _UNCONDITIONAL,
+                },
+            )
+        committed = conn.execute(
+            "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
+            "AND namespace = ? AND memory_key = ?",
+            (scope.value, owner_id, namespace, key),
+        ).fetchone()
+        if committed is None:
+            raise RuntimeError("memory record disappeared during write")
+        committed_record = _record_from_row(committed)
+        committed_expiry = committed_record.expires_at
+        if (
+            committed_expiry is not None
+            and _as_utc(committed_expiry) <= datetime.now(UTC)
+        ):
+            cursor = conn.execute(
+                "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                "AND namespace = ? AND memory_key = ? AND updated_at = ? "
+                "AND expires_at = ?",
+                (
+                    scope.value,
+                    owner_id,
+                    namespace,
+                    key,
+                    committed["updated_at"],
+                    committed["expires_at"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise MemoryConflictError(
+                    "memory record revision changed during write finalization"
+                )
+            committed_record = None
+
         if committed_record is None:
             raise RuntimeError("memory record expired during write")
         return committed_record
@@ -262,6 +325,50 @@ class MemoryService:
                     ),
                 )
                 return None
+        return record
+
+    def get_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scope: MemoryScope,
+        owner_id: str,
+        namespace: str,
+        key: str,
+        now: datetime | None = None,
+    ) -> MemoryRecord | None:
+        """Read one memory row inside a caller-owned canonical SQLite transaction."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        scope = _require_scope(scope)
+        owner_id = _required("owner_id", owner_id)
+        namespace = _required("namespace", namespace)
+        key = _required("key", key)
+        current = _as_utc(now) if now is not None else datetime.now(UTC)
+        row = conn.execute(
+            "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
+            "AND namespace = ? AND memory_key = ?",
+            (scope.value, owner_id, namespace, key),
+        ).fetchone()
+        if row is None:
+            return None
+        record = _record_from_row(row)
+        expires_at = record.expires_at
+        if expires_at is not None and _as_utc(expires_at) <= current:
+            conn.execute(
+                "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                "AND namespace = ? AND memory_key = ? AND updated_at = ? "
+                "AND expires_at = ?",
+                (
+                    scope.value,
+                    owner_id,
+                    namespace,
+                    key,
+                    row["updated_at"],
+                    row["expires_at"],
+                ),
+            )
+            return None
         return record
 
     def list_namespace(

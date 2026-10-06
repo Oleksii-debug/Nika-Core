@@ -186,6 +186,11 @@ class IdempotencyLedger:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
 
+    @property
+    def sqlite_store(self) -> SQLiteStore:
+        """Return the canonical SQLite authority used by this ledger."""
+        return self._store
+
     def reserve(
         self,
         *,
@@ -348,20 +353,44 @@ class IdempotencyLedger:
         """Complete only the exact still-pending reservation created by the caller."""
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._require_matching_pending_with_connection(
+            return self.complete_pending_if_matches_with_connection(
                 conn,
                 operation_key=operation_key,
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=input_fingerprint,
                 created_at=created_at,
+                result=result,
             )
-            return self._set_status_with_connection(
-                conn,
-                operation_key,
-                IdempotencyStatus.COMPLETED,
-                result,
-            )
+
+    def complete_pending_if_matches_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        operation_key: str,
+        task_id: str,
+        operation_type: str,
+        input_fingerprint: str,
+        created_at: str,
+        result: Mapping[str, Any] | None = None,
+    ) -> IdempotencyRecord:
+        """Complete an exact pending reservation inside a caller-owned transaction."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        self._require_matching_pending_with_connection(
+            conn,
+            operation_key=operation_key,
+            task_id=task_id,
+            operation_type=operation_type,
+            input_fingerprint=input_fingerprint,
+            created_at=created_at,
+        )
+        return self._set_status_with_connection(
+            conn,
+            operation_key,
+            IdempotencyStatus.COMPLETED,
+            result,
+        )
 
     def mark_pending_uncertain_if_matches(
         self,
