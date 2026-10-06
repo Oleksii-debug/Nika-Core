@@ -132,6 +132,26 @@ def _observations_sha256(observations: tuple[MetricObservation, ...]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def experiment_snapshot_evidence_identity(
+    snapshot: ExperimentSnapshot,
+) -> tuple[str, str, int]:
+    """Return the canonical durable identity of one Experiment snapshot."""
+
+    if type(snapshot) is not ExperimentSnapshot:
+        raise TypeError("snapshot must be an exact ExperimentSnapshot")
+    if type(snapshot.definition) is not ExperimentDefinition:
+        raise TypeError("snapshot definition must be an exact ExperimentDefinition")
+    ExperimentDefinition.__post_init__(snapshot.definition)
+    if type(snapshot.observations) is not tuple:
+        raise TypeError("snapshot observations must use a canonical tuple")
+    _observation_map(snapshot.observations)
+    return (
+        _definition_sha256(snapshot.definition),
+        _observations_sha256(snapshot.observations),
+        len(snapshot.observations),
+    )
+
+
 def _validate_definition(snapshot: ExperimentSnapshot, definition: ExperimentDefinition) -> None:
     if type(snapshot) is not ExperimentSnapshot:
         raise TypeError("experiment repository returned an invalid snapshot carrier")
