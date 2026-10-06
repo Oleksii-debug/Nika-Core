@@ -121,8 +121,6 @@ def test_latest_definition_projection_is_bounded(tmp_path: Path, limit: object) 
         repository.list_latest(limit=limit)  # type: ignore[arg-type]
 
 
-
-
 class _HostileString(str):
     def split(self, *args: object, **kwargs: object) -> list[str]:
         del args, kwargs
@@ -173,6 +171,46 @@ def test_router_without_builder_handler_fails_closed_before_ordinary_task(
     with store.connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM product_projects").fetchone()[0] == 0
+
+
+
+def test_builder_preserves_existing_product_project_selection(tmp_path: Path) -> None:
+    database = (tmp_path / "builder with product.db").resolve()
+    bridge, _products = nika_windows.build_windows_bridge(
+        AppConfig(database_path=database),
+        start_startup_recovery=False,
+    )
+
+    product_response = bridge.dispatch(
+        {
+            "request_id": "create-product-before-builder",
+            "action_id": "task.create",
+            "payload": {
+                "command": "Create an accessible Windows application for expense tracking"
+            },
+        }
+    )
+    before = bridge.get_state()
+    assert product_response["status"] == "completed"
+    assert before["ok"] is True
+    selected = before["state"]["product_project"]
+    assert selected is not None
+    selected_id = selected["project_id"]
+
+    builder_response = bridge.dispatch(
+        {
+            "request_id": "create-builder-after-product",
+            "action_id": "task.create",
+            "payload": {"command": "Create an agent for accessible report triage"},
+        }
+    )
+    after = bridge.get_state()
+
+    assert builder_response["status"] == "completed"
+    assert after["ok"] is True
+    assert after["state"]["product_project"]["project_id"] == selected_id
+    assert after["state"]["tasks"] == []
+    assert len(after["state"]["agent_builder_definitions"]) == 1
 
 
 def test_current_windows_bridge_routes_builder_without_creating_task_or_project(
