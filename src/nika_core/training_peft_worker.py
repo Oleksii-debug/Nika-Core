@@ -145,6 +145,16 @@ class _ResumeCheckpointLoadAuthority:
     ]
 
 
+@dataclass(frozen=True, slots=True)
+class _TrainedAdapterSourceAuthority:
+    adapter_dir: Path
+    directory_identity: tuple[int, int, int, int, int]
+    files: tuple[
+        tuple[Path, int, tuple[int, int, int, int, int]],
+        ...,
+    ]
+
+
 def _fail(code: str) -> NoReturn:
     raise PeftTrainerError(code)
 
@@ -3003,6 +3013,111 @@ def _open_resume_checkpoint_load_authority(
         _fail("resume_load_authority_invalid")
 
 
+def _close_trained_adapter_source_authority(
+    authority: _TrainedAdapterSourceAuthority,
+) -> None:
+    for _path, descriptor, _identity in authority.files:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _verify_trained_adapter_source_authority(
+    authority: _TrainedAdapterSourceAuthority,
+    *,
+    code: str = "trained_adapter_source_changed",
+) -> None:
+    current_dir = _require_directory_unlinked(
+        authority.adapter_dir,
+        code=code,
+    )
+    if _stable_stat_identity(current_dir) != authority.directory_identity:
+        _fail(code)
+    expected_paths = (
+        authority.adapter_dir / "adapter_config.json",
+        authority.adapter_dir / _CANDIDATE_FILE,
+    )
+    if tuple(path for path, _descriptor, _identity in authority.files) != expected_paths:
+        _fail(code)
+    for path, descriptor, identity in authority.files:
+        try:
+            opened = os.fstat(descriptor)
+        except OSError:
+            _fail(code)
+        current = _require_regular_unlinked(path, code=code)
+        if (
+            opened.st_nlink != 1
+            or current.st_nlink != 1
+            or _stable_stat_identity(opened) != identity
+            or _stable_stat_identity(current) != identity
+        ):
+            _fail(code)
+
+
+def _open_trained_adapter_source_authority(
+    adapter_dir: Path,
+) -> _TrainedAdapterSourceAuthority:
+    directory = _require_directory_unlinked(
+        adapter_dir,
+        code="trained_adapter_source_invalid",
+    )
+    paths = (
+        adapter_dir / "adapter_config.json",
+        adapter_dir / _CANDIDATE_FILE,
+    )
+    opened: list[
+        tuple[Path, int, tuple[int, int, int, int, int]]
+    ] = []
+    try:
+        for path in paths:
+            before = _require_regular_unlinked(
+                path,
+                code="trained_adapter_source_invalid",
+            )
+            if before.st_nlink != 1:
+                _fail("trained_adapter_source_invalid")
+            descriptor = _open_readonly_snapshot(path)
+            opened_stat = os.fstat(descriptor)
+            identity = _stable_stat_identity(before)
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or _is_reparse(opened_stat)
+                or opened_stat.st_nlink != 1
+                or _stable_stat_identity(opened_stat) != identity
+            ):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                _fail("trained_adapter_source_invalid")
+            opened.append((path, descriptor, identity))
+        authority = _TrainedAdapterSourceAuthority(
+            adapter_dir=adapter_dir,
+            directory_identity=_stable_stat_identity(directory),
+            files=tuple(opened),
+        )
+        _verify_trained_adapter_source_authority(
+            authority,
+            code="trained_adapter_source_invalid",
+        )
+        return authority
+    except PeftTrainerError:
+        for _path, descriptor, _identity in opened:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+    except OSError:
+        for _path, descriptor, _identity in opened:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        _fail("trained_adapter_source_invalid")
+
+
 class _TokenizedDataset:
     def __init__(
         self,
@@ -3625,38 +3740,75 @@ def _train_one_step(
             shutil.rmtree(resume_snapshot_root, ignore_errors=True)
 
     adapter_file = adapter_dir / _CANDIDATE_FILE
-    _validate_serialized_adapter_weights(
-        adapter_file,
-        safe_open=safe_open,
-        torch=torch,
-        invalid_code="adapter_candidate_invalid",
-        non_finite_code="adapter_candidate_non_finite",
-    )
-    after_step_adapter_sha256, _ = _hash_regular_snapshot(
-        adapter_file,
-        code="adapter_candidate_invalid",
-    )
-    if after_step_adapter_sha256 == before_step_adapter_sha256:
-        _fail("training_step_no_weight_mutation")
-    trained_adapter_tensors_sha256 = _adapter_tensor_sha256(
-        adapter_file,
-        safe_open=safe_open,
-        safe_serialize=safe_serialize,
-        torch=torch,
-        invalid_code="adapter_candidate_invalid",
-        non_finite_code="adapter_candidate_non_finite",
-    )
-    if hmac.compare_digest(
-        loaded_adapter_tensors_sha256,
-        trained_adapter_tensors_sha256,
-    ):
-        _fail("training_step_no_tensor_mutation")
+    candidate_adapter_config: dict[str, object] | None = None
+    candidate_tensors: dict[str, Any] | None = None
+    trained_source_authority = _open_trained_adapter_source_authority(adapter_dir)
+    try:
+        _validate_serialized_adapter_weights(
+            adapter_file,
+            safe_open=safe_open,
+            torch=torch,
+            invalid_code="adapter_candidate_invalid",
+            non_finite_code="adapter_candidate_non_finite",
+        )
+        after_step_adapter_sha256, _ = _hash_regular_snapshot(
+            adapter_file,
+            code="adapter_candidate_invalid",
+        )
+        if after_step_adapter_sha256 == before_step_adapter_sha256:
+            _fail("training_step_no_weight_mutation")
+        trained_adapter_tensors_sha256 = _adapter_tensor_sha256(
+            adapter_file,
+            safe_open=safe_open,
+            safe_serialize=safe_serialize,
+            torch=torch,
+            invalid_code="adapter_candidate_invalid",
+            non_finite_code="adapter_candidate_non_finite",
+        )
+        if hmac.compare_digest(
+            loaded_adapter_tensors_sha256,
+            trained_adapter_tensors_sha256,
+        ):
+            _fail("training_step_no_tensor_mutation")
+        checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
+        if request.step_index + 1 == request.max_steps:
+            candidate_adapter_config = _adapter_config_snapshot(
+                adapter_dir,
+                request,
+                config,
+            )
+            with safe_open(
+                os.fspath(adapter_file),
+                framework="pt",
+                device="cpu",
+            ) as source:
+                candidate_tensors = {
+                    name: source.get_tensor(name)
+                    for name in sorted(source.keys())
+                }
+            if not candidate_tensors:
+                _fail("adapter_candidate_empty")
+            materialized_tensor_sha256 = _canonical_adapter_tensor_sha256(
+                candidate_tensors,
+                safe_serialize=safe_serialize,
+                torch=torch,
+                invalid_code="adapter_candidate_invalid",
+                non_finite_code="adapter_candidate_non_finite",
+            )
+            if not hmac.compare_digest(
+                materialized_tensor_sha256,
+                trained_adapter_tensors_sha256,
+            ):
+                _fail("candidate_tensor_source_mismatch")
+        _verify_trained_adapter_source_authority(trained_source_authority)
+    finally:
+        _close_trained_adapter_source_authority(trained_source_authority)
+
     previous_adapter_tensors_sha256 = (
         loaded_adapter_tensors_sha256
         if previous_checkpoint is not None or initial_adapter_dir is not None
         else None
     )
-    checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
     if replay_payload_sha256 is None:
         marker_sha256 = _write_checkpoint_marker(
             checkpoint,
@@ -3685,6 +3837,8 @@ def _train_one_step(
     if request.step_index + 1 < request.max_steps:
         return resume_state, None
 
+    if candidate_adapter_config is None or candidate_tensors is None:
+        _fail("trained_adapter_source_invalid")
     candidate = candidate_artifact_path(config.output_root, request.candidate_artifact_ref)
     candidate_parent = _ensure_child_directory(
         job_root,
@@ -3695,12 +3849,11 @@ def _train_one_step(
         _fail("candidate_publish_failed")
     if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
         _fail("checkpoint_payload_changed_before_candidate")
-    adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
         request=request,
         config=config,
         consumed=consumed,
-        adapter_config=adapter_config,
+        adapter_config=candidate_adapter_config,
         previous_adapter_tensors_sha256=previous_adapter_tensors_sha256,
         trained_adapter_tensors_sha256=trained_adapter_tensors_sha256,
         tokenization_sha256=tokenization_sha256,
@@ -3729,24 +3882,8 @@ def _train_one_step(
     temporary_identity: tuple[int, int] | None = None
     published = False
     try:
-        with safe_open(os.fspath(adapter_file), framework="pt", device="cpu") as source:
-            tensors = {name: source.get_tensor(name) for name in sorted(source.keys())}
-        if not tensors:
-            _fail("adapter_candidate_empty")
-        materialized_tensor_sha256 = _canonical_adapter_tensor_sha256(
-            tensors,
-            safe_serialize=safe_serialize,
-            torch=torch,
-            invalid_code="adapter_candidate_invalid",
-            non_finite_code="adapter_candidate_non_finite",
-        )
-        if not hmac.compare_digest(
-            materialized_tensor_sha256,
-            trained_adapter_tensors_sha256,
-        ):
-            _fail("candidate_tensor_source_mismatch")
         safe_save_file(
-            tensors,
+            candidate_tensors,
             os.fspath(temporary),
             metadata={"nika_adapter_manifest": manifest_json},
         )

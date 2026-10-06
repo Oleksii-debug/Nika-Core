@@ -3935,6 +3935,104 @@ def test_final_candidate_rejects_transient_tensor_source_substitution(
     assert not candidate.exists()
 
 
+@pytest.mark.parametrize(
+    "relative_name",
+    [peft._CANDIDATE_FILE, "adapter_config.json"],
+)
+def test_trained_adapter_source_authority_pins_post_step_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_name: str,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    checkpoint = peft._checkpoint_dir(peft._job_root(config, request), 1)
+    target = checkpoint / "adapter" / relative_name
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    observed = {"blocked": False, "mutated": False}
+    attempted = False
+
+    def _mutate_then_restore() -> None:
+        nonlocal attempted
+        if attempted:
+            return
+        attempted = True
+        original = target.read_bytes()
+        try:
+            target.write_bytes(original + b"-transient-source-mutation")
+            target.write_bytes(original)
+            observed["mutated"] = True
+        except OSError:
+            observed["blocked"] = True
+
+    if relative_name == peft._CANDIDATE_FILE:
+        def _mutating_safe_open(
+            path: str,
+            *,
+            framework: str,
+            device: str,
+        ) -> _FakeSafeTensorReader:
+            if Path(path) == target:
+                _mutate_then_restore()
+            return _fake_safe_open(
+                path,
+                framework=framework,
+                device=device,
+            )
+
+        def _mutating_stack() -> tuple[object, ...]:
+            values = list(_fake_stack())
+            values[5] = _mutating_safe_open
+            return tuple(values)
+
+        monkeypatch.setattr(peft, "_import_training_stack", _mutating_stack)
+    else:
+        real_snapshot = peft._adapter_config_snapshot
+
+        def _mutating_config_snapshot(
+            path: Path,
+            parsed: peft.ParsedRequest,
+            trainer_config: peft.TrainerConfig,
+        ) -> dict[str, object]:
+            _mutate_then_restore()
+            return real_snapshot(path, parsed, trainer_config)
+
+        monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+        monkeypatch.setattr(
+            peft,
+            "_adapter_config_snapshot",
+            _mutating_config_snapshot,
+        )
+
+    if peft.os.name == "nt":
+        _, candidate_sha256 = peft._train_one_step(
+            request,
+            config,
+            consumed,
+        )
+        assert candidate_sha256 is not None
+        assert observed == {"blocked": True, "mutated": False}
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="trained_adapter_source_changed",
+        ):
+            peft._train_one_step(
+                request,
+                config,
+                consumed,
+            )
+        marker = checkpoint / peft._CHECKPOINT_MARKER
+        assert observed == {"blocked": False, "mutated": True}
+        assert not marker.exists()
+        assert not candidate.exists()
+
+
 def test_final_candidate_rejects_checkpoint_change_during_materialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
