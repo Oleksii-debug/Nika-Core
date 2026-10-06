@@ -35,6 +35,7 @@ _CHECKPOINT_MARKER = "nika_checkpoint.json"
 _CANDIDATE_FILE = "adapter_model.safetensors"
 _MAX_CHECKPOINT_FILES = 4096
 _MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
+_MAX_CHECKPOINT_MARKER_BYTES = 64 * 1024
 _MAX_RUNTIME_VERSION_BYTES = 256
 _RUNTIME_MANIFEST_DOMAIN = b"nika-peft-runtime-manifest-v1\x00"
 _TRAINING_RUNTIME_DISTRIBUTIONS = (
@@ -1053,6 +1054,67 @@ def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
     return digest.hexdigest(), total
 
 
+def _read_regular_snapshot(
+    path: Path,
+    *,
+    max_bytes: int,
+    code: str,
+) -> bytes:
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive exact integer")
+    before = _require_regular_unlinked(path, code=code)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        _fail(code)
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            _fail(code)
+        while True:
+            remaining = max_bytes + 1 - total
+            if remaining <= 0:
+                _fail(code)
+            chunk = os.read(fd, min(_READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                _fail(code)
+            chunks.append(chunk)
+        after = os.fstat(fd)
+    except PeftTrainerError:
+        raise
+    except OSError:
+        _fail(code)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    try:
+        current = os.lstat(path)
+    except OSError:
+        _fail(code)
+    identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    if (
+        total != opened.st_size
+        or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+    ):
+        _fail(code)
+    return b"".join(chunks)
+
+
 def _parse_jsonl_record(raw_line: bytes) -> TrainingExample:
     if not raw_line or len(raw_line) > _MAX_LINE_BYTES:
         _fail("dataset_record_size_invalid")
@@ -1780,26 +1842,61 @@ def _write_checkpoint_marker(
         "step_number": request.step_index + 1,
     }
     encoded = _canonical_json_bytes(marker)
+    if len(encoded) > _MAX_CHECKPOINT_MARKER_BYTES:
+        _fail("checkpoint_marker_too_large")
+    expected_sha256 = hashlib.sha256(encoded).hexdigest()
     path = checkpoint / _CHECKPOINT_MARKER
     temporary = checkpoint / f".{_CHECKPOINT_MARKER}.tmp"
+    temporary_identity: tuple[int, int] | None = None
+    published = False
     try:
         checkpoint.mkdir(parents=True, exist_ok=True)
         with temporary.open("xb") as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        temporary_stat = _require_regular_unlinked(
+            temporary,
+            code="checkpoint_marker_write_failed",
+        )
+        temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        os.link(temporary, path)
+        os.unlink(temporary)
+        published = True
     except FileExistsError:
         _fail("checkpoint_marker_conflict")
+    except PeftTrainerError:
+        raise
     except OSError:
         _fail("checkpoint_marker_write_failed")
     finally:
-        try:
-            if temporary.exists():
-                temporary.unlink()
-        except OSError:
-            pass
-    return hashlib.sha256(encoded).hexdigest()
+        if not published:
+            try:
+                if temporary.exists():
+                    temporary.unlink()
+            except OSError:
+                pass
+    if temporary_identity is None:
+        _fail("checkpoint_marker_write_failed")
+    published_stat = _require_regular_unlinked(
+        path,
+        code="checkpoint_marker_write_failed",
+    )
+    if (
+        (published_stat.st_dev, published_stat.st_ino) != temporary_identity
+        or published_stat.st_nlink != 1
+    ):
+        _best_effort_unlink_identity(path, temporary_identity)
+        _fail("checkpoint_marker_write_failed")
+    observed = _read_regular_snapshot(
+        path,
+        max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
+        code="checkpoint_marker_write_failed",
+    )
+    if not hmac.compare_digest(hashlib.sha256(observed).hexdigest(), expected_sha256):
+        _best_effort_unlink_identity(path, temporary_identity)
+        _fail("checkpoint_marker_write_failed")
+    return expected_sha256
 
 
 def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
@@ -1835,8 +1932,21 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
     if candidate != expected_resolved:
         _fail("resume_path_mismatch")
     marker_path = candidate / _CHECKPOINT_MARKER
-    _require_regular_unlinked(marker_path, code="resume_marker_missing")
-    marker_digest = _sha256_file(marker_path)
+    try:
+        marker_bytes = _read_regular_snapshot(
+            marker_path,
+            max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
+            code="resume_marker_invalid",
+        )
+    except PeftTrainerError:
+        try:
+            os.lstat(marker_path)
+        except FileNotFoundError:
+            _fail("resume_marker_missing")
+        except OSError:
+            pass
+        _fail("resume_marker_invalid")
+    marker_digest = hashlib.sha256(marker_bytes).hexdigest()
     if marker_digest != state.get("checkpoint_marker_sha256"):
         _fail("resume_marker_digest_mismatch")
     expected_payload_sha256 = _require_sha256(
@@ -1845,11 +1955,11 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
     )
     try:
         marker = json.loads(
-            marker_path.read_text(encoding="utf-8"),
+            marker_bytes.decode("utf-8", errors="strict"),
             object_pairs_hook=_strict_object,
             parse_constant=_reject_constant,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         _fail("resume_marker_invalid")
     expected_marker_keys = {
         "checkpoint_payload_sha256",
@@ -1896,17 +2006,24 @@ def _completed_step_checkpoint(
 
     marker_path = checkpoint / _CHECKPOINT_MARKER
     try:
-        _require_regular_unlinked(marker_path, code="step_checkpoint_incomplete")
-    except PeftTrainerError:
+        os.lstat(marker_path)
+    except FileNotFoundError:
         _fail("step_checkpoint_incomplete")
-    marker_sha256 = _sha256_file(marker_path)
+    except OSError:
+        _fail("step_checkpoint_marker_invalid")
+    marker_bytes = _read_regular_snapshot(
+        marker_path,
+        max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
+        code="step_checkpoint_marker_invalid",
+    )
+    marker_sha256 = hashlib.sha256(marker_bytes).hexdigest()
     try:
         marker = json.loads(
-            marker_path.read_text(encoding="utf-8"),
+            marker_bytes.decode("utf-8", errors="strict"),
             object_pairs_hook=_strict_object,
             parse_constant=_reject_constant,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         _fail("step_checkpoint_marker_invalid")
     expected_keys = {
         "checkpoint_payload_sha256",
