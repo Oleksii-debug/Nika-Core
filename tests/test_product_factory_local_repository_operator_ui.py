@@ -27,6 +27,8 @@ def test_packaged_local_repository_ui_uses_projected_versions_and_fail_closed_st
         'actionId === "product.factory.local_repository.unbind"',
         "payload.expected_binding_version",
         "payload.root_path",
+        "item.binding_status",
+        "прив’язка недійсна",
         "renderProductFactoryLocalRepositories(null)",
         "state.product_factory_local_repositories ?? null",
     ):
