@@ -43,7 +43,12 @@ def is_packaged_intelligence_mode_command(command: str) -> bool:
 
     if type(command) is not str:
         return False
-    normalized = " ".join(command.split()).strip().casefold()
+    visible_probe = "".join(
+        character
+        for character in command
+        if unicodedata.category(character) not in _FORBIDDEN_CATEGORIES
+    )
+    normalized = " ".join(visible_probe.split()).strip().casefold()
     return any(
         normalized == prefix or normalized.startswith(prefix + " ")
         for prefix in _PREFIXES
