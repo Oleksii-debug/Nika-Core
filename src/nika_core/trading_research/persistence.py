@@ -8,6 +8,10 @@ from .accounting import AccountSnapshot
 from .orders import SimulatedFill
 
 _TRADER_SCHEMA_VERSION = 3
+_MIGRATION_COLUMN_TYPES = {
+    "version": "INTEGER",
+    "applied_at": "TEXT",
+}
 _FILL_EVIDENCE_COLUMNS = (
     "approval_id",
     "intent_id",
@@ -62,6 +66,7 @@ class TradingStateRepository:
                 "CREATE TABLE IF NOT EXISTS trading_research_schema_migrations ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
             )
+            _verify_migration_schema(conn)
             row = conn.execute(
                 "SELECT MAX(version) AS version FROM trading_research_schema_migrations"
             ).fetchone()
@@ -234,6 +239,20 @@ def _upgrade_empty_legacy(conn: sqlite3.Connection, current: int) -> None:
             f"legacy trading state lacks {missing}; export/reset it before upgrade"
         )
     _create_v3_tables(conn)
+
+
+def _verify_migration_schema(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        "PRAGMA table_info(trading_research_schema_migrations)"
+    ).fetchall()
+    if _column_names(rows) != set(_MIGRATION_COLUMN_TYPES):
+        raise RuntimeError("invalid trading research migration schema")
+    if _column_types(rows) != _MIGRATION_COLUMN_TYPES:
+        raise RuntimeError("invalid trading research migration column types")
+    if _primary_key_columns(rows) != ("version",):
+        raise RuntimeError("invalid trading research migration primary key")
+    if _not_null_columns(rows) != {"applied_at"}:
+        raise RuntimeError("invalid nullable trading research migration column")
 
 
 def _verify_v3_schema(conn: sqlite3.Connection) -> None:
