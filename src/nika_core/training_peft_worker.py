@@ -30,6 +30,7 @@ _READ_CHUNK_BYTES = 1024 * 1024
 _HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:+/-]{1,256}$")
 _MATERIAL_DOMAIN = b"nika-training-consumed-materials-v1\x00"
+_STEP_ID_DOMAIN = b"nika-training-step-v2\x00"
 _CHECKPOINT_PAYLOAD_DOMAIN = b"nika-peft-checkpoint-payload-v1\x00"
 _CHECKPOINT_MARKER = "nika_checkpoint.json"
 _CHECKPOINT_MARKER_SCHEMA_VERSION = 2
@@ -246,6 +247,22 @@ def _parse_material(value: object) -> MaterialRequest:
     )
 
 
+def _expected_step_id(
+    job_fingerprint: str,
+    trainer_sha256: str,
+    step_index: int,
+) -> str:
+    material = (
+        _STEP_ID_DOMAIN
+        + job_fingerprint.encode("ascii")
+        + b"\x00"
+        + trainer_sha256.encode("ascii")
+        + b"\x00"
+        + str(step_index).encode("ascii")
+    )
+    return hashlib.sha256(material).hexdigest()
+
+
 def _parse_request(value: dict[str, object]) -> ParsedRequest:
     expected = {
         "command_artifacts",
@@ -280,6 +297,13 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
     step_index = value["step_index"]
     if type(step_index) is not int or step_index < 0:
         _fail("step_index_invalid")
+    expected_step_id = _expected_step_id(
+        job_fingerprint,
+        trainer_sha256,
+        step_index,
+    )
+    if not hmac.compare_digest(step_id, expected_step_id):
+        _fail("step_id_mismatch")
     previous_step_id_value = value["previous_step_id"]
     if step_index == 0:
         if previous_step_id_value is not None:
@@ -290,8 +314,13 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
             previous_step_id_value,
             field="previous_step_id",
         )
-        if hmac.compare_digest(previous_step_id, step_id):
-            _fail("previous_step_id_invalid")
+        expected_previous_step_id = _expected_step_id(
+            job_fingerprint,
+            trainer_sha256,
+            step_index - 1,
+        )
+        if not hmac.compare_digest(previous_step_id, expected_previous_step_id):
+            _fail("previous_step_id_mismatch")
     job = value["job"]
     if type(job) is not dict:
         _fail("job_invalid")
@@ -2152,20 +2181,30 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         )
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         _fail("resume_marker_invalid")
-    expected_marker_keys = {
+    legacy_marker_keys = {
         "checkpoint_payload_sha256",
         "consumed_materials_sha256",
         "job_fingerprint",
         "schema_version",
-        "step_id",
         "step_number",
     }
+    current_marker_keys = legacy_marker_keys | {"step_id"}
+    if type(marker) is not dict:
+        _fail("resume_marker_identity_mismatch")
+    marker_keys = set(marker)
+    if marker_keys == legacy_marker_keys:
+        if marker.get("schema_version") != _SCHEMA_VERSION:
+            _fail("resume_marker_identity_mismatch")
+    elif marker_keys == current_marker_keys:
+        if (
+            marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
+            or marker.get("step_id") != request.previous_step_id
+        ):
+            _fail("resume_marker_identity_mismatch")
+    else:
+        _fail("resume_marker_identity_mismatch")
     if (
-        type(marker) is not dict
-        or set(marker) != expected_marker_keys
-        or marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
-        or marker.get("job_fingerprint") != request.job_fingerprint
-        or marker.get("step_id") != request.previous_step_id
+        marker.get("job_fingerprint") != request.job_fingerprint
         or marker.get("step_number") != request.step_index
         or marker.get("consumed_materials_sha256")
         != request.required_consumed_materials_sha256
@@ -2222,20 +2261,30 @@ def _completed_step_checkpoint(
         )
     except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         _fail("step_checkpoint_marker_invalid")
-    expected_keys = {
+    legacy_keys = {
         "checkpoint_payload_sha256",
         "consumed_materials_sha256",
         "job_fingerprint",
         "schema_version",
-        "step_id",
         "step_number",
     }
+    current_keys = legacy_keys | {"step_id"}
+    if type(marker) is not dict:
+        _fail("step_checkpoint_marker_identity_mismatch")
+    marker_keys = set(marker)
+    if marker_keys == legacy_keys:
+        if marker.get("schema_version") != _SCHEMA_VERSION:
+            _fail("step_checkpoint_marker_identity_mismatch")
+    elif marker_keys == current_keys:
+        if (
+            marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
+            or marker.get("step_id") != request.step_id
+        ):
+            _fail("step_checkpoint_marker_identity_mismatch")
+    else:
+        _fail("step_checkpoint_marker_identity_mismatch")
     if (
-        type(marker) is not dict
-        or set(marker) != expected_keys
-        or marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
-        or marker.get("job_fingerprint") != request.job_fingerprint
-        or marker.get("step_id") != request.step_id
+        marker.get("job_fingerprint") != request.job_fingerprint
         or marker.get("step_number") != request.step_index + 1
         or marker.get("consumed_materials_sha256") != consumed_sha256
     ):
