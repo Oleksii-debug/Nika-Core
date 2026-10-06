@@ -161,13 +161,10 @@ def test_progression_schema_migration_is_applied_once(tmp_path) -> None:
 
 def _authorization(
     *,
-    progression_proof: scale.TrainingScaleProgressionProof | None = None,
+    with_progression: bool = False,
 ) -> scale.TrainingScaleAuthorization:
-    base_sha256 = (
-        _sha(b"base")
-        if progression_proof is None
-        else progression_proof.candidate_sha256
-    )
+    candidate_sha256 = _sha(b"candidate")
+    base_sha256 = candidate_sha256 if with_progression else _sha(b"base")
     shards = (
         LearningShard(
             split=LearningDataSplit.TRAINING,
@@ -222,26 +219,40 @@ def _authorization(
             ),
         ),
     )
-    tier_id = "pilot" if progression_proof is None else "small"
-    base_ref = (
-        "models/base"
-        if progression_proof is None
-        else progression_proof.candidate_artifact_ref
-    )
+    progression_proof = None
+    if with_progression:
+        progression_proof = scale._build_progression_proof(
+            plan_sha256=plan.plan_sha256,
+            tier_index=0,
+            authorization_sha256=_sha(b"pilot-authorization"),
+            job_id="pilot-job",
+            job_fingerprint=_sha(b"pilot-job"),
+            base_artifact_ref="models/base",
+            base_sha256=_sha(b"base"),
+            candidate_artifact_ref="models/candidate",
+            candidate_sha256=candidate_sha256,
+            frozen_package_sha256=_sha(b"pilot-package"),
+            training_material_sha256=_sha(b"pilot-materials"),
+            execution_plan_sha256=_sha(b"pilot-execution"),
+            comparison_evidence_sha256=_sha(b"pilot-comparison"),
+            evaluation_set_sha256=plan.evaluation_set_sha256,
+        )
     return scale.authorize_training_scale(
         plan=plan,
-        tier_id=tier_id,
-        job_id="pilot-job" if progression_proof is None else "small-job",
-        base_artifact=ArtifactIdentity(base_ref, base_sha256),
+        tier_id="small" if with_progression else "pilot",
+        job_id="small-job" if with_progression else "pilot-job",
+        base_artifact=ArtifactIdentity(
+            "models/candidate" if with_progression else "models/base",
+            base_sha256,
+        ),
         candidate_artifact_ref=(
-            "models/candidate" if progression_proof is None else "models/small-candidate"
+            "models/small-candidate" if with_progression else "models/candidate"
         ),
         material_evidence=evidence,
         execution_plan_sha256=_sha(b"execution"),
-        max_steps=2 if progression_proof is None else 4,
+        max_steps=4 if with_progression else 2,
         progression_proof=progression_proof,
     )
-
 
 def test_authorization_repository_round_trip_pilot_authority(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "state.sqlite3")
@@ -259,8 +270,9 @@ def test_authorization_repository_round_trip_pilot_authority(tmp_path) -> None:
 def test_authorization_repository_carries_trusted_previous_proof(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "state.sqlite3")
     store.initialize()
-    progression = _proof()
-    authorization = _authorization(progression_proof=progression)
+    authorization = _authorization(with_progression=True)
+    progression = authorization.progression_proof
+    assert progression is not None
     repository = SQLiteTrainingScaleAuthorizationRepository(store)
 
     repository.put(authorization)
@@ -274,8 +286,9 @@ def test_authorization_repository_carries_trusted_previous_proof(tmp_path) -> No
 def test_authorization_repository_rejects_missing_previous_proof_row(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "state.sqlite3")
     store.initialize()
-    progression = _proof()
-    authorization = _authorization(progression_proof=progression)
+    authorization = _authorization(with_progression=True)
+    progression = authorization.progression_proof
+    assert progression is not None
     repository = SQLiteTrainingScaleAuthorizationRepository(store)
     repository.put(authorization)
 
