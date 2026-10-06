@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import subprocess
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -34,6 +35,7 @@ _DEFAULT_MAX_SOURCE_FILES = 128
 _DEFAULT_MAX_FILE_BYTES = 128 * 1024
 _DEFAULT_MAX_SOURCE_BYTES = 512 * 1024
 _DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+_DEFAULT_MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024
 _DEFAULT_GIT_TIMEOUT_SECONDS = 30
 
 
@@ -70,6 +72,7 @@ class ModelGatewayLocalCodingPlanner:
     max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES
     max_source_bytes: int = _DEFAULT_MAX_SOURCE_BYTES
     max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES
+    max_git_output_bytes: int = _DEFAULT_MAX_GIT_OUTPUT_BYTES
     git_executable: str = "git"
     source_environment: Mapping[str, str] | None = None
     _repositories: Mapping[str, pathlib.Path] = field(init=False, repr=False)
@@ -89,6 +92,7 @@ class ModelGatewayLocalCodingPlanner:
             ("max_file_bytes", self.max_file_bytes),
             ("max_source_bytes", self.max_source_bytes),
             ("max_response_bytes", self.max_response_bytes),
+            ("max_git_output_bytes", self.max_git_output_bytes),
         ):
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -463,26 +467,43 @@ class ModelGatewayLocalCodingPlanner:
 
     def _git_bytes(self, repository_root: pathlib.Path, *arguments: str) -> bytes:
         try:
-            result = subprocess.run(
-                (self.git_executable, *arguments),
-                cwd=repository_root,
-                env=dict(self._environment),
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=_DEFAULT_GIT_TIMEOUT_SECONDS,
-                check=False,
-            )
+            with tempfile.SpooledTemporaryFile(
+                max_size=self.max_git_output_bytes,
+                mode="w+b",
+            ) as output:
+                result = subprocess.run(
+                    (self.git_executable, *arguments),
+                    cwd=repository_root,
+                    env=dict(self._environment),
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.DEVNULL,
+                    timeout=_DEFAULT_GIT_TIMEOUT_SECONDS,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    raise ModelGatewayLocalCodingPlannerError(
+                        f"planner Git command failed (exit {result.returncode})"
+                    )
+                size = output.tell()
+                if size > self.max_git_output_bytes:
+                    raise ModelGatewayLocalCodingPlannerError(
+                        "planner Git command output exceeds the byte limit"
+                    )
+                output.seek(0)
+                raw = output.read(self.max_git_output_bytes + 1)
+        except ModelGatewayLocalCodingPlannerError:
+            raise
         except (OSError, subprocess.SubprocessError) as exc:
             raise ModelGatewayLocalCodingPlannerError(
                 "planner Git command could not be executed"
             ) from exc
-        if result.returncode != 0:
+        if len(raw) > self.max_git_output_bytes:
             raise ModelGatewayLocalCodingPlannerError(
-                f"planner Git command failed (exit {result.returncode})"
+                "planner Git command output exceeds the byte limit"
             )
-        return bytes(result.stdout)
+        return bytes(raw)
 
 
 def _canonical_text(value: object, label: str, *, max_bytes: int) -> str:
