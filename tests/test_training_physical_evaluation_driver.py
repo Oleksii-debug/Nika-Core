@@ -782,13 +782,53 @@ def _durable_loader_fixture(
             "scale_tier_id": "pilot",
         },
     )
+
+    config = _config(tmp_path)
+    champion, challenger = _physical_candidates(tmp_path)
+    evaluation = driver._evaluation_set_from_json(
+        json.dumps(_evaluation_payload(), ensure_ascii=False)
+    )
+    experiment_id = "durable-progression-experiment"
+    _complete_promoted_experiment(
+        store=store,
+        experiment_id=experiment_id,
+        champion=champion,
+        challenger=challenger,
+        config=config,
+        evaluation=evaluation,
+    )
+    snapshot = SQLiteExperimentRepository(store).get(experiment_id)
+    definition_sha256, observations_sha256, observation_count = (
+        driver.experiment_snapshot_evidence_identity(snapshot)
+    )
+    comparison_payload = {
+        "schema": "nika-attested-training-comparison-v1",
+        "experiment_id": experiment_id,
+        "experiment_status": snapshot.status.value,
+        "selected_candidate_id": snapshot.selected_candidate_id,
+        "previous_champion_id": snapshot.previous_champion_id,
+        "training_binding_sha256": "b" * 64,
+        "champion_binding_sha256": "f" * 64,
+        "champion_benchmark_sha256": "c" * 64,
+        "challenger_benchmark_sha256": "d" * 64,
+        "attestor_id": "evaluator-artifact",
+        "attestor_sha256": "e" * 64,
+        "definition_sha256": definition_sha256,
+        "observations_sha256": observations_sha256,
+        "observation_count": observation_count,
+    }
+    comparison_evidence_sha256 = (
+        driver.attested_training_comparison_evidence_sha256(
+            comparison_payload
+        )
+    )
     claim = {
         "authorization_sha256": pilot.scale_authorization_sha256,
         "base_artifact_ref": "models/base",
         "base_sha256": pilot.base_sha256,
         "candidate_artifact_ref": pilot.candidate_artifact_ref,
         "candidate_sha256": pilot.candidate_sha256,
-        "comparison_evidence_sha256": "9" * 64,
+        "comparison_evidence_sha256": comparison_evidence_sha256,
         "evaluation_set_sha256": plan.evaluation_set_sha256,
         "execution_plan_sha256": pilot.execution_plan_sha256,
         "frozen_package_sha256": pilot.frozen_package_sha256,
@@ -821,20 +861,6 @@ def _durable_loader_fixture(
         proof=proof,
     )
 
-    config = _config(tmp_path)
-    champion, challenger = _physical_candidates(tmp_path)
-    evaluation = driver._evaluation_set_from_json(
-        json.dumps(_evaluation_payload(), ensure_ascii=False)
-    )
-    experiment_id = "durable-progression-experiment"
-    _complete_promoted_experiment(
-        store=store,
-        experiment_id=experiment_id,
-        champion=champion,
-        challenger=challenger,
-        config=config,
-        evaluation=evaluation,
-    )
     evaluation_result = {
         "schema_version": (
             driver._LEGACY_REPORT_SCHEMA_VERSION
@@ -860,12 +886,9 @@ def _durable_loader_fixture(
         "challenger_provider_manifest_sha256": None,
     }
     if not legacy_report:
-        snapshot = SQLiteExperimentRepository(store).get(experiment_id)
-        definition_sha256, observations_sha256, observation_count = (
-            driver.experiment_snapshot_evidence_identity(snapshot)
-        )
         evaluation_result.update(
             {
+                "champion_binding_sha256": "f" * 64,
                 "definition_sha256": definition_sha256,
                 "observations_sha256": observations_sha256,
                 "observation_count": observation_count,
@@ -894,7 +917,6 @@ def _durable_loader_fixture(
         lambda *_args, **_kwargs: None,
     )
     return root, claim, proof
-
 
 def test_durable_progression_loader_restores_only_completed_promoted_authority(
     tmp_path: Path,
@@ -925,6 +947,45 @@ def test_durable_progression_loader_rejects_legacy_evaluation_report(
     with pytest.raises(
         driver.PhysicalEvaluationDriverError,
         match="canonical evaluation report",
+    ):
+        driver.load_trusted_scale_progression_proof(
+            root,
+            workspace_id="evaluation-workspace",
+            expected_claim=claim,
+        )
+
+
+def test_durable_progression_loader_rejects_inconsistent_comparison_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, claim, _ = _durable_loader_fixture(tmp_path, monkeypatch)
+    store = SQLiteStore(root / "physical-pilot.sqlite3")
+    store.initialize()
+    task = driver._find_pilot_task(
+        store,
+        workspace_id="evaluation-workspace",
+        job_id="pilot-job",
+    )
+    ledger = driver.IdempotencyLedger(store)
+    record = driver._completed_progression_evaluation_record(
+        ledger,
+        task_id=task.task_id,
+        comparison_evidence_sha256=claim["comparison_evidence_sha256"],
+    )
+    tampered_result = dict(record.result)
+    tampered_result["champion_benchmark_sha256"] = "0" * 64
+    tampered = replace(record, result=tampered_result)
+
+    monkeypatch.setattr(
+        driver,
+        "_completed_progression_evaluation_record",
+        lambda *_args, **_kwargs: tampered,
+    )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="comparison evidence digest is inconsistent",
     ):
         driver.load_trusted_scale_progression_proof(
             root,
