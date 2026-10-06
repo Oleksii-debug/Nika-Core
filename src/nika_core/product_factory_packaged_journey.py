@@ -20,6 +20,7 @@ from nika_core.product_command.contracts import (
 )
 from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
+    ProductProjectDecisionNotFoundError,
     ProductProjectPresentationConsistencyError,
 )
 from nika_core.product_command.routing import route_command
@@ -88,6 +89,7 @@ _PENDING_DECISION_LIST_COMMANDS = (
     "покажи рішення productproject, що очікують",
 )
 _PENDING_DECISION_PAGE_SIZE = 8
+_MAX_PENDING_DECISION_PAGE = ((1 << 63) - 1) // _PENDING_DECISION_PAGE_SIZE + 1
 _DAILY_ACTIVITY_REPORT_COMMANDS = frozenset(
     {
         "daily activity report",
@@ -284,10 +286,18 @@ def packaged_product_decision_query(command: str) -> tuple[str, str | int] | Non
                 raise PackagedProductJourneyError(
                     "Номер сторінки рішень має бути додатним цілим числом."
                 )
-            page = int(raw_page)
-            if page < 1 or page > 1_000_000:
+            if len(raw_page) > len(str(_MAX_PENDING_DECISION_PAGE)):
                 raise PackagedProductJourneyError(
-                    "Номер сторінки рішень має бути в межах 1..1000000."
+                    "Номер сторінки рішень перевищує підтримуваний SQLite offset."
+                )
+            page = int(raw_page)
+            if page < 1:
+                raise PackagedProductJourneyError(
+                    "Номер сторінки рішень має бути додатним цілим числом."
+                )
+            if page > _MAX_PENDING_DECISION_PAGE:
+                raise PackagedProductJourneyError(
+                    "Номер сторінки рішень перевищує підтримуваний SQLite offset."
                 )
             return "list", page
 
@@ -571,34 +581,32 @@ class PackagedProductCommandRouter:
             focus_id="product-project-decision-heading",
         )
 
-    def _project_detail_for_decision_read(self) -> ProductProjectDetail:
+    def _decision_read_project_id(self) -> str:
         project_id = self._active_project_id
         if project_id is None:
             raise PackagedProductJourneyError(
                 "Поточний ProductProject не вибрано. Спочатку створіть або відкрийте його."
             )
+        return project_id
+
+    def _describe_product_decision(self, decision_id: str) -> UIResult:
+        project_id = self._decision_read_project_id()
         try:
-            return self._products.inspect_project(project_id)
+            decision = self._products.inspect_decision(project_id, decision_id)
+        except ProductProjectDecisionNotFoundError as exc:
+            raise PackagedProductJourneyError(
+                f"Рішення ProductProject не знайдено: {decision_id}."
+            ) from exc
         except KeyError as exc:
             self.clear_stale_selection()
             raise PackagedProductJourneyError(
-                "Збережений ProductProject більше не існує. Застарілий вибір очищено."
+                "Збережений ProductProject більше не існує. "
+                "Застарілий вибір очищено."
             ) from exc
         except ProductProjectPresentationConsistencyError as exc:
             raise PackagedProductJourneyError(
                 "ProductProject changed while decision state was read; retry the command."
             ) from exc
-
-    def _describe_product_decision(self, decision_id: str) -> UIResult:
-        detail = self._project_detail_for_decision_read()
-        matches = [
-            item for item in detail.decisions if item.decision_id == decision_id
-        ]
-        if len(matches) != 1:
-            raise PackagedProductJourneyError(
-                f"Рішення ProductProject не знайдено: {decision_id}."
-            )
-        decision = matches[0]
         return UIResult(
             request_id="desktop-handler",
             status="completed",
@@ -611,25 +619,36 @@ class PackagedProductCommandRouter:
         )
 
     def _list_pending_product_decisions(self, page: int) -> UIResult:
-        detail = self._project_detail_for_decision_read()
-        pending = sorted(
-            (item for item in detail.decisions if item.state == "pending"),
-            key=lambda item: item.decision_id,
-        )
-        if not pending:
+        project_id = self._decision_read_project_id()
+        start = (page - 1) * _PENDING_DECISION_PAGE_SIZE
+        try:
+            selected, total = self._products.list_decisions_by_state(
+                project_id,
+                ProductDecisionState.PROPOSED,
+                limit=_PENDING_DECISION_PAGE_SIZE,
+                offset=start,
+            )
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. Застарілий вибір очищено."
+            ) from exc
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "ProductProject changed while decision state was read; retry the command."
+            ) from exc
+        if total == 0:
             return UIResult(
                 request_id="desktop-handler",
                 status="completed",
                 message="Рішень ProductProject, що очікують власника, немає.",
                 focus_id="product-project-heading",
             )
-        start = (page - 1) * _PENDING_DECISION_PAGE_SIZE
-        if start >= len(pending):
-            last_page = (len(pending) - 1) // _PENDING_DECISION_PAGE_SIZE + 1
+        if not selected:
+            last_page = (total - 1) // _PENDING_DECISION_PAGE_SIZE + 1
             raise PackagedProductJourneyError(
                 f"Сторінка {page} відсутня. Остання сторінка: {last_page}."
             )
-        selected = pending[start : start + _PENDING_DECISION_PAGE_SIZE]
         end = start + len(selected)
         summary = " | ".join(
             f"{item.decision_id}; {item.title}; R{item.risk_level}"
@@ -637,7 +656,7 @@ class PackagedProductCommandRouter:
         )
         next_hint = (
             ""
-            if end >= len(pending)
+            if end >= total
             else (
                 " Наступна сторінка: list pending product decisions page "
                 f"{page + 1}."
@@ -648,7 +667,7 @@ class PackagedProductCommandRouter:
             status="completed",
             message=(
                 f"Рішення ProductProject, що очікують власника: "
-                f"{start + 1}-{end} із {len(pending)}. {summary}.{next_hint}"
+                f"{start + 1}-{end} із {total}. {summary}.{next_hint}"
             ),
             focus_id="product-project-heading",
         )

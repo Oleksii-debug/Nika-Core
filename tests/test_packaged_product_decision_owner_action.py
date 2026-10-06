@@ -169,8 +169,21 @@ def test_pf1_corrupt_unpresentable_persisted_decision_id_fails_closed(
     assert repository.get(_PROJECT_ID).row_version == 1
 
 
+def test_missing_decision_equal_to_project_id_does_not_clear_valid_selection(
+    tmp_path: Path,
+) -> None:
+    _store, repository, _service, router = _build(tmp_path / "id-collision.db")
+
+    with pytest.raises(PackagedProductJourneyError, match="не знайдено"):
+        router.create({"command": f"show product decision {_PROJECT_ID}"})
+
+    assert router.active_project_id == _PROJECT_ID
+    assert repository.get(_PROJECT_ID).project_id == _PROJECT_ID
+
+
 def test_multiple_pending_decisions_are_discoverable_by_bounded_pages_and_exact_read(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _store, repository, service, router = _build(tmp_path / "pending-pages.db")
     for index in range(9):
@@ -211,6 +224,11 @@ def test_multiple_pending_decisions_are_discoverable_by_bounded_pages_and_exact_
             idempotency_key=f"decision:page:{index:02d}",
         )
 
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("packaged decision reads must not materialize list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
+
     before = repository.get(_PROJECT_ID)
     first = router.create({"command": "list pending product decisions"})
     second = router.create(
@@ -238,6 +256,33 @@ def test_multiple_pending_decisions_are_discoverable_by_bounded_pages_and_exact_
     assert "Question for owner 00" in exact.message
     assert "стан pending" in exact.message
     assert repository.get(_PROJECT_ID) == before
+
+
+def test_pending_page_rejects_corrupt_current_decision_beyond_visible_window(
+    tmp_path: Path,
+) -> None:
+    store, repository, _service, router = _build(tmp_path / "hidden-corrupt.db")
+    with store.connection() as conn:
+        for index in range(8):
+            conn.execute(
+                "INSERT INTO product_decisions("
+                "project_id,decision_id,decision_version,option_id,state,rationale,"
+                "decided_by_ref,evidence_package_ids_json,created_at) "
+                "SELECT project_id,?,1,option_id,state,rationale,decided_by_ref,"
+                "evidence_package_ids_json,created_at FROM product_decisions "
+                "WHERE project_id=? AND decision_id=? AND decision_version=1",
+                (f"decision-{index:02d}", _PROJECT_ID, "decision-owner"),
+            )
+        conn.execute(
+            "UPDATE product_decisions SET state=? "
+            "WHERE project_id=? AND decision_id=?",
+            ("corrupt-hidden-state", _PROJECT_ID, "decision-owner"),
+        )
+
+    with pytest.raises(ValueError, match="persisted product decision state is invalid"):
+        router.create({"command": "list pending product decisions"})
+
+    assert repository.get(_PROJECT_ID).row_version == 1
 
 
 def test_approval_is_two_step_and_replay_does_not_mint_second_effect(
@@ -487,7 +532,11 @@ def test_stale_project_between_request_and_confirmation_fails_closed_then_recove
         ),
         (
             "list pending product decisions page 0",
-            "1..1000000",
+            "додатним цілим",
+        ),
+        (
+            "list pending product decisions page 9999999999999999999",
+            "SQLite offset",
         ),
         (
             "list pending product decisions page many",
