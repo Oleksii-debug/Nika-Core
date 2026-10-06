@@ -613,6 +613,7 @@ def test_snapshot_open_uses_nonblocking_descriptor_flag(
 @pytest.mark.skipif(release_module.os.name != "nt", reason="Windows file-share semantics")
 def test_snapshot_open_refuses_writer_and_holds_write_fence(tmp_path: Path) -> None:
     payload = tmp_path / "payload.bin"
+    renamed = tmp_path / "renamed.bin"
     payload.write_bytes(b"payload")
 
     with payload.open("r+b"):
@@ -623,7 +624,11 @@ def test_snapshot_open_refuses_writer_and_holds_write_fence(tmp_path: Path) -> N
         assert handle.read() == b"payload"
         with pytest.raises(OSError):
             payload.write_bytes(b"replacement")
+        with pytest.raises(OSError):
+            payload.replace(renamed)
 
+    payload.replace(renamed)
+    renamed.replace(payload)
     payload.write_bytes(b"replacement")
     assert payload.read_bytes() == b"replacement"
 
