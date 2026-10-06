@@ -286,7 +286,8 @@ def build_windows_bridge(
         and config.product_factory_local_startup_json is not None
     ):
         raise ValueError(
-            "explicit Product Factory execution host conflicts with packaged local startup authority"
+            "explicit Product Factory execution host conflicts with "
+            "packaged local startup authority"
         )
     if (
         product_factory_execution_host is None
