@@ -549,9 +549,9 @@ class PhysicalTrainingPilotReport:
             _fail("candidate_byte_count must be a positive signed-64 integer")
         if (
             type(self.completed_steps) is not int
-            or self.completed_steps != 2
+            or not 2 <= self.completed_steps <= _MAX_STEPS
         ):
-            _fail("physical pilot report requires exactly two completed steps")
+            _fail("physical pilot report requires a bounded multi-step completion")
 
     def canonical_payload(self) -> dict[str, object]:
         return {
@@ -962,8 +962,8 @@ def build_physical_training_pilot_report(
         _fail("physical pilot must pause exactly after its first trainer step")
     if restart_probe.next_step != 1:
         _fail("restarted runtime did not reopen the one-step durable checkpoint")
-    if completed.next_step != 2:
-        _fail("physical pilot must complete exactly the bounded two-step run")
+    if not 2 <= completed.next_step <= _MAX_STEPS:
+        _fail("physical pilot must complete a bounded multi-step run")
     if paused.candidate_sha256 is not None or restart_probe.candidate_sha256 is not None:
         _fail("paused pilot evidence must not already publish a candidate")
     checkpoint_ids = (
@@ -1116,7 +1116,7 @@ def run_physical_training_pilot(
     ],
     candidate_root: Path | None = None,
 ) -> PhysicalTrainingPilotReport:
-    """Exercise one real Windows subprocess step, reopen, resume, and verify candidate bytes."""
+    """Exercise one Windows step, reopen, resume to bounded completion, and verify bytes."""
 
     if not _is_windows():
         _fail("physical PEFT pilot must execute on Windows")
@@ -1131,8 +1131,8 @@ def run_physical_training_pilot(
         raise TypeError("restart factories must be callable")
     if not callable(candidate_descriptor_factory):
         raise TypeError("candidate_descriptor_factory must be callable")
-    if canonical_spec.max_steps != 2:
-        _fail("physical pilot requires exactly max_steps == 2")
+    if not 2 <= canonical_spec.max_steps <= _MAX_STEPS:
+        _fail("physical pilot requires at least two bounded training steps")
     if worker.last_accepted_consumed_materials_sha256 is not None:
         _fail("initial worker already carries accepted consumed-material evidence")
     initial_execution_plan_sha256 = _require_sha256(
