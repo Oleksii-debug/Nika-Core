@@ -933,13 +933,21 @@ def _commondir_identity(
 ) -> tuple[str | None, str | None, str | None]:
     marker = git_directory / "commondir"
     try:
-        marker.lstat()
+        marker_stat = marker.lstat()
     except FileNotFoundError:
         return None, None, None
     except OSError as exc:
         raise ProductFactoryLocalRepositoryBindingError(
             "Product Factory commondir metadata is unreadable"
         ) from exc
+    if (
+        stat.S_ISLNK(marker_stat.st_mode)
+        or _is_reparse_point(marker_stat)
+        or not stat.S_ISREG(marker_stat.st_mode)
+    ):
+        raise ProductFactoryLocalRepositoryBindingError(
+            "Product Factory commondir metadata must be a regular non-indirect file"
+        )
     raw, _ = _read_held_metadata_file(
         marker,
         label="commondir metadata",
