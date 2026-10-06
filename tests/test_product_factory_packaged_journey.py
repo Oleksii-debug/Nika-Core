@@ -17,6 +17,10 @@ from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
     ProductProjectPresentationConsistencyError,
 )
+from nika_core.product_factory_packaged_plan_file import (
+    PackagedExecutionPlanFileError,
+    PackagedExecutionPlanFileResolver,
+)
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductJourneyError,
@@ -407,3 +411,186 @@ def test_release_builder_records_packaged_pf11_restart_evidence(
     assert payload["human_tested"] is False
     assert payload["nvda_verified"] is False
     assert payload["production_release_ready"] is False
+
+
+def _packaged_execution_plan_file_payload(project_id: str) -> bytes:
+    return json.dumps(
+        {
+            "schema": "nika-packaged-product-factory-execution-plan-v1",
+            "project_id": project_id,
+            "expected_spec_version": 1,
+            "expected_row_version": 0,
+            "graph_version": 1,
+            "repositories": [
+                {
+                    "repository_id": "repo-core",
+                    "provider": "github",
+                    "locator": "Oleksii-debug/Nika-Core",
+                    "default_branch": "main",
+                    "credential_ref": None,
+                    "case_sensitive_paths": True,
+                }
+            ],
+            "components": [
+                {
+                    "component_id": "core",
+                    "repository_id": "repo-core",
+                    "paths": ["src/nika_core"],
+                    "dependencies": [],
+                    "build_commands": [],
+                    "test_commands": [["python", "-m", "pytest", "tests"]],
+                    "release_identity": None,
+                }
+            ],
+            "base_shas": {"repo-core": "c" * 40},
+            "component_goals": {"core": "Implement the accepted ProductProject"},
+            "permission_ceiling": ["read_source", "write_source", "run_tests"],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def test_packaged_execution_plan_file_resolver_reads_exact_project_plan(
+    tmp_path: Path,
+) -> None:
+    project_id = "product-" + "a" * 64
+    directory = tmp_path / "plans"
+    directory.mkdir()
+    (directory / f"{project_id}.json").write_bytes(
+        _packaged_execution_plan_file_payload(project_id)
+    )
+
+    plan = PackagedExecutionPlanFileResolver(directory)(project_id)
+
+    assert plan.project_id == project_id
+    assert plan.graph.project_id == project_id
+    assert tuple(plan.base_shas) == ("repo-core",)
+    assert tuple(plan.component_goals) == ("core",)
+
+
+def test_packaged_execution_plan_file_resolver_rejects_other_project_payload(
+    tmp_path: Path,
+) -> None:
+    project_id = "product-" + "a" * 64
+    directory = tmp_path / "plans"
+    directory.mkdir()
+    (directory / f"{project_id}.json").write_bytes(
+        _packaged_execution_plan_file_payload("product-" + "b" * 64)
+    )
+
+    with pytest.raises(PackagedExecutionPlanFileError, match="another ProductProject"):
+        PackagedExecutionPlanFileResolver(directory)(project_id)
+
+
+def test_packaged_execution_plan_file_resolver_rejects_oversized_file(
+    tmp_path: Path,
+) -> None:
+    project_id = "product-" + "a" * 64
+    directory = tmp_path / "plans"
+    directory.mkdir()
+    (directory / f"{project_id}.json").write_bytes(b"x" * (1024 * 1024 + 1))
+
+    with pytest.raises(PackagedExecutionPlanFileError, match="byte limit"):
+        PackagedExecutionPlanFileResolver(directory)(project_id)
+
+
+def test_packaged_execution_plan_file_resolver_rejects_hardlink_alias(
+    tmp_path: Path,
+) -> None:
+    project_id = "product-" + "a" * 64
+    directory = tmp_path / "plans"
+    directory.mkdir()
+    plan_path = directory / f"{project_id}.json"
+    plan_path.write_bytes(_packaged_execution_plan_file_payload(project_id))
+    alias = tmp_path / "plan-alias.json"
+    try:
+        os.link(plan_path, alias)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"hard links unavailable: {type(exc).__name__}")
+
+    with pytest.raises(PackagedExecutionPlanFileError, match="one pathname authority"):
+        PackagedExecutionPlanFileResolver(directory)(project_id)
+
+
+def test_packaged_execution_plan_file_resolver_rejects_symlink(
+    tmp_path: Path,
+) -> None:
+    project_id = "product-" + "a" * 64
+    directory = tmp_path / "plans"
+    directory.mkdir()
+    target = tmp_path / "real-plan.json"
+    target.write_bytes(_packaged_execution_plan_file_payload(project_id))
+    plan_path = directory / f"{project_id}.json"
+    try:
+        plan_path.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        pytest.skip(f"symbolic links unavailable: {type(exc).__name__}")
+
+    with pytest.raises(PackagedExecutionPlanFileError, match="regular non-reparse"):
+        PackagedExecutionPlanFileResolver(directory)(project_id)
+
+
+def test_packaged_execution_plan_file_resolver_rejects_path_mutation_during_decode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nika_core.product_factory_packaged_plan_file as plan_file_module
+
+    project_id = "product-" + "a" * 64
+    directory = tmp_path / "plans"
+    directory.mkdir()
+    plan_path = directory / f"{project_id}.json"
+    payload = _packaged_execution_plan_file_payload(project_id)
+    plan_path.write_bytes(payload)
+    resolver = PackagedExecutionPlanFileResolver(directory)
+    original_decode = plan_file_module.decode_packaged_product_factory_execution_plan
+
+    def mutate_after_decode(raw: bytes):
+        plan = original_decode(raw)
+        replacement = directory / "replacement.json"
+        replacement.write_bytes(payload + b" ")
+        os.replace(replacement, plan_path)
+        return plan
+
+    monkeypatch.setattr(
+        plan_file_module,
+        "decode_packaged_product_factory_execution_plan",
+        mutate_after_decode,
+    )
+
+    with pytest.raises(PackagedExecutionPlanFileError, match="changed during admission"):
+        resolver(project_id)
+
+
+def test_packaged_execution_plan_file_resolver_rejects_directory_replacement(
+    tmp_path: Path,
+) -> None:
+    project_id = "product-" + "a" * 64
+    directory = tmp_path / "plans"
+    directory.mkdir()
+    plan_path = directory / f"{project_id}.json"
+    plan_path.write_bytes(_packaged_execution_plan_file_payload(project_id))
+    resolver = PackagedExecutionPlanFileResolver(directory)
+
+    moved = tmp_path / "plans-old"
+    directory.rename(moved)
+    directory.mkdir()
+    (directory / f"{project_id}.json").write_bytes(
+        _packaged_execution_plan_file_payload(project_id)
+    )
+
+    with pytest.raises(PackagedExecutionPlanFileError, match="directory identity changed"):
+        resolver(project_id)
+
+
+def test_packaged_execution_plan_file_resolver_rejects_noncanonical_project_id(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "plans"
+    directory.mkdir()
+    resolver = PackagedExecutionPlanFileResolver(directory)
+
+    with pytest.raises(PackagedExecutionPlanFileError, match="canonical ProductProject"):
+        resolver("../product-" + "a" * 64)
