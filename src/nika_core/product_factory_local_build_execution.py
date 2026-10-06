@@ -693,7 +693,7 @@ def _production_integrity_snapshot(
                 "production repository integrity snapshot could not be proven"
             )
     commit = head.stdout.strip().casefold()
-    if len(commit) not in {40, 64} or any(
+    if len(commit) != 40 or any(
         character not in "0123456789abcdef" for character in commit
     ):
         raise WorkspaceSecurityError("production repository HEAD identity is invalid")
