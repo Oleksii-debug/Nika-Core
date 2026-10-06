@@ -169,6 +169,7 @@ def build_windows_bridge(
     *,
     cloud_permission_confirm: CloudModelPermissionConfirm | None = None,
     activity_report_day: Callable[[], date] | None = None,
+    start_startup_recovery: bool = True,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
     store = SQLiteStore(config.database_path)
     store.initialize()
@@ -315,13 +316,14 @@ def build_windows_bridge(
         },
         state_provider=source_state,
     )
-    try:
-        backend.start_startup_recovery()
-    except Exception as exc:
-        backend.close()
-        raise _StartupRecoveryInventoryError(
-            "packaged startup recovery inventory failed"
-        ) from exc
+    if start_startup_recovery:
+        try:
+            backend.start_startup_recovery()
+        except Exception as exc:
+            backend.close()
+            raise _StartupRecoveryInventoryError(
+                "packaged startup recovery inventory failed"
+            ) from exc
     return bridge, products
 
 
@@ -388,7 +390,7 @@ def _run_pf11_proof(
     command: str,
     output_path: Path | None,
 ) -> int:
-    bridge, products = build_windows_bridge(config)
+    bridge, products = build_windows_bridge(config, start_startup_recovery=False)
     decision = route_command(command)
     if decision.normalized_goal is None:
         raise RuntimeError("PF11 proof command did not produce a normalized ProductProject goal")

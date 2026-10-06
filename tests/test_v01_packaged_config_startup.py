@@ -107,6 +107,58 @@ def test_storage_startup_failure_is_accessible_private_and_does_not_launch_shell
 
 
 
+def test_build_windows_bridge_can_disable_startup_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+
+    def fail_if_started(_self: object, **_kwargs: object) -> dict[str, object]:
+        pytest.fail("startup recovery must stay disabled for proof composition")
+
+    monkeypatch.setattr(
+        nika_windows.DesktopBackend,
+        "start_startup_recovery",
+        fail_if_started,
+    )
+
+    bridge, products = nika_windows.build_windows_bridge(
+        config,
+        start_startup_recovery=False,
+    )
+
+    assert bridge is not None
+    assert products is not None
+
+
+def test_pf11_proof_requests_bridge_without_startup_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+    observed: list[bool] = []
+
+    def capture_bridge(
+        _config: AppConfig,
+        *,
+        start_startup_recovery: bool = True,
+        **_kwargs: object,
+    ) -> tuple[object, object]:
+        observed.append(start_startup_recovery)
+        raise RuntimeError("PROOF_BRIDGE_CAPTURE")
+
+    monkeypatch.setattr(nika_windows, "build_windows_bridge", capture_bridge)
+
+    with pytest.raises(RuntimeError, match="PROOF_BRIDGE_CAPTURE"):
+        nika_windows._run_pf11_proof(
+            config,
+            command="Створи тестовий ProductProject",
+            output_path=None,
+        )
+
+    assert observed == [False]
+
+
 def test_bridge_composition_failure_happens_before_startup_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
