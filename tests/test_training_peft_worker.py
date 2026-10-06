@@ -57,6 +57,10 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _step_id(step_index: int) -> str:
+    return peft._expected_step_id("1" * 64, "b" * 64, step_index)
+
+
 def _body(prompt: str, response: str) -> bytes:
     return (
         json.dumps(
@@ -143,7 +147,7 @@ def _request(tmp_path: Path, *, max_steps: int = 2) -> tuple[dict[str, object], 
         "previous_step_id": None,
         "protocol_version": 3,
         "resume_state": {},
-        "step_id": "2" * 64,
+        "step_id": _step_id(0),
         "step_index": 0,
         "trainer_artifact_id": "a" * 64,
         "trainer_sha256": "b" * 64,
@@ -201,6 +205,34 @@ def test_protocol_v3_materials_are_rehashed_and_parsed(tmp_path: Path) -> None:
     assert consumed.attestation_sha256 == request.required_consumed_materials_sha256
     assert consumed.training == (peft.TrainingExample("train", "answer"),)
     assert consumed.validation == (peft.TrainingExample("validate", "answer"),)
+
+
+def test_request_enforces_step_identity_chain(tmp_path: Path) -> None:
+    initial, _ = _request(tmp_path)
+    initial["previous_step_id"] = "9" * 64
+    with pytest.raises(peft.PeftTrainerError, match="previous_step_id_invalid"):
+        peft._parse_request(initial)
+
+    wrong_current, _ = _request(tmp_path, max_steps=2)
+    wrong_current["step_id"] = "9" * 64
+    with pytest.raises(peft.PeftTrainerError, match="step_id_mismatch"):
+        peft._parse_request(wrong_current)
+
+    resumed, _ = _request(tmp_path, max_steps=2)
+    resumed["step_index"] = 1
+    resumed["step_id"] = _step_id(1)
+    resumed["previous_step_id"] = None
+    with pytest.raises(peft.PeftTrainerError, match="previous_step_id"):
+        peft._parse_request(resumed)
+
+    resumed["previous_step_id"] = resumed["step_id"]
+    with pytest.raises(peft.PeftTrainerError, match="previous_step_id_mismatch"):
+        peft._parse_request(resumed)
+
+    resumed["previous_step_id"] = _step_id(0)
+    parsed = peft._parse_request(resumed)
+    assert parsed.step_id == _step_id(1)
+    assert parsed.previous_step_id == _step_id(0)
 
 
 def test_material_tamper_fails_before_training(tmp_path: Path) -> None:
@@ -440,7 +472,7 @@ def test_resume_marker_binds_job_step_and_consumed_materials(tmp_path: Path) -> 
     raw_request, _ = _request(tmp_path)
     raw_request["step_index"] = 1
     raw_request["previous_step_id"] = request.step_id
-    raw_request["step_id"] = "3" * 64
+    raw_request["step_id"] = _step_id(1)
     raw_request["resume_state"] = resume
     second = peft._parse_request(raw_request)
 
@@ -451,6 +483,197 @@ def test_resume_marker_binds_job_step_and_consumed_materials(tmp_path: Path) -> 
     tampered = peft._parse_request(raw_request)
     with pytest.raises(peft.PeftTrainerError, match="resume_marker_digest_mismatch"):
         peft._resume_checkpoint(job_root, tampered)
+
+
+def test_resume_marker_binds_exact_previous_step_id(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    payload_sha = peft._checkpoint_payload_manifest_sha256(checkpoint)
+    peft._write_checkpoint_marker(
+        checkpoint,
+        request=request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha,
+    )
+    marker_path = checkpoint / peft._CHECKPOINT_MARKER
+    marker = json.loads(marker_path.read_bytes())
+    marker["step_id"] = "4" * 64
+    marker_bytes = peft._canonical_json_bytes(marker)
+    marker_path.write_bytes(marker_bytes)
+    resume = {
+        "checkpoint_marker_sha256": _sha256(marker_bytes),
+        "checkpoint_payload_sha256": payload_sha,
+        "checkpoint_step": 1,
+        "job_fingerprint": request.job_fingerprint,
+        "relative_path": checkpoint.relative_to(job_root).as_posix(),
+        "schema_version": 1,
+    }
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["step_id"] = _step_id(1)
+    raw_second["previous_step_id"] = _step_id(0)
+    raw_second["resume_state"] = resume
+    second = peft._parse_request(raw_second)
+
+    with pytest.raises(peft.PeftTrainerError, match="resume_marker_identity_mismatch"):
+        peft._resume_checkpoint(job_root, second)
+
+
+def test_checkpoint_marker_publication_is_create_only(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    payload_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+
+    marker_sha256 = peft._write_checkpoint_marker(
+        checkpoint,
+        request=request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha256,
+    )
+    marker = checkpoint / peft._CHECKPOINT_MARKER
+    marker_bytes = marker.read_bytes()
+    assert marker_sha256 == _sha256(marker_bytes)
+
+    with pytest.raises(peft.PeftTrainerError, match="checkpoint_marker_conflict"):
+        peft._write_checkpoint_marker(
+            checkpoint,
+            request=request,
+            consumed_sha256=request.required_consumed_materials_sha256,
+            checkpoint_payload_sha256=payload_sha256,
+        )
+
+    assert marker.read_bytes() == marker_bytes
+    assert not (checkpoint / f".{peft._CHECKPOINT_MARKER}.tmp").exists()
+
+
+def test_completed_checkpoint_recovers_known_postlink_marker_temp(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    job_root = peft._ensure_job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    payload_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+    marker_sha256 = peft._write_checkpoint_marker(
+        checkpoint,
+        request=request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha256,
+    )
+    marker = checkpoint / peft._CHECKPOINT_MARKER
+    temporary = checkpoint / f".{peft._CHECKPOINT_MARKER}.tmp"
+    temporary.hardlink_to(marker)
+    assert marker.stat().st_nlink == 2
+
+    recovered = peft._completed_step_checkpoint(
+        job_root,
+        request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+    )
+
+    assert recovered == (checkpoint, marker_sha256, payload_sha256)
+    assert marker.stat().st_nlink == 1
+    assert not temporary.exists()
+
+
+def test_completed_checkpoint_recovers_matching_prelink_marker_temp(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    job_root = peft._ensure_job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    payload_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+    marker_sha256 = peft._write_checkpoint_marker(
+        checkpoint,
+        request=request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha256,
+    )
+    marker = checkpoint / peft._CHECKPOINT_MARKER
+    temporary = checkpoint / f".{peft._CHECKPOINT_MARKER}.tmp"
+    temporary.write_bytes(marker.read_bytes())
+    assert marker.stat().st_nlink == 1
+    assert temporary.stat().st_nlink == 1
+
+    recovered = peft._completed_step_checkpoint(
+        job_root,
+        request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+    )
+
+    assert recovered == (checkpoint, marker_sha256, payload_sha256)
+    assert marker.stat().st_nlink == 1
+    assert not temporary.exists()
+
+
+def test_completed_checkpoint_rejects_unknown_marker_hardlink(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    job_root = peft._ensure_job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    payload_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+    peft._write_checkpoint_marker(
+        checkpoint,
+        request=request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha256,
+    )
+    marker = checkpoint / peft._CHECKPOINT_MARKER
+    outside = tmp_path / "unexpected-marker-hardlink"
+    outside.hardlink_to(marker)
+    assert marker.stat().st_nlink == 2
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="step_checkpoint_marker_invalid",
+    ):
+        peft._completed_step_checkpoint(
+            job_root,
+            request,
+            consumed_sha256=request.required_consumed_materials_sha256,
+        )
+
+    assert marker.stat().st_nlink == 2
+    assert outside.exists()
+
+
+def test_completed_step_checkpoint_rejects_oversized_marker(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    job_root = peft._ensure_job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    (checkpoint / peft._CHECKPOINT_MARKER).write_bytes(
+        b"x" * (peft._MAX_CHECKPOINT_MARKER_BYTES + 1)
+    )
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="step_checkpoint_marker_invalid",
+    ):
+        peft._completed_step_checkpoint(
+            job_root,
+            request,
+            consumed_sha256=request.required_consumed_materials_sha256,
+        )
 
 
 def test_resume_rejects_tampered_checkpoint_payload(tmp_path: Path) -> None:
@@ -479,7 +702,7 @@ def test_resume_rejects_tampered_checkpoint_payload(tmp_path: Path) -> None:
     raw_request, _ = _request(tmp_path)
     raw_request["step_index"] = 1
     raw_request["previous_step_id"] = request.step_id
-    raw_request["step_id"] = "3" * 64
+    raw_request["step_id"] = _step_id(1)
     raw_request["resume_state"] = resume
     second = peft._parse_request(raw_request)
 
@@ -519,6 +742,30 @@ def test_response_tokens_must_survive_sequence_budget() -> None:
             tokenizer,
             32,
         )
+
+
+def test_partial_response_truncation_is_rejected() -> None:
+    tokenizer = _FakeTokenizer()
+
+    with pytest.raises(peft.PeftTrainerError, match="response_tokens_truncated"):
+        peft._TokenizedDataset(
+            (peft.TrainingExample("p" * 27, "answer"),),
+            tokenizer,
+            32,
+        )
+
+
+def test_complete_sequence_at_budget_is_accepted_without_partial_response() -> None:
+    tokenizer = _FakeTokenizer()
+    dataset = peft._TokenizedDataset(
+        (peft.TrainingExample("p", "a"),),
+        tokenizer,
+        8,
+    )
+
+    item = dataset[0]
+    assert len(item["input_ids"]) == 8
+    assert len(item["attention_mask"]) == 8
 
 
 class _FakeTokenizerFactory:
@@ -775,6 +1022,15 @@ def _non_finite_mutation_fake_stack() -> tuple[object, ...]:
     return _trainer_variant_stack(_NonFiniteMutationFakeTrainer)
 
 
+class _MustNotTrainFakeTrainer(_FakeTrainer):
+    def __init__(self, **kwargs: object) -> None:
+        raise AssertionError("durable completed step must replay without Trainer construction")
+
+
+def _must_not_train_fake_stack() -> tuple[object, ...]:
+    return _trainer_variant_stack(_MustNotTrainFakeTrainer)
+
+
 def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -791,7 +1047,7 @@ def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
     raw_second, _ = _request(tmp_path, max_steps=2)
     raw_second["step_index"] = 1
     raw_second["previous_step_id"] = request.step_id
-    raw_second["step_id"] = "3" * 64
+    raw_second["step_id"] = _step_id(1)
     raw_second["resume_state"] = first_state
     second = peft._parse_request(raw_second)
     second_consumed = peft._consume_materials(second, max_records=10)
@@ -812,6 +1068,157 @@ def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
     assert b"models/base" in candidate_bytes
     assert b"C:/private/model" not in candidate_bytes
     assert second_state["checkpoint_step"] == 2
+
+
+def test_completed_intermediate_checkpoint_replays_without_optimizer_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    first_state, first_candidate = peft._train_one_step(request, config, consumed)
+    assert first_candidate is None
+
+    checkpoint = (
+        config.output_root
+        / peft._candidate_key(request.candidate_artifact_ref)
+        / "trainer"
+        / "checkpoint-1"
+    )
+    before = {
+        path.relative_to(checkpoint).as_posix(): path.read_bytes()
+        for path in checkpoint.rglob("*")
+        if path.is_file()
+    }
+
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _must_not_train_fake_stack,
+    )
+    replay_state, replay_candidate = peft._train_one_step(
+        request,
+        config,
+        consumed,
+    )
+
+    after = {
+        path.relative_to(checkpoint).as_posix(): path.read_bytes()
+        for path in checkpoint.rglob("*")
+        if path.is_file()
+    }
+    assert replay_state == first_state
+    assert replay_candidate is None
+    assert after == before
+
+
+def test_completed_checkpoint_replay_rejects_marker_step_id_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    first_state, first_candidate = peft._train_one_step(request, config, consumed)
+    assert first_candidate is None
+    assert first_state["checkpoint_step"] == 1
+
+    checkpoint = (
+        config.output_root
+        / peft._candidate_key(request.candidate_artifact_ref)
+        / "trainer"
+        / "checkpoint-1"
+    )
+    marker_path = checkpoint / peft._CHECKPOINT_MARKER
+    marker = json.loads(marker_path.read_bytes())
+    marker["step_id"] = "9" * 64
+    marker_path.write_bytes(peft._canonical_json_bytes(marker))
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _must_not_train_fake_stack,
+    )
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="step_checkpoint_marker_identity_mismatch",
+    ):
+        peft._train_one_step(
+            request,
+            config,
+            consumed,
+        )
+
+
+def test_completed_final_step_replays_existing_candidate_without_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    first_state, first_sha256 = peft._train_one_step(request, config, consumed)
+    assert first_sha256 is not None
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    candidate_bytes = candidate.read_bytes()
+
+    def _manifest_from_fake_candidate(path: Path) -> dict[str, object]:
+        carrier = json.loads(path.read_bytes())
+        return json.loads(carrier["metadata"]["nika_adapter_manifest"])
+
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        _manifest_from_fake_candidate,
+    )
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _must_not_train_fake_stack,
+    )
+
+    replay_state, replay_sha256 = peft._train_one_step(
+        request,
+        config,
+        consumed,
+    )
+
+    assert replay_state == first_state
+    assert replay_sha256 == first_sha256
+    assert candidate.read_bytes() == candidate_bytes
+
+
+def test_incomplete_target_checkpoint_fails_closed_before_retry_training(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    job_root = peft._ensure_job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "stale-optimizer.bin").write_bytes(b"partial-state")
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _must_not_train_fake_stack,
+    )
+
+    with pytest.raises(peft.PeftTrainerError, match="step_checkpoint_incomplete"):
+        peft._train_one_step(request, config, consumed)
+
+    assert (checkpoint / "stale-optimizer.bin").read_bytes() == b"partial-state"
+    assert not (checkpoint / peft._CHECKPOINT_MARKER).exists()
 
 
 class _PriorCheckpointTamperingFakeTrainer(_FakeTrainer):
@@ -840,9 +1247,7 @@ def test_resumed_manifest_binds_loaded_pre_step_tensor_state(
     first_state, first_candidate = peft._train_one_step(request, config, consumed)
     assert first_candidate is None
 
-    job_root = config.output_root / peft._candidate_key(
-        request.candidate_artifact_ref
-    )
+    job_root = config.output_root / peft._candidate_key(request.candidate_artifact_ref)
     prior_adapter = (
         job_root / "trainer" / "checkpoint-1" / "adapter" / peft._CANDIDATE_FILE
     )
@@ -854,7 +1259,7 @@ def test_resumed_manifest_binds_loaded_pre_step_tensor_state(
     raw_second, _ = _request(tmp_path, max_steps=2)
     raw_second["step_index"] = 1
     raw_second["previous_step_id"] = request.step_id
-    raw_second["step_id"] = "3" * 64
+    raw_second["step_id"] = _step_id(1)
     raw_second["resume_state"] = first_state
     second = peft._parse_request(raw_second)
     second_consumed = peft._consume_materials(second, max_records=10)
@@ -866,9 +1271,10 @@ def test_resumed_manifest_binds_loaded_pre_step_tensor_state(
 
     peft._train_one_step(second, config, second_consumed)
 
-    assert prior_adapter.read_bytes() == b"forged-prior-adapter-after-load"
+    assert prior_adapter.read_bytes() == loaded_bytes
     forged_previous_sha256 = _sha256(
-        b"tensor-only-v1\x00lora.weight\x00" + prior_adapter.read_bytes()
+        b"tensor-only-v1\x00lora.weight\x00"
+        + b"forged-prior-adapter-after-load"
     )
     candidate = peft.candidate_artifact_path(
         config.output_root,
@@ -878,6 +1284,87 @@ def test_resumed_manifest_binds_loaded_pre_step_tensor_state(
     manifest = json.loads(carrier["metadata"]["nika_adapter_manifest"])
     assert manifest["previous_adapter_tensors_sha256"] == expected_previous_sha256
     assert manifest["previous_adapter_tensors_sha256"] != forged_previous_sha256
+
+
+def test_resumed_training_loads_from_verified_checkpoint_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    first_state, first_candidate = peft._train_one_step(request, config, consumed)
+    assert first_candidate is None
+
+    job_root = config.output_root / peft._candidate_key(request.candidate_artifact_ref)
+    prior_adapter = (
+        job_root
+        / "trainer"
+        / "checkpoint-1"
+        / "adapter"
+        / peft._CANDIDATE_FILE
+    )
+    original_bytes = prior_adapter.read_bytes()
+    forged_bytes = b"forged-prior-adapter-before-load"
+    expected_previous_sha256 = _sha256(
+        b"tensor-only-v1\x00lora.weight\x00" + original_bytes
+    )
+    forged_previous_sha256 = _sha256(
+        b"tensor-only-v1\x00lora.weight\x00" + forged_bytes
+    )
+    snapshot_roots: list[Path] = []
+
+    class _SourceMutatingPeftModel:
+        @staticmethod
+        def from_pretrained(
+            model: _FakeModel,
+            path: str,
+            *,
+            is_trainable: bool,
+            local_files_only: bool,
+        ) -> _FakeModel:
+            snapshot_dir = Path(path)
+            snapshot_roots.append(snapshot_dir.parent)
+            assert snapshot_dir.name == "checkpoint-1"
+            assert snapshot_dir.parent.name.startswith(".resume-checkpoint-snapshot-")
+            snapshot_adapter = snapshot_dir / "adapter" / peft._CANDIDATE_FILE
+            assert snapshot_adapter.read_bytes() == original_bytes
+            prior_adapter.write_bytes(forged_bytes)
+            assert snapshot_adapter.read_bytes() == original_bytes
+            return _FakePeftModel.from_pretrained(
+                model,
+                path,
+                is_trainable=is_trainable,
+                local_files_only=local_files_only,
+            )
+
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["previous_step_id"] = request.step_id
+    raw_second["step_id"] = _step_id(1)
+    raw_second["resume_state"] = first_state
+    second = peft._parse_request(raw_second)
+    second_consumed = peft._consume_materials(second, max_records=10)
+    stack = list(_fake_stack())
+    stack[2] = _SourceMutatingPeftModel
+    monkeypatch.setattr(peft, "_import_training_stack", lambda: tuple(stack))
+
+    peft._train_one_step(second, config, second_consumed)
+
+    assert prior_adapter.read_bytes() == forged_bytes
+    assert len(snapshot_roots) == 1
+    assert not snapshot_roots[0].exists()
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        second.candidate_artifact_ref,
+    )
+    carrier = json.loads(candidate.read_bytes())
+    manifest = json.loads(carrier["metadata"]["nika_adapter_manifest"])
+    assert manifest["previous_adapter_tensors_sha256"] == expected_previous_sha256
+    assert manifest["previous_adapter_tensors_sha256"] != forged_previous_sha256
+
 
 def test_initial_adapter_config_publish_recovers_partial_prelink_temp(
     tmp_path: Path,
@@ -946,6 +1433,47 @@ def test_initial_adapter_config_publish_rejects_mismatched_existing_target(
         peft._publish_initial_adapter_config(target, payload)
 
     assert target.read_bytes() == b"wrong-derived-config"
+
+
+def test_checkpoint_snapshot_revalidates_nested_source_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_root = tmp_path / "job"
+    checkpoint = job_root / "trainer" / "checkpoint-1"
+    nested = checkpoint / "nested"
+    nested.mkdir(parents=True)
+    (nested / "optimizer.bin").write_bytes(b"optimizer-state")
+    expected_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+    real_copy = peft._copy_checkpoint_snapshot_file
+    mutated = False
+
+    def _copy_then_mutate(
+        source: Path,
+        destination: Path,
+        *,
+        expected_size: int,
+    ) -> None:
+        nonlocal mutated
+        real_copy(source, destination, expected_size=expected_size)
+        if not mutated:
+            (nested / "late-state.bin").write_bytes(b"late-state")
+            mutated = True
+
+    monkeypatch.setattr(peft, "_copy_checkpoint_snapshot_file", _copy_then_mutate)
+
+    with pytest.raises(peft.PeftTrainerError, match="resume_checkpoint_changed"):
+        peft._snapshot_resume_checkpoint(
+            checkpoint,
+            expected_payload_sha256=expected_sha256,
+            job_root=job_root,
+        )
+
+    assert mutated is True
+    assert not any(
+        child.name.startswith(".resume-checkpoint-snapshot-")
+        for child in job_root.iterdir()
+    )
 
 
 def test_new_job_can_warm_start_from_promoted_candidate(
@@ -1082,6 +1610,49 @@ def test_warm_start_rejects_wrong_foundation_chain(
         )
 
 
+def test_first_training_step_requires_canonical_tensor_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StableTensorReader(_FakeSafeTensorReader):
+        def get_tensor(self, name: str) -> _FakeTensor:
+            assert name == "lora.weight"
+            return _FakeTensor(b"stable-canonical-tensor-state")
+
+    def _stable_tensor_safe_open(
+        path: str,
+        *,
+        framework: str,
+        device: str,
+    ) -> _StableTensorReader:
+        assert framework == "pt"
+        assert device == "cpu"
+        return _StableTensorReader(path)
+
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    stack = list(_fake_stack())
+    stack[5] = _stable_tensor_safe_open
+    monkeypatch.setattr(peft, "_import_training_stack", lambda: tuple(stack))
+
+    with pytest.raises(peft.PeftTrainerError, match="training_step_no_tensor_mutation"):
+        peft._train_one_step(request, config, consumed)
+
+    checkpoint = (
+        config.output_root
+        / peft._candidate_key(request.candidate_artifact_ref)
+        / "trainer"
+        / "checkpoint-1"
+    )
+    assert (checkpoint / "adapter" / peft._CANDIDATE_FILE).is_file()
+    assert not (checkpoint / peft._CHECKPOINT_MARKER).exists()
+    assert not peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    ).exists()
+
+
 def test_training_step_rejects_unchanged_adapter_weights(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1207,7 +1778,7 @@ def test_resumed_training_rejects_unchanged_weights_and_preserves_prior_checkpoi
     raw_second, _ = _request(tmp_path, max_steps=2)
     raw_second["step_index"] = 1
     raw_second["previous_step_id"] = request.step_id
-    raw_second["step_id"] = "3" * 64
+    raw_second["step_id"] = _step_id(1)
     raw_second["resume_state"] = first_state
     second = peft._parse_request(raw_second)
     second_consumed = peft._consume_materials(second, max_records=10)
@@ -1819,10 +2390,7 @@ def test_candidate_manifest_reader_rejects_non_finite_published_tensor(
         lambda: (_fake_stack()[0], safe_open, _fake_safe_serialize),
     )
 
-    with pytest.raises(
-        peft.PeftTrainerError,
-        match="candidate_safetensors_non_finite",
-    ):
+    with pytest.raises(peft.PeftTrainerError, match="candidate_safetensors_non_finite"):
         peft.candidate_adapter_manifest(candidate.resolve())
 
 
@@ -1951,11 +2519,9 @@ def test_candidate_manifest_reader_rejects_tensor_state_mismatch(
         lambda: (_fake_stack()[0], safe_open, _fake_safe_serialize),
     )
 
-    with pytest.raises(
-        peft.PeftTrainerError,
-        match="candidate_tensor_state_mismatch",
-    ):
+    with pytest.raises(peft.PeftTrainerError, match="candidate_tensor_state_mismatch"):
         peft.candidate_adapter_manifest(candidate.resolve())
+
 
 def test_candidate_manifest_v2_and_v3_contracts_are_exact_and_disjoint(
     tmp_path: Path,
@@ -2133,6 +2699,7 @@ def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
 
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_not_canonical"):
         peft.candidate_adapter_manifest(candidate.resolve())
+
 
 def test_candidate_manifest_rejects_unhashable_target_carrier(tmp_path: Path) -> None:
     request, base = _parsed(tmp_path)
