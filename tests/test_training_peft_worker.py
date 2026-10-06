@@ -1602,6 +1602,64 @@ def test_existing_candidate_replay_rejects_manifest_to_digest_mutation(
             )
 
 
+def test_existing_candidate_replay_keeps_live_source_authority_during_private_parse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    _, expected_sha256 = peft._train_one_step(request, config, consumed)
+    assert expected_sha256 is not None
+
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    candidate_bytes = candidate.read_bytes()
+    carrier = json.loads(candidate_bytes)
+    expected_manifest = json.loads(
+        carrier["metadata"]["nika_adapter_manifest"]
+    )
+
+    def mutate_live_candidate(snapshot: Path) -> dict[str, object]:
+        assert snapshot != candidate
+        current = json.loads(snapshot.read_bytes())
+        observed = json.loads(
+            current["metadata"]["nika_adapter_manifest"]
+        )
+        try:
+            with candidate.open("ab") as handle:
+                handle.write(b"live-source-mutation")
+        except OSError:
+            pass
+        return observed
+
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        mutate_live_candidate,
+    )
+
+    if peft.os.name == "nt":
+        observed_sha256 = peft._existing_candidate_sha256(
+            candidate,
+            expected_manifest=expected_manifest,
+        )
+        assert observed_sha256 == expected_sha256
+        assert candidate.read_bytes() == candidate_bytes
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="candidate_replay_changed",
+        ):
+            peft._existing_candidate_sha256(
+                candidate,
+                expected_manifest=expected_manifest,
+            )
+
+
 def test_incomplete_target_checkpoint_fails_closed_before_retry_training(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
