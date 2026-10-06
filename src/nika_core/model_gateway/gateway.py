@@ -99,6 +99,17 @@ class ModelGateway:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         providers = self._select_candidates(request)
         self._validate_privacy_route(request, providers)
+
+        # Deliver any cancellation that already targets this task before this
+        # request can audit or start a provider effect. A previously delivered
+        # cancellation may leave Task.cancelling() non-zero, so snapshot that
+        # count only after this checkpoint and require a later increment.
+        await asyncio.sleep(0)
+        current_task = asyncio.current_task()
+        cancellation_baseline = (
+            current_task.cancelling() if current_task is not None else 0
+        )
+
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request.timeout_seconds
 
@@ -146,7 +157,11 @@ class ModelGateway:
                     )
                     response = await provider_task
             except TimeoutError:
-                if self._admit_caller_cancellation(request, capabilities.provider_id):
+                if self._admit_caller_cancellation(
+                    request,
+                    capabilities.provider_id,
+                    cancellation_baseline,
+                ):
                     cancelled = True
                 else:
                     error = ModelGatewayError(
@@ -171,7 +186,11 @@ class ModelGateway:
                         continue
                     terminal_error = error
             except asyncio.CancelledError:
-                if self._admit_caller_cancellation(request, capabilities.provider_id):
+                if self._admit_caller_cancellation(
+                    request,
+                    capabilities.provider_id,
+                    cancellation_baseline,
+                ):
                     cancelled = True
                 else:
                     error = ModelGatewayError(
@@ -184,7 +203,11 @@ class ModelGateway:
                     self._audit_failure(request, capabilities.provider_id, error)
                     terminal_error = error
             except ModelGatewayError as raw_error:
-                if self._admit_caller_cancellation(request, capabilities.provider_id):
+                if self._admit_caller_cancellation(
+                    request,
+                    capabilities.provider_id,
+                    cancellation_baseline,
+                ):
                     cancelled = True
                 else:
                     error = self._normalize_provider_error(
@@ -205,7 +228,11 @@ class ModelGateway:
                         continue
                     terminal_error = error
             except Exception:  # noqa: BLE001 - provider implementations are untrusted
-                if self._admit_caller_cancellation(request, capabilities.provider_id):
+                if self._admit_caller_cancellation(
+                    request,
+                    capabilities.provider_id,
+                    cancellation_baseline,
+                ):
                     cancelled = True
                 else:
                     error = ModelGatewayError(
@@ -217,7 +244,11 @@ class ModelGateway:
                     self._audit_failure(request, capabilities.provider_id, error)
                     terminal_error = error
             else:
-                if self._admit_caller_cancellation(request, capabilities.provider_id):
+                if self._admit_caller_cancellation(
+                    request,
+                    capabilities.provider_id,
+                    cancellation_baseline,
+                ):
                     cancelled = True
 
             # Raise after the provider exception handler so provider-controlled
@@ -284,9 +315,13 @@ class ModelGateway:
         self,
         request: ModelRequest,
         provider_id: str,
+        cancellation_baseline: int,
     ) -> bool:
         current_task = asyncio.current_task()
-        if current_task is None or current_task.cancelling() <= 0:
+        if (
+            current_task is None
+            or current_task.cancelling() <= cancellation_baseline
+        ):
             return False
         self._audit(
             event_type="model.cancelled",
