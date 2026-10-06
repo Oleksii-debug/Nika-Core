@@ -345,7 +345,7 @@ class OpenHandsRuntimeApiSandboxProvider:
                     raise OpenHandsRuntimeApiError(
                         "Runtime API session changed Agent Server URL"
                     )
-                if session.status == "running" and session.pod_status in {None, "running"}:
+                if session.status == "running" and session.pod_status in {None, "running", "ready"}:
                     return session
                 if session.status not in {"starting", "running"}:
                     raise OpenHandsRuntimeApiError(
