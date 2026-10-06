@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
+from nika_core.builder.compiler import AgentCompiler
+from nika_core.builder.repository import AgentDefinitionRepository
+from nika_core.builder.spec import AgentDefinition
+from nika_core.data.sqlite import SQLiteStore
+
 from nika_core.model_gateway.contracts import (
+    ModelAuditError,
     ModelErrorCode,
     ModelFailureEffect,
     ModelGatewayError,
@@ -17,6 +24,8 @@ from nika_core.model_gateway.contracts import (
     ProviderKind,
 )
 from nika_core.model_gateway.gateway import ModelGateway
+from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
+from nika_core.runtime.contracts import RuntimeRequest
 
 _AUDIT_CANARY = "audit-secret-canary-704"
 _PROVIDER_CANARY = "provider-secret-canary-704"
@@ -98,13 +107,12 @@ def _request(*, fallback_provider_ids: tuple[str, ...] = ()) -> ModelRequest:
 
 
 def _assert_audit_error(
-    error: ModelGatewayError,
+    error: ModelAuditError,
     *,
     effect: ModelFailureEffect,
 ) -> None:
-    assert error.code is ModelErrorCode.PROVIDER_ERROR
+    assert not isinstance(error, ModelGatewayError)
     assert error.provider_id == "primary"
-    assert error.retryable is False
     assert error.failure_effect is effect
     assert str(error) == "model audit evidence could not be recorded"
     rendered = repr(error)
@@ -120,7 +128,7 @@ def test_requested_audit_failure_blocks_provider_with_no_effect() -> None:
     gateway = ModelGateway(audit_log=audit)
     gateway.register(provider)
 
-    with pytest.raises(ModelGatewayError) as caught:
+    with pytest.raises(ModelAuditError) as caught:
         asyncio.run(gateway.complete(_request()))
 
     _assert_audit_error(caught.value, effect=ModelFailureEffect.NO_EFFECT)
@@ -136,7 +144,7 @@ def test_completed_audit_failure_is_unknown_and_never_falls_back() -> None:
     gateway.register(primary)
     gateway.register(fallback)
 
-    with pytest.raises(ModelGatewayError) as caught:
+    with pytest.raises(ModelAuditError) as caught:
         asyncio.run(
             gateway.complete(
                 _request(fallback_provider_ids=("fallback",))
@@ -163,7 +171,7 @@ def test_failed_audit_failure_preserves_attempt_effect_and_stops_fallback(
     gateway.register(primary)
     gateway.register(fallback)
 
-    with pytest.raises(ModelGatewayError) as caught:
+    with pytest.raises(ModelAuditError) as caught:
         asyncio.run(
             gateway.complete(
                 _request(fallback_provider_ids=("fallback",))
@@ -184,7 +192,7 @@ def test_fallback_audit_failure_stops_before_next_provider_effect() -> None:
     gateway.register(primary)
     gateway.register(fallback)
 
-    with pytest.raises(ModelGatewayError) as caught:
+    with pytest.raises(ModelAuditError) as caught:
         asyncio.run(
             gateway.complete(
                 _request(fallback_provider_ids=("fallback",))
@@ -207,9 +215,55 @@ def test_cancelled_audit_failure_is_unknown_not_raw_audit_exception() -> None:
     gateway = ModelGateway(audit_log=audit)
     gateway.register(provider)
 
-    with pytest.raises(ModelGatewayError) as caught:
+    with pytest.raises(ModelAuditError) as caught:
         asyncio.run(gateway.complete(_request()))
 
     _assert_audit_error(caught.value, effect=ModelFailureEffect.UNKNOWN)
     assert provider.complete_calls == 1
     assert audit.events == ["model.requested", "model.cancelled"]
+
+
+def test_agent_runtime_does_not_reclassify_audit_failure_as_transient(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "runtime.db")
+    store.initialize()
+    definitions = AgentDefinitionRepository(store)
+    compiler = AgentCompiler(tools=(), model_profiles={"configured"})
+    definition = AgentDefinition(
+        agent_id="worker",
+        name="worker",
+        goal="Complete the assigned task.",
+        instructions="Return concise evidence.",
+        model_profile="configured",
+    )
+    definitions.save_draft(compiler.compile(definition))
+    definitions.activate(definition)
+
+    audit = _SelectiveFailAudit("model.completed")
+    provider = _Provider("primary")
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(provider)
+    runtime = ModelGatewayAgentRuntime(
+        gateway=gateway,
+        definitions=definitions,
+        provider_id="primary",
+        provider_kind=ProviderKind.LOCAL,
+        model="fixture-model",
+    )
+    request = RuntimeRequest(
+        task_id="task-audit-infrastructure",
+        thread_id="thread-audit-infrastructure",
+        payload={
+            "agent_id": "worker",
+            "agent_version": 1,
+            "handoff": {"work": "fixture"},
+        },
+    )
+
+    with pytest.raises(ModelAuditError) as caught:
+        asyncio.run(runtime.run(request))
+
+    _assert_audit_error(caught.value, effect=ModelFailureEffect.UNKNOWN)
+    assert provider.complete_calls == 1
+    assert audit.events == ["model.requested", "model.completed"]

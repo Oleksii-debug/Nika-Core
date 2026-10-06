@@ -7,6 +7,7 @@ from math import isfinite
 from typing import Protocol
 
 from .contracts import (
+    ModelAuditError,
     ModelErrorCode,
     ModelFailureEffect,
     ModelGatewayError,
@@ -609,11 +610,8 @@ class ModelGateway:
         except Exception:  # noqa: BLE001 - durable audit is an integration boundary
             audit_failed = True
         if audit_failed:
-            raise ModelGatewayError(
-                ModelErrorCode.PROVIDER_ERROR,
-                "model audit evidence could not be recorded",
+            raise ModelAuditError(
                 provider_id=provider_id,
-                retryable=False,
                 failure_effect=failure_effect,
             ) from None
 
