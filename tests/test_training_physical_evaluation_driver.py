@@ -141,6 +141,46 @@ def _scale_task_payload(
     }
 
 
+def _scale_plan_payload() -> dict[str, object]:
+    return {
+        "evaluation_set_sha256": "e" * 64,
+        "plan_id": "physical-scale",
+        "schema_version": 1,
+        "tiers": [
+            {
+                "max_steps": 2,
+                "max_training_bytes": 4096,
+                "max_training_records": 10,
+                "max_validation_bytes": 4096,
+                "max_validation_records": 10,
+                "tier_id": "pilot",
+            },
+            {
+                "max_steps": 8,
+                "max_training_bytes": 65536,
+                "max_training_records": 100,
+                "max_validation_bytes": 8192,
+                "max_validation_records": 20,
+                "tier_id": "small",
+            },
+        ],
+    }
+
+
+def _scale_task_payload_with_plan(
+    *,
+    kind: str = "physical_peft_pilot",
+    proof_sha256: str | None = None,
+) -> dict[str, object]:
+    plan_payload = _scale_plan_payload()
+    plan = driver.TrainingScalePlan.from_canonical_payload(plan_payload)
+    return {
+        **_scale_task_payload(kind=kind, proof_sha256=proof_sha256),
+        "scale_plan": plan_payload,
+        "scale_plan_sha256": plan.plan_sha256,
+    }
+
+
 def _pilot_report(
     *,
     descriptor: ModelArtifactDescriptor | None = None,
@@ -341,6 +381,78 @@ def test_find_pilot_task_accepts_scale_aware_training_identity(
     )
 
     assert actual.task_id == expected.task_id
+
+
+@pytest.mark.parametrize(
+    ("kind", "proof_sha256"),
+    (
+        ("physical_peft_pilot", None),
+        ("physical_peft_scale_tier", "9" * 64),
+    ),
+)
+def test_find_pilot_task_accepts_plan_bound_scale_identity(
+    tmp_path: Path,
+    kind: str,
+    proof_sha256: str | None,
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    expected = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload=_scale_task_payload_with_plan(
+            kind=kind,
+            proof_sha256=proof_sha256,
+        ),
+    )
+
+    actual = driver._find_pilot_task(
+        store,
+        workspace_id="evaluation-workspace",
+        job_id="pilot-job",
+    )
+
+    assert actual.task_id == expected.task_id
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            **_scale_task_payload_with_plan(),
+            "scale_plan_sha256": "f" * 64,
+        },
+        {
+            **_scale_task_payload_with_plan(),
+            "scale_tier_id": "small",
+        },
+        {
+            **_scale_task_payload_with_plan(
+                kind="physical_peft_scale_tier",
+                proof_sha256="9" * 64,
+            ),
+            "scale_tier_id": "pilot",
+        },
+    ),
+)
+def test_find_pilot_task_rejects_inconsistent_plan_bound_identity(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload=payload,
+    )
+
+    with pytest.raises(driver.PhysicalEvaluationDriverError, match="exactly one"):
+        driver._find_pilot_task(
+            store,
+            workspace_id="evaluation-workspace",
+            job_id="pilot-job",
+        )
 
 
 @pytest.mark.parametrize(

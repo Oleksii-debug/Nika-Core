@@ -368,6 +368,33 @@ def test_config_v3_rejects_promoted_reference_mismatch(tmp_path: Path) -> None:
         driver.PhysicalPilotConfig.from_json(json.dumps(payload))
 
 
+def test_physical_training_task_payload_persists_canonical_scale_plan(
+    tmp_path: Path,
+) -> None:
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v2(tmp_path)))
+    plan = driver._scale_plan_for_physical_pilot(
+        config,
+        evaluation_set_sha256="e" * 64,
+        training_records=3,
+        training_bytes=1024,
+        validation_records=2,
+        validation_bytes=512,
+    )
+
+    payload = driver._physical_training_task_payload(
+        job_id="pilot-job",
+        plan=plan,
+        tier_index=0,
+        progression_proof=None,
+    )
+
+    assert payload["kind"] == "physical_peft_pilot"
+    assert payload["scale_tier_id"] == "pilot"
+    assert payload["scale_plan_sha256"] == plan.plan_sha256
+    assert payload["scale_plan"] == plan.canonical_payload()
+    assert payload["progression_proof_sha256"] is None
+
+
 def test_higher_tier_preflight_binds_plan_package_and_adapter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

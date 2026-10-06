@@ -970,6 +970,37 @@ def _selected_scale_tier(
     return index, plan.tiers[index]
 
 
+def _physical_training_task_payload(
+    *,
+    job_id: str,
+    plan: TrainingScalePlan,
+    tier_index: int,
+    progression_proof: TrainingScaleProgressionProof | None,
+) -> dict[str, object]:
+    canonical_plan = plan.revalidated()
+    if type(tier_index) is not int or not 0 <= tier_index < len(canonical_plan.tiers):
+        _fail("physical training task scale tier index is invalid")
+    tier = canonical_plan.tiers[tier_index]
+    if tier_index == 0:
+        if progression_proof is not None:
+            _fail("pilot training task must not carry progression authority")
+        kind = "physical_peft_pilot"
+        proof_sha256 = None
+    else:
+        if type(progression_proof) is not TrainingScaleProgressionProof:
+            _fail("higher-tier training task requires trusted progression authority")
+        kind = "physical_peft_scale_tier"
+        proof_sha256 = progression_proof.revalidated().proof_sha256
+    return {
+        "job_id": job_id,
+        "kind": kind,
+        "progression_proof_sha256": proof_sha256,
+        "scale_plan": canonical_plan.canonical_payload(),
+        "scale_plan_sha256": canonical_plan.plan_sha256,
+        "scale_tier_id": tier.tier_id,
+    }
+
+
 def _preflight_higher_tier(
     config: PhysicalPilotConfig,
     *,
@@ -1168,19 +1199,12 @@ def run_physical_pilot_from_config(
     task = TaskQueue(store).create(
         workspace_id=config.workspace_id,
         agent_id="physical-peft-pilot",
-        payload={
-            "job_id": config.job_id,
-            "kind": (
-                "physical_peft_pilot"
-                if tier_index == 0
-                else "physical_peft_scale_tier"
-            ),
-            "progression_proof_sha256": (
-                None if progression_proof is None else progression_proof.proof_sha256
-            ),
-            "scale_plan_sha256": scale_plan.plan_sha256,
-            "scale_tier_id": scale_tier.tier_id,
-        },
+        payload=_physical_training_task_payload(
+            job_id=config.job_id,
+            plan=scale_plan,
+            tier_index=tier_index,
+            progression_proof=progression_proof,
+        ),
     )
     spec = TrainingJobSpec(
         job_id=config.job_id,

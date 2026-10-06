@@ -56,6 +56,7 @@ from nika_core.training_evaluation_comparison import (
 from nika_core.training_evaluation_execution import run_attested_challenger_benchmark
 from nika_core.training_evaluation_subprocess import RegistrySubprocessLoadedModelAttestor
 from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
+from nika_core.training_scale import TrainingScaleError, TrainingScalePlan
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingJobSpec,
@@ -90,6 +91,9 @@ _SCALE_TRAINING_TASK_KEYS = frozenset(
         "scale_plan_sha256",
         "scale_tier_id",
     }
+)
+_SCALE_TRAINING_TASK_KEYS_WITH_PLAN = frozenset(
+    {*_SCALE_TRAINING_TASK_KEYS, "scale_plan"}
 )
 _REPORT_KEYS = frozenset(
     {
@@ -782,7 +786,10 @@ def _matches_physical_training_task_payload(
     keys = frozenset(payload)
     if keys == _LEGACY_TRAINING_TASK_KEYS:
         return payload.get("kind") == "physical_peft_pilot"
-    if keys != _SCALE_TRAINING_TASK_KEYS:
+    if keys not in {
+        _SCALE_TRAINING_TASK_KEYS,
+        _SCALE_TRAINING_TASK_KEYS_WITH_PLAN,
+    }:
         return False
     kind = payload.get("kind")
     if kind not in {"physical_peft_pilot", "physical_peft_scale_tier"}:
@@ -795,8 +802,24 @@ def _matches_physical_training_task_payload(
         return False
     proof_sha256 = payload.get("progression_proof_sha256")
     if kind == "physical_peft_pilot":
-        return proof_sha256 is None
-    return type(proof_sha256) is str and _SHA256_RE.fullmatch(proof_sha256) is not None
+        if proof_sha256 is not None:
+            return False
+    elif type(proof_sha256) is not str or _SHA256_RE.fullmatch(proof_sha256) is None:
+        return False
+    if keys == _SCALE_TRAINING_TASK_KEYS:
+        return True
+    try:
+        plan = TrainingScalePlan.from_canonical_payload(payload.get("scale_plan"))
+    except (TrainingScaleError, TypeError, ValueError):
+        return False
+    if plan.plan_sha256 != plan_sha256:
+        return False
+    matching = tuple(
+        index for index, tier in enumerate(plan.tiers) if tier.tier_id == tier_id
+    )
+    if len(matching) != 1:
+        return False
+    return (kind == "physical_peft_pilot") == (matching[0] == 0)
 
 
 def _find_pilot_task(
