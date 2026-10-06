@@ -306,27 +306,136 @@ def test_model_directory_manifest_rejects_path_swap_before_open(
     source.write_text('{"a":1}', encoding="utf-8")
     replacement = model_dir / "replacement.json"
     replacement.write_text('{"a":2}', encoding="utf-8")
-    real_open = peft.os.open
+    real_open = peft._open_readonly_snapshot
     substituted = False
 
-    def substituting_open(
-        path: object,
-        flags: int,
-        *args: object,
-        **kwargs: object,
-    ) -> int:
+    def substituting_open(path: Path) -> int:
         nonlocal substituted
         if Path(path) == source and not substituted:
             substituted = True
-            return real_open(replacement, flags, *args, **kwargs)
-        return real_open(path, flags, *args, **kwargs)
+            return real_open(replacement)
+        return real_open(Path(path))
 
-    monkeypatch.setattr(peft.os, "open", substituting_open)
+    monkeypatch.setattr(peft, "_open_readonly_snapshot", substituting_open)
 
     with pytest.raises(ValueError, match="changed before hashing"):
         peft.model_directory_manifest_sha256(model_dir)
 
     assert substituted is True
+
+
+@pytest.mark.skipif(peft.os.name != "nt", reason="Windows file-share semantics")
+def test_readonly_snapshot_refuses_preexisting_writer_and_releases_lock(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "authority.bin"
+    path.write_bytes(b"trusted")
+
+    with path.open("r+b"):
+        with pytest.raises(OSError):
+            peft._open_readonly_snapshot(path)
+
+    descriptor = peft._open_readonly_snapshot(path)
+    peft.os.close(descriptor)
+    path.write_bytes(b"replacement")
+    assert path.read_bytes() == b"replacement"
+
+
+@pytest.mark.skipif(peft.os.name != "nt", reason="Windows file-share semantics")
+def test_model_directory_manifest_refuses_preexisting_writer(tmp_path: Path) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = model_dir / "config.json"
+    source.write_text('{"a":1}', encoding="utf-8")
+
+    with source.open("r+b"):
+        with pytest.raises(ValueError, match="changed before hashing"):
+            peft.model_directory_manifest_sha256(model_dir)
+
+
+@pytest.mark.skipif(peft.os.name != "nt", reason="Windows file-share semantics")
+def test_regular_hash_and_bounded_read_refuse_preexisting_writer(tmp_path: Path) -> None:
+    path = tmp_path / "authority.bin"
+    path.write_bytes(b"trusted")
+
+    with path.open("r+b"):
+        with pytest.raises(peft.PeftTrainerError, match="snapshot_locked"):
+            peft._hash_regular_snapshot(path, code="snapshot_locked")
+        with pytest.raises(peft.PeftTrainerError, match="bounded_locked"):
+            peft._read_regular_snapshot(path, max_bytes=32, code="bounded_locked")
+
+
+@pytest.mark.skipif(peft.os.name != "nt", reason="Windows file-share semantics")
+def test_training_material_reader_refuses_preexisting_writer(tmp_path: Path) -> None:
+    raw_request, _ = _request(tmp_path)
+    materials = raw_request["training_materials"]
+    assert isinstance(materials, dict)
+    rows = materials["materials"]
+    assert isinstance(rows, list)
+    first = rows[0]
+    assert isinstance(first, dict)
+    path = Path(str(first["path"]))
+    request = peft._parse_request(raw_request)
+
+    with path.open("r+b"):
+        with pytest.raises(peft.PeftTrainerError, match="material_open_failed"):
+            peft._consume_materials(request, max_records=10)
+
+
+@pytest.mark.skipif(peft.os.name != "nt", reason="Windows file-share semantics")
+def test_model_snapshot_copy_refuses_preexisting_writer(tmp_path: Path) -> None:
+    source = tmp_path / "source.bin"
+    source.write_bytes(b"trusted")
+    destination = tmp_path / "snapshot" / "source.bin"
+
+    with source.open("r+b"):
+        with pytest.raises(peft.PeftTrainerError, match="model_dir_source_changed"):
+            peft._copy_model_snapshot_file(
+                source,
+                destination,
+                expected_size=source.stat().st_size,
+            )
+
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(peft.os.name != "nt", reason="Windows file-share semantics")
+def test_initial_adapter_copy_refuses_preexisting_writer(tmp_path: Path) -> None:
+    source = tmp_path / "promoted.safetensors"
+    source.write_bytes(b"trusted")
+    destination_dir = tmp_path / "stage"
+    destination_dir.mkdir()
+    destination = destination_dir / peft._CANDIDATE_FILE
+
+    with source.open("r+b"):
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="initial_adapter_source_changed",
+        ):
+            peft._copy_initial_adapter_snapshot(
+                source,
+                destination,
+                expected_sha256=_sha256(b"trusted"),
+            )
+
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(peft.os.name != "nt", reason="Windows file-share semantics")
+def test_checkpoint_snapshot_copy_refuses_preexisting_writer(tmp_path: Path) -> None:
+    source = tmp_path / "checkpoint.bin"
+    source.write_bytes(b"trusted")
+    destination = tmp_path / "snapshot" / "checkpoint.bin"
+
+    with source.open("r+b"):
+        with pytest.raises(peft.PeftTrainerError, match="resume_checkpoint_changed"):
+            peft._copy_checkpoint_snapshot_file(
+                source,
+                destination,
+                expected_size=source.stat().st_size,
+            )
+
+    assert not destination.exists()
 
 
 def test_model_directory_manifest_rejects_casefold_collision(tmp_path: Path) -> None:
