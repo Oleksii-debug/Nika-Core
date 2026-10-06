@@ -120,7 +120,7 @@ class PackagedProductFactoryBuildLoop:
                     BuildExecutionState.WAITING_FOR_AUTHORITY,
                 }:
                     raise
-                record = current
+                record = self.build_host.retry(work_id)
             else:
                 record = self.build_host.execute(work_id)
         elif record.state is BuildExecutionState.DISPATCHING:
