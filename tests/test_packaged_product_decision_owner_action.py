@@ -392,6 +392,47 @@ def test_unknown_or_forged_confirmation_cannot_create_authority(
     assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
 
 
+def test_restart_invalidates_ephemeral_request_and_fresh_request_recovers(
+    tmp_path: Path,
+) -> None:
+    store, repository, _service, router = _build(tmp_path / "restart-request.db")
+    first = router.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    stale_request = _approval_request_id(first.message)
+
+    restarted_authority = ApprovalAuthority()
+    restarted_service = ProductProjectCommandService(
+        repository,
+        approval_verifier=restarted_authority.verifier(),
+    )
+    restarted = PackagedProductCommandRouter(
+        products=restarted_service,
+        ordinary_handler=_ordinary_handler,
+        selection_store=PackagedProductSelectionStore(store),
+        decision_approval_authority=restarted_authority,
+    )
+
+    with pytest.raises(PackagedProductJourneyError, match="іншому запуску|невідомий"):
+        restarted.create(
+            {"command": f"confirm product decision approval {stale_request}"}
+        )
+
+    fresh = restarted.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    fresh_request = _approval_request_id(fresh.message)
+    assert fresh_request != stale_request
+    restarted.create(
+        {"command": f"confirm product decision approval {fresh_request}"}
+    )
+
+    assert restarted_service.decision_history(
+        _PROJECT_ID, "decision-owner"
+    )[-1].state == "approved"
+    assert repository.get(_PROJECT_ID).row_version == 2
+
+
 def test_stale_project_between_request_and_confirmation_fails_closed_then_recovers(
     tmp_path: Path,
 ) -> None:
