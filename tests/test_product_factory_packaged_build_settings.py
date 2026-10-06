@@ -114,7 +114,7 @@ def test_decode_rejects_template_for_another_node() -> None:
     template["node_id"] = "other-node"
     payload["templates"] = [template]
 
-    with pytest.raises(PackagedBuildRuntimeSettingsError, match="configured execution node"):
+    with pytest.raises(PackagedBuildRuntimeSettingsError, match="node або component"):
         decode_packaged_build_runtime_config(_json(payload))
 
 
