@@ -153,6 +153,37 @@ def test_candidate_tokenization_evidence_is_required() -> None:
             proof._require_candidate_tokenization_sha256(manifest)
 
 
+def test_candidate_evidence_snapshot_rejects_held_descriptor_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proof = _proof_module()
+    candidate = tmp_path / "adapter_model.safetensors"
+    decoy = tmp_path / "same-bytes-different-file.safetensors"
+    candidate_bytes = b"exact-physical-proof-candidate"
+    candidate.write_bytes(candidate_bytes)
+    decoy.write_bytes(candidate_bytes)
+
+    monkeypatch.setattr(
+        proof,
+        "_open_readonly_snapshot",
+        lambda _path: proof.os.open(decoy, proof.os.O_RDONLY),
+    )
+
+    def unexpected_manifest_parse(_path: Path) -> dict[str, object]:
+        raise AssertionError(
+            "manifest parser must not run for a mismatched held identity"
+        )
+
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", unexpected_manifest_parse)
+
+    with pytest.raises(proof.ProofError, match="identity changed"):
+        proof._verified_candidate_evidence_from_snapshot(
+            candidate,
+            candidate_bytes,
+        )
+
+
 def test_candidate_evidence_snapshot_rejects_manifest_path_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -186,20 +217,17 @@ def test_candidate_evidence_snapshot_rejects_tensor_path_mutation(
     monkeypatch.setattr(proof, "candidate_adapter_manifest", lambda _path: {})
 
     fake_safetensors = ModuleType("safetensors")
+    fake_safetensors_torch = ModuleType("safetensors.torch")
 
-    class MutatingSafeOpen:
-        def __enter__(self):
-            candidate.write_bytes(b"mutated-during-tensor-read")
-            return SimpleNamespace(
-                keys=lambda: ("tensor",),
-                get_tensor=lambda _name: SimpleNamespace(numel=lambda: 1),
-            )
+    def mutating_load(payload: bytes) -> dict[str, object]:
+        assert payload == candidate_bytes
+        candidate.write_bytes(b"mutated-during-tensor-read")
+        return {"tensor": SimpleNamespace(numel=lambda: 1)}
 
-        def __exit__(self, exc_type, exc, traceback) -> None:
-            return None
-
-    fake_safetensors.safe_open = lambda *_args, **_kwargs: MutatingSafeOpen()
+    fake_safetensors_torch.load = mutating_load
+    fake_safetensors.torch = fake_safetensors_torch
     monkeypatch.setitem(sys.modules, "safetensors", fake_safetensors)
+    monkeypatch.setitem(sys.modules, "safetensors.torch", fake_safetensors_torch)
 
     with pytest.raises(proof.ProofError):
         proof._verified_candidate_evidence_from_snapshot(
