@@ -157,14 +157,30 @@ class TradingStateRepository:
     def account_payload(self, workspace_id: str, run_id: str) -> dict[str, object] | None:
         _validate_scope(workspace_id, run_id)
         with self._store.connection() as conn:
+            conn.execute("BEGIN")
             row = conn.execute(
-                "SELECT payload FROM trading_research_run_account_state "
+                "SELECT payload, last_fill_id FROM trading_research_run_account_state "
                 "WHERE workspace_id = ? AND run_id = ?",
                 (workspace_id, run_id),
             ).fetchone()
-        if row is None:
-            return None
-        value = json.loads(str(row["payload"]))
+            if row is None:
+                fill_row = conn.execute(
+                    "SELECT 1 FROM trading_research_run_fills "
+                    "WHERE workspace_id = ? AND run_id = ? LIMIT 1",
+                    (workspace_id, run_id),
+                ).fetchone()
+                if fill_row is not None:
+                    raise RuntimeError("durable trading fills exist without account state")
+                return None
+            last_fill = conn.execute(
+                "SELECT 1 FROM trading_research_run_fills "
+                "WHERE workspace_id = ? AND run_id = ? AND fill_id = ?",
+                (workspace_id, run_id, str(row["last_fill_id"])),
+            ).fetchone()
+            if last_fill is None:
+                raise RuntimeError("durable trading account state references missing fill")
+            payload = str(row["payload"])
+        value = json.loads(payload)
         if not isinstance(value, dict):
             raise TypeError("invalid durable trading account payload")
         return value
