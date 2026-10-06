@@ -100,10 +100,10 @@ class ModelGateway:
         providers = self._select_candidates(request)
         self._validate_privacy_route(request, providers)
 
-        # Deliver any cancellation that already targets this task before this
-        # request can audit or start a provider effect. A previously delivered
-        # cancellation may leave Task.cancelling() non-zero, so snapshot that
-        # count only after this checkpoint and require a later increment.
+        # Deliver cancellation already targeting this gateway task before any
+        # provider effect. A previously delivered-and-suppressed cancellation
+        # can leave Task.cancelling() non-zero, so only a later increment is
+        # authoritative for this request.
         await asyncio.sleep(0)
         current_task = asyncio.current_task()
         cancellation_baseline = (
@@ -147,15 +147,24 @@ class ModelGateway:
             )
             self._authorize_cloud_effect(attempt_request, capabilities)
 
-            response: ModelResponse | None = None
+            canonical_response: ModelResponse | None = None
+            response_error: ModelGatewayError | None = None
+            missing_response = False
             terminal_error: ModelGatewayError | None = None
             cancelled = False
             try:
                 async with asyncio.timeout(remaining):
                     provider_task = asyncio.create_task(
-                        self._invoke_provider_complete(provider, attempt_request)
+                        self._invoke_provider_complete(
+                            provider,
+                            attempt_request,
+                            trusted_provider_id=capabilities.provider_id,
+                            trusted_provider_kind=capabilities.kind,
+                        )
                     )
-                    response = await provider_task
+                    canonical_response, response_error, missing_response = (
+                        await provider_task
+                    )
             except TimeoutError:
                 if self._admit_caller_cancellation(
                     request,
@@ -257,7 +266,7 @@ class ModelGateway:
                 raise asyncio.CancelledError()
             if terminal_error is not None:
                 raise terminal_error
-            if response is None:
+            if missing_response:
                 error = ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
                     "model provider completed without a response",
@@ -267,12 +276,6 @@ class ModelGateway:
                 self._audit_failure(request, capabilities.provider_id, error)
                 raise error
 
-            canonical_response, response_error = self._snapshot_success_response(
-                response=response,
-                request=request,
-                trusted_provider_id=capabilities.provider_id,
-                trusted_provider_kind=capabilities.kind,
-            )
             if response_error is not None:
                 self._audit_failure(
                     request,
@@ -308,8 +311,20 @@ class ModelGateway:
     async def _invoke_provider_complete(
         provider: ModelProvider,
         request: ModelRequest,
-    ) -> ModelResponse:
-        return await provider.complete(request)
+        *,
+        trusted_provider_id: str,
+        trusted_provider_kind: ProviderKind,
+    ) -> tuple[ModelResponse | None, ModelGatewayError | None, bool]:
+        response = await provider.complete(request)
+        if response is None:
+            return None, None, True
+        canonical_response, response_error = ModelGateway._snapshot_success_response(
+            response=response,
+            request=request,
+            trusted_provider_id=trusted_provider_id,
+            trusted_provider_kind=trusted_provider_kind,
+        )
+        return canonical_response, response_error, False
 
     def _admit_caller_cancellation(
         self,
@@ -454,7 +469,7 @@ class ModelGateway:
             retryable=False,
             failure_effect=ModelFailureEffect.UNKNOWN,
         )
-        if type(response) is not ModelResponse:
+        if not isinstance(response, ModelResponse):
             return None, invalid_error
 
         try:
@@ -465,7 +480,7 @@ class ModelGateway:
             model = response.model
             raw_usage = response.usage
             latency_ms = response.latency_ms
-            if type(raw_usage) is not ModelUsage:
+            if not isinstance(raw_usage, ModelUsage):
                 return None, invalid_error
             input_tokens = raw_usage.input_tokens
             output_tokens = raw_usage.output_tokens
