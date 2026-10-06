@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import math
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -12,6 +11,10 @@ from nika_core.learning_cognition import (
     CognitionCandidate,
     CognitionVerification,
     CognitionVerificationRequirement,
+)
+from nika_core.learning_payload import (
+    decode_learning_json_payload,
+    durable_learning_value_sha256,
 )
 from nika_core.learning_update import LearningUpdateIntent, LearningUpdateTarget
 from nika_core.memory.contracts import (
@@ -120,55 +123,6 @@ def _exact_utc_datetime(value: object) -> datetime:
     return value.astimezone(UTC)
 
 
-def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate semantic memory JSON field")
-        result[key] = value
-    return result
-
-
-def _reject_json_constant(_value: str) -> object:
-    raise ValueError("non-finite semantic memory JSON constant")
-
-
-def _finite_json_float(raw: str) -> float:
-    value = float(raw)
-    if not math.isfinite(value):
-        raise ValueError("non-finite semantic memory JSON float")
-    return value
-
-
-def _decode_memory_payload(payload: bytes) -> object:
-    if type(payload) is not bytes:
-        raise TypeError("payload must be exact built-in bytes")
-    try:
-        text = payload.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise ValueError("learning memory payload must be valid UTF-8 JSON") from exc
-    try:
-        return json.loads(
-            text,
-            object_pairs_hook=_unique_json_object,
-            parse_constant=_reject_json_constant,
-            parse_float=_finite_json_float,
-        )
-    except (TypeError, ValueError, RecursionError) as exc:
-        raise ValueError("learning memory payload must be strict JSON") from exc
-
-
-def _durable_value_sha256(value: object) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 class LearningMemoryApplier:
     """Apply one VERIFIED Loop-B memory intent through canonical MemoryService CAS."""
 
@@ -225,7 +179,7 @@ class LearningMemoryApplier:
         if not hmac.compare_digest(target_ref, canonical.target_ref_sha256):
             raise ValueError("learning memory target does not match bound update intent")
 
-        value = _decode_memory_payload(payload)
+        value = decode_learning_json_payload(payload)
         expected_revision = canonical.expected_revision_sha256
         created = expected_revision is None
         expected_updated_at: datetime | None
@@ -258,6 +212,6 @@ class LearningMemoryApplier:
             intent_sha256=canonical.intent_sha256,
             target_ref_sha256=target_ref,
             revision_sha256=memory_revision_sha256(committed),
-            durable_value_sha256=_durable_value_sha256(committed.value),
+            durable_value_sha256=durable_learning_value_sha256(committed.value),
             created=created,
         )
