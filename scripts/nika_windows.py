@@ -32,6 +32,11 @@ from nika_core.packaged_agent_builder import (
 from nika_core.packaged_intelligence_mode import PackagedIntelligenceModeCommandAdapter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
+from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
+from nika_core.product_factory_packaged_execution import (
+    PackagedProductFactoryExecutionController,
+    ProductFactoryExecutionPlanResolver,
+)
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductSelectionStore,
@@ -43,7 +48,11 @@ from nika_core.product_factory_packaged_planning import (
     PackagedProductFactoryTeamPlanner,
     PackagedTeamPlanResult,
 )
+from nika_core.product_factory_packaged_preparation import (
+    PackagedProductFactoryPreparationService,
+)
 from nika_core.product_factory_packaged_status import (
+    PACKAGED_PRODUCT_FACTORY_WORKSPACE_ID,
     PackagedProductCommandCenter,
     PackagedProductFactoryStatusReader,
 )
@@ -262,7 +271,17 @@ def build_windows_bridge(
     start_startup_recovery: bool = True,
     defer_startup_recovery: Callable[[Callable[[], None]], None] | None = None,
     register_cleanup: Callable[[Callable[[], None]], None] | None = None,
+    product_factory_execution_host: MultiRepositoryProductFactoryHost | None = None,
+    product_factory_execution_plan_resolver: ProductFactoryExecutionPlanResolver | None = None,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
+    if (product_factory_execution_host is None) != (
+        product_factory_execution_plan_resolver is None
+    ):
+        raise ValueError(
+            "Product Factory execution host and execution-plan resolver "
+            "must be configured together"
+        )
+
     store = SQLiteStore(config.database_path)
     store.initialize()
     activity_reports = DailyActivityReportService(store)
@@ -335,6 +354,23 @@ def build_windows_bridge(
         product_repository,
         approval_verifier=decision_approval_authority.verifier(),
     )
+    product_factory_execution_handler = None
+    if (
+        product_factory_execution_host is not None
+        and product_factory_execution_plan_resolver is not None
+    ):
+        product_factory_execution = PackagedProductFactoryExecutionController(
+            preparation=PackagedProductFactoryPreparationService(
+                repository=product_repository,
+                tasks=task_queue,
+                host=product_factory_execution_host,
+                workspace_id=PACKAGED_PRODUCT_FACTORY_WORKSPACE_ID,
+            ),
+            host=product_factory_execution_host,
+            resolve_plan=product_factory_execution_plan_resolver,
+            submit=backend.submit_packaged_coroutine,
+        )
+        product_factory_execution_handler = product_factory_execution.start
     agent_definitions = AgentDefinitionRepository(store)
 
     def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
@@ -387,6 +423,7 @@ def build_windows_bridge(
         decision_approval_authority=decision_approval_authority,
         team_planner=PackagedProductFactoryTeamPlanner(product_repository),
         product_factory_status_inspector=command_center.inspect_packaged_project,
+        product_factory_execution_handler=product_factory_execution_handler,
     )
     agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
     product_state = PackagedProductStateProvider(
