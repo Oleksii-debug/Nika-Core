@@ -358,6 +358,65 @@
           </button>
         </div>
       </div>
+      <div aria-labelledby="product-factory-local-repository-heading">
+        <h3 id="product-factory-local-repository-heading" tabindex="-1">
+          Локальний репозиторій Product Factory
+        </h3>
+        <p id="product-factory-local-repository-help">
+          Спочатку завантажте JSON-план. Виберіть репозиторій лише з цього плану
+          та явно вкажіть повний шлях до його локального Git-кореня.
+          Прив’язка надає Product Factory локальний доступ до цього репозиторію;
+          зміна або скасування прив’язки під час виконання зупиняє нові ефекти.
+          Шлях не показується у стані та журналі.
+        </p>
+        <label for="product-factory-local-repository-select">
+          Репозиторій з поточного плану
+        </label>
+        <select
+          id="product-factory-local-repository-select"
+          aria-describedby="product-factory-local-repository-help product-factory-local-repository-status"
+          disabled
+        >
+          <option value="">Спочатку завантажте план</option>
+        </select>
+        <label for="product-factory-local-repository-root">
+          Повний шлях до локального Git-кореня
+        </label>
+        <input
+          id="product-factory-local-repository-root"
+          type="text"
+          maxlength="32767"
+          spellcheck="false"
+          autocomplete="off"
+          aria-describedby="product-factory-local-repository-help product-factory-local-repository-status"
+          disabled
+        >
+        <p id="product-factory-local-repository-status">
+          Локальна прив’язка ще недоступна.
+        </p>
+        <div class="actions">
+          <button
+            type="button"
+            id="product-factory-local-repository-bind"
+            data-action-id="product.factory.local_repository.bind"
+            data-error-focus-target="product-factory-local-repository-root"
+            data-focus-target="product-factory-local-repository-select"
+            disabled
+          >
+            Прив’язати локальний репозиторій
+          </button>
+          <button
+            type="button"
+            id="product-factory-local-repository-unbind"
+            data-action-id="product.factory.local_repository.unbind"
+            data-error-focus-target="product-factory-local-repository-select"
+            data-focus-target="product-factory-local-repository-select"
+            disabled
+          >
+            Скасувати локальну прив’язку
+          </button>
+        </div>
+      </div>
       <div id="product-project-statuses" hidden>
         <h3 id="product-project-statuses-heading" tabindex="-1">Статус ProductProject</h3>
         <p id="product-project-statuses-empty">Статусних записів немає.</p>

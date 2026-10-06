@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import shutil
+import sqlite3
 import subprocess
 
 import pytest
 
 import nika_core.product_factory_packaged_bound_local_host as packaged_bound_local_host
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_local_repository_binding import (
     ProductFactoryLocalRepositoryBindingError,
     ProductFactoryLocalRepositoryBindings,
@@ -81,7 +84,7 @@ def _repository_ref() -> RepositoryRef:
 
 
 def _project(store: SQLiteStore, repository: RepositoryRef):
-    return ProductProjectRepository(store).create(
+    project = ProductProjectRepository(store).create(
         project_id="product-1",
         name="Product 1",
         spec=ProductProjectSpec(
@@ -91,6 +94,16 @@ def _project(store: SQLiteStore, repository: RepositoryRef):
         ),
         idempotency_key="create:product-1",
     )
+    TaskQueue(store).create_exact(
+        task_id="host-task",
+        workspace_id="test.product-factory",
+        agent_id="product-factory",
+        payload={
+            "kind": "product_factory",
+            "product_project_id": project.project_id,
+        },
+    )
+    return project
 
 
 def _graph(
@@ -324,6 +337,377 @@ def test_admitted_entry_keeps_frozen_model_if_revision_changes_after_recheck(
         match="model authority changed after packaged startup",
     ):
         host._entry_for("later-host-task", project, resolved)
+
+
+def test_model_authority_check_runs_under_durable_bind_write_fence(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    base_sha = _git(root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    original_require_current = host._require_model_authority_current
+    fence_observations: list[str] = []
+
+    def require_current_under_fence() -> None:
+        contender = sqlite3.connect(store.path, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                contender.execute("BEGIN IMMEDIATE")
+            fence_observations.append("writer-blocked")
+        finally:
+            contender.close()
+        original_require_current()
+
+    host._require_model_authority_current = require_current_under_fence
+
+    host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests"}
+        ),
+    )
+
+    assert fence_observations == ["writer-blocked"]
+    assert (
+        packaged_bound_local_host._MODEL_AUTHORITY_KEY
+        in TaskQueue(store).get("host-task").payload
+    )
+
+
+def test_host_task_persists_secret_free_model_authority_snapshot(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    base_sha = _git(root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    settings = _settings(store)
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=settings,
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+
+    host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests"}
+        ),
+    )
+
+    task = TaskQueue(store).get("host-task")
+    persisted = task.payload[
+        packaged_bound_local_host._MODEL_AUTHORITY_KEY
+    ]
+    assert persisted["schema"] == (
+        "nika.product-factory.packaged-model-authority.v1"
+    )
+    assert persisted["revision"] == 1
+    assert persisted["model"] == "qwen3:8b"
+    assert persisted["base_url"] == "http://localhost:11434"
+    assert len(persisted["selection_sha256"]) == 64
+    assert persisted["artifact_pin_sha256"] is None
+    assert persisted["private_data_allowed"] is False
+    assert len(persisted["authority_sha256"]) == 64
+    assert "credential" not in json.dumps(persisted).casefold()
+
+
+def test_restart_restores_original_model_authority_after_settings_change(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    base_sha = _git(root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    settings = _settings(store)
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=settings,
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    state = host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests"}
+        ),
+    )
+    admitted = host._require_state_bindings("host-task", state)
+    assert admitted.model_authority.model == "qwen3:8b"
+    assert admitted.program.worker.planner.model == "qwen3:8b"
+
+    changed = settings.configure(
+        {
+            "schema_version": 1,
+            "revision": 1,
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": "qwen3:8b-next",
+            "base_url": "http://localhost:11434",
+            "credential_ref": None,
+            "private_data_allowed": False,
+            "timeout_seconds": 60.0,
+        }
+    )
+    assert changed.status == "completed"
+
+    reopened_store = SQLiteStore(store.path)
+    reopened_store.initialize()
+    reopened_settings = V01ModelSettings(reopened_store)
+    restarted = PackagedBoundLocalProductFactoryHost(
+        reopened_store,
+        settings=reopened_settings,
+        startup=_startup(tmp_path),
+    )
+    reopened_project = ProductProjectRepository(reopened_store).get(
+        project.project_id
+    )
+    restored = restarted.restore(
+        host_task_id="host-task",
+        project=reopened_project,
+    )
+    entry = restarted._require_state_bindings("host-task", restored)
+
+    assert restarted._model_authority.model == "qwen3:8b-next"
+    assert entry.model_authority.model == "qwen3:8b"
+    assert entry.program.worker.planner.model == "qwen3:8b"
+
+    replay_host = PackagedBoundLocalProductFactoryHost(
+        reopened_store,
+        settings=reopened_settings,
+        startup=_startup(tmp_path),
+    )
+    replayed = replay_host.initialize(
+        host_task_id="host-task",
+        project=reopened_project,
+        graph=_graph(reopened_project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests"}
+        ),
+    )
+    replay_entry = replay_host._require_state_bindings(
+        "host-task",
+        replayed,
+    )
+    assert replay_host._model_authority.model == "qwen3:8b-next"
+    assert replay_entry.model_authority.model == "qwen3:8b"
+    assert replay_entry.program.worker.planner.model == "qwen3:8b"
+
+
+def test_restart_rejects_route_tamper_even_with_recomputed_snapshot_checksum(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    base_sha = _git(root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests"}
+        ),
+    )
+
+    with store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            ("host-task",),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        authority = dict(
+            payload[packaged_bound_local_host._MODEL_AUTHORITY_KEY]
+        )
+        authority["model"] = "tampered-model"
+        checksum_payload = dict(authority)
+        checksum_payload.pop("authority_sha256")
+        authority["authority_sha256"] = hashlib.sha256(
+            json.dumps(
+                checksum_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        payload[packaged_bound_local_host._MODEL_AUTHORITY_KEY] = authority
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "host-task",
+            ),
+        )
+
+    reopened_store = SQLiteStore(store.path)
+    reopened_store.initialize()
+    restarted = PackagedBoundLocalProductFactoryHost(
+        reopened_store,
+        settings=V01ModelSettings(reopened_store),
+        startup=_startup(tmp_path),
+    )
+    reopened_project = ProductProjectRepository(reopened_store).get(
+        project.project_id
+    )
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="model selection digest mismatch",
+    ):
+        restarted.restore(
+            host_task_id="host-task",
+            project=reopened_project,
+        )
+
+
+def test_restart_fails_closed_for_legacy_checkpoint_without_model_authority(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    base_sha = _git(root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    settings = _settings(store)
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=settings,
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests"}
+        ),
+    )
+
+    with store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            ("host-task",),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        payload.pop(packaged_bound_local_host._MODEL_AUTHORITY_KEY)
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "host-task",
+            ),
+        )
+
+    reopened_store = SQLiteStore(store.path)
+    reopened_store.initialize()
+    restarted = PackagedBoundLocalProductFactoryHost(
+        reopened_store,
+        settings=V01ModelSettings(reopened_store),
+        startup=_startup(tmp_path),
+    )
+    reopened_project = ProductProjectRepository(reopened_store).get(
+        project.project_id
+    )
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="has no durable model authority",
+    ):
+        restarted.restore(
+            host_task_id="host-task",
+            project=reopened_project,
+        )
 
 
 def test_rebind_after_host_composition_fails_closed_before_worker_reuse(
