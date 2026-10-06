@@ -1053,6 +1053,71 @@ def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
     return digest.hexdigest(), total
 
 
+def _read_regular_snapshot(
+    path: Path,
+    *,
+    code: str,
+    max_bytes: int,
+) -> tuple[bytes, str]:
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive integer")
+    before = _require_regular_unlinked(path, code=code)
+    if before.st_size > max_bytes:
+        _fail(code)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        _fail(code)
+
+    payload = bytearray()
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_size > max_bytes
+        ):
+            _fail(code)
+        while True:
+            chunk = os.read(fd, min(_READ_CHUNK_BYTES, max_bytes + 1 - total))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                _fail(code)
+            payload.extend(chunk)
+            digest.update(chunk)
+        after = os.fstat(fd)
+    except OSError:
+        _fail(code)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    try:
+        current = os.lstat(path)
+    except OSError:
+        _fail(code)
+    identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    if (
+        total != opened.st_size
+        or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or identity
+        != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+    ):
+        _fail(code)
+    return bytes(payload), digest.hexdigest()
+
+
 def _parse_jsonl_record(raw_line: bytes) -> TrainingExample:
     if not raw_line or len(raw_line) > _MAX_LINE_BYTES:
         _fail("dataset_record_size_invalid")
@@ -1836,7 +1901,11 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         _fail("resume_path_mismatch")
     marker_path = candidate / _CHECKPOINT_MARKER
     _require_regular_unlinked(marker_path, code="resume_marker_missing")
-    marker_digest = _sha256_file(marker_path)
+    marker_bytes, marker_digest = _read_regular_snapshot(
+        marker_path,
+        code="resume_marker_changed",
+        max_bytes=64 * 1024,
+    )
     if marker_digest != state.get("checkpoint_marker_sha256"):
         _fail("resume_marker_digest_mismatch")
     expected_payload_sha256 = _require_sha256(
@@ -1845,11 +1914,11 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
     )
     try:
         marker = json.loads(
-            marker_path.read_text(encoding="utf-8"),
+            marker_bytes.decode("utf-8", errors="strict"),
             object_pairs_hook=_strict_object,
             parse_constant=_reject_constant,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         _fail("resume_marker_invalid")
     expected_marker_keys = {
         "checkpoint_payload_sha256",
@@ -1899,14 +1968,18 @@ def _completed_step_checkpoint(
         _require_regular_unlinked(marker_path, code="step_checkpoint_incomplete")
     except PeftTrainerError:
         _fail("step_checkpoint_incomplete")
-    marker_sha256 = _sha256_file(marker_path)
+    marker_bytes, marker_sha256 = _read_regular_snapshot(
+        marker_path,
+        code="step_checkpoint_marker_changed",
+        max_bytes=64 * 1024,
+    )
     try:
         marker = json.loads(
-            marker_path.read_text(encoding="utf-8"),
+            marker_bytes.decode("utf-8", errors="strict"),
             object_pairs_hook=_strict_object,
             parse_constant=_reject_constant,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         _fail("step_checkpoint_marker_invalid")
     expected_keys = {
         "checkpoint_payload_sha256",
@@ -2759,14 +2832,17 @@ def _adapter_config_snapshot(
     config: TrainerConfig,
 ) -> dict[str, object]:
     config_path = path / "adapter_config.json"
-    _require_regular_unlinked(config_path, code="adapter_config_missing")
-    try:
-        with config_path.open("rb") as handle:
-            raw = handle.read(256 * 1024 + 1)
-    except OSError:
-        _fail("adapter_config_read_failed")
-    if len(raw) > 256 * 1024:
+    config_stat = _require_regular_unlinked(
+        config_path,
+        code="adapter_config_missing",
+    )
+    if config_stat.st_size > 256 * 1024:
         _fail("adapter_config_too_large")
+    raw, _ = _read_regular_snapshot(
+        config_path,
+        code="adapter_config_read_failed",
+        max_bytes=256 * 1024,
+    )
     try:
         value = json.loads(
             raw.decode("utf-8", errors="strict"),

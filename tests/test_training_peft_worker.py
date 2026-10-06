@@ -935,6 +935,142 @@ def test_incomplete_target_checkpoint_fails_closed_before_retry_training(
     assert not (checkpoint / peft._CHECKPOINT_MARKER).exists()
 
 
+def test_completed_checkpoint_marker_snapshot_rejects_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    peft._train_one_step(request, config, consumed)
+
+    job_root = config.output_root / peft._candidate_key(request.candidate_artifact_ref)
+    marker_path = job_root / "trainer" / "checkpoint-1" / peft._CHECKPOINT_MARKER
+    real_lstat = peft.os.lstat
+    marker_calls = 0
+
+    def drifting_lstat(path: object) -> object:
+        nonlocal marker_calls
+        value = real_lstat(path)
+        if Path(path) == marker_path:
+            marker_calls += 1
+            if marker_calls == 3:
+                return SimpleNamespace(
+                    st_dev=value.st_dev,
+                    st_ino=value.st_ino + 1,
+                    st_mode=value.st_mode,
+                    st_mtime_ns=value.st_mtime_ns,
+                    st_size=value.st_size,
+                )
+        return value
+
+    monkeypatch.setattr(peft.os, "lstat", drifting_lstat)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="step_checkpoint_marker_changed",
+    ):
+        peft._completed_step_checkpoint(
+            job_root,
+            request,
+            consumed_sha256=consumed.attestation_sha256,
+        )
+
+
+def test_resume_marker_snapshot_rejects_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    first_state, _ = peft._train_one_step(request, config, consumed)
+
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["previous_step_id"] = request.step_id
+    raw_second["step_id"] = "3" * 64
+    raw_second["resume_state"] = first_state
+    second = peft._parse_request(raw_second)
+
+    job_root = config.output_root / peft._candidate_key(second.candidate_artifact_ref)
+    marker_path = job_root / "trainer" / "checkpoint-1" / peft._CHECKPOINT_MARKER
+    real_lstat = peft.os.lstat
+    marker_calls = 0
+
+    def drifting_lstat(path: object) -> object:
+        nonlocal marker_calls
+        value = real_lstat(path)
+        if Path(path) == marker_path:
+            marker_calls += 1
+            if marker_calls == 3:
+                return SimpleNamespace(
+                    st_dev=value.st_dev,
+                    st_ino=value.st_ino + 1,
+                    st_mode=value.st_mode,
+                    st_mtime_ns=value.st_mtime_ns,
+                    st_size=value.st_size,
+                )
+        return value
+
+    monkeypatch.setattr(peft.os, "lstat", drifting_lstat)
+
+    with pytest.raises(peft.PeftTrainerError, match="resume_marker_changed"):
+        peft._resume_checkpoint(job_root, second)
+
+
+def test_adapter_config_snapshot_rejects_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    adapter_dir = tmp_path / "adapter"
+    adapter_dir.mkdir()
+    config_path = adapter_dir / "adapter_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "base_model_name_or_path": "models/base",
+                "bias": "none",
+                "lora_alpha": config.lora_alpha,
+                "lora_dropout": config.lora_dropout,
+                "r": config.lora_r,
+                "target_modules": list(config.lora_target_modules),
+                "task_type": "CAUSAL_LM",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    real_lstat = peft.os.lstat
+    config_calls = 0
+
+    def drifting_lstat(path: object) -> object:
+        nonlocal config_calls
+        value = real_lstat(path)
+        if Path(path) == config_path:
+            config_calls += 1
+            if config_calls == 3:
+                return SimpleNamespace(
+                    st_dev=value.st_dev,
+                    st_ino=value.st_ino + 1,
+                    st_mode=value.st_mode,
+                    st_mtime_ns=value.st_mtime_ns,
+                    st_size=value.st_size,
+                )
+        return value
+
+    monkeypatch.setattr(peft.os, "lstat", drifting_lstat)
+
+    with pytest.raises(peft.PeftTrainerError, match="adapter_config_read_failed"):
+        peft._adapter_config_snapshot(adapter_dir, request, config)
+
+
 class _PriorCheckpointTamperingFakeTrainer(_FakeTrainer):
     def train(self, *, resume_from_checkpoint: str | bool) -> None:
         prior_checkpoint = Path(str(resume_from_checkpoint))
