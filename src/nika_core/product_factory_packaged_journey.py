@@ -520,7 +520,9 @@ class PackagedProductCommandRouter:
 
     def _select_existing_project(self, project_id: str) -> UIResult:
         try:
-            detail = self._products.inspect_project_metadata(project_id)
+            detail, _credential_refs, _decision_summary = (
+                self._products.inspect_project_presentation_context(project_id)
+            )
         except KeyError as exc:
             raise PackagedProductJourneyError(
                 f"ProductProject не знайдено: {project_id}. Поточний вибір не змінено."
@@ -888,7 +890,9 @@ class PackagedProductCommandRouter:
                 "Поточний ProductProject не вибрано. Створіть продукт або відкрийте його за ID."
             )
         try:
-            detail = self._products.inspect_project_metadata(project_id)
+            detail, _credential_refs, _decision_summary = (
+                self._products.inspect_project_presentation_context(project_id)
+            )
         except KeyError as exc:
             self.clear_stale_selection()
             raise PackagedProductJourneyError(
