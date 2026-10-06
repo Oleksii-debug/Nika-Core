@@ -47,9 +47,53 @@ def test_windows_unsafe_paths_fail_closed(value: str) -> None:
         normalize_job_relative_path(value)
 
 
+def test_path_rejects_behavioral_text_carrier() -> None:
+    class PathText(str):
+        pass
+
+    with pytest.raises(WorkspaceSecurityError, match="exact text"):
+        normalize_job_relative_path(PathText("src/file.py"))
+
+
+@pytest.mark.parametrize("separator", ("\n", "\r", "\t", "\x7f", "\u0085", "\u2028", "\u2029"))
+def test_path_rejects_control_and_line_boundary_data(separator: str) -> None:
+    with pytest.raises(WorkspaceSecurityError, match="control data"):
+        normalize_job_relative_path(f"src/{separator}file.py")
+
+
 def test_relative_unicode_and_spaces_are_supported() -> None:
     path = normalize_job_relative_path("src/модулі/my file.py")
     assert path.as_posix() == "src/модулі/my file.py"
+
+
+def test_path_policy_snapshots_mutable_allowed_roots() -> None:
+    roots = ["src"]
+    policy = WorkspacePathPolicy(roots)  # type: ignore[arg-type]
+    roots[0] = "tests"
+
+    assert policy.allowed_roots == ("src",)
+    assert policy.allows("src/module.py")
+    assert not policy.allows("tests/test_module.py")
+
+
+def test_path_policy_rejects_scalar_root_container() -> None:
+    with pytest.raises(WorkspaceSecurityError, match="path sequence"):
+        WorkspacePathPolicy("src")  # type: ignore[arg-type]
+
+
+def test_path_policy_rejects_behavioral_root_text() -> None:
+    class Root(str):
+        pass
+
+    with pytest.raises(WorkspaceSecurityError, match="exact text"):
+        WorkspacePathPolicy((Root("src"),))
+
+
+def test_path_policy_canonicalizes_root_spelling_once() -> None:
+    policy = WorkspacePathPolicy(("src/./nika_core",))
+
+    assert policy.allowed_roots == ("src/nika_core",)
+    assert policy.allows("src/nika_core/module.py")
 
 
 def test_path_policy_is_component_scoped() -> None:
