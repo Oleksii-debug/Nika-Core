@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from collections.abc import Mapping
+from math import isfinite
 from typing import Any
 
 from nika_core.builder.repository import AgentDefinitionRepository
@@ -56,19 +57,49 @@ class ModelGatewayAgentRuntime:
         privacy: PrivacyClass = PrivacyClass.PRIVATE,
         temperature: float | None = 0.0,
     ) -> None:
+        if type(provider_id) is not str:
+            raise TypeError("provider_id must be exact text")
         if not provider_id.strip():
             raise ValueError("provider_id must not be empty")
         if provider_id != provider_id.strip():
             raise ValueError("provider_id must not contain surrounding whitespace")
-        if not isinstance(provider_kind, ProviderKind):
+        if any(not char.isprintable() for char in provider_id):
+            raise ValueError("provider_id must not contain control characters")
+        if not any(provider_kind is member for member in ProviderKind):
             raise TypeError("provider_kind must be ProviderKind")
+        if intelligence_mode is not None and not any(
+            intelligence_mode is member for member in IntelligenceMode
+        ):
+            raise TypeError("intelligence_mode must be IntelligenceMode")
         if model is not None:
+            if type(model) is not str:
+                raise TypeError("model must be exact text when provided")
             if not model.strip():
                 raise ValueError("model must not be blank when provided")
             if model != model.strip():
                 raise ValueError("model must not contain surrounding whitespace")
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be greater than zero")
+            if any(not char.isprintable() for char in model):
+                raise ValueError("model must not contain control characters")
+        if type(timeout_seconds) not in (int, float):
+            raise TypeError("timeout_seconds must be a finite positive number")
+        try:
+            finite_timeout = isfinite(float(timeout_seconds))
+        except OverflowError:
+            finite_timeout = False
+        if not finite_timeout or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        if not any(privacy is member for member in PrivacyClass):
+            raise TypeError("privacy must be PrivacyClass")
+        if temperature is not None:
+            if type(temperature) not in (int, float):
+                raise TypeError("temperature must be numeric when provided")
+            try:
+                finite_temperature = isfinite(float(temperature))
+            except OverflowError:
+                finite_temperature = False
+            if not finite_temperature or not 0 <= temperature <= 2:
+                raise ValueError("temperature must be finite and between 0 and 2")
+            temperature = float(temperature)
         self._gateway = gateway
         self._definitions = definitions
         self._provider_id = provider_id
