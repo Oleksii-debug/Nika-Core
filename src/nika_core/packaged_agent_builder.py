@@ -127,13 +127,20 @@ class PackagedAgentBuilderDraftHandler:
 
 def _normalized_goal(value: object) -> str:
     if type(value) is not str:
-        raise TypeError("Команда Agent Builder має бути текстом.")
+        raise TypeError("Команда Agent Builder має бути звичайним текстом.")
     normalized = unicodedata.normalize("NFC", " ".join(value.split()))
     if not normalized:
         raise ValueError("Введіть опис агента перед створенням чернетки.")
     if len(normalized) > _MAX_COMMAND_CHARS:
         raise ValueError("Опис агента перевищує безпечний ліміт.")
-    if any(unicodedata.category(char) == "Cc" for char in normalized):
+    try:
+        normalized.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("Опис агента містить некоректний текст Unicode.") from exc
+    if any(
+        unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+        for char in normalized
+    ):
         raise ValueError("Опис агента містить недопустимі керувальні символи.")
     return normalized
 

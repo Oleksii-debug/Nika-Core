@@ -74,7 +74,8 @@ def route_command(text: str, *, active_project_id: str | None = None) -> Command
     product = any(pattern.search(normalized) for pattern in _PRODUCT_PATTERNS)
     toolsmith = any(pattern.search(normalized) for pattern in _TOOLSMITH_PATTERNS)
     agent_builder = any(pattern.search(normalized) for pattern in _AGENT_BUILDER_PATTERNS)
-    if sum((product, toolsmith, agent_builder)) > 1:
+    matched_routes = sum((product, toolsmith, agent_builder))
+    if matched_routes > 1:
         return CommandRouteDecision(
             route=CommandRouteKind.AMBIGUOUS,
             reason="Command matches more than one specialized route.",

@@ -24,11 +24,11 @@ from nika_core.kernel.default_actions import build_default_action_registry
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
+from nika_core.packaging.pf11_evidence import require_packaged_pf11_evidence
 from nika_core.packaged_agent_builder import (
     PackagedAgentBuilderDraftHandler,
     PackagedAgentBuilderStateProjector,
 )
-from nika_core.packaging.pf11_evidence import require_packaged_pf11_evidence
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
