@@ -6,6 +6,7 @@ import threading
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from typing import Any
+from uuid import UUID
 
 from nika_core.kernel.agent_registry import AgentDefinition, AgentRegistry
 from nika_core.kernel.audit import AuditLog
@@ -165,8 +166,10 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def pause_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_controllable(action="призупинення")
+    def pause_task(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._explicit_task(payload)
+        if record is None:
+            record = self._only_controllable(action="призупинення")
         if record is None:
             raise ValueError("Немає активного завдання, яке можна призупинити.")
         if record.state == TaskState.RUNNING:
@@ -192,10 +195,16 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def resume_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_with_state(TaskState.PAUSED, action="продовження")
+    def resume_task(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._explicit_task(payload)
+        if record is None:
+            record = self._only_with_state(TaskState.PAUSED, action="продовження")
         if record is None:
             raise ValueError("Немає призупиненого завдання для продовження.")
+        if record.state is not TaskState.PAUSED:
+            raise ValueError(
+                f"Завдання у стані {record.state.value} не можна продовжити."
+            )
 
         if self._admit_resumed_task is not None:
             self._admit_resumed_task(record)
@@ -239,21 +248,34 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def stop_agent(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_controllable(action="зупинки")
+    def stop_agent(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._explicit_task(payload)
         if record is None:
-            cancelled = self._only_with_state(
-                TaskState.CANCELLED,
-                action="повторної зупинки",
-            )
-            if cancelled is not None:
-                return UIResult(
-                    request_id="desktop-handler",
-                    status="completed",
-                    message="Завдання вже скасовано; додаткових дій не виконано.",
-                    focus_id="tasks-heading",
+            record = self._only_controllable(action="зупинки")
+            if record is None:
+                cancelled = self._only_with_state(
+                    TaskState.CANCELLED,
+                    action="повторної зупинки",
                 )
-            raise ValueError("Немає активного завдання агента для зупинки.")
+                if cancelled is not None:
+                    return UIResult(
+                        request_id="desktop-handler",
+                        status="completed",
+                        message="Завдання вже скасовано; додаткових дій не виконано.",
+                        focus_id="tasks-heading",
+                    )
+                raise ValueError("Немає активного завдання агента для зупинки.")
+        if record.state is TaskState.CANCELLED:
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message="Завдання вже скасовано; додаткових дій не виконано.",
+                focus_id="tasks-heading",
+            )
+        if record.state in _TERMINAL_STATES:
+            raise ValueError(
+                f"Завдання у стані {record.state.value} не можна зупинити."
+            )
 
         cancel_future: Future[bool] | None = None
         with self._active_lock:
@@ -719,6 +741,23 @@ class DesktopBackend:
                     description="Основний локальний робочий простір Nika Core.",
                 )
             )
+
+    def _explicit_task(self, payload: Mapping[str, Any]) -> TaskRecord | None:
+        if "task_id" not in payload:
+            return None
+        task_id = payload["task_id"]
+        if type(task_id) is not str or not task_id or task_id != task_id.strip():
+            raise ValueError("task_id має бути канонічним UUID.")
+        try:
+            parsed = UUID(task_id)
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("task_id має бути канонічним UUID.") from exc
+        if str(parsed) != task_id:
+            raise ValueError("task_id має бути канонічним UUID.")
+        try:
+            return self._queue.get(task_id)
+        except KeyError as exc:
+            raise ValueError(f"Завдання не знайдено: {task_id}.") from exc
 
     def _only_controllable(self, *, action: str) -> TaskRecord | None:
         records = [

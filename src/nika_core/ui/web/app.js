@@ -1334,7 +1334,10 @@
       tasksList,
       tasksEmpty,
       state.tasks || [],
-      (item) => `${item.command || "Без назви"} — ${presentState(taskStateLabels, item.state)}`,
+      (item) => (
+        `ID: ${item.task_id} — ${presentState(taskStateLabels, item.state)} — `
+        + (item.command || "Без назви")
+      ),
     );
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
     renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);

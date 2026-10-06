@@ -69,7 +69,7 @@ def _router(
         task_pause_handler=control("pause"),
         task_resume_handler=control("resume"),
         task_stop_handler=control("stop"),
-        task_status_handler=(lambda: _result("status")) if include_status else None,
+        task_status_handler=(lambda _task_id: _result("status")) if include_status else None,
     )
     return router, ordinary
 
