@@ -429,15 +429,12 @@ def prepare_tier1(root: Path) -> None:
 
     tier0_root = root / "run"
     report = _pilot_report(tier0_root)
+    _require_scale_promotion_config(
+        _read_object(root / "physical-evaluation.json")
+    )
     evaluation = _read_object(
         tier0_root / "physical-old-new-evaluation-report.json"
     )
-    if (
-        evaluation.get("experiment_status") != "promoted"
-        or evaluation.get("selected_candidate_id")
-        != report.candidate_artifact_ref
-    ):
-        _fail("tier-0 evaluation did not canonically promote the trained challenger")
 
     proof = _trusted_progression(
         tier0_root,
@@ -467,6 +464,13 @@ def prepare_tier1(root: Path) -> None:
         expected_manifest_sha256=str(
             tier0_config.get("frozen_package_sha256", "")
         ),
+    )
+    _require_evaluation_binding(
+        evaluation,
+        tier0=report,
+        proof=proof,
+        evaluation_set_sha256=source_package.evaluation_set_sha256,
+        previous_champion_id=tier0_config.get("base_artifact_ref"),
     )
     tier1_package = FrozenLearningPackage.freeze(
         package_id=source_package.package_id,
