@@ -10,6 +10,7 @@ import subprocess
 import pytest
 
 import nika_core.product_factory_packaged_bound_local_host as packaged_bound_local_host
+import nika_core.toolsmith.local_worker as local_worker_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_local_repository_binding import (
@@ -1548,3 +1549,74 @@ async def test_worker_recovery_revalidates_binding_after_durable_state_read(
     assert inspected is not None
     assert inspected.phase == "manual_reconcile_required"
     assert terminal_storage_reads == []
+
+@pytest.mark.asyncio
+async def test_worker_revalidates_binding_after_private_git_source_copy(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    first_root = _repository(tmp_path, "first repository")
+    second_root = _repository(tmp_path, "second repository")
+    base_sha = _git(first_root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    state = host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
+    )
+    entry = host._require_state_bindings("host-task", state)
+    request = state.coordinator.snapshot().records[0].request
+    original_prepare = local_worker_module.prepare_private_git_workspace
+    apply_calls: list[str] = []
+
+    def prepare_then_rebind(*args, **kwargs):
+        prepared = original_prepare(*args, **kwargs)
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=second_root,
+            expected_binding_version=first.binding_version,
+        )
+        return prepared
+
+    def unexpected_apply(*args, **kwargs) -> None:
+        apply_calls.append("apply")
+        raise AssertionError("stale private source must not advance to candidate edits")
+
+    monkeypatch.setattr(
+        local_worker_module,
+        "prepare_private_git_workspace",
+        prepare_then_rebind,
+    )
+    monkeypatch.setattr(entry.program.worker, "_apply_plan", unexpected_apply)
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="changed during contained-local execution",
+    ):
+        await entry.program.host.worker.dispatch(request)
+
+    job_root = entry.program.worker.workspace_root_for(request.work_id)
+    assert apply_calls == []
+    assert not (job_root / "_nika_private_git").exists()
+    assert not (job_root / "worktree").exists()
+
