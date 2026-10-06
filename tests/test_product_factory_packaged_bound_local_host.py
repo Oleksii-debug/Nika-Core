@@ -9,6 +9,7 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_local_repository_binding import (
+    ProductFactoryLocalRepositoryBindingError,
     ProductFactoryLocalRepositoryBindings,
 )
 from nika_core.product_factory_orchestration import (
@@ -326,7 +327,7 @@ def test_dynamic_host_does_not_infer_missing_local_binding(
     )
 
     assert host._bindings_for_project(project) == {}
-    with pytest.raises(KeyError):
+    with pytest.raises(ProductFactoryLocalRepositoryBindingError):
         host._bindings_for_graph(
             project,
             _graph(project.project_id, repository),
