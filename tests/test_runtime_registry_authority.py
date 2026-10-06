@@ -119,17 +119,21 @@ def test_registry_rejects_unsafe_unicode_runtime_ids(runtime_id: str) -> None:
     assert registry.describe() == ()
 
 
-@pytest.mark.parametrize(
-    "runtime_id",
-    (
-        "reference\ud800forged",
-        "reference\udfffforged",
-    ),
-)
-def test_registry_rejects_non_utf8_runtime_ids(runtime_id: str) -> None:
+def test_registry_rejects_non_utf8_high_surrogate_runtime_id() -> None:
     registry = RuntimeRegistry()
     runtime = ReferenceRuntime()
-    runtime.runtime_id = runtime_id
+    runtime.runtime_id = "reference\ud800forged"
+
+    with pytest.raises(ValueError, match="runtime_id must be valid UTF-8"):
+        registry.register(runtime)
+
+    assert registry.describe() == ()
+
+
+def test_registry_rejects_non_utf8_low_surrogate_runtime_id() -> None:
+    registry = RuntimeRegistry()
+    runtime = ReferenceRuntime()
+    runtime.runtime_id = "reference\udfffforged"
 
     with pytest.raises(ValueError, match="runtime_id must be valid UTF-8"):
         registry.register(runtime)

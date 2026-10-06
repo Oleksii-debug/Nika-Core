@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from inspect import getattr_static
-import unicodedata
 
 from nika_core.runtime.contracts import AgentRuntimePort, RuntimeCapability
 
