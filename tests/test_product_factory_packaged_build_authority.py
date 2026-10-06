@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -584,6 +585,18 @@ def test_historical_authority_is_effect_bound_and_recovery_scoped(
             repository_id=REPOSITORY_ID,
             work_id=work_id,
         ) == execution
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                runtime.trusted_execution.resolve,
+                project_id=PROJECT_ID,
+                repository_id=REPOSITORY_ID,
+                work_id=work_id,
+            )
+            with pytest.raises(
+                PackagedBuildAuthorityError,
+                match="changed after PF5 work admission",
+            ):
+                future.result()
 
     with pytest.raises(
         PackagedBuildAuthorityError,
