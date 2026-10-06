@@ -5,8 +5,8 @@ from datetime import datetime
 from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.kernel.task_queue import TaskPayloadCorruptionError, decode_task_payload
 from nika_core.kernel.checkpoint import CheckpointService
+from nika_core.kernel.task_queue import TaskPayloadCorruptionError, decode_task_payload
 from nika_core.product_factory_deployment import (
     DeploymentFabric,
     DeploymentFabricError,
