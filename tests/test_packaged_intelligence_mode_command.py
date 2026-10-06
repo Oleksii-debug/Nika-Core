@@ -63,7 +63,7 @@ def test_explicit_mode_namespace_reports_and_selects_deterministic_without_task_
     queue = TaskQueue(store)
 
     missing = router.create({"command": "режим інтелекту"})
-    selected = router.create({"command": "режим інтелекту deterministic"})
+    selected = router.create({"command": "режим інтелекту no_llm"})
     status = router.create({"command": "intelligence mode status"})
 
     assert missing.status == "completed"
@@ -160,6 +160,19 @@ def test_foundry_and_api_commands_delegate_to_canonical_settings_without_secret_
     assert api_snapshot["credential_configured"] is True
     assert api_snapshot["private_data_allowed"] is True
     assert "credential_ref" not in api_snapshot
+
+    secret_canary = "sk-direct-command-secret-canary"
+    rejected_secret = router.create(
+        {
+            "command": (
+                "intelligence mode api configured-api api-v2 "
+                f"https://api.example.test/v1 {secret_canary} private"
+            )
+        }
+    )
+    assert rejected_secret.status == "rejected"
+    assert secret_canary not in rejected_secret.message
+    assert settings.snapshot() == api_snapshot
 
     status = router.create({"command": "режим інтелекту"})
     assert status.status == "completed"
