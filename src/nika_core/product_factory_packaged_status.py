@@ -8,6 +8,11 @@ from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
     ProductProjectPresentationConsistencyError,
 )
+from nika_core.product_factory_build_execution_persistence import (
+    BuildExecutionDurabilityError,
+    DurableBuildExecutionSnapshot,
+    SQLiteBuildExecutionCheckpointStore,
+)
 from nika_core.product_factory_checkpoint_host import (
     ProductFactoryCheckpointError,
     ProductFactoryCheckpointHost,
@@ -51,6 +56,7 @@ class PackagedProductFactoryStatusReader:
             raise PackagedProductFactoryStatusError(
                 "workspace_id must be normalized non-empty text"
             )
+        self._store = store
         self._projects = ProductProjectRepository(store)
         self._tasks = TaskQueue(store)
         self._checkpoints = ProductFactoryCheckpointHost(store)
@@ -114,6 +120,56 @@ class PackagedProductFactoryStatusReader:
             )
         return checkpoint.coordinator
 
+    def read_build(self, project_id: str) -> DurableBuildExecutionSnapshot | None:
+        """Read the latest canonical PF5 build checkpoint for the current project version."""
+
+        before = self._projects.get(project_id)
+        host_task_id = product_factory_host_task_identity(
+            before.project_id,
+            spec_version=before.spec_version,
+            row_version=before.row_version,
+        )
+        try:
+            task = self._tasks.get(host_task_id)
+        except KeyError:
+            return None
+        except TaskPayloadCorruptionError as exc:
+            raise PackagedProductFactoryStatusError(
+                "Product Factory host task payload is corrupt"
+            ) from exc
+
+        if (
+            task.workspace_id != self._workspace_id
+            or task.agent_id != PRODUCT_FACTORY_HOST_AGENT_ID
+            or task.payload.get("kind") != _PRODUCT_FACTORY_HOST_KIND
+            or task.payload.get("product_project_id") != before.project_id
+        ):
+            raise PackagedProductFactoryStatusError(
+                "deterministic Product Factory host task conflicts with packaged authority"
+            )
+
+        checkpoints = SQLiteBuildExecutionCheckpointStore(
+            self._store,
+            host_task_id=host_task_id,
+            project_id=before.project_id,
+        )
+        try:
+            if not checkpoints.has_checkpoint():
+                build = None
+            else:
+                build = checkpoints.latest().snapshot
+        except BuildExecutionDurabilityError as exc:
+            raise PackagedProductFactoryStatusError(
+                "durable PF5 build checkpoint authority is invalid"
+            ) from exc
+
+        after = self._projects.get(project_id)
+        if before != after:
+            raise PackagedProductFactoryStatusError(
+                "ProductProject changed while PF5 build status was read"
+            )
+        return build
+
 
 class PackagedProductCommandCenter:
     """Thin packaged PF5 composition that adds trusted Product Factory status."""
@@ -130,13 +186,19 @@ class PackagedProductCommandCenter:
     def inspect_project(self, project_id: str) -> ProductProjectDetail:
         try:
             coordinator = self._status_reader.read(project_id)
-            detail = self._base.inspect_project(project_id, coordinator=coordinator)
+            build_execution = self._status_reader.read_build(project_id)
+            detail = self._base.inspect_project(
+                project_id,
+                coordinator=coordinator,
+                build_execution=build_execution,
+            )
             confirmed = self._status_reader.read(project_id)
+            confirmed_build = self._status_reader.read_build(project_id)
         except PackagedProductFactoryStatusError as exc:
             raise ProductProjectPresentationConsistencyError(
                 "durable Product Factory status failed trusted projection"
             ) from exc
-        if coordinator != confirmed:
+        if coordinator != confirmed or build_execution != confirmed_build:
             raise ProductProjectPresentationConsistencyError(
                 "Product Factory status changed while PF5 was composing presentation; retry"
             )
@@ -150,16 +212,19 @@ class PackagedProductCommandCenter:
 
         try:
             coordinator = self._status_reader.read(project_id)
+            build_execution = self._status_reader.read_build(project_id)
             detail, decision_summary = self._base.inspect_packaged_project(
                 project_id,
                 coordinator=coordinator,
+                build_execution=build_execution,
             )
             confirmed = self._status_reader.read(project_id)
+            confirmed_build = self._status_reader.read_build(project_id)
         except PackagedProductFactoryStatusError as exc:
             raise ProductProjectPresentationConsistencyError(
                 "durable Product Factory status failed trusted projection"
             ) from exc
-        if coordinator != confirmed:
+        if coordinator != confirmed or build_execution != confirmed_build:
             raise ProductProjectPresentationConsistencyError(
                 "Product Factory status changed while PF5 was composing presentation; retry"
             )
