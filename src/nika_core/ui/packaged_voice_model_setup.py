@@ -50,6 +50,7 @@ class PackagedVoiceModelSetup:
         self._active = False
         self._cancelling = False
         self._cancel_event: Event | None = None
+        self._active_future: Future[Any] | None = None
         self._last_status: str | None = None
         self._last_message: str | None = None
         self._restart_required = False
@@ -76,6 +77,20 @@ class PackagedVoiceModelSetup:
                     "Скасування імпорту голосової моделі виконується."
                     if cancelling
                     else "Локальна голосова модель імпортується."
+                ),
+            )
+
+        if not self._canonical_data_root_is_safe():
+            return self._public_state(
+                status="partial",
+                generation=generation,
+                active=False,
+                installed=False,
+                can_import=False,
+                restart_required=False,
+                message=(
+                    "Канонічна папка даних Nika Core має небезпечний або недоступний "
+                    "шлях. Імпорт голосової моделі заблоковано."
                 ),
             )
 
@@ -156,6 +171,15 @@ class PackagedVoiceModelSetup:
         except _SetupInputError as exc:
             return self._result("rejected", exc.public_message)
 
+        if not self._canonical_data_root_is_safe():
+            return self._result(
+                "rejected",
+                (
+                    "Канонічна папка даних Nika Core має небезпечний або недоступний "
+                    "шлях. Імпорт голосової моделі заблоковано."
+                ),
+            )
+
         state = self._installation_state()
         if state == "installed":
             return UIResult(
@@ -195,13 +219,17 @@ class PackagedVoiceModelSetup:
             self._last_status = None
             self._last_message = None
 
+        started_event = Event()
+        submission_cancelled_event = Event()
         coroutine = self._run_import(
             {"source_root": source_text},
             generation=generation,
             cancel_event=cancel_event,
+            started_event=started_event,
+            submission_cancelled_event=submission_cancelled_event,
         )
         try:
-            self._submit(coroutine)
+            future = self._submit(coroutine)
         except Exception:  # noqa: BLE001 - bounded packaged submit failure
             coroutine.close()
             with self._lock:
@@ -209,11 +237,41 @@ class PackagedVoiceModelSetup:
                     self._active = False
                     self._cancel_event = None
                     self._last_status = "failed"
-                    self._last_message = "Не вдалося запустити фоновий імпорт голосової моделі."
+                    self._last_message = (
+                        "Не вдалося запустити фоновий імпорт голосової моделі."
+                    )
             return self._result(
                 "failed",
                 "Не вдалося запустити фоновий імпорт голосової моделі.",
             )
+        if type(future) is not Future:
+            coroutine.close()
+            with self._lock:
+                if generation == self._generation:
+                    self._active = False
+                    self._cancel_event = None
+                    self._last_status = "failed"
+                    self._last_message = (
+                        "Не вдалося запустити фоновий імпорт голосової моделі."
+                    )
+            return self._result(
+                "failed",
+                "Не вдалося запустити фоновий імпорт голосової моделі.",
+            )
+
+        with self._lock:
+            if generation != self._generation or not self._active:
+                future.cancel()
+                return self._result(
+                    "failed",
+                    "Стан імпорту голосової моделі змінився до запуску.",
+                )
+            self._active_future = future
+        future.add_done_callback(
+            lambda done, identity=generation, started=started_event, cancelled=(
+                submission_cancelled_event
+            ): self._submitted_done(identity, started, cancelled, done)
+        )
 
         return UIResult(
             request_id="desktop-handler",
@@ -221,6 +279,56 @@ class PackagedVoiceModelSetup:
             message="Імпорт локальної голосової моделі розпочато.",
             focus_id="voice-model-cancel",
         )
+
+    def _submitted_done(
+        self,
+        generation: int,
+        started_event: Event,
+        submission_cancelled_event: Event,
+        future: Future[Any],
+    ) -> None:
+        with self._lock:
+            if self._active_future is not future:
+                return
+            self._active_future = None
+            if generation != self._generation or not self._active:
+                return
+            cancel_event = self._cancel_event
+
+        if future.cancelled():
+            submission_cancelled_event.set()
+            if cancel_event is not None:
+                cancel_event.set()
+            if started_event.is_set():
+                with self._lock:
+                    if generation == self._generation and self._active:
+                        self._cancelling = True
+                return
+            status = "cancelled"
+            message = "Імпорт голосової моделі скасовано."
+        else:
+            try:
+                failure = future.exception()
+            except Exception:  # noqa: BLE001 - untrusted Future completion boundary
+                failure = RuntimeError("voice model import Future inspection failed")
+            if failure is None:
+                status = "failed"
+                message = "Фоновий імпорт завершився без коректного стану."
+            else:
+                if cancel_event is not None:
+                    cancel_event.set()
+                status = "failed"
+                message = "Не вдалося безпечно завершити фоновий імпорт моделі."
+
+        with self._lock:
+            if generation != self._generation or not self._active:
+                return
+            self._active = False
+            self._cancelling = False
+            self._cancel_event = None
+            self._restart_required = False
+            self._last_status = status
+            self._last_message = message
 
     def cancel(self, payload: dict[str, Any]) -> UIResult:
         if type(payload) is not dict:
@@ -260,6 +368,15 @@ class PackagedVoiceModelSetup:
                 "rejected",
                 "Імпорт локальної голосової моделі доступний лише у Windows.",
             )
+        if not self._canonical_data_root_is_safe():
+            return self._result(
+                "rejected",
+                (
+                    "Канонічна папка даних Nika Core має небезпечний або недоступний "
+                    "шлях. Імпорт голосової моделі заблоковано."
+                ),
+            )
+
         state = self._installation_state()
         if state == "installed":
             return UIResult(
@@ -317,17 +434,60 @@ class PackagedVoiceModelSetup:
         *,
         generation: int,
         cancel_event: Event,
+        started_event: Event,
+        submission_cancelled_event: Event,
     ) -> None:
         terminal_status: str
         terminal_message: str
         restart_required = False
-        try:
-            source_text = self._require_start_payload(payload)
-            await asyncio.to_thread(
+        cancellation: asyncio.CancelledError | None = None
+        started_event.set()
+        if cancel_event.is_set():
+            with self._lock:
+                if generation == self._generation:
+                    self._active = False
+                    self._cancelling = False
+                    self._cancel_event = None
+                    self._restart_required = False
+                    self._last_status = "cancelled"
+                    self._last_message = "Імпорт голосової моделі скасовано."
+            if submission_cancelled_event.is_set():
+                raise asyncio.CancelledError
+            return
+
+        source_text = self._require_start_payload(payload)
+        worker = asyncio.create_task(
+            asyncio.to_thread(
                 self._perform_install,
                 source_text,
                 cancel_event=cancel_event,
             )
+        )
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            cancel_event.set()
+            try:
+                await asyncio.shield(worker)
+            except _SetupCancelled:
+                terminal_status = "cancelled"
+                terminal_message = "Імпорт голосової моделі скасовано."
+            except _SetupInputError as worker_error:
+                terminal_status = "failed"
+                terminal_message = worker_error.public_message
+            except (OSError, RuntimeError):
+                terminal_status = "failed"
+                terminal_message = (
+                    "Не вдалося безпечно встановити локальну голосову модель."
+                )
+            else:
+                terminal_status = "restart_required"
+                terminal_message = (
+                    "Локальну голосову модель встановлено. Перезапустіть Nika Core, "
+                    "щоб увімкнути голосовий ввід."
+                )
+                restart_required = True
         except _SetupCancelled:
             terminal_status = "cancelled"
             terminal_message = "Імпорт голосової моделі скасовано."
@@ -346,14 +506,16 @@ class PackagedVoiceModelSetup:
             restart_required = True
 
         with self._lock:
-            if generation != self._generation:
-                return
-            self._active = False
-            self._cancelling = False
-            self._cancel_event = None
-            self._restart_required = restart_required
-            self._last_status = terminal_status
-            self._last_message = terminal_message
+            if generation == self._generation:
+                self._active = False
+                self._cancelling = False
+                self._cancel_event = None
+                self._restart_required = restart_required
+                self._last_status = terminal_status
+                self._last_message = terminal_message
+
+        if cancellation is not None:
+            raise cancellation
 
     def _perform_install(
         self,
@@ -443,6 +605,10 @@ class PackagedVoiceModelSetup:
         *,
         cancel_event: Event | None,
     ) -> None:
+        # Revalidate the canonical data root at the mutation boundary so a
+        # symlink/reparse swap cannot redirect the first mkdir outside Nika.
+        self._require_regular_directory(self._data_root)
+        self._require_no_reparse_ancestors(self._data_root)
         voice_root = self._data_root / "voice"
         model_root = self._data_root / _MODEL_DIR
         voice_root.mkdir(parents=True, exist_ok=True)
@@ -472,6 +638,14 @@ class PackagedVoiceModelSetup:
         finally:
             if stage is not None:
                 shutil.rmtree(stage, ignore_errors=True)
+
+    def _canonical_data_root_is_safe(self) -> bool:
+        try:
+            self._require_regular_directory(self._data_root)
+            self._require_no_reparse_ancestors(self._data_root)
+        except OSError:
+            return False
+        return True
 
     def _installation_state(self) -> str:
         model_root = self._data_root / _MODEL_DIR

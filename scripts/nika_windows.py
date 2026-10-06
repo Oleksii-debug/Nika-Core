@@ -416,6 +416,8 @@ def build_windows_bridge(
             "task.create": product_router.create,
             "task.pause": backend.pause_task,
             "task.resume": resume_ordinary_task,
+            "task.page.previous": backend.previous_task_page,
+            "task.page.next": backend.next_task_page,
             "agent.stop": backend.stop_agent,
             "voice.start": voice.start,
             "voice.cancel": voice.cancel,

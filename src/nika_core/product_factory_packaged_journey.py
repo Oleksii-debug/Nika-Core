@@ -11,7 +11,12 @@ from uuid import UUID
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.packaged_intelligence_mode import is_packaged_intelligence_mode_command
 from nika_core.product_command.command_center import ProductCommandCenter
-from nika_core.product_command.contracts import CommandRouteKind, ProductProjectDetail
+from nika_core.product_command.contracts import (
+    CommandRouteKind,
+    ProductProjectDetail,
+    ProductStatusKind,
+    ProductUserDecision,
+)
 from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
     ProductProjectPresentationConsistencyError,
@@ -42,6 +47,15 @@ _CURRENT_PROJECT_COMMANDS = frozenset(
         "show current productproject",
         "поточний productproject",
         "покажи поточний productproject",
+    }
+)
+_PRODUCT_STATUS_PREVIEW_LIMIT = 24
+_CURRENT_DECISION_COMMANDS = frozenset(
+    {
+        "current product decision",
+        "show current product decision",
+        "поточне рішення productproject",
+        "покажи поточне рішення productproject",
     }
 )
 _DAILY_ACTIVITY_REPORT_COMMANDS = frozenset(
@@ -156,6 +170,14 @@ def packaged_current_product_command(command: str) -> bool:
         raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split()).casefold().strip(" :")
     return normalized in _CURRENT_PROJECT_COMMANDS
+
+
+def packaged_current_product_decision_command(command: str) -> bool:
+    """Recognize an exact read-only command for the unambiguous pending product decision."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split()).casefold().strip(" :.!?")
+    return normalized in _CURRENT_DECISION_COMMANDS
 
 
 def packaged_daily_activity_report_command(command: str) -> bool:
@@ -374,6 +396,46 @@ class PackagedProductCommandRouter:
             focus_id="tasks-heading",
         )
 
+    def _describe_current_decision(self) -> UIResult:
+        project_id = self._active_project_id
+        if project_id is None:
+            raise PackagedProductJourneyError(
+                "Поточний ProductProject не вибрано. Спочатку створіть або відкрийте його."
+            )
+        try:
+            detail = self._products.inspect_project(project_id)
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. Застарілий вибір очищено."
+            ) from exc
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "ProductProject changed while packaged state was read; "
+                "retry the current-decision command."
+            ) from exc
+
+        decision = detail.summary.current_decision
+        if decision is None:
+            pending_count = sum(item.state == "pending" for item in detail.decisions)
+            if pending_count > 1:
+                raise PackagedProductJourneyError(
+                    "Кілька рішень ProductProject очікують власника; "
+                    "жодне не вибрано автоматично."
+                )
+            raise PackagedProductJourneyError(
+                "Поточне рішення ProductProject відсутнє."
+            )
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                f"Поточне рішення ProductProject: {decision.decision_id}; "
+                f"{decision.title}; ризик R{decision.risk_level}; {decision.question}"
+            ),
+            focus_id="product-project-decision-heading",
+        )
+
     def _describe_current_project(self) -> UIResult:
         project_id = self._active_project_id
         if project_id is None:
@@ -463,6 +525,8 @@ class PackagedProductCommandRouter:
             # Direct command text and unrelated UI fields are classification input only.
             # Only the canonical target identity crosses into incumbent task-control authority.
             return handler({"task_id": task_id} if task_id is not None else {})
+        if packaged_current_product_decision_command(command):
+            return self._describe_current_decision()
         if packaged_current_product_command(command):
             return self._describe_current_project()
 
@@ -563,6 +627,7 @@ class PackagedProductStateProvider:
 def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
     status_counts = Counter(item.kind.value for item in detail.statuses)
     decision_counts = Counter(item.state for item in detail.decisions)
+    status_items = _safe_product_status_items(detail)
     return {
         "project_id": detail.summary.project_id,
         "spec_version": detail.summary.version,
@@ -572,8 +637,47 @@ def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
         "blocker_count": detail.summary.blocker_count,
         "status_count": len(detail.statuses),
         "status_counts": dict(sorted(status_counts.items())),
+        "status_items": status_items,
+        "status_items_truncated": len(status_items) < len(detail.statuses),
         "decision_count": len(detail.decisions),
         "decision_state_counts": dict(sorted(decision_counts.items())),
+        "current_decision": _safe_product_decision(detail.summary.current_decision),
+    }
+
+
+def _safe_product_status_items(
+    detail: ProductProjectDetail,
+) -> list[dict[str, Any]]:
+    blockers = [
+        item for item in detail.statuses if item.kind is ProductStatusKind.BLOCKER
+    ]
+    others = [
+        item for item in detail.statuses if item.kind is not ProductStatusKind.BLOCKER
+    ]
+    selected = (blockers + others)[:_PRODUCT_STATUS_PREVIEW_LIMIT]
+    return [
+        {
+            "kind": item.kind.value,
+            "item_id": item.item_id,
+            "label": item.label,
+            "state": item.state,
+            "detail": item.detail,
+        }
+        for item in selected
+    ]
+
+
+def _safe_product_decision(
+    decision: ProductUserDecision | None,
+) -> dict[str, Any] | None:
+    if decision is None:
+        return None
+    return {
+        "decision_id": decision.decision_id,
+        "title": decision.title,
+        "question": decision.question,
+        "risk_level": decision.risk_level,
+        "state": decision.state,
     }
 
 

@@ -33,6 +33,16 @@ def test_product_project_surface_uses_native_semantic_structure() -> None:
         "product-project-blocker-count",
         "product-project-status-count",
         "product-project-decision-count",
+        "product-project-statuses-heading",
+        "product-project-statuses-empty",
+        "product-project-statuses-list",
+        "product-project-statuses-truncated",
+        "product-project-decision-heading",
+        "product-project-decision-id",
+        "product-project-decision-title",
+        "product-project-decision-question",
+        "product-project-decision-risk",
+        "product-project-decision-state",
     ):
         assert f'id="{field_id}"' in html
 
@@ -49,6 +59,10 @@ def test_product_project_renderer_tracks_bounded_bridge_projection() -> None:
     assert "productProjectEmpty.hidden = true;" in render_block
     assert "productProjectSummary.hidden = false;" in render_block
     assert "node.textContent = String(project[field]);" in render_block
+    assert "renderProductProjectStatuses(project);" in render_block
+    assert "productProjectDecisionFields.question.textContent = decision.question;" in render_block
+    assert 'productProjectDecisionFields.state.textContent = "Очікує рішення";' in render_block
+    assert "productProjectDecision.hidden = false;" in render_block
     assert "innerHTML" not in render_block
     assert "renderProductProject(state.product_project ?? null);" in source
 
@@ -65,6 +79,26 @@ def test_product_project_renderer_rejects_malformed_snapshot_fail_closed() -> No
     assert "!Number.isInteger(project.spec_version) || project.spec_version < 1" in validator
     assert 'const countFields = ["blocker_count", "status_count", "decision_count"];' in validator
     assert "Number.isInteger(project[field]) && project[field] >= 0" in validator
+    assert "Array.isArray(project.status_items)" in validator
+    assert "project.status_items.length > 24" in validator
+    assert "project.status_items.every(validProductStatusItem)" in validator
+    assert "project.status_items_truncated" in validator
+    assert 'hasOwnProperty.call(project, "current_decision")' in validator
+    status_validator = _between(
+        source,
+        "function validProductStatusItem(item) {",
+        "function validProductDecision(decision) {",
+    )
+    assert "productStatusKindLabels" in status_validator
+    assert 'typeof item.detail === "string"' in status_validator
+    decision_validator = _between(
+        source,
+        "function validProductDecision(decision) {",
+        "function validProductProject(project) {",
+    )
+    assert 'decision.state !== "pending"' in decision_validator
+    assert "decision.risk_level >= 0" in decision_validator
+    assert "decision.risk_level <= 4" in decision_validator
 
     renderer = _between(
         source,
@@ -103,6 +137,24 @@ def test_product_project_renderer_does_not_expand_authority_or_secret_fields() -
         "protected_store_handle",
     ):
         assert forbidden not in field_block
+
+    html = _source("index.html")
+    decision_block = _between(
+        html,
+        '<div id="product-project-decision" hidden>',
+        "</section>",
+    )
+    assert '<dl aria-label="Поточне рішення ProductProject">' in decision_block
+    assert "<button" not in decision_block
+
+    status_block = _between(
+        html,
+        '<div id="product-project-statuses" hidden>',
+        '<div id="product-project-decision" hidden>',
+    )
+    assert '<ul id="product-project-statuses-list"' in status_block
+    assert 'aria-label="Статусні записи ProductProject"' in status_block
+    assert "<button" not in status_block
 
 
 def test_product_project_refresh_preserves_backend_focus_precedence() -> None:
