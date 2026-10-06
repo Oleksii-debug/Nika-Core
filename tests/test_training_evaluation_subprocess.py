@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.training_evaluation_subprocess as evaluation_subprocess
 from nika_core.artifacts import ArtifactRegistry
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.model_artifacts import (
@@ -372,6 +373,96 @@ async def test_evaluator_command_tamper_fails_before_effect(tmp_path: Path) -> N
 
     assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
     assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_command_launch_guard_spans_final_verify_spawn_and_post_start_verify(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _success_script(tmp_path)
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+    state = {"active": False}
+    verify_states: list[bool] = []
+    spawn_states: list[bool] = []
+
+    class GuardProbe:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> GuardProbe:
+            assert state["active"] is False
+            state["active"] = True
+            return self
+
+        def __exit__(
+            self,
+            exc_type: object,
+            exc_value: object,
+            traceback: object,
+        ) -> None:
+            state["active"] = False
+
+    original_verify = adapter._verify_command_records
+    original_spawn = evaluation_subprocess.asyncio.create_subprocess_exec
+
+    def tracked_verify(records: object) -> None:
+        verify_states.append(state["active"])
+        original_verify(records)  # type: ignore[arg-type]
+
+    async def tracked_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        spawn_states.append(state["active"])
+        return await original_spawn(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(evaluation_subprocess, "_CommandArtifactLaunchGuard", GuardProbe)
+    monkeypatch.setattr(adapter, "_verify_command_records", tracked_verify)
+    monkeypatch.setattr(
+        evaluation_subprocess.asyncio,
+        "create_subprocess_exec",
+        tracked_spawn,
+    )
+
+    result = await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert result.response.text == "answer"
+    assert verify_states == [False, True, True]
+    assert spawn_states == [True]
+    assert state["active"] is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_command_launch_guard_refuses_writer_and_releases_all_handles(
+    tmp_path: Path,
+) -> None:
+    script = _success_script(tmp_path)
+    registry, executable_id, script_id, executable = _registry(tmp_path, script)
+    records = {
+        0: registry.get(executable_id),
+        1: registry.get(script_id),
+    }
+    command = (str(executable), str(script.resolve()))
+
+    with script.open("r+b"):
+        with pytest.raises(ModelGatewayError) as exc_info:
+            with evaluation_subprocess._CommandArtifactLaunchGuard(
+                command,
+                records,
+                provider_id="ollama",
+            ):
+                pytest.fail("guard unexpectedly admitted a writable command artifact")
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
+
+    with evaluation_subprocess._CommandArtifactLaunchGuard(
+        command,
+        records,
+        provider_id="ollama",
+    ):
+        pass
+
+    script.write_text("replacement-after-release", encoding="utf-8")
+    assert script.read_text(encoding="utf-8") == "replacement-after-release"
 
 
 @pytest.mark.asyncio
