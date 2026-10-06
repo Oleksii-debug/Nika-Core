@@ -18,6 +18,7 @@ from nika_core.product_factory_orchestration import (
     ProductRepositoryGraph,
     RepositoryRef,
 )
+from nika_core.product_factory_packaged_journey import PackagedProductStateProvider
 from nika_core.product_factory_packaged_preparation import (
     PRODUCT_FACTORY_HOST_AGENT_ID,
     PackagedProductFactoryExecutionPlan,
@@ -242,6 +243,48 @@ def test_repeated_status_reads_are_read_only(tmp_path: Path) -> None:
         detail = center.inspect_project(project.project_id)
         assert any(item.kind is ProductStatusKind.COMPONENT for item in detail.statuses)
     assert counts() == before
+
+
+
+
+class SelectedProjectRouter:
+    def __init__(self, project_id: str) -> None:
+        self.active_project_id = project_id
+
+    def clear_stale_selection(self) -> None:
+        self.active_project_id = None
+
+
+def test_packaged_state_exposes_bounded_component_status_without_evidence(tmp_path: Path) -> None:
+    _store, _repository, project, plan, preparation, center = _fixture(tmp_path)
+    preparation.prepare(plan)
+    router = SelectedProjectRouter(project.project_id)
+    provider = PackagedProductStateProvider(
+        base_state=lambda: {"tasks": [], "agents": [], "workspaces": []},
+        router=router,  # type: ignore[arg-type]
+        command_center=center,  # type: ignore[arg-type]
+    )
+
+    state = provider()
+    product_state = state["product_project"]
+
+    assert product_state["status_count"] == 1
+    assert product_state["status_counts"] == {"component": 1}
+    assert product_state["status_items"] == [
+        {
+            "kind": "component",
+            "item_id": "core",
+            "label": "Компонент core",
+            "state": "ready",
+            "detail": (
+                "Стан: Готово до виконання; Repository: repo-core; Base SHA: "
+                + "a" * 40
+                + "; Attempt: 1; Allowed paths: src/nika_core"
+            ),
+        }
+    ]
+    assert product_state["status_items_truncated"] is False
+    assert "evidence" not in product_state["status_items"][0]
 
 
 def test_windows_composition_uses_read_only_packaged_factory_status_reader() -> None:

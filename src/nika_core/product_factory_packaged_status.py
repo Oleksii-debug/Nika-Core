@@ -42,7 +42,11 @@ class PackagedProductFactoryStatusReader:
         *,
         workspace_id: str = PACKAGED_PRODUCT_FACTORY_WORKSPACE_ID,
     ) -> None:
-        if type(workspace_id) is not str or not workspace_id.strip() or workspace_id != workspace_id.strip():
+        if (
+            type(workspace_id) is not str
+            or not workspace_id.strip()
+            or workspace_id != workspace_id.strip()
+        ):
             raise PackagedProductFactoryStatusError(
                 "workspace_id must be normalized non-empty text"
             )
