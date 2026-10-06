@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 from typing import cast
 
@@ -248,3 +249,53 @@ def test_review_rejection_is_not_laundered_into_worker_capability_gap(tmp_path) 
 
     assert escalation.begun == []
     assert _binding_count(store) == 0
+
+def test_failed_attempt_proof_and_reservation_share_one_writer_fence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store, _, _, request, task_id, escalation, bridge = _setup(tmp_path)
+    original = ProductFactoryCheckpointHost.latest_with_connection
+    observed_fences: list[bool] = []
+
+    def probe(
+        self,
+        conn,
+        *,
+        host_task_id: str,
+        project_id: str,
+    ):
+        assert conn.in_transaction
+        contender = sqlite3.connect(store.path, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                contender.execute("BEGIN IMMEDIATE")
+        finally:
+            contender.close()
+        observed_fences.append(True)
+        return original(
+            self,
+            conn,
+            host_task_id=host_task_id,
+            project_id=project_id,
+        )
+
+    monkeypatch.setattr(
+        ProductFactoryCheckpointHost,
+        "latest_with_connection",
+        probe,
+    )
+
+    checkpoint = bridge.begin_durable_gap(
+        request,
+        host_task_id=task_id,
+        capability_id="toml-editor",
+        reason="missing capability",
+        attempted_methods=("bounded-local-capability-search",),
+    )
+
+    assert observed_fences == [True]
+    assert checkpoint.work_id == request.work_id
+    assert len(escalation.begun) == 1
+    assert _binding_count(store) == 1
+
