@@ -141,24 +141,42 @@ class TaskQueue:
             allow_nan=False,
         )
         with self.store.connection() as conn:
-            verb = "INSERT OR IGNORE" if replay_allowed else "INSERT"
-            cursor = conn.execute(
-                f"""
-                {verb} INTO tasks(
-                    task_id, workspace_id, agent_id, state, payload_json, created_at, updated_at
+            if replay_allowed:
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO tasks(
+                        task_id, workspace_id, agent_id, state, payload_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        workspace_id,
+                        agent_id,
+                        TaskState.CREATED.value,
+                        payload_json,
+                        now,
+                        now,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    task_id,
-                    workspace_id,
-                    agent_id,
-                    TaskState.CREATED.value,
-                    payload_json,
-                    now,
-                    now,
-                ),
-            )
+            else:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO tasks(
+                        task_id, workspace_id, agent_id, state, payload_json, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        task_id,
+                        workspace_id,
+                        agent_id,
+                        TaskState.CREATED.value,
+                        payload_json,
+                        now,
+                        now,
+                    ),
+                )
             if cursor.rowcount == 1:
                 conn.execute(
                     """
