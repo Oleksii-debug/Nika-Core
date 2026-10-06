@@ -8,6 +8,7 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_multi_repository import (
+    MultiRepositoryExecutionError,
     MultiRepositoryProductFactoryHost,
     RepositoryGraphIntegrityError,
 )
@@ -111,6 +112,21 @@ def _fixture(tmp_path: Path):
 def _task_count(store: SQLiteStore) -> int:
     with store.connection() as conn:
         return int(conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0])
+
+
+def _checkpoint_stage_count(
+    store: SQLiteStore,
+    *,
+    task_id: str,
+    stage: str,
+) -> int:
+    with store.connection() as conn:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE task_id = ? AND stage = ?",
+                (task_id, stage),
+            ).fetchone()[0]
+        )
 
 
 def test_prepare_is_exact_idempotent_and_restart_restores_same_authority(
@@ -231,6 +247,125 @@ def test_stale_trusted_plan_fails_before_host_task_creation(tmp_path: Path) -> N
         service.prepare(plan)
 
     assert _task_count(store) == 0
+
+
+def test_concurrent_project_revision_after_host_task_creation_blocks_graph_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, repository, _tasks, service, project, _graph, plan, _bases, _goals = _fixture(
+        tmp_path
+    )
+    original_ensure = service._ensure_host_task
+
+    def ensure_then_revise(current_project, *, task_id: str, create: bool) -> None:
+        original_ensure(current_project, task_id=task_id, create=create)
+        latest = repository.get(current_project.project_id)
+        repository.update_spec(
+            latest.project_id,
+            replace(
+                latest.spec,
+                desired_outcome="Concurrent revision before graph authority publication",
+            ),
+            expected_row_version=latest.row_version,
+            change_reason="regression: revise after exact host task creation",
+        )
+
+    monkeypatch.setattr(service, "_ensure_host_task", ensure_then_revise)
+
+    task_id = product_factory_host_task_identity(
+        project.project_id,
+        spec_version=project.spec_version,
+        row_version=project.row_version,
+    )
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        service.prepare(plan)
+
+    assert _task_count(store) == 1
+    assert (
+        _checkpoint_stage_count(
+            store,
+            task_id=task_id,
+            stage="product_factory.repository_graph.v1",
+        )
+        == 0
+    )
+    assert (
+        _checkpoint_stage_count(
+            store,
+            task_id=task_id,
+            stage="product_factory.coordinator.v1",
+        )
+        == 0
+    )
+
+
+def test_concurrent_project_revision_after_graph_binding_blocks_initial_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, repository, _tasks, service, project, _graph, plan, _bases, _goals = _fixture(
+        tmp_path
+    )
+    original_bind_graph = service._host._bind_graph
+
+    def bind_then_revise(
+        *,
+        host_task_id: str,
+        project,
+        graph,
+        graph_version: int,
+    ):
+        authority = original_bind_graph(
+            host_task_id=host_task_id,
+            project=project,
+            graph=graph,
+            graph_version=graph_version,
+        )
+        latest = repository.get(project.project_id)
+        repository.update_spec(
+            latest.project_id,
+            replace(
+                latest.spec,
+                desired_outcome="Concurrent revision before initial coordinator checkpoint",
+            ),
+            expected_row_version=latest.row_version,
+            change_reason="regression: revise after graph authority publication",
+        )
+        return authority
+
+    monkeypatch.setattr(service._host, "_bind_graph", bind_then_revise)
+
+    task_id = product_factory_host_task_identity(
+        project.project_id,
+        spec_version=project.spec_version,
+        row_version=project.row_version,
+    )
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        service.prepare(plan)
+
+    assert (
+        _checkpoint_stage_count(
+            store,
+            task_id=task_id,
+            stage="product_factory.repository_graph.v1",
+        )
+        == 1
+    )
+    assert (
+        _checkpoint_stage_count(
+            store,
+            task_id=task_id,
+            stage="product_factory.coordinator.v1",
+        )
+        == 0
+    )
 
 
 def test_execution_plan_snapshots_mutable_graph_and_mapping_inputs(tmp_path: Path) -> None:
