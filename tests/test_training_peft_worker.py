@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -1942,7 +1943,7 @@ def test_main_rejects_deployment_mismatch_before_config_effects(
     assert peft.main() == 2
 
 
-def test_read_config_rejects_foundation_gguf_digest_drift(
+def test_external_foundation_digest_is_enforced_by_staging_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1963,8 +1964,56 @@ def test_read_config_rejects_foundation_gguf_digest_drift(
         monkeypatch.setenv(key, value)
     config.base_gguf.write_bytes(b"replacement-foundation")
 
+    loaded = peft._read_config()
+    job_root = peft._ensure_job_root(loaded, request)
     with pytest.raises(peft.PeftTrainerError, match="base_gguf_digest_mismatch"):
-        peft._read_config()
+        peft._copy_verified_base(loaded, request, job_root)
+
+
+def test_configured_source_loss_replays_durable_base_and_model_snapshots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    first_state, first_candidate = peft._train_one_step(request, config, consumed)
+    assert first_candidate is None
+
+    monkeypatch.setattr(
+        peft.importlib.metadata,
+        "version",
+        _RUNTIME_VERSIONS.__getitem__,
+    )
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        output_root=config.output_root,
+        trainer_artifact=_trainer_artifact(tmp_path),
+    )
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+
+    config.base_gguf.unlink()
+    shutil.rmtree(config.model_dir)
+    loaded = peft._read_config()
+    assert loaded.base_gguf == config.base_gguf
+    assert loaded.model_dir == config.model_dir
+
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _must_not_train_fake_stack,
+    )
+    replay_state, replay_candidate = peft._train_one_step(
+        request,
+        loaded,
+        consumed,
+    )
+
+    assert replay_state == first_state
+    assert replay_candidate is None
 
 
 def test_environment_builder_binds_promoted_initial_adapter(
