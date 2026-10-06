@@ -197,11 +197,13 @@ class PackagedVoiceModelSetup:
             self._last_message = None
 
         started_event = Event()
+        submission_cancelled_event = Event()
         coroutine = self._run_import(
             {"source_root": source_text},
             generation=generation,
             cancel_event=cancel_event,
             started_event=started_event,
+            submission_cancelled_event=submission_cancelled_event,
         )
         try:
             future = self._submit(coroutine)
@@ -243,9 +245,9 @@ class PackagedVoiceModelSetup:
                 )
             self._active_future = future
         future.add_done_callback(
-            lambda done, identity=generation, started=started_event: (
-                self._submitted_done(identity, started, done)
-            )
+            lambda done, identity=generation, started=started_event, cancelled=(
+                submission_cancelled_event
+            ): self._submitted_done(identity, started, cancelled, done)
         )
 
         return UIResult(
@@ -259,6 +261,7 @@ class PackagedVoiceModelSetup:
         self,
         generation: int,
         started_event: Event,
+        submission_cancelled_event: Event,
         future: Future[Any],
     ) -> None:
         with self._lock:
@@ -270,6 +273,7 @@ class PackagedVoiceModelSetup:
             cancel_event = self._cancel_event
 
         if future.cancelled():
+            submission_cancelled_event.set()
             if cancel_event is not None:
                 cancel_event.set()
             if started_event.is_set():
@@ -399,6 +403,7 @@ class PackagedVoiceModelSetup:
         generation: int,
         cancel_event: Event,
         started_event: Event,
+        submission_cancelled_event: Event,
     ) -> None:
         terminal_status: str
         terminal_message: str
@@ -414,7 +419,9 @@ class PackagedVoiceModelSetup:
                     self._restart_required = False
                     self._last_status = "cancelled"
                     self._last_message = "Імпорт голосової моделі скасовано."
-            raise asyncio.CancelledError
+            if submission_cancelled_event.is_set():
+                raise asyncio.CancelledError
+            return
 
         source_text = self._require_start_payload(payload)
         worker = asyncio.create_task(
