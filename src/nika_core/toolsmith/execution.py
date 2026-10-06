@@ -230,25 +230,78 @@ class _PinnedExecutableLaunchGuard:
             self._executable = executable
             self._expected_sha256 = expected_sha256
         self._handle: int | None = None
+        self._descriptor: int | None = None
 
     def __enter__(self) -> pathlib.Path:
         if os.name != "nt":
-            admission = _admit_pinned_executable(
-                self._executable,
-                self._arguments,
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
             )
-            if (
-                _resolution_chain_key(admission.executable)
-                != _resolution_chain_key(self._executable)
-            ):
+            try:
+                descriptor = os.open(self._executable, flags)
+            except OSError as exc:
                 raise ProcessExecutionError(
-                    "pinned runtime executable changed before process launch"
+                    "unable to hold pinned runtime executable for launch"
+                ) from exc
+            self._descriptor = descriptor
+            try:
+                descriptor_stat = os.fstat(descriptor)
+                readmitted = _resolve_pinned_executable(
+                    self._executable,
+                    self._arguments,
                 )
-            if admission.sha256 != self._expected_sha256:
+                if (
+                    _resolution_chain_key(readmitted)
+                    != _resolution_chain_key(self._executable)
+                ):
+                    raise ProcessExecutionError(
+                        "pinned runtime executable changed before process launch"
+                    )
+                try:
+                    path_stat = readmitted.stat()
+                except OSError as exc:
+                    raise ProcessExecutionError(
+                        "pinned runtime executable changed before process launch"
+                    ) from exc
+                if (
+                    not stat.S_ISREG(descriptor_stat.st_mode)
+                    or not stat.S_ISREG(path_stat.st_mode)
+                    or descriptor_stat.st_dev != path_stat.st_dev
+                    or descriptor_stat.st_ino != path_stat.st_ino
+                ):
+                    raise ProcessExecutionError(
+                        "pinned runtime executable changed before process launch"
+                    )
+                if (
+                    _pinned_executable_descriptor_sha256(descriptor)
+                    != self._expected_sha256
+                ):
+                    raise ProcessExecutionError(
+                        "pinned runtime executable bytes changed before process launch"
+                    )
+
+                for descriptor_root in (
+                    pathlib.Path("/proc/self/fd"),
+                    pathlib.Path("/dev/fd"),
+                ):
+                    launch_path = descriptor_root / str(descriptor)
+                    try:
+                        launch_stat = launch_path.stat()
+                    except OSError:
+                        continue
+                    if (
+                        launch_stat.st_dev == descriptor_stat.st_dev
+                        and launch_stat.st_ino == descriptor_stat.st_ino
+                    ):
+                        return launch_path
                 raise ProcessExecutionError(
-                    "pinned runtime executable bytes changed before process launch"
+                    "descriptor-backed executable launch is unavailable"
                 )
-            return admission.executable
+            except Exception:
+                self._close()
+                raise
 
         self._handle = _open_windows_executable_launch_lock(self._executable)
         try:
@@ -277,7 +330,20 @@ class _PinnedExecutableLaunchGuard:
     ) -> None:
         self._close()
 
+    @property
+    def pass_fds(self) -> tuple[int, ...]:
+        descriptor = self._descriptor
+        return () if descriptor is None else (descriptor,)
+
     def _close(self) -> None:
+        descriptor = self._descriptor
+        if descriptor is not None:
+            self._descriptor = None
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
         handle = self._handle
         if handle is None:
             return
@@ -602,17 +668,32 @@ def run_typed_process(
             if time.monotonic() >= deadline:
                 return _timed_out_before_launch(typed_argv)
             launch_argv = (str(launch_executable), *typed_argv[1:])
-            process = subprocess.Popen(
-                launch_argv,
-                cwd=launch_cwd,
-                env=process_environment,
-                shell=False,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                creationflags=creationflags,
-                start_new_session=start_new_session,
-            )
+            if os.name == "nt":
+                process = subprocess.Popen(
+                    launch_argv,
+                    cwd=launch_cwd,
+                    env=process_environment,
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=creationflags,
+                    start_new_session=start_new_session,
+                )
+            else:
+                process = subprocess.Popen(
+                    typed_argv,
+                    executable=str(launch_executable),
+                    pass_fds=launch_guard.pass_fds,
+                    cwd=launch_cwd,
+                    env=process_environment,
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    creationflags=creationflags,
+                    start_new_session=start_new_session,
+                )
 
     with _WindowsJob() as job:
         if os.name == "nt":
@@ -728,8 +809,21 @@ def _git(
                 command[1:],
                 expected_sha256=expected_executable_sha256,
             ) as launch_executable:
+                launch_command = (
+                    (str(launch_executable), *command[1:])
+                    if os.name == "nt"
+                    else command
+                )
+                launch_options = (
+                    {}
+                    if os.name == "nt"
+                    else {
+                        "executable": str(launch_executable),
+                        "pass_fds": launch_guard.pass_fds,
+                    }
+                )
                 result = subprocess.run(
-                    (str(launch_executable), *command[1:]),
+                    launch_command,
                     cwd=cwd,
                     env=dict(environment),
                     shell=False,
@@ -740,6 +834,7 @@ def _git(
                     errors="replace",
                     timeout=timeout_seconds,
                     check=False,
+                    **launch_options,
                 )
         else:
             result = subprocess.run(
@@ -909,8 +1004,21 @@ def prepare_private_git_workspace(
             collision_argv[1:],
             expected_sha256=git_executable_sha256,
         ) as launch_executable:
+            collision_command = (
+                (str(launch_executable), *collision_argv[1:])
+                if os.name == "nt"
+                else collision_argv
+            )
+            collision_options = (
+                {}
+                if os.name == "nt"
+                else {
+                    "executable": str(launch_executable),
+                    "pass_fds": launch_guard.pass_fds,
+                }
+            )
             collision = subprocess.run(
-                (str(launch_executable), *collision_argv[1:]),
+                collision_command,
                 cwd=job_root,
                 env=dict(plan.environment),
                 shell=False,
@@ -918,6 +1026,7 @@ def prepare_private_git_workspace(
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
+                **collision_options,
             )
     except ProcessExecutionError:
         raise WorkspaceSecurityError(

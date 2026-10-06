@@ -230,6 +230,83 @@ def test_executable_launch_guard_rejects_same_path_byte_replacement(
             raise AssertionError("changed executable must not cross launch guard")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor launch only")
+def test_posix_launch_guard_keeps_exact_descriptor_through_exec(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = tmp_path / pathlib.Path(sys.executable).name
+    replacement = tmp_path / "replacement"
+    shutil.copy2(pathlib.Path(sys.executable).resolve(strict=True), executable)
+    replacement.write_bytes(b"replacement executable bytes")
+
+    guard = execution_module._PinnedExecutableLaunchGuard(
+        executable,
+        ("-c", "print('descriptor-bound')"),
+    )
+    with guard as launch_executable:
+        assert guard.pass_fds
+        os.replace(replacement, executable)
+        result = subprocess.run(
+            (str(executable), "-c", "print('descriptor-bound')"),
+            executable=str(launch_executable),
+            pass_fds=guard.pass_fds,
+            cwd=tmp_path,
+            env=sterile_git_environment({"PATH": os.environ.get("PATH", "")}),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "descriptor-bound"
+    assert executable.read_bytes() == b"replacement executable bytes"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor launch only")
+def test_posix_typed_runner_survives_path_swap_at_popen(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / pathlib.Path(sys.executable).name
+    replacement = tmp_path / "replacement"
+    shutil.copy2(pathlib.Path(sys.executable).resolve(strict=True), executable)
+    replacement.write_bytes(b"replacement executable bytes")
+    original_popen = execution_module.subprocess.Popen
+    swapped = False
+
+    def swapping_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        nonlocal swapped
+        if not swapped:
+            os.replace(replacement, executable)
+            swapped = True
+        return original_popen(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution_module.subprocess, "Popen", swapping_popen)
+
+    result = run_typed_process(
+        (str(executable), "-c", "print('trusted-executable')"),
+        process_policy=ProcessPolicy((str(executable),)),
+        resource_budget=ResourceBudget(
+            timeout_seconds=5,
+            max_output_bytes=4096,
+            max_changed_files=1,
+        ),
+        cwd=tmp_path,
+        environment=sterile_git_environment(
+            {"PATH": os.environ.get("PATH", "")}
+        ),
+    )
+
+    assert swapped is True
+    assert result.returncode == 0
+    assert result.stdout.strip() == "trusted-executable"
+    assert executable.read_bytes() == b"replacement executable bytes"
+
+
 def test_typed_runner_rejects_same_path_replacement_after_runtime_admission(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
