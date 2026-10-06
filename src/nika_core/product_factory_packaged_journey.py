@@ -520,7 +520,7 @@ class PackagedProductCommandRouter:
 
     def _select_existing_project(self, project_id: str) -> UIResult:
         try:
-            detail = self._products.inspect_project(project_id)
+            detail = self._products.inspect_project_metadata(project_id)
         except KeyError as exc:
             raise PackagedProductJourneyError(
                 f"ProductProject не знайдено: {project_id}. Поточний вибір не змінено."
@@ -549,7 +549,9 @@ class PackagedProductCommandRouter:
                 "Поточний ProductProject не вибрано. Спочатку створіть або відкрийте його."
             )
         try:
-            detail = self._products.inspect_project(project_id)
+            detail, _credential_refs, decision_summary = (
+                self._products.inspect_project_presentation_context(project_id)
+            )
         except KeyError as exc:
             self.clear_stale_selection()
             raise PackagedProductJourneyError(
@@ -563,8 +565,7 @@ class PackagedProductCommandRouter:
 
         decision = detail.summary.current_decision
         if decision is None:
-            pending_count = sum(item.state == "pending" for item in detail.decisions)
-            if pending_count > 1:
+            if decision_summary.pending_count > 1:
                 raise PackagedProductJourneyError(
                     "Кілька рішень ProductProject очікують власника; "
                     "жодне не вибрано автоматично."
@@ -728,7 +729,7 @@ class PackagedProductCommandRouter:
         # The canonical repository returns an already-committed matching effect without
         # demanding a second ApprovalEvidence.
         try:
-            self._products.record_decision(
+            self._products.record_decision_for_presentation(
                 project_id,
                 decision,
                 expected_row_version=row_version,
@@ -834,7 +835,7 @@ class PackagedProductCommandRouter:
 
         self._pending_decision_approvals.pop(request_id, None)
         try:
-            self._products.record_decision(
+            self._products.record_decision_for_presentation(
                 pending.project_id,
                 pending.decision,
                 expected_row_version=pending.expected_row_version,
@@ -862,7 +863,7 @@ class PackagedProductCommandRouter:
             ProductDecisionState.REJECTED,
         )
         try:
-            self._products.record_decision(
+            self._products.record_decision_for_presentation(
                 project_id,
                 decision,
                 expected_row_version=row_version,
@@ -887,7 +888,7 @@ class PackagedProductCommandRouter:
                 "Поточний ProductProject не вибрано. Створіть продукт або відкрийте його за ID."
             )
         try:
-            detail = self._products.inspect_project(project_id)
+            detail = self._products.inspect_project_metadata(project_id)
         except KeyError as exc:
             self.clear_stale_selection()
             raise PackagedProductJourneyError(

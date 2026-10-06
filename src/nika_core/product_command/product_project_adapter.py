@@ -91,6 +91,11 @@ class ProductProjectCommandService:
         detail, _credential_refs = self.inspect_project_context(project_id)
         return detail
 
+    def inspect_project_metadata(self, project_id: str) -> ProductProjectDetail:
+        """Read ProductProject metadata/statuses without reading ProductDecision rows."""
+
+        return project_detail(self._repository.get(project_id))
+
     def inspect_project_context(
         self,
         project_id: str,
@@ -294,6 +299,26 @@ class ProductProjectCommandService:
             idempotency_key=idempotency_key,
         )
 
+    def _record_decision_effect(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        idempotency_key: str,
+        approval: ApprovalEvidence | None,
+        now: datetime | None,
+    ) -> None:
+        expected_row_version = self._require_expected_row_version(expected_row_version)
+        self._decisions.record(
+            project_id,
+            decision,
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
+        )
+
     def record_decision(
         self,
         project_id: str,
@@ -304,8 +329,7 @@ class ProductProjectCommandService:
         approval: ApprovalEvidence | None = None,
         now: datetime | None = None,
     ) -> ProductProjectDetail:
-        expected_row_version = self._require_expected_row_version(expected_row_version)
-        self._decisions.record(
+        self._record_decision_effect(
             project_id,
             decision,
             expected_row_version=expected_row_version,
@@ -314,6 +338,31 @@ class ProductProjectCommandService:
             now=now,
         )
         return self.inspect_project(project_id)
+
+    def record_decision_for_presentation(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        idempotency_key: str,
+        approval: ApprovalEvidence | None = None,
+        now: datetime | None = None,
+    ) -> ProductProjectDetail:
+        """Commit through PF1, then return the bounded packaged presentation."""
+
+        self._record_decision_effect(
+            project_id,
+            decision,
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
+        )
+        detail, _credential_refs, _summary = self.inspect_project_presentation_context(
+            project_id
+        )
+        return detail
 
     def persist_decision(
         self,
