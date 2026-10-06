@@ -4,6 +4,7 @@ import hashlib
 import os
 import pathlib
 import stat
+from types import MappingProxyType
 
 from nika_core.toolsmith import contracts as toolsmith_contracts
 
@@ -120,7 +121,9 @@ def _sterile_git_config_args() -> tuple[str, ...]:
     )
 
 
-def validate_sterile_git_environment(environment: object) -> dict[str, str]:
+def validate_sterile_git_environment(
+    environment: object,
+) -> collections.abc.Mapping[str, str]:
     if not isinstance(environment, collections.abc.Mapping):
         raise WorkspaceSecurityError("sterile Git environment must be a string mapping")
     try:
@@ -140,7 +143,7 @@ def validate_sterile_git_environment(environment: object) -> dict[str, str]:
     canonical = sterile_git_environment(snapshot)
     if snapshot != canonical:
         raise WorkspaceSecurityError("sterile Git environment is not canonical")
-    return dict(canonical)
+    return MappingProxyType(dict(canonical))
 
 
 def validate_sterile_git_config_args(config_args: object) -> tuple[str, ...]:
@@ -196,8 +199,10 @@ class SterileGitPlan:
     def __post_init__(self) -> None:
         validate_git_branch_name(self.branch_name)
         validate_git_commit_sha(self.base_sha)
-        validate_sterile_git_environment(self.environment)
-        validate_sterile_git_config_args(self.config_args)
+        environment = validate_sterile_git_environment(self.environment)
+        config_args = validate_sterile_git_config_args(self.config_args)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "config_args", config_args)
         if self.private_git_dir == self.repository_root / ".git":
             raise WorkspaceSecurityError("production .git metadata cannot be worker metadata")
         if self.private_git_dir == self.worktree_root / ".git":

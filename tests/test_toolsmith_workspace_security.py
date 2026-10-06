@@ -245,6 +245,40 @@ def test_sterile_git_plan_rejects_noncanonical_execution_context(tmp_path: Path)
         )
 
 
+def test_sterile_git_plan_snapshots_and_freezes_canonical_environment(
+    tmp_path: Path,
+) -> None:
+    production = tmp_path / "production-snapshot"
+    job_root = tmp_path / "jobs" / "job-snapshot"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    canonical = sterile_git_environment({"PATH": "trusted"})
+    reference = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
+        branch_name="toolsmith/job-snapshot",
+        base_sha="a" * 40,
+        source_environment={"PATH": "trusted"},
+    )
+    plan = SterileGitPlan(
+        repository_root=reference.repository_root,
+        private_git_dir=reference.private_git_dir,
+        worktree_root=reference.worktree_root,
+        branch_name=reference.branch_name,
+        base_sha=reference.base_sha,
+        environment=canonical,
+        config_args=reference.config_args,
+    )
+
+    canonical["PATH"] = "attacker"
+    assert plan.environment["PATH"] == "trusted"
+    with pytest.raises(TypeError):
+        plan.environment["PATH"] = "attacker"  # type: ignore[index]
+
+
+
+
 @pytest.mark.parametrize(
     "base_sha",
     (
