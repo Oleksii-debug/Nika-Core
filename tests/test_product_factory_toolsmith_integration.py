@@ -238,6 +238,20 @@ def test_wrong_toolsmith_resume_identity_is_rejected_before_product_state_change
     assert record.state is WorkState.REPAIR_REQUIRED
 
 
+def test_non_dict_toolsmith_resume_identity_fails_closed_before_product_change() -> None:
+    coordinator, request = _coordinator()
+    escalation = FakeEscalation()
+    bridge = _bridge(escalation)
+    checkpoint = bridge.begin_gap(request, capability_id="toml-editor", reason="missing")
+    escalation.resume = ["task_id", "capability_id", "version", "digest"]
+    before = coordinator.snapshot()
+
+    with pytest.raises(ProductFactoryToolsmithError, match="exact dictionary"):
+        bridge.resume_registered_gap(coordinator, checkpoint)
+
+    assert coordinator.snapshot() == before
+
+
 @pytest.mark.parametrize(
     ("field", "bad_value"),
     (
