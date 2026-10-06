@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import pytest
 
-from nika_core.toolsmith.contracts import AcceptanceCommand, NetworkMode, NetworkPolicy, ProcessPolicy
+from nika_core.toolsmith.contracts import (
+    AcceptanceCommand,
+    AllowedPathPolicy,
+    NetworkMode,
+    NetworkPolicy,
+    ProcessPolicy,
+    normalize_relative_path,
+)
 
 
 @pytest.mark.parametrize(
@@ -81,3 +88,65 @@ def test_valid_unicode_command_and_allowlist_are_preserved() -> None:
     assert ProcessPolicy(("C:\\Program Files\\Nika\\python.exe",)).shell_allowed is False
     command = AcceptanceCommand(("python", "-m", "pytest", "тести з пробілами"))
     assert command.argv[-1] == "тести з пробілами"
+
+@pytest.mark.parametrize(
+    "invalid",
+    (
+        "src",
+        [],
+        (),
+        ("",),
+        (" src",),
+        ("src ",),
+        ("src\nsecrets",),
+        ("src\u0085secrets",),
+        (None,),
+        (123,),
+    ),
+)
+def test_allowed_path_policy_rejects_ambiguous_root_carriers(invalid: object) -> None:
+    with pytest.raises(ValueError, match="path|tuple|control"):
+        AllowedPathPolicy(invalid)  # type: ignore[arg-type]
+
+
+def test_allowed_path_policy_rejects_behavioral_root_text() -> None:
+    class Root(str):
+        pass
+
+    with pytest.raises(ValueError, match="exact text"):
+        AllowedPathPolicy((Root("src"),))
+
+
+def test_allowed_path_policy_snapshots_canonical_root_identity() -> None:
+    policy = AllowedPathPolicy(("src/./nika_core", "tests\\unit"))
+
+    assert policy.roots == ("src/nika_core", "tests/unit")
+    assert policy.allows("src/nika_core/module.py")
+    assert policy.allows("tests/unit/test_module.py")
+    assert not policy.allows("src2/module.py")
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        " src/module.py",
+        "src/module.py ",
+        "src/\tmodule.py",
+        "src/\x7fmodule.py",
+        "src/\u2028module.py",
+        "src/\u2029module.py",
+    ),
+)
+def test_relative_path_rejects_ambiguous_text_identity(value: str) -> None:
+    with pytest.raises(ValueError, match="canonical text|control"):
+        normalize_relative_path(value)
+
+
+def test_relative_path_rejects_behavioral_text_identity() -> None:
+    class PathText(str):
+        def strip(self) -> str:
+            return "src/module.py"
+
+    with pytest.raises(ValueError, match="exact text"):
+        normalize_relative_path(PathText(" attacker"))
+

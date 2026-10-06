@@ -71,13 +71,23 @@ class WorkerFailureKind(StrEnum):
 
 
 def normalize_relative_path(value: str) -> PurePosixPath:
-    stripped = value.strip()
-    win = PureWindowsPath(stripped)
-    posix = PurePosixPath(stripped.replace("\\", "/"))
+    if type(value) is not str:
+        raise ValueError("path must be exact text")
+    if not value or value != value.strip():
+        raise ValueError("path must be non-empty canonical text")
+    if any(
+        ord(character) < 32
+        or ord(character) == 127
+        or character in "\u0085\u2028\u2029"
+        for character in value
+    ):
+        raise ValueError("path must not contain control data")
+
+    win = PureWindowsPath(value)
+    posix = PurePosixPath(value.replace("\\", "/"))
     lowered_parts = tuple(part.casefold() for part in posix.parts)
     if (
-        not stripped
-        or posix == PurePosixPath(".")
+        posix == PurePosixPath(".")
         or win.drive
         or posix.is_absolute()
         or ".." in posix.parts
@@ -124,14 +134,17 @@ class AllowedPathPolicy:
     roots: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        if not self.roots:
-            raise ValueError("at least one allowed path root is required")
-        for root in self.roots:
-            normalize_relative_path(root)
+        if type(self.roots) is not tuple or not self.roots:
+            raise ValueError("allowed path roots must be a non-empty tuple")
+        canonical_roots = tuple(
+            normalize_relative_path(root).as_posix()
+            for root in self.roots
+        )
+        object.__setattr__(self, "roots", canonical_roots)
 
     def allows(self, value: str) -> bool:
         candidate = normalize_relative_path(value)
-        roots = tuple(normalize_relative_path(root) for root in self.roots)
+        roots = tuple(PurePosixPath(root) for root in self.roots)
         return any(candidate == root or root in candidate.parents for root in roots)
 
 

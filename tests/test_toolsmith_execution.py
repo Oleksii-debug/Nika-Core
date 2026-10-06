@@ -775,18 +775,22 @@ def test_typed_runner_uses_final_executable_launch_guard(
     assert observed[0] == pathlib.Path(sys.executable).resolve(strict=True)
 
 
-def test_prepared_git_workspace_rejects_behavioral_head_sha() -> None:
+def test_prepared_git_workspace_rejects_behavioral_head_sha(
+    tmp_path: pathlib.Path,
+) -> None:
     class HeadSha(str):
         pass
 
-    plan = execution_module.SterileGitPlan(
-        repository_root=pathlib.Path("production"),
-        private_git_dir=pathlib.Path("jobs") / "_nika_private_git",
-        worktree_root=pathlib.Path("jobs") / "worktree",
+    production = tmp_path / "production-head"
+    job_root = tmp_path / "jobs" / "job-head"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+    plan = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
         branch_name="toolsmith/job",
         base_sha="a" * 40,
-        environment={},
-        config_args=(),
+        source_environment={"PATH": os.environ.get("PATH", "")},
     )
 
     with pytest.raises(WorkspaceSecurityError, match="private workspace HEAD"):
@@ -817,6 +821,79 @@ def test_private_git_workspace_refuses_ambiguous_reuse(tmp_path: pathlib.Path) -
 
     with pytest.raises(WorkspaceSecurityError, match="ambiguous reuse"):
         prepare_private_git_workspace(plan)
+
+
+def test_private_git_workspace_readmits_corrupted_environment_carrier(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha = _make_source_repository(tmp_path)
+    job_root = tmp_path / "jobs" / "job-corrupted-environment"
+    job_root.mkdir(parents=True)
+    plan = make_sterile_git_plan(
+        repository_root=repository,
+        job_root=job_root,
+        branch_name="toolsmith/job-corrupted-environment",
+        base_sha=base_sha,
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+    hostile_environment = dict(plan.environment)
+    hostile_environment["GIT_CONFIG_COUNT"] = "1"
+    hostile_environment["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+    hostile_environment["GIT_CONFIG_VALUE_0"] = str(tmp_path / "hooks")
+    object.__setattr__(plan, "environment", hostile_environment)
+
+    with pytest.raises(WorkspaceSecurityError, match="environment is not canonical"):
+        prepare_private_git_workspace(plan)
+
+    assert not plan.private_git_dir.exists()
+    assert not plan.worktree_root.exists()
+
+
+def test_private_git_workspace_uses_frozen_environment_snapshot(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, base_sha = _make_source_repository(tmp_path)
+    job_root = tmp_path / "jobs" / "job-environment-snapshot"
+    job_root.mkdir(parents=True)
+    plan = make_sterile_git_plan(
+        repository_root=repository,
+        job_root=job_root,
+        branch_name="toolsmith/job-environment-snapshot",
+        base_sha=base_sha,
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+    original_validate = execution_module.validate_sterile_git_environment
+    original_git = execution_module._git
+
+    def validate_then_replace(environment: object) -> object:
+        snapshot = original_validate(environment)
+        hostile_environment = dict(plan.environment)
+        hostile_environment["GIT_CONFIG_COUNT"] = "1"
+        hostile_environment["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+        hostile_environment["GIT_CONFIG_VALUE_0"] = str(tmp_path / "hooks")
+        object.__setattr__(plan, "environment", hostile_environment)
+        return snapshot
+
+    def guarded_git(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        environment = kwargs.get("environment")
+        assert environment is not None
+        assert "GIT_CONFIG_COUNT" not in environment  # type: ignore[operator]
+        assert "GIT_CONFIG_KEY_0" not in environment  # type: ignore[operator]
+        assert "GIT_CONFIG_VALUE_0" not in environment  # type: ignore[operator]
+        return original_git(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        execution_module,
+        "validate_sterile_git_environment",
+        validate_then_replace,
+    )
+    monkeypatch.setattr(execution_module, "_git", guarded_git)
+
+    prepared = prepare_private_git_workspace(plan)
+
+    assert prepared.head_sha == base_sha
+    assert plan.environment["GIT_CONFIG_COUNT"] == "1"
 
 
 def test_typed_runner_preserves_literal_arguments_and_captures_output(

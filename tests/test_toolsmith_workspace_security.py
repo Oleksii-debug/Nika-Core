@@ -8,6 +8,7 @@ import pytest
 from nika_core.toolsmith import IsolationClass
 from nika_core.toolsmith.workspace_security import (
     ProductionIntegritySnapshot,
+    SterileGitPlan,
     WorkspacePathPolicy,
     WorkspaceSecurityError,
     assert_production_integrity,
@@ -216,6 +217,81 @@ def test_private_git_plan_separates_production_metadata(tmp_path: Path) -> None:
     assert "protocol.file.allow=never" in plan.config_args
     assert "protocol.ext.allow=never" in plan.config_args
     assert "GITHUB_TOKEN" not in plan.environment
+
+
+def test_sterile_git_plan_rejects_noncanonical_execution_context(tmp_path: Path) -> None:
+    production = tmp_path / "production-context"
+    job_root = tmp_path / "jobs" / "job-context"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    plan = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
+        branch_name="toolsmith/job-context",
+        base_sha="a" * 40,
+        source_environment={"PATH": "x"},
+    )
+    hostile_environment = dict(plan.environment)
+    hostile_environment["GIT_CONFIG_COUNT"] = "1"
+    hostile_environment["GIT_CONFIG_KEY_0"] = "core.hooksPath"
+    hostile_environment["GIT_CONFIG_VALUE_0"] = str(tmp_path / "hooks")
+
+    with pytest.raises(WorkspaceSecurityError, match="environment is not canonical"):
+        SterileGitPlan(
+            repository_root=plan.repository_root,
+            private_git_dir=plan.private_git_dir,
+            worktree_root=plan.worktree_root,
+            branch_name=plan.branch_name,
+            base_sha=plan.base_sha,
+            environment=hostile_environment,
+            config_args=plan.config_args,
+        )
+
+    with pytest.raises(WorkspaceSecurityError, match="config arguments are not canonical"):
+        SterileGitPlan(
+            repository_root=plan.repository_root,
+            private_git_dir=plan.private_git_dir,
+            worktree_root=plan.worktree_root,
+            branch_name=plan.branch_name,
+            base_sha=plan.base_sha,
+            environment=plan.environment,
+            config_args=("-c", f"core.hooksPath={tmp_path / 'hooks'}"),
+        )
+
+
+def test_sterile_git_plan_snapshots_and_freezes_canonical_environment(
+    tmp_path: Path,
+) -> None:
+    production = tmp_path / "production-snapshot"
+    job_root = tmp_path / "jobs" / "job-snapshot"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    canonical = sterile_git_environment({"PATH": "trusted"})
+    reference = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
+        branch_name="toolsmith/job-snapshot",
+        base_sha="a" * 40,
+        source_environment={"PATH": "trusted"},
+    )
+    plan = SterileGitPlan(
+        repository_root=reference.repository_root,
+        private_git_dir=reference.private_git_dir,
+        worktree_root=reference.worktree_root,
+        branch_name=reference.branch_name,
+        base_sha=reference.base_sha,
+        environment=canonical,
+        config_args=reference.config_args,
+    )
+
+    canonical["PATH"] = "attacker"
+    assert plan.environment["PATH"] == "trusted"
+    with pytest.raises(TypeError):
+        plan.environment["PATH"] = "attacker"  # type: ignore[index]
+
+
 
 
 @pytest.mark.parametrize(
