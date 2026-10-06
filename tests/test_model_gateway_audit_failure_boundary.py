@@ -9,6 +9,9 @@ from nika_core.builder.compiler import AgentCompiler
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.audit import AuditLog
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
 from nika_core.model_gateway.contracts import (
     ModelAuditError,
     ModelErrorCode,
@@ -24,7 +27,13 @@ from nika_core.model_gateway.contracts import (
 )
 from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
-from nika_core.runtime.contracts import RuntimeRequest
+from nika_core.runtime.contracts import (
+    RuntimeErrorCode,
+    RuntimeOutcome,
+    RuntimeRequest,
+)
+from nika_core.runtime.coordinator import TaskRuntimeCoordinator
+from nika_core.runtime.retry import RetryPolicy
 
 _AUDIT_CANARY = "audit-secret-canary-704"
 _PROVIDER_CANARY = "provider-secret-canary-704"
@@ -222,11 +231,7 @@ def test_cancelled_audit_failure_is_unknown_not_raw_audit_exception() -> None:
     assert audit.events == ["model.requested", "model.cancelled"]
 
 
-def test_agent_runtime_does_not_reclassify_audit_failure_as_transient(
-    tmp_path: Path,
-) -> None:
-    store = SQLiteStore(tmp_path / "runtime.db")
-    store.initialize()
+def _definitions(store: SQLiteStore) -> AgentDefinitionRepository:
     definitions = AgentDefinitionRepository(store)
     compiler = AgentCompiler(tools=(), model_profiles={"configured"})
     definition = AgentDefinition(
@@ -238,6 +243,15 @@ def test_agent_runtime_does_not_reclassify_audit_failure_as_transient(
     )
     definitions.save_draft(compiler.compile(definition))
     definitions.activate(definition)
+    return definitions
+
+
+def test_agent_runtime_does_not_reclassify_audit_failure_as_transient(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "runtime.db")
+    store.initialize()
+    definitions = _definitions(store)
 
     audit = _SelectiveFailAudit("model.completed")
     provider = _Provider("primary")
@@ -266,3 +280,56 @@ def test_agent_runtime_does_not_reclassify_audit_failure_as_transient(
     _assert_audit_error(caught.value, effect=ModelFailureEffect.UNKNOWN)
     assert provider.complete_calls == 1
     assert audit.events == ["model.requested", "model.completed"]
+
+
+def test_coordinator_transient_retry_policy_does_not_replay_audit_failure(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "coordinator.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    task = queue.create(workspace_id="audit-boundary", agent_id="worker")
+    queue.transition(task.task_id, TaskState.READY)
+
+    audit = _SelectiveFailAudit("model.completed")
+    provider = _Provider("primary")
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(provider)
+    runtime = ModelGatewayAgentRuntime(
+        gateway=gateway,
+        definitions=_definitions(store),
+        provider_id="primary",
+        provider_kind=ProviderKind.LOCAL,
+        model="fixture-model",
+    )
+    coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+    request = RuntimeRequest(
+        task_id=task.task_id,
+        thread_id="thread-audit-coordinator",
+        payload={
+            "agent_id": "worker",
+            "agent_version": 1,
+            "handoff": {"work": "fixture"},
+        },
+    )
+    policy = RetryPolicy(
+        max_retries=1,
+        retryable_error_codes=frozenset(
+            {RuntimeErrorCode.TRANSIENT, RuntimeErrorCode.TIMEOUT}
+        ),
+        allow_fresh_retry=True,
+    )
+
+    result = asyncio.run(
+        coordinator.start(
+            runtime,
+            request,
+            retry_policy=policy,
+        )
+    )
+
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert result.error_code is RuntimeErrorCode.INTERNAL
+    assert provider.complete_calls == 1
+    assert audit.events == ["model.requested", "model.completed"]
+    assert queue.get(task.task_id).state is TaskState.FAILED
