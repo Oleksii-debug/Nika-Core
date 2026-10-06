@@ -96,17 +96,26 @@ class ProductFactoryDeploymentCheckpointHost:
         project_id: str,
         snapshot: DeploymentFabricSnapshot,
     ) -> str:
-        self._require_host_task(host_task_id=host_task_id, project_id=project_id)
+        host_task_id = _require_exact_identity(host_task_id, "host_task_id")
+        project_id = _require_exact_identity(project_id, "project_id")
         _validate_snapshot_project(snapshot, project_id)
-        checkpoint = self._checkpoints.save(
-            task_id=host_task_id,
-            stage=_STAGE,
-            payload={
-                "schema": _SCHEMA,
-                "project_id": project_id,
-                "snapshot": _encode_snapshot(snapshot),
-            },
-        )
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._require_host_task_on_connection(
+                conn,
+                host_task_id=host_task_id,
+                project_id=project_id,
+            )
+            checkpoint = self._checkpoints.save_with_connection(
+                conn,
+                task_id=host_task_id,
+                stage=_STAGE,
+                payload={
+                    "schema": _SCHEMA,
+                    "project_id": project_id,
+                    "snapshot": _encode_snapshot(snapshot),
+                },
+            )
         return checkpoint.checkpoint_id
 
     def latest_snapshot(
@@ -115,8 +124,15 @@ class ProductFactoryDeploymentCheckpointHost:
         host_task_id: str,
         project_id: str,
     ) -> DeploymentFabricSnapshot | None:
-        self._require_host_task(host_task_id=host_task_id, project_id=project_id)
+        host_task_id = _require_exact_identity(host_task_id, "host_task_id")
+        project_id = _require_exact_identity(project_id, "project_id")
         with self._store.connection() as conn:
+            conn.execute("BEGIN")
+            self._require_host_task_on_connection(
+                conn,
+                host_task_id=host_task_id,
+                project_id=project_id,
+            )
             row = conn.execute(
                 """
                 SELECT payload_json, checksum_sha256
@@ -170,10 +186,23 @@ class ProductFactoryDeploymentCheckpointHost:
         host_task_id = _require_exact_identity(host_task_id, "host_task_id")
         project_id = _require_exact_identity(project_id, "project_id")
         with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM tasks WHERE task_id = ?",
-                (host_task_id,),
-            ).fetchone()
+            self._require_host_task_on_connection(
+                conn,
+                host_task_id=host_task_id,
+                project_id=project_id,
+            )
+
+    @staticmethod
+    def _require_host_task_on_connection(
+        conn: Any,
+        *,
+        host_task_id: str,
+        project_id: str,
+    ) -> None:
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            (host_task_id,),
+        ).fetchone()
         if row is None:
             raise ProductFactoryDeploymentCheckpointError(
                 "Product Factory host task does not exist"

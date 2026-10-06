@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -265,27 +266,81 @@ class CheckpointService:
         self.store = store
 
     def save(self, *, task_id: str, stage: str, payload: dict[str, object]) -> Checkpoint:
+        prepared = self._prepare_checkpoint(
+            task_id=task_id,
+            stage=stage,
+            payload=payload,
+        )
+        with self.store.connection() as conn:
+            return self._insert_checkpoint(conn, prepared)
+
+    def save_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        task_id: str,
+        stage: str,
+        payload: dict[str, object],
+    ) -> Checkpoint:
+        """Save inside a caller-owned transaction without committing it."""
+
+        prepared = self._prepare_checkpoint(
+            task_id=task_id,
+            stage=stage,
+            payload=payload,
+        )
+        return self._insert_checkpoint(conn, prepared)
+
+    @staticmethod
+    def _prepare_checkpoint(
+        *,
+        task_id: str,
+        stage: str,
+        payload: dict[str, object],
+    ) -> tuple[Checkpoint, str, str]:
         task_id = _require_text(task_id, "task_id")
         stage = _require_text(stage, "stage")
         body = _canonical_json(payload)
         checksum = hashlib.sha256(body.encode("utf-8")).hexdigest()
         public_payload = _decode_payload(body, checksum)
-        checkpoint_id = str(uuid.uuid4())
-        now = datetime.now(UTC).isoformat()
-        with self.store.connection() as conn:
-            exists = conn.execute("SELECT 1 FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
-            if exists is None:
-                raise KeyError(f"Unknown task: {task_id}")
-            conn.execute(
-                """
-                INSERT INTO checkpoints(
-                    checkpoint_id, task_id, stage, payload_json, checksum_sha256, created_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (checkpoint_id, task_id, stage, body, checksum, now),
+        checkpoint = Checkpoint(
+            str(uuid.uuid4()),
+            task_id,
+            stage,
+            public_payload,
+            checksum,
+        )
+        return checkpoint, body, datetime.now(UTC).isoformat()
+
+    @staticmethod
+    def _insert_checkpoint(
+        conn: sqlite3.Connection,
+        prepared: tuple[Checkpoint, str, str],
+    ) -> Checkpoint:
+        checkpoint, body, created_at = prepared
+        exists = conn.execute(
+            "SELECT 1 FROM tasks WHERE task_id = ?",
+            (checkpoint.task_id,),
+        ).fetchone()
+        if exists is None:
+            raise KeyError(f"Unknown task: {checkpoint.task_id}")
+        conn.execute(
+            """
+            INSERT INTO checkpoints(
+                checkpoint_id, task_id, stage, payload_json, checksum_sha256, created_at
             )
-        return Checkpoint(checkpoint_id, task_id, stage, public_payload, checksum)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                checkpoint.checkpoint_id,
+                checkpoint.task_id,
+                checkpoint.stage,
+                body,
+                checkpoint.checksum_sha256,
+                created_at,
+            ),
+        )
+        return checkpoint
 
     def latest(self, task_id: str) -> Checkpoint | None:
         task_id = _require_text(task_id, "task_id")
