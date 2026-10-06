@@ -3180,28 +3180,31 @@ def _train_one_step(
             job_root=job_root,
         )
         resume_snapshot_root = resume_checkpoint.parent
-    foundation_load_authority = _open_foundation_load_authority(
-        staged_model_dir,
-        staged_base,
-        expected_model_manifest_sha256=config.model_dir_manifest_sha256,
-        expected_base_sha256=config.base_gguf_sha256,
-    )
     initial_adapter_dir = (
         _stage_initial_adapter(config, request, job_root)
         if previous_checkpoint is None
         else None
     )
+    foundation_load_authority: tuple[
+        tuple[Path, int, tuple[int, int, int, int, int]], ...
+    ] = ()
     initial_adapter_load_authority: tuple[
         tuple[Path, int, tuple[int, int, int, int, int]], ...
     ] = ()
-    if initial_adapter_dir is not None:
-        initial_adapter_load_authority = _open_initial_adapter_load_authority(
-            initial_adapter_dir,
-            config=config,
-            request=request,
-        )
 
     try:
+        foundation_load_authority = _open_foundation_load_authority(
+            staged_model_dir,
+            staged_base,
+            expected_model_manifest_sha256=config.model_dir_manifest_sha256,
+            expected_base_sha256=config.base_gguf_sha256,
+        )
+        if initial_adapter_dir is not None:
+            initial_adapter_load_authority = _open_initial_adapter_load_authority(
+                initial_adapter_dir,
+                config=config,
+                request=request,
+            )
         tokenizer = AutoTokenizer.from_pretrained(
             os.fspath(staged_model_dir),
             gguf_file=os.fspath(staged_base),
