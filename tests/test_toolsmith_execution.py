@@ -59,6 +59,16 @@ def _make_source_repository(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
     return repository, _git(repository, "rev-parse", "HEAD")
 
 
+@pytest.mark.parametrize("separator", ("\u0085", "\u2028", "\u2029"))
+def test_branch_name_rejects_unicode_line_boundaries(separator: str) -> None:
+    with pytest.raises(WorkspaceSecurityError, match="control data"):
+        execution_module._validate_branch_name(f"toolsmith{separator}branch")
+
+
+def test_branch_name_preserves_safe_unicode_identity() -> None:
+    execution_module._validate_branch_name("toolsmith/гілка")
+
+
 def test_prepare_private_git_workspace_has_no_remote_or_visible_dot_git(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -318,6 +328,139 @@ def test_posix_typed_runner_survives_path_swap_at_popen(
     assert result.returncode == 0
     assert result.stdout.strip() == "trusted-executable"
     assert executable.read_text(encoding="utf-8") == "#!/bin/sh\nprintf 'replacement\\n'\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_launch_guard_executes_snapshot_after_same_inode_mutation(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text(
+        "#!/bin/sh\nprintf 'trusted-snapshot\\n'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with guard as launch_executable:
+        admitted_stat = executable.stat()
+        with executable.open("r+b", buffering=0) as writer:
+            writer.truncate(0)
+            writer.write(b"#!/bin/sh\nprintf 'mutated-inode\\n'\n")
+        mutated_stat = executable.stat()
+        assert (mutated_stat.st_dev, mutated_stat.st_ino) == (
+            admitted_stat.st_dev,
+            admitted_stat.st_ino,
+        )
+
+        result = subprocess.run(
+            (str(executable),),
+            executable=str(launch_executable),
+            pass_fds=guard.pass_fds,
+            cwd=tmp_path,
+            env=sterile_git_environment({"PATH": os.environ.get("PATH", "")}),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "trusted-snapshot"
+    assert "mutated-inode" in executable.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_typed_runner_survives_same_inode_mutation_at_popen(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text(
+        "#!/bin/sh\nprintf 'trusted-at-popen\\n'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    original_popen = execution_module.subprocess.Popen
+    mutated = False
+
+    def mutating_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        nonlocal mutated
+        if not mutated:
+            before = executable.stat()
+            with executable.open("r+b", buffering=0) as writer:
+                writer.truncate(0)
+                writer.write(b"#!/bin/sh\nprintf 'mutated-at-popen\\n'\n")
+            after = executable.stat()
+            assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+            mutated = True
+        return original_popen(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution_module.subprocess, "Popen", mutating_popen)
+
+    result = run_typed_process(
+        (str(executable),),
+        process_policy=ProcessPolicy((str(executable),)),
+        resource_budget=ResourceBudget(
+            timeout_seconds=5,
+            max_output_bytes=4096,
+            max_changed_files=1,
+        ),
+        cwd=tmp_path,
+        environment=sterile_git_environment(
+            {"PATH": os.environ.get("PATH", "")}
+        ),
+    )
+
+    assert mutated is True
+    assert result.returncode == 0
+    assert result.stdout.strip() == "trusted-at-popen"
+    assert "mutated-at-popen" in executable.read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_launch_guard_fallback_snapshot_survives_same_inode_mutation(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text(
+        "#!/bin/sh\nprintf 'trusted-fallback\\n'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setattr(execution_module.os, "memfd_create", None, raising=False)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with guard as launch_executable:
+        before = executable.stat()
+        with executable.open("r+b", buffering=0) as writer:
+            writer.truncate(0)
+            writer.write(b"#!/bin/sh\nprintf 'mutated-fallback\\n'\n")
+        after = executable.stat()
+        assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+
+        result = subprocess.run(
+            (str(executable),),
+            executable=str(launch_executable),
+            pass_fds=guard.pass_fds,
+            cwd=tmp_path,
+            env=sterile_git_environment({"PATH": os.environ.get("PATH", "")}),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "trusted-fallback"
+    assert "mutated-fallback" in executable.read_text(encoding="utf-8")
 
 
 def test_typed_runner_rejects_same_path_replacement_after_runtime_admission(
@@ -763,6 +906,33 @@ def test_typed_runner_uses_final_executable_launch_guard(
     assert result.stdout.strip() == "guarded"
     assert len(observed) == 1
     assert observed[0] == pathlib.Path(sys.executable).resolve(strict=True)
+
+
+def test_prepared_git_workspace_rejects_behavioral_head_sha() -> None:
+    class HeadSha(str):
+        pass
+
+    plan = execution_module.SterileGitPlan(
+        repository_root=pathlib.Path("production"),
+        private_git_dir=pathlib.Path("jobs") / "_nika_private_git",
+        worktree_root=pathlib.Path("jobs") / "worktree",
+        branch_name="toolsmith/job",
+        base_sha="a" * 40,
+        environment={},
+        config_args=(),
+    )
+
+    with pytest.raises(WorkspaceSecurityError, match="private workspace HEAD"):
+        execution_module.PreparedGitWorkspace(
+            plan=plan,
+            head_sha=HeadSha("a" * 40),
+            remotes=(),
+            tree_evidence=execution_module.TreeEvidence(
+                files=(),
+                digest="b" * 64,
+                total_bytes=0,
+            ),
+        )
 
 
 def test_private_git_workspace_refuses_ambiguous_reuse(tmp_path: pathlib.Path) -> None:
