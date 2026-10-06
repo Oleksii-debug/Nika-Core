@@ -14,8 +14,8 @@ from nika_core.intelligence.contracts import (
     DeterministicGoal,
     DeterministicPlan,
     DeterministicPlanner,
-    PlanStep,
     DeterministicPlanningError,
+    PlanStep,
     WorldState,
     WorldStateObserver,
 )
@@ -175,9 +175,8 @@ class DeterministicBrain:
         observation_timeout_seconds = _positive_finite_seconds(
             observation_timeout_seconds, name="observation_timeout_seconds"
         )
-        if self._effect_journal is not None:
-            if task_id is None:
-                raise ValueError("task_id is required when effect_journal is configured")
+        if self._effect_journal is not None and task_id is None:
+            raise ValueError("task_id is required when effect_journal is configured")
 
         # Kept for source compatibility only. A planner-selected action ID is not approval
         # evidence and must never turn into ToolCall.approved=True.
