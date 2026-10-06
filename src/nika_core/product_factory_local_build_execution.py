@@ -39,9 +39,11 @@ from nika_core.toolsmith.execution import (
     run_typed_process,
 )
 from nika_core.toolsmith.workspace_security import (
+    ProductionIntegritySnapshot,
     WorkspacePathPolicy,
     WorkspaceSecurityError,
     assert_cleanup_tree_safe,
+    assert_production_integrity,
     collect_tree_delta_evidence,
     collect_tree_evidence,
     ensure_path_policy,
@@ -194,6 +196,12 @@ class PackagedLocalBuildExecutionNode:
                 self.startup.policy.resource_budget.max_output_bytes,
                 self.startup.policy.resource_budget.max_changed_files,
             )
+            production_before = _production_integrity_snapshot(
+                repository_root,
+                git_executable=self.startup.git_executable,
+                environment=environment,
+                resource_budget=resource_budget,
+            )
         except (
             KeyError,
             OSError,
@@ -231,6 +239,8 @@ class PackagedLocalBuildExecutionNode:
             self._cleanup_after_receipt(plan, job_root, dispatch)
             return result
 
+        process_result = None
+        process_error: Exception | None = None
         try:
             process_result = run_typed_process(
                 dispatch.grant.argv,
@@ -241,11 +251,44 @@ class PackagedLocalBuildExecutionNode:
                 workspace_root=prepared.plan.worktree_root,
             )
         except (ProcessExecutionError, OSError, RuntimeError, ValueError) as exc:
+            process_error = exc
+
+        # Process containment is not a filesystem sandbox. Re-admit the production
+        # repository after every attempted effect so an absolute-path escape or a
+        # concurrent source mutation can never be reported as a successful build.
+        try:
+            production_after = _production_integrity_snapshot(
+                repository_root,
+                git_executable=self.startup.git_executable,
+                environment=environment,
+                resource_budget=resource_budget,
+            )
+            assert_production_integrity(production_before, production_after)
+        except (OSError, ProcessExecutionError, ValueError, WorkspaceSecurityError):
+            result = _failed_result(
+                dispatch,
+                dispatch_digest,
+                reason_code="production_integrity_not_preserved",
+            )
+            self._write_receipt(
+                dispatch,
+                dispatch_digest,
+                result,
+                (),
+                process_summary={"reason_code": "production_integrity_not_preserved"},
+            )
+            self._cleanup_after_receipt(plan, job_root, dispatch)
+            return result
+
+        if process_error is not None:
             # The process boundary may already have been crossed. No blind retry:
             # leave the started marker without a fabricated result receipt.
             raise BuildExecutionPortError(
-                f"local build process outcome requires inspection: {type(exc).__name__}"
-            ) from None
+                "local build process outcome requires inspection: "
+                f"{type(process_error).__name__}"
+            )
+        if process_result is None:
+            raise BuildExecutionPortError("local build process returned no result")
 
         try:
             after = collect_tree_evidence(
@@ -597,6 +640,65 @@ def build_packaged_local_build_execution_node(
         trusted_authority=trusted_authority,
         output_policies=output_policies,
     )
+
+
+
+def _production_integrity_snapshot(
+    repository_root: pathlib.Path,
+    *,
+    git_executable: pathlib.Path,
+    environment: dict[str, str],
+    resource_budget: ResourceBudget,
+) -> ProductionIntegritySnapshot:
+    """Snapshot production HEAD plus tracked/index/untracked working-tree state."""
+
+    git = str(git_executable)
+    policy = ProcessPolicy((git,))
+    budget = ResourceBudget(
+        min(resource_budget.timeout_seconds, 60),
+        min(resource_budget.max_output_bytes, 8 * 1024 * 1024),
+        1,
+    )
+    head = run_typed_process(
+        (git, "rev-parse", "--verify", "HEAD^{commit}"),
+        process_policy=policy,
+        resource_budget=budget,
+        cwd=repository_root,
+        environment=environment,
+        workspace_root=repository_root,
+    )
+    status = run_typed_process(
+        (
+            git,
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignored=no",
+        ),
+        process_policy=policy,
+        resource_budget=budget,
+        cwd=repository_root,
+        environment=environment,
+        workspace_root=repository_root,
+    )
+    for result in (head, status):
+        if (
+            result.returncode != 0
+            or result.timed_out
+            or result.cancelled
+            or result.output_limit_exceeded
+        ):
+            raise WorkspaceSecurityError(
+                "production repository integrity snapshot could not be proven"
+            )
+    commit = head.stdout.strip().casefold()
+    if len(commit) not in {40, 64} or any(
+        character not in "0123456789abcdef" for character in commit
+    ):
+        raise WorkspaceSecurityError("production repository HEAD identity is invalid")
+    status_digest = hashlib.sha256(status.stdout.encode("utf-8")).hexdigest()
+    return ProductionIntegritySnapshot(commit, status_digest)
 
 
 def _host_platform() -> Platform:
