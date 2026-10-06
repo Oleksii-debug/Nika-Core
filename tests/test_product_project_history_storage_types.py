@@ -482,3 +482,54 @@ def test_history_rejects_approved_decision_actor_drift(tmp_path) -> None:
     with pytest.raises(ProductProjectError, match="decision audit actor drift"):
         ProductProjectHistoricalIntegrityService(store).validate("project-1")
 
+def test_history_accepts_legacy_approved_decision_writer_fingerprint(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _decision(store, projects)
+    legacy_actor = "policy://product-owner"
+    legacy_rationale = "Reject this option after review"
+    legacy_fingerprint = ProductProjectHistoricalIntegrityService._fingerprint(
+        {
+            "project_id": "project-1",
+            "decision_id": "decision-1",
+            "option_id": "option-1",
+            "state": ProductDecisionState.APPROVED.value,
+            "rationale": legacy_rationale,
+            "decided_by_ref": legacy_actor,
+        }
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_decisions SET state=? "
+            "WHERE project_id='project-1' AND decision_id='decision-1'",
+            (ProductDecisionState.APPROVED.value,),
+        )
+        conn.execute(
+            "UPDATE product_project_mutation_idempotency SET input_fingerprint=? "
+            "WHERE project_id='project-1' AND operation_kind='product_decision.record'",
+            (legacy_fingerprint,),
+        )
+        audit = conn.execute(
+            "SELECT event_id,payload_json FROM audit_events "
+            "WHERE event_type='product_project.decision_recorded' "
+            "AND entity_id='project-1'"
+        ).fetchone()
+        payload = json.loads(audit["payload_json"])
+        payload["state"] = ProductDecisionState.APPROVED.value
+        payload.pop("decided_by_ref", None)
+        payload.pop("approval_authority", None)
+        conn.execute(
+            "UPDATE audit_events SET payload_json=? WHERE event_id=?",
+            (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                audit["event_id"],
+            ),
+        )
+
+    report = ProductProjectHistoricalIntegrityService(store).validate("project-1")
+    assert report.mutation_idempotency_count == 1
+
