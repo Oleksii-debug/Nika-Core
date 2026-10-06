@@ -57,7 +57,7 @@ def launch_windows_shell(
         min_size=(760, 520),
         hidden=on_gui_started is not None,
     )
-    callback_failure: list[Exception] = []
+    callback_failure: list[BaseException] = []
 
     def finish_startup() -> None:
         try:
@@ -66,7 +66,7 @@ def launch_windows_shell(
             if on_gui_started is not None:
                 on_gui_started()
             window.show()
-        except Exception as exc:  # noqa: BLE001 - relay worker-thread startup failure
+        except BaseException as exc:  # noqa: BLE001 - relay control-flow to main thread
             callback_failure.append(exc)
             # The host stays hidden until recovery succeeds, so the shown
             # event cannot be a destruction precondition on this path.
