@@ -719,3 +719,85 @@ async def test_worker_revalidates_binding_after_planner_await_before_effect(
     assert not (
         entry.program.worker.workspace_root_for(request.work_id) / "worktree"
     ).exists()
+
+
+@pytest.mark.asyncio
+async def test_worker_revalidates_binding_at_sync_effect_entry(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    first_root = _repository(tmp_path, "first repository")
+    second_root = _repository(tmp_path, "second repository")
+    base_sha = _git(first_root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    state = host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
+    )
+    entry = host._require_state_bindings("host-task", state)
+    request = state.coordinator.snapshot().records[0].request
+    original_authority = entry.program.worker.repository_authority
+    assert original_authority is not None
+
+    class RebindingAfterPostPlannerAuthority:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def require_repository_root(
+            self,
+            *,
+            repository_id: str,
+            root: pathlib.Path,
+        ) -> None:
+            self.calls += 1
+            original_authority.require_repository_root(
+                repository_id=repository_id,
+                root=root,
+            )
+            if self.calls == 2:
+                bindings.bind(
+                    project_id=project.project_id,
+                    repository=repository,
+                    root=second_root,
+                    expected_binding_version=first.binding_version,
+                )
+
+    class StaticPlanner:
+        async def plan(self, job):
+            return LocalCodingPlan(
+                (LocalFileEdit("src/new.py", b"print('candidate')\n"),)
+            )
+
+    race_authority = RebindingAfterPostPlannerAuthority()
+    entry.program.worker.repository_authority = race_authority
+    entry.program.worker.planner = StaticPlanner()
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="changed during contained-local execution",
+    ):
+        await entry.program.host.worker.dispatch(request)
+
+    assert race_authority.calls == 3
+    assert not (
+        entry.program.worker.workspace_root_for(request.work_id) / "worktree"
+    ).exists()
