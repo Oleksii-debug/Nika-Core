@@ -26,6 +26,7 @@ from nika_core.product_factory_packaged_local_startup import (
     decode_packaged_local_product_factory_startup,
 )
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
+from nika_core.toolsmith.local_worker import LocalCodingPlan, LocalFileEdit
 from nika_core.v01_model_settings import V01ModelSettings
 
 
@@ -435,3 +436,132 @@ def test_entry_repository_authority_rejects_same_root_rebind_version_change(
             repository_id=repository.repository_id,
             root=root,
         )
+
+
+@pytest.mark.asyncio
+async def test_worker_revalidates_binding_after_context_before_execute(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    first_root = _repository(tmp_path, "first repository")
+    second_root = _repository(tmp_path, "second repository")
+    base_sha = _git(first_root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    state = host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
+    )
+    entry = host._require_state_bindings("host-task", state)
+    request = state.coordinator.snapshot().records[0].request
+    adapter = entry.program.host.worker
+    original_contexts = adapter.contexts
+    planner_calls: list[str] = []
+
+    class RebindingContexts:
+        async def context_for(self, active_request):
+            context = await original_contexts.context_for(active_request)
+            bindings.bind(
+                project_id=project.project_id,
+                repository=repository,
+                root=second_root,
+                expected_binding_version=first.binding_version,
+            )
+            return context
+
+    class UnexpectedPlanner:
+        async def plan(self, job):
+            planner_calls.append(job.job_id)
+            raise AssertionError("planner must not run after binding authority changes")
+
+    adapter.contexts = RebindingContexts()
+    entry.program.worker.planner = UnexpectedPlanner()
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="changed during contained-local execution",
+    ):
+        await adapter.dispatch(request)
+
+    assert planner_calls == []
+    assert not (
+        entry.program.worker.workspace_root_for(request.work_id) / "worktree"
+    ).exists()
+
+
+@pytest.mark.asyncio
+async def test_worker_revalidates_binding_after_planner_await_before_effect(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    first_root = _repository(tmp_path, "first repository")
+    second_root = _repository(tmp_path, "second repository")
+    base_sha = _git(first_root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    state = host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
+    )
+    entry = host._require_state_bindings("host-task", state)
+    request = state.coordinator.snapshot().records[0].request
+
+    class RebindingPlanner:
+        async def plan(self, job):
+            bindings.bind(
+                project_id=project.project_id,
+                repository=repository,
+                root=second_root,
+                expected_binding_version=first.binding_version,
+            )
+            return LocalCodingPlan(
+                (LocalFileEdit("src/new.py", b"print('candidate')\n"),)
+            )
+
+    entry.program.worker.planner = RebindingPlanner()
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="changed during contained-local execution",
+    ):
+        await entry.program.host.worker.dispatch(request)
+
+    assert not (
+        entry.program.worker.workspace_root_for(request.work_id) / "worktree"
+    ).exists()
