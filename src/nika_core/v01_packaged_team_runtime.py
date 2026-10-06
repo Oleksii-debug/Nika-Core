@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +15,7 @@ from nika_core.intelligence.provenance import (
     IntelligenceProvenance,
     IntelligenceResultStatus,
 )
+from nika_core.kernel.task_queue import TaskPayloadCorruptionError, TaskQueue
 from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent import (
     MultiAgentStore,
@@ -149,6 +149,17 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 status=RuntimeResumeProbeStatus.INVALID,
                 reason="Persisted V0.1 runtime cursor does not match task identity.",
             )
+        if self._is_member_thread(thread_id):
+            shared_task_id = self._member_shared_task_id(
+                task_id=task_id, thread_id=thread_id
+            )
+        else:
+            shared_task_id = task_id
+        if shared_task_id is None or not self._stored_outer_command(shared_task_id):
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.INVALID,
+                reason="Persisted V0.1 task cannot be safely reconstructed.",
+            )
         checkpoint = hashlib.sha256(
             f"v01-packaged-checkpoint\0{expected}".encode()
         ).hexdigest()
@@ -160,6 +171,10 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         if self._is_member_thread(request.thread_id):
+            if self._member_shared_task_id(
+                task_id=request.task_id, thread_id=request.thread_id
+            ) is None:
+                return self._failed()
             return await self._run_member_from_store(thread_id=request.thread_id)
         command = str(request.payload.get("command", "")).strip()
         if not command:
@@ -177,6 +192,11 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 error_code=RuntimeErrorCode.INVALID_RESUME,
             )
         if self._is_member_thread(request.thread_id):
+            shared_task_id = self._member_shared_task_id(
+                task_id=request.task_id, thread_id=request.thread_id
+            )
+            if shared_task_id is None or not self._stored_outer_command(shared_task_id):
+                return self._failed()
             return await self._run_member_from_store(thread_id=request.thread_id)
         command = self._stored_outer_command(request.task_id)
         if not command:
@@ -470,16 +490,12 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         return runtime
 
     def _task_has_model_selection(self, task_id: str) -> bool:
-        with self._sqlite.connection() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM tasks WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-        if row is None:
+        try:
+            payload = TaskQueue(self._sqlite).get(task_id).payload
+        except KeyError:
             return False
-        payload = json.loads(row["payload_json"])
-        if not isinstance(payload, dict):
-            raise TypeError("task payload must be an object")
+        # Use the kernel's unique-key, TEXT-only, finite-number decoder.
+        # Corruption must not downgrade a pinned model to deterministic mode.
         return _MODEL_SELECTION_FIELD in payload
 
     @staticmethod
@@ -606,29 +622,55 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 raise PermissionError("existing V0.1 packaged agent definition differs")
 
     def _stored_outer_command(self, task_id: str) -> str:
+        try:
+            task = TaskQueue(self._sqlite).get(task_id)
+        except TaskPayloadCorruptionError:
+            # A cached checker goal must never bypass corrupt durable task data.
+            return ""
+        except KeyError:
+            # Preserve pre-queue legacy teams that have a persisted checker handoff.
+            task = None
         team_id = self._team_id(task_id)
         try:
             handoff = self._multi_store.task_payload(team_id, "checker")
         except KeyError:
             handoff = None
+        except (TypeError, ValueError, RuntimeError):
+            # A corrupt durable checker handoff must not fall back to a new goal.
+            return ""
         if isinstance(handoff, Mapping):
             goal = str(handoff.get("user_goal", "")).strip()
             if goal:
                 return goal
-        with self._sqlite.connection() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM tasks WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-        if row is None:
-            return ""
+        return str(task.payload.get("command", "")).strip() if task is not None else ""
+
+    def _member_shared_task_id(self, *, task_id: str, thread_id: str) -> str | None:
+        identity = self._member_identity(thread_id)
+        if identity is None:
+            return None
+        team_id, member_id = identity
+        if task_id != f"team:{team_id}:{member_id}":
+            return None
         try:
-            payload = json.loads(row["payload_json"])
-        except (TypeError, ValueError):
-            return ""
-        if not isinstance(payload, dict):
-            return ""
-        return str(payload.get("command", "")).strip()
+            handoff = self._multi_store.task_payload(team_id, member_id)
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            return None
+        stage = handoff.get("stage")
+        if (
+            (member_id == "checker" and stage != "checker")
+            or (member_id in {"worker-a", "worker-b"} and stage != "source_worker")
+            or member_id not in {"checker", "worker-a", "worker-b"}
+        ):
+            return None
+        shared_task_id = handoff.get("shared_task_id")
+        if (
+            type(shared_task_id) is not str
+            or not shared_task_id
+            or shared_task_id != shared_task_id.strip()
+            or self._team_id(shared_task_id) != team_id
+        ):
+            return None
+        return shared_task_id
 
     @staticmethod
     def _failed() -> RuntimeResult:
