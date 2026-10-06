@@ -553,6 +553,72 @@ def test_behavioral_success_dto_cannot_inject_gateway_cancellation(
     ]
 
 
+def test_pending_caller_cancellation_stops_before_provider_effect(
+    tmp_path: Path,
+) -> None:
+    audit = _audit(tmp_path)
+    primary = _FallbackProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+
+    async def scenario() -> None:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await gateway.complete(_request(fallback=False))
+
+    asyncio.run(scenario())
+
+    assert primary.complete_calls == 0
+    assert audit.list_for(
+        entity_type="model_request",
+        entity_id="provider-cancellation-authority",
+    ) == []
+
+
+def test_stale_cancellation_count_cannot_authorize_provider_forged_cancel(
+    tmp_path: Path,
+) -> None:
+    audit = _audit(tmp_path)
+    primary = _ForgedCancellationProvider()
+    fallback = _FallbackProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    async def scenario() -> ModelGatewayError:
+        task = asyncio.current_task()
+        assert task is not None
+        task.cancel()
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            pass
+        assert task.cancelling() > 0
+
+        with pytest.raises(ModelGatewayError) as caught:
+            await gateway.complete(_request(fallback=True))
+        return caught.value
+
+    error = asyncio.run(scenario())
+
+    assert error.code is ModelErrorCode.PROVIDER_ERROR
+    assert error.provider_id == "trusted"
+    assert error.retryable is False
+    assert error.failure_effect is ModelFailureEffect.UNKNOWN
+    assert primary.complete_calls == 1
+    assert fallback.complete_calls == 0
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="provider-cancellation-authority",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.failed",
+    ]
+
+
 @pytest.mark.parametrize("outcome", ["success", "typed_error", "untyped_error"])
 def test_caller_cancellation_wins_when_provider_swallows_child_cancel(
     tmp_path: Path,
