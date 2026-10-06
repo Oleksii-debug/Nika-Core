@@ -394,6 +394,49 @@ def test_voice_model_setup_rejects_symlinked_source_root(
     assert not (data_root / "voice" / "whisper").exists()
 
 
+def test_voice_model_setup_reparse_data_root_fails_closed_without_platform_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    ordinary = os.lstat(data_root)
+    submit_calls = 0
+
+    class _ReparseDirectoryEvidence:
+        st_mode = ordinary.st_mode
+        st_file_attributes = model_setup._REPARSE_POINT
+
+    original_lstat = model_setup.os.lstat
+
+    def lstat(path: object) -> object:
+        if Path(path) == data_root:
+            return _ReparseDirectoryEvidence()
+        return original_lstat(path)  # type: ignore[arg-type]
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        nonlocal submit_calls
+        submit_calls += 1
+        coroutine.close()
+        return Future()
+
+    monkeypatch.setattr(model_setup.os, "lstat", lstat)
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+
+    snapshot = setup.snapshot()
+    installed = setup.install({"source_root": str(source)})
+    started = setup.start({"source_root": str(source)})
+
+    assert snapshot["status"] == "partial"
+    assert snapshot["can_import"] is False
+    assert installed.status == "rejected"
+    assert started.status == "rejected"
+    assert submit_calls == 0
+    assert not (data_root / "voice").exists()
+
+
 def test_voice_model_setup_rejects_indirected_data_root_before_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
