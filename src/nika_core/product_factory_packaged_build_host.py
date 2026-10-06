@@ -28,9 +28,11 @@ from nika_core.product_factory_deployment import (
 from nika_core.product_factory_local_build_execution import (
     build_packaged_local_build_execution_node,
 )
+from nika_core.product_factory_local_coding import ContainedLocalCodingPolicy
 from nika_core.product_factory_packaged_local_startup import (
     PackagedLocalProductFactoryStartup,
 )
+from nika_core.toolsmith.contracts import ResourceBudget
 from nika_core.toolsmith.workspace_security import (
     WorkspaceSecurityError,
     ensure_real_directory_root,
@@ -108,11 +110,7 @@ def build_packaged_local_durable_build_host(
     _exact_text(host_task_id, "host_task_id")
     _exact_text(project_id, "project_id")
     local_node = _snapshot_local_node(node)
-    if type(startup) is not PackagedLocalProductFactoryStartup:
-        raise PackagedLocalBuildHostError(
-            "PF5 composition requires exact packaged local startup authority"
-        )
-    startup.__post_init__()
+    startup_snapshot = _snapshot_startup(startup)
     if not callable(getattr(trusted_authority, "resolve", None)):
         raise PackagedLocalBuildHostError(
             "PF5 composition requires TrustedExecutionAuthorityPort"
@@ -126,7 +124,7 @@ def build_packaged_local_durable_build_host(
     registry.register(local_node)
     availability = PackagedLocalBuildNodeAvailability(
         local_node.identity.node_id,
-        startup,
+        startup_snapshot,
     )
     coordinator = BuildExecutionCoordinator(
         registry,
@@ -141,7 +139,7 @@ def build_packaged_local_durable_build_host(
     node_port = build_packaged_local_build_execution_node(
         store,
         node_id=local_node.identity.node_id,
-        startup=startup,
+        startup=startup_snapshot,
         trusted_authority=trusted_authority,
         output_policies=output_policies,
     )
@@ -155,6 +153,38 @@ def build_packaged_local_durable_build_host(
     if checkpoints.has_checkpoint():
         host.restore_latest()
     return host
+
+
+def _snapshot_startup(value: object) -> PackagedLocalProductFactoryStartup:
+    if type(value) is not PackagedLocalProductFactoryStartup:
+        raise PackagedLocalBuildHostError(
+            "PF5 composition requires exact packaged local startup authority"
+        )
+    value.__post_init__()
+    policy = value.policy
+    if type(policy) is not ContainedLocalCodingPolicy:
+        raise PackagedLocalBuildHostError(
+            "PF5 local startup policy carrier is invalid"
+        )
+    budget = policy.resource_budget
+    if type(budget) is not ResourceBudget:
+        raise PackagedLocalBuildHostError(
+            "PF5 local startup resource budget carrier is invalid"
+        )
+    return PackagedLocalProductFactoryStartup(
+        workspace_parent=Path(value.workspace_parent),
+        policy=ContainedLocalCodingPolicy(
+            allowed_executables=tuple(policy.allowed_executables),
+            resource_budget=ResourceBudget(
+                budget.timeout_seconds,
+                budget.max_output_bytes,
+                budget.max_changed_files,
+            ),
+            lease_seconds=policy.lease_seconds,
+            producer_actor_id=policy.producer_actor_id,
+        ),
+        git_executable=Path(value.git_executable),
+    )
 
 
 def _snapshot_local_node(value: object) -> ExecutionNode:
