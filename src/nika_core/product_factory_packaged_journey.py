@@ -14,6 +14,7 @@ from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.contracts import (
     CommandRouteKind,
     ProductProjectDetail,
+    ProductStatusKind,
     ProductUserDecision,
 )
 from nika_core.product_command.product_project_adapter import (
@@ -48,6 +49,7 @@ _CURRENT_PROJECT_COMMANDS = frozenset(
         "покажи поточний productproject",
     }
 )
+_PRODUCT_STATUS_PREVIEW_LIMIT = 24
 _CURRENT_DECISION_COMMANDS = frozenset(
     {
         "current product decision",
@@ -625,6 +627,7 @@ class PackagedProductStateProvider:
 def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
     status_counts = Counter(item.kind.value for item in detail.statuses)
     decision_counts = Counter(item.state for item in detail.decisions)
+    status_items = _safe_product_status_items(detail)
     return {
         "project_id": detail.summary.project_id,
         "spec_version": detail.summary.version,
@@ -634,10 +637,34 @@ def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
         "blocker_count": detail.summary.blocker_count,
         "status_count": len(detail.statuses),
         "status_counts": dict(sorted(status_counts.items())),
+        "status_items": status_items,
+        "status_items_truncated": len(status_items) < len(detail.statuses),
         "decision_count": len(detail.decisions),
         "decision_state_counts": dict(sorted(decision_counts.items())),
         "current_decision": _safe_product_decision(detail.summary.current_decision),
     }
+
+
+def _safe_product_status_items(
+    detail: ProductProjectDetail,
+) -> list[dict[str, Any]]:
+    blockers = [
+        item for item in detail.statuses if item.kind is ProductStatusKind.BLOCKER
+    ]
+    others = [
+        item for item in detail.statuses if item.kind is not ProductStatusKind.BLOCKER
+    ]
+    selected = (blockers + others)[:_PRODUCT_STATUS_PREVIEW_LIMIT]
+    return [
+        {
+            "kind": item.kind.value,
+            "item_id": item.item_id,
+            "label": item.label,
+            "state": item.state,
+            "detail": item.detail,
+        }
+        for item in selected
+    ]
 
 
 def _safe_product_decision(

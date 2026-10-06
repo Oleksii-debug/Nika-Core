@@ -351,6 +351,70 @@ def test_voice_model_setup_inflight_task_cancel_waits_for_worker_settlement(
     assert snapshot["can_import"] is True
 
 
+def test_voice_model_setup_cancel_after_publish_preserves_restart_requirement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    setup = PackagedVoiceModelSetup(data_root)
+    worker_published = model_setup.Event()
+    cancel_event = model_setup.Event()
+    started_event = model_setup.Event()
+    submission_cancelled_event = model_setup.Event()
+
+    def publish_then_settle(
+        source_text: str,
+        *,
+        cancel_event: model_setup.Event | None,
+    ) -> None:
+        assert source_text == str(tmp_path)
+        assert cancel_event is not None
+        target = data_root / "voice" / "whisper"
+        target.mkdir(parents=True)
+        for name in ("encoder.onnx", "decoder.onnx", "tokens.txt"):
+            (target / name).write_bytes(b"published-model")
+        worker_published.set()
+        assert cancel_event.wait(timeout=2.0)
+
+    monkeypatch.setattr(setup, "_perform_install", publish_then_settle)
+    with setup._lock:  # noqa: SLF001 - focused lifecycle state setup
+        setup._generation = 1  # noqa: SLF001
+        setup._active = True  # noqa: SLF001
+        setup._cancel_event = cancel_event  # noqa: SLF001
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            setup._run_import(  # noqa: SLF001
+                {"source_root": str(tmp_path)},
+                generation=1,
+                cancel_event=cancel_event,
+                started_event=started_event,
+                submission_cancelled_event=submission_cancelled_event,
+            )
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 1.0
+        while not worker_published.is_set() and loop.time() < deadline:
+            await asyncio.sleep(0.005)
+        assert worker_published.is_set()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    snapshot = setup.snapshot()
+    assert cancel_event.is_set()
+    assert snapshot["status"] == "restart_required"
+    assert snapshot["active"] is False
+    assert snapshot["installed"] is True
+    assert snapshot["can_import"] is False
+    assert snapshot["restart_required"] is True
+
+
 def test_voice_model_setup_precancelled_run_never_starts_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -485,6 +549,86 @@ def test_voice_model_setup_rejects_symlinked_source_root(
 
     assert result.status == "rejected"
     assert not (data_root / "voice" / "whisper").exists()
+
+
+def test_voice_model_setup_reparse_data_root_fails_closed_without_platform_skip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    ordinary = os.lstat(data_root)
+    submit_calls = 0
+
+    class _ReparseDirectoryEvidence:
+        st_mode = ordinary.st_mode
+        st_file_attributes = model_setup._REPARSE_POINT
+
+    original_lstat = model_setup.os.lstat
+
+    def lstat(path: object) -> object:
+        if Path(path) == data_root:
+            return _ReparseDirectoryEvidence()
+        return original_lstat(path)  # type: ignore[arg-type]
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        nonlocal submit_calls
+        submit_calls += 1
+        coroutine.close()
+        return Future()
+
+    monkeypatch.setattr(model_setup.os, "lstat", lstat)
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+
+    snapshot = setup.snapshot()
+    installed = setup.install({"source_root": str(source)})
+    started = setup.start({"source_root": str(source)})
+
+    assert snapshot["status"] == "partial"
+    assert snapshot["can_import"] is False
+    assert installed.status == "rejected"
+    assert started.status == "rejected"
+    assert submit_calls == 0
+    assert not (data_root / "voice").exists()
+
+
+def test_voice_model_setup_rejects_indirected_data_root_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    data_root = tmp_path / "nika-data"
+    try:
+        data_root.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this host")
+    submit_calls = 0
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        nonlocal submit_calls
+        submit_calls += 1
+        coroutine.close()
+        return Future()
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+    snapshot = setup.snapshot()
+    installed = setup.install({"source_root": str(source)})
+    started = setup.start({"source_root": str(source)})
+
+    assert snapshot["status"] == "partial"
+    assert snapshot["can_import"] is False
+    assert "папка даних" in str(snapshot["message"])
+    assert installed.status == "rejected"
+    assert started.status == "rejected"
+    assert "папка даних" in installed.message
+    assert "папка даних" in started.message
+    assert submit_calls == 0
+    assert not (outside / "voice").exists()
 
 
 def test_voice_model_setup_rejects_indirected_canonical_install(

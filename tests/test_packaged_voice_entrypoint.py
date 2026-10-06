@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from concurrent.futures import Future
 from pathlib import Path
@@ -154,6 +155,44 @@ def test_packaged_voice_refuses_indirected_preexisting_model_before_native_open(
     assert "не встановлена безпечно" in feature.snapshot()["message"]
 
 
+def test_packaged_voice_releases_model_authority_when_microphone_build_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_root = tmp_path / "voice" / "whisper"
+    model_root.mkdir(parents=True)
+    for name in ("encoder.onnx", "decoder.onnx", "tokens.txt"):
+        (model_root / name).write_bytes(b"test")
+    monkeypatch.setattr(packaged_voice.sys, "platform", "win32")
+
+    closed: list[packaged_voice._PinnedModelAuthority] = []
+    original_close = packaged_voice._PinnedModelAuthority.close
+
+    def track_close(authority: packaged_voice._PinnedModelAuthority) -> None:
+        closed.append(authority)
+        original_close(authority)
+
+    class _FailingMicrophone:
+        def __init__(self) -> None:
+            raise RuntimeError("synthetic microphone construction failure")
+
+    monkeypatch.setattr(packaged_voice._PinnedModelAuthority, "close", track_close)
+    monkeypatch.setattr(
+        packaged_voice,
+        "WindowsWasapiMicrophoneCaptureAdapter",
+        _FailingMicrophone,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic microphone construction failure"):
+        packaged_voice.build_packaged_voice(
+            tmp_path.resolve(),
+            submit=lambda coroutine: Future(),
+        )
+
+    assert len(closed) == 1
+    assert closed[0].closed is True
+
+
 def test_packaged_voice_build_is_lazy_and_preserves_current_vad_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -193,6 +232,8 @@ def test_packaged_voice_build_is_lazy_and_preserves_current_vad_gate(
         assert turn["status"] == "idle"
     finally:
         feature.close()
+        assert feature._model_loader is not None
+        assert feature._model_loader._authority.closed is True
 
 
 def _lazy_test_request() -> SpeechToTextRequest:
@@ -208,6 +249,109 @@ def _lazy_test_request() -> SpeechToTextRequest:
         ),
         language="uk",
     )
+
+
+def _write_lazy_model_files(tmp_path: Path) -> tuple[Path, Path, Path]:
+    encoder = tmp_path / "encoder.onnx"
+    decoder = tmp_path / "decoder.onnx"
+    tokens = tmp_path / "tokens.txt"
+    encoder.write_bytes(b"encoder-model")
+    decoder.write_bytes(b"decoder-model")
+    tokens.write_bytes(b"token-model")
+    return encoder, decoder, tokens
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX replacement fallback regression")
+def test_lazy_whisper_rejects_model_replaced_after_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoder, decoder, tokens = _write_lazy_model_files(tmp_path)
+    calls = 0
+
+    class _ForbiddenFactory:
+        @classmethod
+        def from_whisper_files(cls, **_kwargs: object) -> _FakeStt:
+            nonlocal calls
+            calls += 1
+            return _FakeStt()
+
+    monkeypatch.setattr(
+        packaged_voice,
+        "SherpaOnnxWhisperSpeechToTextAdapter",
+        _ForbiddenFactory,
+    )
+    adapter = packaged_voice._LazySherpaAdapter(
+        encoder=encoder,
+        decoder=decoder,
+        tokens=tokens,
+    )
+    replacement = tmp_path / "replacement.onnx"
+    replacement.write_bytes(b"replacement-model")
+    os.replace(replacement, encoder)
+
+    try:
+        with pytest.raises(SpeechToTextAdapterError):
+            asyncio.run(adapter.transcribe(_lazy_test_request()))
+        assert calls == 0
+    finally:
+        adapter.close()
+
+
+def test_lazy_whisper_rejects_model_mutation_during_native_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoder, decoder, tokens = _write_lazy_model_files(tmp_path)
+    calls = 0
+
+    class _MutatingFactory:
+        @classmethod
+        def from_whisper_files(cls, **_kwargs: object) -> _FakeStt:
+            nonlocal calls
+            calls += 1
+            encoder.write_bytes(b"mutated-model")
+            return _FakeStt()
+
+    monkeypatch.setattr(
+        packaged_voice,
+        "SherpaOnnxWhisperSpeechToTextAdapter",
+        _MutatingFactory,
+    )
+    adapter = packaged_voice._LazySherpaAdapter(
+        encoder=encoder,
+        decoder=decoder,
+        tokens=tokens,
+    )
+
+    try:
+        with pytest.raises(SpeechToTextAdapterError):
+            asyncio.run(adapter.transcribe(_lazy_test_request()))
+        assert calls == 1
+        assert adapter._delegate is None
+    finally:
+        adapter.close()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows share-mode semantics only")
+def test_lazy_whisper_model_authority_blocks_replacement_until_close(
+    tmp_path: Path,
+) -> None:
+    encoder, decoder, tokens = _write_lazy_model_files(tmp_path)
+    adapter = packaged_voice._LazySherpaAdapter(
+        encoder=encoder,
+        decoder=decoder,
+        tokens=tokens,
+    )
+    replacement = tmp_path / "replacement.onnx"
+    replacement.write_bytes(b"replacement-model")
+
+    with pytest.raises(OSError):
+        os.replace(replacement, encoder)
+
+    adapter.close()
+    os.replace(replacement, encoder)
+    assert encoder.read_bytes() == b"replacement-model"
 
 
 def test_lazy_whisper_load_reuses_one_inflight_factory_after_cancellation(
@@ -244,10 +388,11 @@ def test_lazy_whisper_load_reuses_one_inflight_factory_after_cancellation(
         "SherpaOnnxWhisperSpeechToTextAdapter",
         _BlockingFactory,
     )
+    encoder, decoder, tokens = _write_lazy_model_files(tmp_path)
     adapter = packaged_voice._LazySherpaAdapter(
-        encoder=tmp_path / "encoder.onnx",
-        decoder=tmp_path / "decoder.onnx",
-        tokens=tmp_path / "tokens.txt",
+        encoder=encoder,
+        decoder=decoder,
+        tokens=tokens,
     )
 
     async def scenario() -> None:
@@ -274,6 +419,7 @@ def test_lazy_whisper_load_reuses_one_inflight_factory_after_cancellation(
         asyncio.run(scenario())
     finally:
         release.set()
+        adapter.close()
 
 
 def test_lazy_whisper_load_failure_allows_one_explicit_retry(
@@ -308,10 +454,11 @@ def test_lazy_whisper_load_failure_allows_one_explicit_retry(
         "SherpaOnnxWhisperSpeechToTextAdapter",
         _FlakyFactory,
     )
+    encoder, decoder, tokens = _write_lazy_model_files(tmp_path)
     adapter = packaged_voice._LazySherpaAdapter(
-        encoder=tmp_path / "encoder.onnx",
-        decoder=tmp_path / "decoder.onnx",
-        tokens=tmp_path / "tokens.txt",
+        encoder=encoder,
+        decoder=decoder,
+        tokens=tokens,
     )
 
     async def scenario() -> None:
@@ -320,8 +467,12 @@ def test_lazy_whisper_load_failure_allows_one_explicit_retry(
         response = await adapter.transcribe(_lazy_test_request())
         assert response.text == "повтор успішний"
         assert calls == 2
+        assert adapter._authority.closed is False
 
-    asyncio.run(scenario())
+    try:
+        asyncio.run(scenario())
+    finally:
+        adapter.close()
 
 
 def test_current_windows_bridge_exposes_voice_state_actions_and_cleanup(

@@ -115,6 +115,12 @@
   const workspacesEmpty = document.getElementById("workspaces-empty");
   const productProjectEmpty = document.getElementById("product-project-empty");
   const productProjectSummary = document.getElementById("product-project-summary");
+  const productProjectStatuses = document.getElementById("product-project-statuses");
+  const productProjectStatusesList = document.getElementById("product-project-statuses-list");
+  const productProjectStatusesEmpty = document.getElementById("product-project-statuses-empty");
+  const productProjectStatusesTruncated = document.getElementById(
+    "product-project-statuses-truncated",
+  );
   const productProjectDecision = document.getElementById("product-project-decision");
   const productProjectDecisionFields = Object.freeze({
     decision_id: document.getElementById("product-project-decision-id"),
@@ -157,6 +163,21 @@
     model_text: document.getElementById("team-final-model-text"),
     model_provider: document.getElementById("team-final-model-provider"),
     model_name: document.getElementById("team-final-model-name"),
+  });
+  const productStatusKindLabels = Object.freeze({
+    requirement: "Вимога",
+    milestone: "Етап",
+    architecture_decision: "Архітектурне рішення",
+    team_role: "Роль команди",
+    repository: "Репозиторій",
+    component: "Компонент",
+    qa: "QA",
+    build: "Збірка",
+    release: "Реліз",
+    credential: "Облікові дані",
+    deployment: "Розгортання",
+    incident: "Інцидент",
+    blocker: "Блокер",
   });
   const productProjectUnavailableMessage = "Стан поточного ProductProject недоступний.";
   const teamTaskUnavailableMessage = "Стан командного завдання недоступний.";
@@ -494,6 +515,16 @@
       : unavailableStateLabel;
   }
 
+  function validProductStatusItem(item) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const required = ["kind", "item_id", "label", "state"];
+    if (required.some((field) => typeof item[field] !== "string" || !item[field].trim())) {
+      return false;
+    }
+    if (!Object.prototype.hasOwnProperty.call(productStatusKindLabels, item.kind)) return false;
+    return typeof item.detail === "string";
+  }
+
   function validProductDecision(decision) {
     if (decision === null) return true;
     if (!decision || typeof decision !== "object" || Array.isArray(decision)) return false;
@@ -518,6 +549,13 @@
     if (!countFields.every((field) => Number.isInteger(project[field]) && project[field] >= 0)) {
       return false;
     }
+    if (!Array.isArray(project.status_items) || project.status_items.length > 24) return false;
+    if (!project.status_items.every(validProductStatusItem)) return false;
+    if (project.status_items.length > project.status_count) return false;
+    if (typeof project.status_items_truncated !== "boolean") return false;
+    if (project.status_items_truncated !== (project.status_items.length < project.status_count)) {
+      return false;
+    }
     return Object.prototype.hasOwnProperty.call(project, "current_decision")
       && validProductDecision(project.current_decision);
   }
@@ -525,6 +563,11 @@
   function clearProductProjectFields() {
     for (const node of Object.values(productProjectFields)) node.textContent = "";
     for (const node of Object.values(productProjectDecisionFields)) node.textContent = "";
+    productProjectStatusesList.replaceChildren();
+    productProjectStatusesEmpty.hidden = false;
+    productProjectStatusesTruncated.textContent = "";
+    productProjectStatusesTruncated.hidden = true;
+    productProjectStatuses.hidden = true;
     productProjectDecision.hidden = true;
   }
 
@@ -548,6 +591,29 @@
     appendLog(productProjectUnavailableMessage);
   }
 
+  function renderProductProjectStatuses(project) {
+    productProjectStatusesList.replaceChildren();
+    for (const item of project.status_items) {
+      const row = document.createElement("li");
+      const kind = productStatusKindLabels[item.kind];
+      const detail = item.detail ? ` ${item.detail}` : "";
+      row.textContent = `${kind}: ${item.label}; стан: ${item.state}.${detail}`;
+      productProjectStatusesList.appendChild(row);
+    }
+    productProjectStatusesEmpty.hidden = project.status_items.length > 0;
+    if (project.status_items_truncated) {
+      productProjectStatusesTruncated.textContent = (
+        `Показано ${project.status_items.length} з ${project.status_count} записів; `
+        + "блокери мають пріоритет."
+      );
+      productProjectStatusesTruncated.hidden = false;
+    } else {
+      productProjectStatusesTruncated.textContent = "";
+      productProjectStatusesTruncated.hidden = true;
+    }
+    productProjectStatuses.hidden = false;
+  }
+
   function renderProductProject(project) {
     if (project == null) {
       productProjectEmpty.textContent = "Поточний ProductProject не вибрано.";
@@ -566,6 +632,7 @@
     for (const [field, node] of Object.entries(productProjectFields)) {
       node.textContent = String(project[field]);
     }
+    renderProductProjectStatuses(project);
     const decision = project.current_decision;
     if (decision === null) {
       productProjectDecision.hidden = true;
