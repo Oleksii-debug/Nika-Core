@@ -463,6 +463,30 @@ def test_restart_restores_original_model_authority_after_settings_change(
     assert entry.model_authority.model == "qwen3:8b"
     assert entry.program.worker.planner.model == "qwen3:8b"
 
+    replay_host = PackagedBoundLocalProductFactoryHost(
+        reopened_store,
+        settings=reopened_settings,
+        startup=_startup(tmp_path),
+    )
+    replayed = replay_host.initialize(
+        host_task_id="host-task",
+        project=reopened_project,
+        graph=_graph(reopened_project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests"}
+        ),
+    )
+    replay_entry = replay_host._require_state_bindings(
+        "host-task",
+        replayed,
+    )
+    assert replay_host._model_authority.model == "qwen3:8b-next"
+    assert replay_entry.model_authority.model == "qwen3:8b"
+    assert replay_entry.program.worker.planner.model == "qwen3:8b"
+
 
 def test_restart_rejects_route_tamper_even_with_recomputed_snapshot_checksum(
     tmp_path: pathlib.Path,
