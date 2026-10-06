@@ -71,21 +71,21 @@ function Get-NikaDatabaseAliasIdentity {
     # Match pathlib's Windows path identity for compatibility aliases without
     # resolving '..' into a different spelling. Separators, redundant
     # separators and '.' are non-semantic; '..' remains part of the identity.
-    $normalized = $Path.Replace('/', '\\')
+    $normalized = $Path.Replace([char]'/', [char]'\')
     $root = [System.IO.Path]::GetPathRoot($normalized)
     if ([string]::IsNullOrWhiteSpace($root)) {
         throw "Configured Nika Core database path must be fully qualified."
     }
     $relative = $normalized.Substring($root.Length)
     $parts = [System.Collections.Generic.List[string]]::new()
-    foreach ($part in $relative.Split([char]'\\')) {
+    foreach ($part in $relative.Split([char]'\')) {
         if ([string]::IsNullOrEmpty($part) -or $part -eq ".") {
             continue
         }
         $parts.Add($part)
     }
 
-    $rootIdentity = $root.TrimEnd([char]'\\')
+    $rootIdentity = $root.TrimEnd([char]'\')
     if ($parts.Count -eq 0) {
         return $rootIdentity + "\\"
     }
