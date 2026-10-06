@@ -65,12 +65,19 @@ def launch_windows_shell(
                 raise RuntimeError("packaged WebView did not reach loaded state")
             if on_gui_started is not None:
                 on_gui_started()
+                # The hidden bootstrap rendered a pre-recovery snapshot. Reload while
+                # still hidden so the first visible DOM is reconciled post-recovery.
+                window.load_url(str(asset))
+                if not window.events.loaded.wait(20):
+                    raise RuntimeError(
+                        "packaged WebView did not reload post-recovery state"
+                    )
             window.show()
         except BaseException as exc:  # noqa: BLE001 - relay control-flow to main thread
             callback_failure.append(exc)
-            # The host stays hidden until recovery succeeds, so the shown
-            # event cannot be a destruction precondition on this path.
-            # Always close it so webview.start() can return the failure.
+            # The host stays hidden until recovery and its post-recovery reload succeed,
+            # so the shown event cannot be a destruction precondition on this path.
+            # Always close it so webview.start() can return the original failure.
             window.destroy()
 
     if on_gui_started is None:

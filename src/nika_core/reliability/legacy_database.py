@@ -410,7 +410,7 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
     pending_snapshot = _read_pending_record(pending_path)
     pending = pending_snapshot[0] if pending_snapshot is not None else None
     pending_identity = pending_snapshot[1] if pending_snapshot is not None else None
-    if pending is not None:
+    if pending_snapshot is not None:
         if (
             not isinstance(pending, dict)
             or set(pending)

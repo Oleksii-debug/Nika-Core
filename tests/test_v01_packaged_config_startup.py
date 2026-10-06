@@ -287,7 +287,7 @@ def test_shell_preflight_imports_pywebview_after_complete_assets(
     assert imported == ["webview"]
 
 
-def test_shell_deferred_startup_waits_for_loaded_webview_before_recovery(
+def test_shell_deferred_startup_reloads_post_recovery_state_before_first_show(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -311,6 +311,9 @@ def test_shell_deferred_startup_waits_for_loaded_webview_before_recovery(
 
     class Window:
         events = Events()
+
+        def load_url(self, _url: str) -> None:
+            events.append("reload")
 
         def show(self) -> None:
             events.append("show")
@@ -342,7 +345,7 @@ def test_shell_deferred_startup_waits_for_loaded_webview_before_recovery(
 
     assert result is window
     assert create_kwargs["hidden"] is True
-    assert events == ["loaded", "recovery", "show"]
+    assert events == ["loaded", "recovery", "reload", "loaded", "show"]
 
 
 def test_shell_loaded_timeout_never_runs_recovery_and_destroys_hidden_host(
@@ -368,6 +371,9 @@ def test_shell_loaded_timeout_never_runs_recovery_and_destroys_hidden_host(
 
     class Window:
         events = Events()
+
+        def load_url(self, _url: str) -> None:
+            events.append("reload")
 
         def show(self) -> None:
             events.append("show")
@@ -398,6 +404,66 @@ def test_shell_loaded_timeout_never_runs_recovery_and_destroys_hidden_host(
         )
 
     assert events == ["loaded-timeout", "destroy"]
+
+
+def test_shell_post_recovery_reload_timeout_never_exposes_stale_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    waits = iter((True, False))
+
+    class LoadedEvent:
+        @staticmethod
+        def wait(timeout: int) -> bool:
+            assert timeout == 20
+            result = next(waits)
+            events.append("loaded" if result else "reload-timeout")
+            return result
+
+    class ShownEvent:
+        @staticmethod
+        def is_set() -> bool:
+            return False
+
+    class Events:
+        loaded = LoadedEvent()
+        shown = ShownEvent()
+
+    class Window:
+        events = Events()
+
+        def load_url(self, _url: str) -> None:
+            events.append("reload")
+
+        def show(self) -> None:
+            events.append("show")
+
+        def destroy(self) -> None:
+            events.append("destroy")
+
+    window = Window()
+
+    class WebView:
+        @staticmethod
+        def create_window(_title: str, _url: str, **_kwargs: object) -> Window:
+            return window
+
+        @staticmethod
+        def start(func=None, *, gui: str) -> None:
+            assert gui == "edgechromium"
+            assert func is not None
+            func()
+
+    monkeypatch.setattr(ui_shell, "preflight_windows_shell", lambda: None)
+    monkeypatch.setattr(ui_shell, "import_module", lambda _name: WebView)
+
+    with pytest.raises(RuntimeError, match="did not reload post-recovery state"):
+        ui_shell.launch_windows_shell(
+            object(),
+            on_gui_started=lambda: events.append("recovery"),
+        )
+
+    assert events == ["loaded", "recovery", "reload", "reload-timeout", "destroy"]
 
 
 def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
