@@ -443,6 +443,92 @@ def test_effect_admission_guard_blocks_next_component_after_settings_drift(
     assert calls == ["component-a"]
 
 
+@pytest.mark.parametrize(
+    "guard",
+    [
+        lambda: 1,
+        lambda: False,
+    ],
+)
+def test_effect_admission_guard_requires_literal_true_before_pf5(
+    tmp_path,
+    monkeypatch,
+    guard,
+):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    continuation = PackagedReviewedBuildContinuation(
+        store,
+        _startup(tmp_path),
+        _activated({(PROJECT_ID, "repo-a", "component-a")}),
+        effect_admission_guard=guard,
+    )
+    built = False
+
+    def forbidden_controller(*_args, **_kwargs):
+        nonlocal built
+        built = True
+        raise AssertionError("non-authoritative guard must block PF5 composition")
+
+    monkeypatch.setattr(
+        continuation_module,
+        "build_configured_packaged_reviewed_build_controller",
+        forbidden_controller,
+    )
+
+    with pytest.raises(
+        continuation_module.PackagedBuildContinuationError,
+        match="effect authority changed",
+    ):
+        continuation._advance(
+            _prepared([_record("component-a", "repo-a", WorkState.ACCEPTED)])
+        )
+
+    assert built is False
+
+
+def test_effect_admission_guard_exception_fails_closed_without_detail_leak(
+    tmp_path,
+    monkeypatch,
+):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+
+    def broken_guard():
+        raise RuntimeError("private settings backend detail")
+
+    continuation = PackagedReviewedBuildContinuation(
+        store,
+        _startup(tmp_path),
+        _activated({(PROJECT_ID, "repo-a", "component-a")}),
+        effect_admission_guard=broken_guard,
+    )
+    built = False
+
+    def forbidden_controller(*_args, **_kwargs):
+        nonlocal built
+        built = True
+        raise AssertionError("failed guard must block PF5 composition")
+
+    monkeypatch.setattr(
+        continuation_module,
+        "build_configured_packaged_reviewed_build_controller",
+        forbidden_controller,
+    )
+
+    with pytest.raises(
+        continuation_module.PackagedBuildContinuationError,
+        match="effect authority changed",
+    ) as caught:
+        continuation._advance(
+            _prepared([_record("component-a", "repo-a", WorkState.ACCEPTED)])
+        )
+
+    assert "private settings backend detail" not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert built is False
+
+
 def test_continuation_settles_current_pf5_work_without_starting_next_after_cancel(
     tmp_path,
     monkeypatch,
