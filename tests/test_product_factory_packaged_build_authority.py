@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.product_factory_packaged_build_authority as authority_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_build_execution import BuildExecutionState
@@ -406,14 +407,14 @@ def test_repeat_bind_rejects_resource_scope_drift_for_same_work(
         )
 
 
-def test_template_drift_invalidates_already_bound_work(
+def test_template_drift_invalidates_execution_but_preserves_bound_output_inspection(
     tmp_path: Path,
 ) -> None:
     _store, _startup_value, _node_value, runtime = _runtime(tmp_path)
     spec = _admit(runtime)
 
     runtime.authorities.configure(
-        _template(argv_suffix=("--wheel",)),
+        _template(argv_suffix=("--wheel",), max_changed_files=3),
         expected_revision=1,
     )
 
@@ -426,11 +427,149 @@ def test_template_drift_invalidates_already_bound_work(
             repository_id=REPOSITORY_ID,
             work_id=spec.request.work_id,
         )
+
+    output = runtime.output_policies.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+    )
+    assert output.allowed_paths.roots == ("products/build",)
+    assert output.max_changed_files == 8
+
+    current = runtime.authorities.snapshot(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        component_id=COMPONENT_ID,
+    )
+    assert current.revision == 2
+    assert current.template.max_changed_files == 3
+
     with pytest.raises(
         PackagedBuildAuthorityError,
         match="different packaged authority",
     ):
         _admit(runtime)
+
+
+def test_historical_bound_output_policy_fails_closed_on_history_tamper(
+    tmp_path: Path,
+) -> None:
+    store, _startup_value, _node_value, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    runtime.authorities.configure(
+        _template(argv_suffix=("--wheel",)),
+        expected_revision=1,
+    )
+
+    with store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE product_factory_build_authority_template_history "
+            "SET template_json = ? "
+            "WHERE project_id = ? AND repository_id = ? AND component_id = ? "
+            "AND revision = ?",
+            ("{}", PROJECT_ID, REPOSITORY_ID, COMPONENT_ID, 1),
+        )
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="does not match binding",
+    ):
+        runtime.output_policies.resolve(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            work_id=spec.request.work_id,
+        )
+
+
+def test_schema_v1_migration_backfills_current_template_history(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    startup = _startup(tmp_path)
+    node = _node()
+    template = _template()
+    payload = authority_module._encode_template(template)
+    digest = authority_module._digest_payload(payload)
+    configured_at = "2026-10-06T00:00:00+00:00"
+
+    with store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "CREATE TABLE product_factory_build_authority_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE product_factory_build_authority_templates ("
+            "project_id TEXT NOT NULL, repository_id TEXT NOT NULL, "
+            "component_id TEXT NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), "
+            "template_json TEXT NOT NULL, template_digest TEXT NOT NULL, "
+            "configured_at TEXT NOT NULL, "
+            "PRIMARY KEY(project_id, repository_id, component_id))"
+        )
+        conn.execute(
+            "CREATE TABLE product_factory_build_authority_bindings ("
+            "work_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+            "repository_id TEXT NOT NULL, component_id TEXT NOT NULL, "
+            "candidate_work_id TEXT NOT NULL, source_sha TEXT NOT NULL, "
+            "review_fingerprint TEXT NOT NULL, spec_version INTEGER NOT NULL, "
+            "row_version INTEGER NOT NULL, graph_digest TEXT NOT NULL, "
+            "template_revision INTEGER NOT NULL, template_digest TEXT NOT NULL, "
+            "bound_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO product_factory_build_authority_schema VALUES (?, ?)",
+            (1, configured_at),
+        )
+        conn.execute(
+            "INSERT INTO product_factory_build_authority_templates "
+            "(project_id, repository_id, component_id, revision, template_json, "
+            "template_digest, configured_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                PROJECT_ID,
+                REPOSITORY_ID,
+                COMPONENT_ID,
+                1,
+                payload,
+                digest,
+                configured_at,
+            ),
+        )
+
+    authorities = PackagedBuildAuthorityStore(
+        store,
+        node=node,
+        startup=startup,
+    )
+    snapshot = authorities.snapshot(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        component_id=COMPONENT_ID,
+    )
+    assert snapshot == authority_module.PackagedBuildAuthoritySnapshot(
+        template,
+        1,
+        digest,
+    )
+
+    with store.connection() as conn:
+        history = conn.execute(
+            "SELECT revision, template_json, template_digest, configured_at "
+            "FROM product_factory_build_authority_template_history "
+            "WHERE project_id = ? AND repository_id = ? AND component_id = ?",
+            (PROJECT_ID, REPOSITORY_ID, COMPONENT_ID),
+        ).fetchall()
+        versions = conn.execute(
+            "SELECT version FROM product_factory_build_authority_schema "
+            "ORDER BY version"
+        ).fetchall()
+
+    assert [row["revision"] for row in history] == [1]
+    assert history[0]["template_json"] == payload
+    assert history[0]["template_digest"] == digest
+    assert history[0]["configured_at"] == configured_at
+    assert [row["version"] for row in versions] == [1, 2]
 
 
 def test_stale_configure_revision_is_fail_closed(tmp_path: Path) -> None:
