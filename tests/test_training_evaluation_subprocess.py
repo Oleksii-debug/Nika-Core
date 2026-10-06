@@ -466,6 +466,140 @@ def test_command_launch_guard_refuses_writer_and_releases_all_handles(
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+async def test_windows_command_launch_guard_blocks_replace_at_spawn_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _success_script(tmp_path)
+    replacement = tmp_path / "replacement-evaluator.py"
+    replacement.write_text("raise SystemExit(97)\n", encoding="utf-8")
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+    original_spawn = evaluation_subprocess.asyncio.create_subprocess_exec
+    attempts = 0
+
+    async def racing_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        nonlocal attempts
+        attempts += 1
+        try:
+            os.replace(replacement, script)
+        except OSError as exc:
+            assert getattr(exc, "winerror", None) in {5, 32, 33}
+        else:
+            raise AssertionError(
+                "Registry-bound evaluator command artifact was replaceable at spawn"
+            )
+        return await original_spawn(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        evaluation_subprocess.asyncio,
+        "create_subprocess_exec",
+        racing_spawn,
+    )
+
+    result = await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert attempts == 1
+    assert result.response.text == "answer"
+
+    os.replace(replacement, script)
+    assert script.read_text(encoding="utf-8") == "raise SystemExit(97)\n"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+async def test_windows_command_launch_guard_reverifies_swap_before_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "unexpected-evaluator-start.txt"
+    script = _success_script(tmp_path)
+    replacement = tmp_path / "replacement-evaluator.py"
+    replacement.write_text(
+        "from pathlib import Path\n"
+        + f"Path({str(marker)!r}).write_text('started', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+    original_verify = adapter._verify_command_records
+    verify_calls = 0
+
+    def verify_then_swap(records: object) -> None:
+        nonlocal verify_calls
+        verify_calls += 1
+        original_verify(records)  # type: ignore[arg-type]
+        if verify_calls == 1:
+            os.replace(replacement, script)
+
+    async def process_must_not_start(*args: object, **kwargs: object) -> object:
+        raise AssertionError("process effect reached after evaluator command replacement")
+
+    monkeypatch.setattr(adapter, "_verify_command_records", verify_then_swap)
+    monkeypatch.setattr(
+        evaluation_subprocess.asyncio,
+        "create_subprocess_exec",
+        process_must_not_start,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert verify_calls == 2
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_command_launch_guard_rolls_back_earlier_handle_when_later_lock_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _success_script(tmp_path)
+    registry, executable_id, script_id, executable = _registry(tmp_path, script)
+    records = {
+        0: registry.get(executable_id),
+        1: registry.get(script_id),
+    }
+    command = (str(executable), str(script.resolve()))
+    opened: list[str] = []
+    closed: list[int] = []
+
+    def fake_open(path: str) -> int:
+        opened.append(path)
+        if len(opened) == 2:
+            raise OSError(32, "sharing violation")
+        return 101
+
+    def fake_close(handle: int) -> None:
+        closed.append(handle)
+
+    monkeypatch.setattr(
+        evaluation_subprocess,
+        "_open_windows_command_artifact_lock",
+        fake_open,
+    )
+    monkeypatch.setattr(
+        evaluation_subprocess,
+        "_close_windows_command_artifact_lock",
+        fake_close,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        with evaluation_subprocess._CommandArtifactLaunchGuard(
+            command,
+            records,
+            provider_id="ollama",
+        ):
+            pytest.fail("guard unexpectedly admitted a partially locked command")
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert opened == [command[0], command[1]]
+    assert closed == [101]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("mode", "expected_code"),
     [
