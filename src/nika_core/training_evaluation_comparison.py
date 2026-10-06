@@ -132,6 +132,26 @@ def _observations_sha256(observations: tuple[MetricObservation, ...]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def experiment_snapshot_evidence_identity(
+    snapshot: ExperimentSnapshot,
+) -> tuple[str, str, int]:
+    """Return the canonical durable identity of one Experiment snapshot."""
+
+    if type(snapshot) is not ExperimentSnapshot:
+        raise TypeError("snapshot must be an exact ExperimentSnapshot")
+    if type(snapshot.definition) is not ExperimentDefinition:
+        raise TypeError("snapshot definition must be an exact ExperimentDefinition")
+    ExperimentDefinition.__post_init__(snapshot.definition)
+    if type(snapshot.observations) is not tuple:
+        raise TypeError("snapshot observations must use a canonical tuple")
+    _observation_map(snapshot.observations)
+    return (
+        _definition_sha256(snapshot.definition),
+        _observations_sha256(snapshot.observations),
+        len(snapshot.observations),
+    )
+
+
 def _validate_definition(snapshot: ExperimentSnapshot, definition: ExperimentDefinition) -> None:
     if type(snapshot) is not ExperimentSnapshot:
         raise TypeError("experiment repository returned an invalid snapshot carrier")
@@ -511,13 +531,72 @@ class AttestedTrainingComparisonResult:
 
     @property
     def evidence_sha256(self) -> str:
-        encoded = json.dumps(
-            self.evidence_payload(),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        return attested_training_comparison_evidence_sha256(
+            self.evidence_payload()
+        )
+
+
+_COMPARISON_EVIDENCE_REQUIRED_KEYS = frozenset(
+    {
+        "schema",
+        "experiment_id",
+        "experiment_status",
+        "selected_candidate_id",
+        "previous_champion_id",
+        "training_binding_sha256",
+        "champion_binding_sha256",
+        "champion_benchmark_sha256",
+        "challenger_benchmark_sha256",
+        "attestor_id",
+        "attestor_sha256",
+        "definition_sha256",
+        "observations_sha256",
+        "observation_count",
+    }
+)
+_COMPARISON_EVIDENCE_OPTIONAL_KEYS = frozenset(
+    {
+        "champion_provider_manifest_sha256",
+        "challenger_provider_manifest_sha256",
+    }
+)
+
+
+def attested_training_comparison_evidence_sha256(value: object) -> str:
+    """Hash one strict canonical attested-comparison evidence payload."""
+
+    if type(value) is not dict:
+        raise TypeError("comparison evidence payload must be an exact object")
+    keys = frozenset(value)
+    if (
+        not _COMPARISON_EVIDENCE_REQUIRED_KEYS.issubset(keys)
+        or not keys.issubset(
+            _COMPARISON_EVIDENCE_REQUIRED_KEYS
+            | _COMPARISON_EVIDENCE_OPTIONAL_KEYS
+        )
+        or value.get("schema") != "nika-attested-training-comparison-v1"
+    ):
+        raise ValueError("comparison evidence payload does not match the strict schema")
+    for key in _COMPARISON_EVIDENCE_OPTIONAL_KEYS:
+        if key not in value:
+            continue
+        digest = value[key]
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(
+                f"{key} must be omitted or a lowercase SHA-256 digest"
+            )
+    encoded = json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _build_result(

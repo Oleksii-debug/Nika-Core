@@ -546,6 +546,30 @@ class ResolvedTrainingPackage:
             _verify_resolved_material(material)
 
 
+def reconstruct_training_material_evidence(
+    package: FrozenLearningPackage,
+    *,
+    workspace_id: str,
+) -> TrainingMaterialSetEvidence:
+    """Rebuild durable package evidence without claiming current shard-byte availability."""
+
+    if type(package) is not FrozenLearningPackage:
+        raise TypeError("package must be an exact FrozenLearningPackage")
+    workspace_sha256 = _workspace_fingerprint(workspace_id)
+    evidence_items: list[TrainingMaterialEvidence] = []
+    for shard in package.shards:
+        if shard.split not in (LearningDataSplit.TRAINING, LearningDataSplit.VALIDATION):
+            raise TrainingMaterialResolutionError(
+                "frozen package contains a non-training material split"
+            )
+        evidence_items.append(TrainingMaterialEvidence.from_shard(shard))
+    return TrainingMaterialSetEvidence.from_package(
+        package,
+        workspace_sha256=workspace_sha256,
+        materials=tuple(evidence_items),
+    )
+
+
 def resolve_training_materials(
     package: FrozenLearningPackage,
     *,
