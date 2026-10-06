@@ -531,13 +531,60 @@ class AttestedTrainingComparisonResult:
 
     @property
     def evidence_sha256(self) -> str:
-        encoded = json.dumps(
-            self.evidence_payload(),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        return attested_training_comparison_evidence_sha256(
+            self.evidence_payload()
+        )
+
+
+_COMPARISON_EVIDENCE_REQUIRED_KEYS = frozenset(
+    {
+        "schema",
+        "experiment_id",
+        "experiment_status",
+        "selected_candidate_id",
+        "previous_champion_id",
+        "training_binding_sha256",
+        "champion_binding_sha256",
+        "champion_benchmark_sha256",
+        "challenger_benchmark_sha256",
+        "attestor_id",
+        "attestor_sha256",
+        "definition_sha256",
+        "observations_sha256",
+        "observation_count",
+    }
+)
+_COMPARISON_EVIDENCE_OPTIONAL_KEYS = frozenset(
+    {
+        "champion_provider_manifest_sha256",
+        "challenger_provider_manifest_sha256",
+    }
+)
+
+
+def attested_training_comparison_evidence_sha256(value: object) -> str:
+    """Hash one strict canonical attested-comparison evidence payload."""
+
+    if type(value) is not dict:
+        raise TypeError("comparison evidence payload must be an exact object")
+    keys = frozenset(value)
+    if (
+        not _COMPARISON_EVIDENCE_REQUIRED_KEYS.issubset(keys)
+        or not keys.issubset(
+            _COMPARISON_EVIDENCE_REQUIRED_KEYS
+            | _COMPARISON_EVIDENCE_OPTIONAL_KEYS
+        )
+        or value.get("schema") != "nika-attested-training-comparison-v1"
+    ):
+        raise ValueError("comparison evidence payload does not match the strict schema")
+    encoded = json.dumps(
+        value,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _build_result(
