@@ -4,6 +4,7 @@ import hashlib
 import json
 import pathlib
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -322,6 +323,34 @@ class ProductFactoryLocalRepositoryBindings:
         project_after = self._projects.get(plan.project_id)
         _require_plan_project(plan, project_after)
         return MappingProxyType(resolved)
+
+    def require_plan_roots_within(
+        self,
+        plan: PackagedProductFactoryExecutionPlan,
+        *,
+        allowed_roots: Mapping[str, pathlib.Path],
+    ) -> MappingProxyType[str, pathlib.Path]:
+        """Require durable plan roots to stay inside the canonical host allowlist.
+
+        The execution plan supplies repository identity, never filesystem authority.
+        Durable ProductProject-scoped bindings select each root. allowed_roots is
+        only the already-canonicalized packaged worker containment ceiling.
+        """
+
+        if not isinstance(allowed_roots, Mapping):
+            raise TypeError("allowed_roots must be a mapping")
+        resolved = self.resolve_for_plan(plan)
+        for repository_id, root in resolved.items():
+            allowed_root = allowed_roots.get(repository_id)
+            if not isinstance(allowed_root, pathlib.Path):
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "local repository binding is not admitted by packaged startup"
+                )
+            if allowed_root != root:
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "local repository binding does not match packaged startup authority"
+                )
+        return resolved
 
     def _require_project_repository(
         self,

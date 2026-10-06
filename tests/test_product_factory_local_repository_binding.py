@@ -490,6 +490,82 @@ def test_require_rejects_relative_persisted_root_path(
         bindings.require(project.project_id, repository.repository_id)
 
 
+def test_plan_roots_require_exact_packaged_startup_allowlist_match(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = _root(tmp_path)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+
+    resolved = bindings.require_plan_roots_within(
+        _plan(project, repository),
+        allowed_roots={repository.repository_id: root.resolve(strict=True)},
+    )
+
+    assert resolved == {repository.repository_id: root.resolve(strict=True)}
+
+
+def test_plan_roots_reject_packaged_startup_root_mismatch(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    bound_root = _root(tmp_path, "bound repository")
+    other_root = _root(tmp_path, "startup repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=bound_root,
+        expected_binding_version=None,
+    )
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="does not match packaged startup authority",
+    ):
+        bindings.require_plan_roots_within(
+            _plan(project, repository),
+            allowed_roots={
+                repository.repository_id: other_root.resolve(strict=True)
+            },
+        )
+
+
+def test_plan_roots_reject_repository_missing_from_packaged_startup_allowlist(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = _root(tmp_path)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="not admitted by packaged startup",
+    ):
+        bindings.require_plan_roots_within(
+            _plan(project, repository),
+            allowed_roots={},
+        )
+
+
 def test_binding_rejects_inline_repository_credentials(
     tmp_path: pathlib.Path,
 ) -> None:

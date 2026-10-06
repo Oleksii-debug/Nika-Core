@@ -33,6 +33,9 @@ from nika_core.packaged_agent_builder import (
 from nika_core.packaged_intelligence_mode import PackagedIntelligenceModeCommandAdapter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
+from nika_core.product_factory_local_repository_binding import (
+    ProductFactoryLocalRepositoryBindings,
+)
 from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
 from nika_core.product_factory_packaged_execution import (
     PackagedProductFactoryExecutionController,
@@ -350,6 +353,7 @@ def build_windows_bridge(
         )
 
     local_product_factory_runtime_active = False
+    local_product_factory_worker_repositories: Mapping[str, Path] | None = None
     local_product_factory_launch_model_revision: int | None = None
     local_product_factory_launch_settings_revision: int | None = None
     if (
@@ -437,6 +441,9 @@ def build_windows_bridge(
                         else:
                             product_factory_execution_host = (
                                 local_product_factory_program.multi_repository_host
+                            )
+                            local_product_factory_worker_repositories = (
+                                local_product_factory_program.worker.repositories
                             )
                             local_product_factory_runtime_active = True
                             local_product_factory_launch_model_revision = model_revision
@@ -577,6 +584,26 @@ def build_windows_bridge(
         if execution_plan_resolver is None:
             assert product_factory_execution_plan_files is not None
             execution_plan_resolver = product_factory_execution_plan_files.resolve
+        if local_product_factory_runtime_active:
+            if local_product_factory_worker_repositories is None:
+                raise RuntimeError(
+                    "local Product Factory host repository authority is unavailable"
+                )
+            local_repository_bindings = ProductFactoryLocalRepositoryBindings(
+                store,
+                product_repository,
+            )
+            local_execution_plan_resolver = execution_plan_resolver
+
+            def resolve_local_execution_plan(project_id: str):
+                plan = local_execution_plan_resolver(project_id)
+                local_repository_bindings.require_plan_roots_within(
+                    plan,
+                    allowed_roots=local_product_factory_worker_repositories,
+                )
+                return plan
+
+            execution_plan_resolver = resolve_local_execution_plan
         product_factory_execution = PackagedProductFactoryExecutionController(
             preparation=PackagedProductFactoryPreparationService(
                 repository=product_repository,
