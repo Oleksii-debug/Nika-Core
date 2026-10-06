@@ -23,6 +23,30 @@ _FILL_EVIDENCE_COLUMNS = (
     "filled_at",
     "filled_slice",
 )
+_FILL_COLUMN_TYPES = {
+    "workspace_id": "TEXT",
+    "run_id": "TEXT",
+    "fill_id": "TEXT",
+    "approval_id": "TEXT",
+    "intent_id": "TEXT",
+    "order_id": "TEXT",
+    "venue_id": "TEXT",
+    "venue_timezone": "TEXT",
+    "instrument_id": "TEXT",
+    "currency": "TEXT",
+    "side": "TEXT",
+    "quantity": "TEXT",
+    "price": "TEXT",
+    "fee": "TEXT",
+    "filled_at": "TEXT",
+    "filled_slice": "INTEGER",
+}
+_ACCOUNT_COLUMN_TYPES = {
+    "workspace_id": "TEXT",
+    "run_id": "TEXT",
+    "payload": "TEXT",
+    "last_fill_id": "TEXT",
+}
 
 
 class TradingStateRepository:
@@ -216,26 +240,11 @@ def _verify_v3_schema(conn: sqlite3.Connection) -> None:
     fill_rows = conn.execute(
         "PRAGMA table_info(trading_research_run_fills)"
     ).fetchall()
-    required_fill = {
-        "workspace_id",
-        "run_id",
-        "fill_id",
-        "approval_id",
-        "intent_id",
-        "order_id",
-        "venue_id",
-        "venue_timezone",
-        "instrument_id",
-        "currency",
-        "side",
-        "quantity",
-        "price",
-        "fee",
-        "filled_at",
-        "filled_slice",
-    }
+    required_fill = set(_FILL_COLUMN_TYPES)
     if _column_names(fill_rows) != required_fill:
         raise RuntimeError("invalid trading research run fill schema")
+    if _column_types(fill_rows) != _FILL_COLUMN_TYPES:
+        raise RuntimeError("invalid trading research run fill column types")
     if _primary_key_columns(fill_rows) != ("workspace_id", "run_id", "fill_id"):
         raise RuntimeError("invalid trading research run fill primary key")
     if _not_null_columns(fill_rows) != required_fill:
@@ -244,9 +253,11 @@ def _verify_v3_schema(conn: sqlite3.Connection) -> None:
     account_rows = conn.execute(
         "PRAGMA table_info(trading_research_run_account_state)"
     ).fetchall()
-    required_account = {"workspace_id", "run_id", "payload", "last_fill_id"}
+    required_account = set(_ACCOUNT_COLUMN_TYPES)
     if _column_names(account_rows) != required_account:
         raise RuntimeError("invalid trading research run account schema")
+    if _column_types(account_rows) != _ACCOUNT_COLUMN_TYPES:
+        raise RuntimeError("invalid trading research run account column types")
     if _primary_key_columns(account_rows) != ("workspace_id", "run_id"):
         raise RuntimeError("invalid trading research run account primary key")
     if _not_null_columns(account_rows) != required_account:
@@ -257,6 +268,10 @@ def _verify_v3_schema(conn: sqlite3.Connection) -> None:
 
 def _column_names(rows: list[sqlite3.Row]) -> set[str]:
     return {str(row["name"]) for row in rows}
+
+
+def _column_types(rows: list[sqlite3.Row]) -> dict[str, str]:
+    return {str(row["name"]): str(row["type"]).upper() for row in rows}
 
 
 def _primary_key_columns(rows: list[sqlite3.Row]) -> tuple[str, ...]:
