@@ -57,7 +57,7 @@ def _reject_constant(value: str) -> NoReturn:
     _fail(f"non-finite JSON constant: {value}")
 
 
-def _read_object(path: Path) -> dict[str, object]:
+def _read_object_snapshot(path: Path) -> tuple[dict[str, object], bytes]:
     try:
         raw = path.read_bytes()
         if not raw or len(raw) > _MAX_JSON_BYTES:
@@ -73,6 +73,11 @@ def _read_object(path: Path) -> dict[str, object]:
         raise ProofError(f"invalid JSON authority: {path.name}") from exc
     if type(value) is not dict:
         _fail(f"JSON authority must be an object: {path.name}")
+    return value, raw
+
+
+def _read_object(path: Path) -> dict[str, object]:
+    value, _ = _read_object_snapshot(path)
     return value
 
 
@@ -588,8 +593,10 @@ def verify(root: Path) -> None:
         _fail("tier-1 candidate manifest does not bind warm-start foundation authority")
 
     staged_assets_path = root / "staged-assets.json"
-    staged_assets = _read_object(staged_assets_path)
-    staged_assets_sha256, _ = _sha256_file(staged_assets_path)
+    staged_assets, staged_assets_bytes = _read_object_snapshot(
+        staged_assets_path
+    )
+    staged_assets_sha256 = hashlib.sha256(staged_assets_bytes).hexdigest()
 
     evidence = root / "scale-evidence"
     try:
@@ -655,7 +662,7 @@ def verify(root: Path) -> None:
     )
     _write_new(
         evidence / "staged-assets.json",
-        (_canonical_json(staged_assets) + "\n").encode("utf-8"),
+        staged_assets_bytes,
     )
     print(_canonical_json(summary))
 
