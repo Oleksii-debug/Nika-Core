@@ -80,6 +80,17 @@ _MAX_COMMAND_FILES = 16
 _MAX_SWITCHES = 16
 _SWITCH_RE = re.compile(r"^--[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_SCALE_TIER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$")
+_LEGACY_TRAINING_TASK_KEYS = frozenset({"job_id", "kind"})
+_SCALE_TRAINING_TASK_KEYS = frozenset(
+    {
+        "job_id",
+        "kind",
+        "progression_proof_sha256",
+        "scale_plan_sha256",
+        "scale_tier_id",
+    }
+)
 _REPORT_KEYS = frozenset(
     {
         "schema_version",
@@ -761,19 +772,48 @@ def _physical_report(output_root: Path) -> PhysicalTrainingPilotReport:
         ) from exc
 
 
+def _matches_physical_training_task_payload(
+    payload: object,
+    *,
+    job_id: str,
+) -> bool:
+    if type(payload) is not dict or payload.get("job_id") != job_id:
+        return False
+    keys = frozenset(payload)
+    if keys == _LEGACY_TRAINING_TASK_KEYS:
+        return payload.get("kind") == "physical_peft_pilot"
+    if keys != _SCALE_TRAINING_TASK_KEYS:
+        return False
+    kind = payload.get("kind")
+    if kind not in {"physical_peft_pilot", "physical_peft_scale_tier"}:
+        return False
+    plan_sha256 = payload.get("scale_plan_sha256")
+    if type(plan_sha256) is not str or _SHA256_RE.fullmatch(plan_sha256) is None:
+        return False
+    tier_id = payload.get("scale_tier_id")
+    if type(tier_id) is not str or _SCALE_TIER_ID_RE.fullmatch(tier_id) is None:
+        return False
+    proof_sha256 = payload.get("progression_proof_sha256")
+    if kind == "physical_peft_pilot":
+        return proof_sha256 is None
+    return type(proof_sha256) is str and _SHA256_RE.fullmatch(proof_sha256) is not None
+
+
 def _find_pilot_task(
     store: SQLiteStore,
     *,
     workspace_id: str,
     job_id: str,
 ) -> TaskRecord:
-    expected_payload = {"job_id": job_id, "kind": "physical_peft_pilot"}
     matches = tuple(
         task
         for task in TaskQueue(store).list_recent(limit=500)
         if task.workspace_id == workspace_id
         and task.agent_id == "physical-peft-pilot"
-        and task.payload == expected_payload
+        and _matches_physical_training_task_payload(
+            task.payload,
+            job_id=job_id,
+        )
     )
     if len(matches) != 1:
         _fail("physical pilot database must contain exactly one matching training task")
