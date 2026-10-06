@@ -1793,6 +1793,152 @@ def test_checkpoint_snapshot_revalidates_nested_source_changes(
     )
 
 
+@pytest.mark.parametrize(
+    "relative_name",
+    [peft._CANDIDATE_FILE, "adapter_config.json"],
+)
+def test_initial_adapter_load_authority_pins_staged_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_name: str,
+) -> None:
+    raw_request, foundation = _request(tmp_path, max_steps=1)
+    promoted_bytes = b"promoted-tier-zero-adapter"
+    promoted_sha256 = _sha256(promoted_bytes)
+    raw_request["job"]["base_artifact"] = {
+        "artifact_ref": "models/candidate/pilot",
+        "sha256": promoted_sha256,
+    }
+    raw_request["training_materials"]["base_artifact_sha256"] = promoted_sha256
+    request = peft._parse_request(raw_request)
+    base_config = _config(tmp_path, request, foundation)
+    promoted = tmp_path / "promoted.safetensors"
+    promoted.write_bytes(promoted_bytes)
+    config = replace(
+        base_config,
+        initial_adapter=promoted.resolve(),
+        initial_adapter_sha256=promoted_sha256,
+    )
+    adapter_dir = tmp_path / "staged-adapter"
+    adapter_dir.mkdir()
+    candidate = adapter_dir / peft._CANDIDATE_FILE
+    candidate.write_bytes(promoted_bytes)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    config_path = adapter_dir / "adapter_config.json"
+    config_path.write_bytes(peft._canonical_json_bytes(adapter_config))
+    manifest = {
+        "adapter_config": adapter_config,
+        "base_artifact_sha256": config.base_gguf_sha256,
+        "candidate_artifact_ref": request.base_artifact_ref,
+        "schema": "nika-peft-candidate-v2",
+    }
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        lambda _: manifest,
+    )
+
+    authority = peft._open_initial_adapter_load_authority(
+        adapter_dir,
+        config=config,
+        request=request,
+    )
+    changed_path = adapter_dir / relative_name
+    try:
+        if peft.os.name == "nt":
+            with pytest.raises(OSError):
+                with changed_path.open("ab") as handle:
+                    handle.write(b"mutation")
+            peft._verify_initial_adapter_load_authority(
+                authority,
+                adapter_dir=adapter_dir,
+            )
+        else:
+            with changed_path.open("ab") as handle:
+                handle.write(b"mutation")
+            with pytest.raises(
+                peft.PeftTrainerError,
+                match="initial_adapter_changed_during_load",
+            ):
+                peft._verify_initial_adapter_load_authority(
+                    authority,
+                    adapter_dir=adapter_dir,
+                )
+    finally:
+        peft._close_initial_adapter_load_authority(authority)
+
+
+def test_initial_adapter_load_authority_rejects_extra_load_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, foundation = _request(tmp_path, max_steps=1)
+    promoted_bytes = b"promoted-tier-zero-adapter"
+    promoted_sha256 = _sha256(promoted_bytes)
+    raw_request["job"]["base_artifact"] = {
+        "artifact_ref": "models/candidate/pilot",
+        "sha256": promoted_sha256,
+    }
+    raw_request["training_materials"]["base_artifact_sha256"] = promoted_sha256
+    request = peft._parse_request(raw_request)
+    base_config = _config(tmp_path, request, foundation)
+    config = replace(
+        base_config,
+        initial_adapter=(tmp_path / "promoted.safetensors").resolve(),
+        initial_adapter_sha256=promoted_sha256,
+    )
+    adapter_dir = tmp_path / "staged-adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / peft._CANDIDATE_FILE).write_bytes(promoted_bytes)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    (adapter_dir / "adapter_config.json").write_bytes(
+        peft._canonical_json_bytes(adapter_config)
+    )
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        lambda _: {
+            "adapter_config": adapter_config,
+            "base_artifact_sha256": config.base_gguf_sha256,
+            "candidate_artifact_ref": request.base_artifact_ref,
+            "schema": "nika-peft-candidate-v2",
+        },
+    )
+    authority = peft._open_initial_adapter_load_authority(
+        adapter_dir,
+        config=config,
+        request=request,
+    )
+    try:
+        (adapter_dir / "adapter_model.bin").write_bytes(b"alternate")
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="initial_adapter_changed_during_load",
+        ):
+            peft._verify_initial_adapter_load_authority(
+                authority,
+                adapter_dir=adapter_dir,
+            )
+    finally:
+        peft._close_initial_adapter_load_authority(authority)
+
+
 def test_new_job_can_warm_start_from_promoted_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
