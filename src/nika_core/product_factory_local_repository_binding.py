@@ -87,10 +87,33 @@ class ProductFactoryLocalRepositoryBindings:
         repository: RepositoryRef,
         root: pathlib.Path,
         expected_binding_version: int | None,
+        expected_project_spec_version: int | None = None,
+        expected_project_row_version: int | None = None,
     ) -> ProductFactoryLocalRepositoryBinding:
         project_id = _canonical_text(project_id, "project_id")
         repository = _snapshot_repository(repository)
+        expected_spec_version = (
+            None
+            if expected_project_spec_version is None
+            else _positive_int(
+                expected_project_spec_version,
+                "expected_project_spec_version",
+            )
+        )
+        expected_row_version = (
+            None
+            if expected_project_row_version is None
+            else _non_negative_int(
+                expected_project_row_version,
+                "expected_project_row_version",
+            )
+        )
         project = self._require_project_repository(project_id, repository.locator)
+        _require_expected_project_versions(
+            project,
+            expected_spec_version=expected_spec_version,
+            expected_row_version=expected_row_version,
+        )
         if project.status != "active":
             raise ProductFactoryLocalRepositoryBindingError(
                 "local repository binding requires an active ProductProject"
@@ -103,6 +126,11 @@ class ProductFactoryLocalRepositoryBindings:
             current_project = self._require_project_repository(
                 project_id,
                 repository.locator,
+            )
+            _require_expected_project_versions(
+                current_project,
+                expected_spec_version=expected_spec_version,
+                expected_row_version=expected_row_version,
             )
             if current_project != project or current_project.status != "active":
                 raise ProductFactoryLocalRepositoryBindingError(
@@ -260,6 +288,25 @@ class ProductFactoryLocalRepositoryBindings:
                 ),
             )
 
+    def current_binding_version(
+        self,
+        project_id: str,
+        repository_id: str,
+    ) -> int | None:
+        """Return persisted CAS metadata without accepting filesystem authority."""
+
+        project_id = _canonical_text(project_id, "project_id")
+        repository_id = _canonical_text(repository_id, "repository_id")
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT binding_version FROM product_factory_local_repository_bindings "
+                "WHERE project_id=? AND repository_id=?",
+                (project_id, repository_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return _stored_positive_int(row["binding_version"], "binding_version")
+
     def require(
         self,
         project_id: str,
@@ -348,6 +395,24 @@ def _require_plan_project(
     ):
         raise ProductFactoryLocalRepositoryBindingError(
             "execution plan is stale for the current ProductProject"
+        )
+
+
+def _require_expected_project_versions(
+    project: ProductProject,
+    *,
+    expected_spec_version: int | None,
+    expected_row_version: int | None,
+) -> None:
+    if (
+        expected_spec_version is not None
+        and project.spec_version != expected_spec_version
+    ) or (
+        expected_row_version is not None
+        and project.row_version != expected_row_version
+    ):
+        raise ProductFactoryLocalRepositoryBindingError(
+            "execution plan is stale for current ProductProject"
         )
 
 
@@ -564,6 +629,14 @@ def _positive_int(value: object, label: str) -> int:
     if type(value) is not int or value < 1:
         raise ProductFactoryLocalRepositoryBindingError(
             f"{label} must be a positive integer"
+        )
+    return value
+
+
+def _non_negative_int(value: object, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ProductFactoryLocalRepositoryBindingError(
+            f"{label} must be a non-negative integer"
         )
     return value
 

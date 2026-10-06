@@ -5,10 +5,12 @@ on:
     paths:
       - "src/nika_core/product_project_schema.py"
       - "src/nika_core/product_factory_local_repository_binding.py"
+      - "src/nika_core/product_factory_packaged_repository_binding.py"
       - "src/nika_core/product_factory_local_coding.py"
       - "src/nika_core/product_factory_packaged_local_startup.py"
       - "src/nika_core/product_factory_packaged_bound_local_host.py"
       - "tests/test_product_factory_local_repository_binding.py"
+      - "tests/test_packaged_product_factory_repository_binding.py"
       - "tests/test_product_factory_contained_local_coding.py"
       - "tests/test_product_factory_packaged_local_startup.py"
       - "tests/test_product_factory_packaged_bound_local_host.py"
@@ -54,10 +56,12 @@ jobs:
           python -m ruff check
           src/nika_core/product_project_schema.py
           src/nika_core/product_factory_local_repository_binding.py
+          src/nika_core/product_factory_packaged_repository_binding.py
           src/nika_core/product_factory_local_coding.py
           src/nika_core/product_factory_packaged_local_startup.py
           src/nika_core/product_factory_packaged_bound_local_host.py
           tests/test_product_factory_local_repository_binding.py
+          tests/test_packaged_product_factory_repository_binding.py
           tests/test_product_factory_contained_local_coding.py
           tests/test_product_factory_packaged_local_startup.py
           tests/test_product_factory_packaged_bound_local_host.py
@@ -65,6 +69,7 @@ jobs:
         run: >-
           python -m pytest
           tests/test_product_factory_local_repository_binding.py
+          tests/test_packaged_product_factory_repository_binding.py
           tests/test_product_factory_contained_local_coding.py
           tests/test_product_factory_packaged_local_startup.py
           tests/test_product_factory_packaged_bound_local_host.py

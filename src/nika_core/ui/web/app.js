@@ -135,6 +135,22 @@
   const productFactoryExecutionPlanLoad = document.getElementById(
     "product-factory-execution-plan-load",
   );
+  const productFactoryRepositoryId = document.getElementById(
+    "product-factory-repository-id",
+  );
+  const productFactoryRepositoryRoot = document.getElementById(
+    "product-factory-repository-root",
+  );
+  const productFactoryRepositoryStatus = document.getElementById(
+    "product-factory-repository-binding-status",
+  );
+  const productFactoryRepositoryBind = document.getElementById(
+    "product-factory-repository-bind",
+  );
+  let productFactoryRepositoryRows = new Map();
+  let productFactoryRepositoryMessage = "";
+  let productFactoryRepositoryBindingDirty = false;
+  let productFactoryRepositoryEditVersion = null;
   const productProjectStatuses = document.getElementById("product-project-statuses");
   const productProjectStatusesList = document.getElementById("product-project-statuses-list");
   const productProjectStatusesEmpty = document.getElementById("product-project-statuses-empty");
@@ -790,6 +806,201 @@
     }
     if (productFactoryExecutionPlanPath) productFactoryExecutionPlanPath.disabled = false;
     if (productFactoryExecutionPlanLoad) productFactoryExecutionPlanLoad.disabled = false;
+    return true;
+  }
+
+  function syncProductFactoryRepositorySelection() {
+    const repositoryId = productFactoryRepositoryId?.value ?? "";
+    const row = productFactoryRepositoryRows.get(repositoryId);
+    if (!row) {
+      productFactoryRepositoryEditVersion = null;
+      if (productFactoryRepositoryRoot) {
+        productFactoryRepositoryRoot.value = "";
+        productFactoryRepositoryRoot.disabled = true;
+      }
+      if (productFactoryRepositoryBind) productFactoryRepositoryBind.disabled = true;
+      return;
+    }
+    if (productFactoryRepositoryRoot) {
+      productFactoryRepositoryRoot.disabled = false;
+      if (!productFactoryRepositoryBindingDirty) {
+        productFactoryRepositoryEditVersion = row.binding_version;
+        productFactoryRepositoryRoot.value =
+          typeof row.root === "string" ? row.root : "";
+      }
+    }
+    const repairable = row.binding_status !== "invalid"
+      || Number.isSafeInteger(row.binding_version);
+    if (productFactoryRepositoryBind) productFactoryRepositoryBind.disabled = !repairable;
+    if (productFactoryRepositoryStatus) {
+      const bindingLabel = row.binding_status === "bound"
+        ? `Прив’язано, версія ${row.binding_version}.`
+        : (row.binding_status === "invalid"
+          ? (repairable
+            ? `Поточна прив’язка недійсна; можна замінити її з версії ${row.binding_version}.`
+            : "Поточна прив’язка пошкоджена і не має безпечної CAS-версії.")
+          : "Локальний корінь ще не прив’язано.");
+      const dirtyLabel = productFactoryRepositoryBindingDirty
+        ? " Є незбережена зміна локального шляху."
+        : "";
+      productFactoryRepositoryStatus.textContent =
+        `${productFactoryRepositoryMessage} Репозиторій ${row.repository_id}: ${bindingLabel}${dirtyLabel}`;
+    }
+  }
+
+  function renderProductFactoryRepositoryBindings(snapshot) {
+    const failClosed = (
+      message = "Стан локальних репозиторіїв Product Factory недоступний або несумісний.",
+    ) => {
+      productFactoryRepositoryRows = new Map();
+      productFactoryRepositoryMessage = message;
+      if (productFactoryRepositoryId) {
+        productFactoryRepositoryId.replaceChildren();
+        productFactoryRepositoryId.disabled = true;
+      }
+      if (productFactoryRepositoryRoot) {
+        productFactoryRepositoryRoot.value = "";
+        productFactoryRepositoryRoot.disabled = true;
+      }
+      if (productFactoryRepositoryBind) productFactoryRepositoryBind.disabled = true;
+      if (productFactoryRepositoryStatus) {
+        productFactoryRepositoryStatus.textContent = message;
+      }
+      productFactoryRepositoryBindingDirty = false;
+      productFactoryRepositoryEditVersion = null;
+      return false;
+    };
+    if (snapshot === null) {
+      failClosed(
+        "Прив’язка локальних репозиторіїв недоступна в поточній конфігурації Product Factory.",
+      );
+      return true;
+    }
+    const allowedStatuses = new Set([
+      "project_required",
+      "plan_required",
+      "stale_plan",
+      "unavailable",
+      "ready",
+    ]);
+    if (
+      !snapshot
+      || snapshot.schema_version !== 1
+      || !allowedStatuses.has(snapshot.status)
+      || typeof snapshot.message !== "string"
+      || snapshot.message.length === 0
+      || !Array.isArray(snapshot.repositories)
+      || snapshot.repositories.length > 64
+      || !(
+        snapshot.project_id === null
+        || (typeof snapshot.project_id === "string" && snapshot.project_id.length > 0)
+      )
+    ) {
+      return failClosed();
+    }
+    if (snapshot.status !== "ready") {
+      if (snapshot.repositories.length !== 0) return failClosed();
+      productFactoryRepositoryRows = new Map();
+      productFactoryRepositoryMessage = snapshot.message;
+      if (productFactoryRepositoryId) {
+        productFactoryRepositoryId.replaceChildren();
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "Репозиторій недоступний";
+        productFactoryRepositoryId.appendChild(option);
+        productFactoryRepositoryId.disabled = true;
+      }
+      if (productFactoryRepositoryRoot) {
+        productFactoryRepositoryRoot.value = "";
+        productFactoryRepositoryRoot.disabled = true;
+      }
+      if (productFactoryRepositoryBind) productFactoryRepositoryBind.disabled = true;
+      if (productFactoryRepositoryStatus) {
+        productFactoryRepositoryStatus.textContent = snapshot.message;
+      }
+      productFactoryRepositoryBindingDirty = false;
+      productFactoryRepositoryEditVersion = null;
+      return true;
+    }
+    if (typeof snapshot.project_id !== "string" || snapshot.repositories.length < 1) {
+      return failClosed();
+    }
+    const rows = new Map();
+    for (const row of snapshot.repositories) {
+      if (
+        !row
+        || typeof row !== "object"
+        || typeof row.repository_id !== "string"
+        || row.repository_id.length === 0
+        || typeof row.provider !== "string"
+        || row.provider.length === 0
+        || typeof row.locator !== "string"
+        || row.locator.length === 0
+        || typeof row.default_branch !== "string"
+        || row.default_branch.length === 0
+        || !["unbound", "bound", "invalid"].includes(row.binding_status)
+        || !(
+          row.binding_version === null
+          || (Number.isSafeInteger(row.binding_version) && row.binding_version > 0)
+        )
+        || !(row.root === null || (typeof row.root === "string" && row.root.length > 0))
+        || rows.has(row.repository_id)
+      ) {
+        return failClosed();
+      }
+      if (
+        row.binding_status === "unbound"
+        && (row.binding_version !== null || row.root !== null)
+      ) {
+        return failClosed();
+      }
+      if (
+        row.binding_status === "bound"
+        && (!Number.isSafeInteger(row.binding_version) || typeof row.root !== "string")
+      ) {
+        return failClosed();
+      }
+      if (row.binding_status === "invalid" && row.root !== null) {
+        return failClosed();
+      }
+      rows.set(row.repository_id, row);
+    }
+    const previous = productFactoryRepositoryId?.value ?? "";
+    const nextSelectedRow = rows.get(previous);
+    const concurrentBindingChange = Boolean(
+      productFactoryRepositoryBindingDirty
+      && nextSelectedRow
+      && nextSelectedRow.binding_version !== productFactoryRepositoryEditVersion
+    );
+    if (concurrentBindingChange) {
+      productFactoryRepositoryBindingDirty = false;
+      productFactoryRepositoryEditVersion = nextSelectedRow.binding_version;
+    }
+    productFactoryRepositoryRows = rows;
+    productFactoryRepositoryMessage = concurrentBindingChange
+      ? (
+        snapshot.message
+        + " Прив’язка змінилася під час редагування; незбережений шлях скинуто "
+        + "до актуального durable стану."
+      )
+      : snapshot.message;
+    if (productFactoryRepositoryId) {
+      productFactoryRepositoryId.replaceChildren();
+      for (const row of rows.values()) {
+        const option = document.createElement("option");
+        option.value = row.repository_id;
+        option.textContent = `${row.repository_id} — ${row.provider} — ${row.locator}`;
+        productFactoryRepositoryId.appendChild(option);
+      }
+      if (rows.has(previous)) {
+        productFactoryRepositoryId.value = previous;
+      } else {
+        productFactoryRepositoryBindingDirty = false;
+        productFactoryRepositoryEditVersion = null;
+      }
+      productFactoryRepositoryId.disabled = false;
+    }
+    syncProductFactoryRepositorySelection();
     return true;
   }
 
@@ -1967,6 +2178,20 @@
         "Конфігурацію локального Product Factory змінено, але ще не збережено.";
     }
   });
+  productFactoryRepositoryId?.addEventListener("change", () => {
+    productFactoryRepositoryBindingDirty = false;
+    productFactoryRepositoryEditVersion = null;
+    syncProductFactoryRepositorySelection();
+  });
+  productFactoryRepositoryRoot?.addEventListener("input", () => {
+    if (!productFactoryRepositoryBindingDirty) {
+      const repositoryId = productFactoryRepositoryId?.value ?? "";
+      const repository = productFactoryRepositoryRows.get(repositoryId);
+      productFactoryRepositoryEditVersion = repository?.binding_version ?? null;
+    }
+    productFactoryRepositoryBindingDirty = true;
+    syncProductFactoryRepositorySelection();
+  });
 
   document.getElementById("model-reload")?.addEventListener("click", () => {
     modelDirty = false;
@@ -2035,6 +2260,9 @@
     renderProductFactoryExecutionPlan(
       state.product_factory_execution_plan ?? null,
     );
+    const repositoryBindingsReady = renderProductFactoryRepositoryBindings(
+      state.product_factory_repository_bindings ?? null,
+    );
     const taskPageReady = renderTaskPage(state.task_page ?? null);
     renderTasks(state.tasks || []);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
@@ -2044,6 +2272,14 @@
     if (!recoveryRender.ok) {
       lastStateReady = false;
       announce(recoveryRender.message, true);
+      return false;
+    }
+    if (!repositoryBindingsReady) {
+      lastStateReady = false;
+      announce(
+        "Стан локальних репозиторіїв Product Factory недоступний або несумісний.",
+        true,
+      );
       return false;
     }
     if (!taskPageReady) {
@@ -2101,7 +2337,8 @@
     // Group task controls: pause/resume/stop must not race an unacknowledged task creation.
     const durableMutation = taskMutationActions.has(actionId)
       || actionId === "team.sources.configure"
-      || actionId === "settings.product_factory_local.configure";
+      || actionId === "settings.product_factory_local.configure"
+      || actionId === "product.factory.repository.bind";
     const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
     if (inFlightActions.has(lockKey)) {
       announce("Попередню команду ще обробляють. Дочекайтеся підтвердження.", false);
@@ -2150,6 +2387,15 @@
       if (actionId === "product.factory.execution_plan.load") {
         payload.path = productFactoryExecutionPlanPath?.value ?? "";
       }
+      if (actionId === "product.factory.repository.bind") {
+        const repositoryId = productFactoryRepositoryId?.value ?? "";
+        const repository = productFactoryRepositoryRows.get(repositoryId);
+        payload.repository_id = repositoryId;
+        payload.root = productFactoryRepositoryRoot?.value ?? "";
+        payload.expected_binding_version = productFactoryRepositoryBindingDirty
+          ? productFactoryRepositoryEditVersion
+          : (repository?.binding_version ?? null);
+      }
       if (actionId === "settings.product_factory_local.configure") {
         const raw = productFactoryLocalStartupJson?.value.trim() ?? "";
         payload.revision = productFactoryLocalStartupRevision;
@@ -2194,6 +2440,13 @@
         && result.status === "completed"
       ) {
         productFactoryLocalStartupDirty = false;
+      }
+      if (
+        actionId === "product.factory.repository.bind"
+        && result.status === "completed"
+      ) {
+        productFactoryRepositoryBindingDirty = false;
+        productFactoryRepositoryEditVersion = null;
       }
       announce(message, failed);
       appendLog(message);
