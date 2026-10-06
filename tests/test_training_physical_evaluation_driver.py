@@ -434,6 +434,33 @@ def test_find_pilot_task_accepts_plan_bound_scale_identity(
     assert actual.task_id == expected.task_id
 
 
+def test_required_physical_steps_preserve_pilot_and_scale_higher_tier() -> None:
+    pilot_payload = _scale_task_payload_with_plan()
+    higher_payload = {
+        **_scale_task_payload_with_plan(
+            kind="physical_peft_scale_tier",
+            proof_sha256="9" * 64,
+        ),
+        "scale_tier_id": "small",
+    }
+
+    assert driver._required_physical_training_steps(pilot_payload) == 2
+    assert driver._required_physical_training_steps(higher_payload) == 8
+
+
+def test_required_physical_steps_reject_higher_tier_without_plan() -> None:
+    payload = _scale_task_payload(
+        kind="physical_peft_scale_tier",
+        proof_sha256="9" * 64,
+    )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="missing its canonical scale plan",
+    ):
+        driver._required_physical_training_steps(payload)
+
+
 def test_find_pilot_task_accepts_chained_higher_tier_identity(
     tmp_path: Path,
 ) -> None:
