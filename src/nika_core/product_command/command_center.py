@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
-from nika_core.product_command.contracts import ProductProjectDetail, ProductStatusKind
+from nika_core.product_command.contracts import (
+    ProductProjectDetail,
+    ProductStatusEntry,
+    ProductStatusKind,
+)
 from nika_core.product_command.coordinator_adapter import coordinator_status_entries
 from nika_core.product_command.credential_adapter import credential_status_entries
 from nika_core.product_command.deployment_adapter import (
@@ -16,6 +20,7 @@ from nika_core.product_command.factory_status_adapter import (
     rolling_maintenance_status_entries,
 )
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
+from nika_core.product_decisions import ProductDecisionSetSummary
 from nika_core.product_factory_coordinator import CoordinatorSnapshot, WorkState
 from nika_core.product_factory_credentials import CredentialBrokerSnapshot
 from nika_core.product_factory_deployment import (
@@ -46,6 +51,23 @@ class ProductCommandCenter:
 
     def __init__(self, projects: ProductProjectCommandService) -> None:
         self._projects = projects
+
+    def inspect_packaged_project(
+        self,
+        project_id: str,
+        *,
+        coordinator: CoordinatorSnapshot | None = None,
+    ) -> tuple[ProductProjectDetail, ProductDecisionSetSummary]:
+        """Compose the bounded packaged read model with optional trusted PF2 status."""
+
+        detail, _credential_refs, decision_summary = (
+            self._projects.inspect_project_presentation_context(project_id)
+        )
+        statuses = list(detail.statuses)
+        if coordinator is not None:
+            _validate_coordinator_scope(project_id, coordinator)
+            statuses.extend(coordinator_status_entries(coordinator))
+        return _finalize_statuses(detail, statuses), decision_summary
 
     def inspect_project(
         self,
@@ -98,15 +120,25 @@ class ProductCommandCenter:
                 rolling_maintenance_status_entries(project_id, fleet_maintenance)
             )
 
-        _require_unique_status_identity(statuses)
-        blocker_count = sum(item.kind is ProductStatusKind.BLOCKER for item in statuses)
-        summary = detail.summary.model_copy(update={"blocker_count": blocker_count})
-        return detail.model_copy(
-            update={
-                "summary": summary,
-                "statuses": tuple(statuses),
-            }
-        )
+        return _finalize_statuses(detail, statuses)
+
+
+def _finalize_statuses(
+    detail: ProductProjectDetail,
+    statuses: Iterable[ProductStatusEntry],
+) -> ProductProjectDetail:
+    materialized = list(statuses)
+    _require_unique_status_identity(materialized)
+    blocker_count = sum(
+        item.kind is ProductStatusKind.BLOCKER for item in materialized
+    )
+    summary = detail.summary.model_copy(update={"blocker_count": blocker_count})
+    return detail.model_copy(
+        update={
+            "summary": summary,
+            "statuses": tuple(materialized),
+        }
+    )
 
 
 def _validate_coordinator_scope(

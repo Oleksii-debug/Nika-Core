@@ -273,6 +273,40 @@ class StoredProductDecision:
     created_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class ProductDecisionSetSummary:
+    """Bounded-memory presentation summary for the complete current decision set."""
+
+    total_count: int
+    pending_count: int
+    approved_count: int
+    rejected_count: int
+    sole_pending: StoredProductDecision | None
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.total_count,
+            self.pending_count,
+            self.approved_count,
+            self.rejected_count,
+        )
+        if any(type(value) is not int or value < 0 for value in counts):
+            raise ProductProjectError(
+                "product decision summary counts must be non-negative integers"
+            )
+        if self.total_count != (
+            self.pending_count + self.approved_count + self.rejected_count
+        ):
+            raise ProductProjectError("product decision summary count mismatch")
+        if (self.pending_count == 1) != (self.sole_pending is not None):
+            raise ProductProjectError("product decision sole-pending summary mismatch")
+        if (
+            self.sole_pending is not None
+            and self.sole_pending.decision.state is not ProductDecisionState.PROPOSED
+        ):
+            raise ProductProjectError("product decision sole-pending state mismatch")
+
+
 class ProductDecisionRepository:
     """Durable PF1 decision lifecycle over the canonical ProductProject SQLite store."""
 
@@ -544,6 +578,24 @@ class ProductDecisionRepository:
                 raise KeyError(decision_id)
             return decision
 
+    @staticmethod
+    def _latest_cursor_conn(conn: Any, project_id: str) -> Any:
+        if not conn.execute(
+            "SELECT 1 FROM product_projects WHERE project_id=?",
+            (project_id,),
+        ).fetchone():
+            raise KeyError(project_id)
+        return conn.execute(
+            "SELECT d.* FROM product_decisions d JOIN ("
+            "SELECT project_id,decision_id,MAX(decision_version) AS decision_version "
+            "FROM product_decisions WHERE project_id=? GROUP BY project_id,decision_id"
+            ") latest ON latest.project_id=d.project_id "
+            "AND latest.decision_id=d.decision_id "
+            "AND latest.decision_version=d.decision_version "
+            "ORDER BY d.decision_id",
+            (project_id,),
+        )
+
     def list_latest_by_state(
         self,
         project_id: str,
@@ -567,21 +619,7 @@ class ProductDecisionRepository:
 
         with self.store.connection() as conn:
             conn.execute("BEGIN")
-            if not conn.execute(
-                "SELECT 1 FROM product_projects WHERE project_id=?",
-                (project_id,),
-            ).fetchone():
-                raise KeyError(project_id)
-            cursor = conn.execute(
-                "SELECT d.* FROM product_decisions d JOIN ("
-                "SELECT project_id,decision_id,MAX(decision_version) AS decision_version "
-                "FROM product_decisions WHERE project_id=? GROUP BY project_id,decision_id"
-                ") latest ON latest.project_id=d.project_id "
-                "AND latest.decision_id=d.decision_id "
-                "AND latest.decision_version=d.decision_version "
-                "ORDER BY d.decision_id",
-                (project_id,),
-            )
+            cursor = self._latest_cursor_conn(conn, project_id)
             selected: list[StoredProductDecision] = []
             matching = 0
             while True:
@@ -597,24 +635,51 @@ class ProductDecisionRepository:
                     matching += 1
             return tuple(selected), matching
 
+    def summarize_latest(self, project_id: str) -> ProductDecisionSetSummary:
+        """Summarize current decisions without materializing the complete result set.
+
+        Every row is decoded and validated, including rows not retained for presentation.
+        Only the sole pending row is retained, and only when it is unambiguous.
+        """
+
+        project_id = _validated_text(project_id, label="project_id")
+        with self.store.connection() as conn:
+            conn.execute("BEGIN")
+            cursor = self._latest_cursor_conn(conn, project_id)
+            pending_count = 0
+            approved_count = 0
+            rejected_count = 0
+            sole_pending: StoredProductDecision | None = None
+            while True:
+                rows = cursor.fetchmany(128)
+                if not rows:
+                    break
+                for row in rows:
+                    stored = self._from_row(row)
+                    state = stored.decision.state
+                    if state is ProductDecisionState.PROPOSED:
+                        pending_count += 1
+                        sole_pending = stored if pending_count == 1 else None
+                    elif state is ProductDecisionState.APPROVED:
+                        approved_count += 1
+                    elif state is ProductDecisionState.REJECTED:
+                        rejected_count += 1
+                    else:
+                        raise ProductProjectError(
+                            "stored product decision has unsupported current state"
+                        )
+            return ProductDecisionSetSummary(
+                total_count=pending_count + approved_count + rejected_count,
+                pending_count=pending_count,
+                approved_count=approved_count,
+                rejected_count=rejected_count,
+                sole_pending=sole_pending,
+            )
+
     def list(self, project_id: str) -> tuple[StoredProductDecision, ...]:
         project_id = _validated_text(project_id, label="project_id")
         with self.store.connection() as conn:
-            if not conn.execute(
-                "SELECT 1 FROM product_projects WHERE project_id=?",
-                (project_id,),
-            ).fetchone():
-                raise KeyError(project_id)
-            rows = conn.execute(
-                "SELECT d.* FROM product_decisions d JOIN ("
-                "SELECT project_id,decision_id,MAX(decision_version) AS decision_version "
-                "FROM product_decisions WHERE project_id=? GROUP BY project_id,decision_id"
-                ") latest ON latest.project_id=d.project_id "
-                "AND latest.decision_id=d.decision_id "
-                "AND latest.decision_version=d.decision_version "
-                "ORDER BY d.decision_id",
-                (project_id,),
-            ).fetchall()
+            rows = self._latest_cursor_conn(conn, project_id).fetchall()
             return tuple(self._from_row(row) for row in rows)
 
     def history(
