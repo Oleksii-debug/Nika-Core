@@ -976,6 +976,35 @@ def _find_pilot_task(
     return matches[0]
 
 
+def _required_physical_training_steps(payload: object) -> int:
+    if type(payload) is not dict:
+        _fail("physical training task payload is not canonical")
+    kind = payload.get("kind")
+    raw_plan = payload.get("scale_plan")
+    if raw_plan is None:
+        if kind != "physical_peft_pilot":
+            _fail("higher-tier training task is missing its canonical scale plan")
+        return 2
+    try:
+        plan = TrainingScalePlan.from_canonical_payload(raw_plan)
+    except (TrainingScaleError, TypeError, ValueError) as exc:
+        raise PhysicalEvaluationDriverError(
+            "physical training task scale plan is not canonical"
+        ) from exc
+    tier_id = payload.get("scale_tier_id")
+    matching = tuple(
+        index for index, tier in enumerate(plan.tiers) if tier.tier_id == tier_id
+    )
+    if len(matching) != 1:
+        _fail("physical training task scale tier is not unique")
+    tier_index = matching[0]
+    if (kind == "physical_peft_pilot") != (tier_index == 0):
+        _fail("physical training task kind does not match its scale tier")
+    if tier_index == 0:
+        return 2
+    return plan.tiers[tier_index].max_steps
+
+
 def _verify_completed_checkpoint(
     store: SQLiteStore,
     *,
@@ -2501,8 +2530,6 @@ def run_physical_evaluation_from_config(
     database_path = output_root / "physical-pilot.sqlite3"
     _canonical_file(database_path, name="physical pilot database")
     pilot = _physical_report(output_root)
-    if pilot.completed_steps != 2:
-        _fail("repository-native physical pilot evaluation requires the canonical two-step pilot")
 
     candidate_path = config.candidate_model_path.resolve(strict=True)
     if not candidate_path.is_relative_to(output_root):
@@ -2560,6 +2587,9 @@ def run_physical_evaluation_from_config(
         workspace_id=config.workspace_id,
         job_id=pilot.job_id,
     )
+    required_steps = _required_physical_training_steps(task.payload)
+    if pilot.completed_steps != required_steps:
+        _fail("physical training report does not match the selected scale-tier step budget")
     _verify_completed_checkpoint(store, task=task, report=pilot)
 
     spec = TrainingJobSpec(
@@ -2572,7 +2602,7 @@ def run_physical_evaluation_from_config(
         training_material_sha256=pilot.training_material_sha256,
         scale_authorization_sha256=pilot.scale_authorization_sha256,
         candidate_artifact_ref=pilot.candidate_artifact_ref,
-        max_steps=2,
+        max_steps=required_steps,
     )
     completed = TrainingRunEvidence(
         job_id=pilot.job_id,
