@@ -113,6 +113,133 @@ def _approval_request_id(message: str) -> str:
     return match.group(0)
 
 
+@pytest.mark.parametrize(
+    "decision_id",
+    [
+        " decision-leading-space",
+        "decision-control\nline",
+        "decision-zero-width\u200bformat",
+        "d" * 161,
+    ],
+)
+def test_pf1_rejects_unpresentable_decision_identity_before_mutation(
+    tmp_path: Path,
+    decision_id: str,
+) -> None:
+    store, repository, _service, _router = _build(tmp_path / "unsafe-id.db")
+    decisions = ProductDecisionRepository(store)
+
+    with pytest.raises(ValueError, match="safe presentation identity"):
+        decisions.record(
+            _PROJECT_ID,
+            ProductDecision(
+                decision_id=decision_id,
+                option_id="option-owner",
+                state=ProductDecisionState.PROPOSED,
+                rationale="Must fail before a durable write",
+                decided_by_ref="user://owner",
+            ),
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+            idempotency_key="decision:unsafe-id",
+        )
+
+    assert repository.get(_PROJECT_ID).row_version == 1
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM product_decisions WHERE project_id=?",
+            (_PROJECT_ID,),
+        ).fetchone()["count"]
+    assert count == 1
+
+
+def test_pf1_corrupt_unpresentable_persisted_decision_id_fails_closed(
+    tmp_path: Path,
+) -> None:
+    store, repository, service, _router = _build(tmp_path / "corrupt-id.db")
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_decisions SET decision_id=? "
+            "WHERE project_id=? AND decision_id=?",
+            ("decision-corrupt\ncontrol", _PROJECT_ID, "decision-owner"),
+        )
+
+    with pytest.raises(ValueError, match="safe presentation identity"):
+        service.inspect_project(_PROJECT_ID)
+
+    assert repository.get(_PROJECT_ID).row_version == 1
+
+
+def test_multiple_pending_decisions_are_discoverable_by_bounded_pages_and_exact_read(
+    tmp_path: Path,
+) -> None:
+    _store, repository, service, router = _build(tmp_path / "pending-pages.db")
+    for index in range(9):
+        package_id = f"research-page-{index:02d}"
+        option_id = f"option-page-{index:02d}"
+        decision_id = f"decision-{index:02d}"
+        repository.record_research_handoff(
+            _PROJECT_ID,
+            ResearchEvidencePackage(
+                package_id,
+                (
+                    EvidenceRef(
+                        f"evidence-page-{index:02d}",
+                        f"research://pending-page/{index:02d}",
+                        f"Evidence for pending decision {index:02d}",
+                    ),
+                ),
+            ),
+            (
+                ProductOption(
+                    option_id,
+                    f"Option {index:02d}",
+                    f"Candidate option {index:02d}",
+                    (package_id,),
+                ),
+            ),
+        )
+        service.record_decision(
+            _PROJECT_ID,
+            ProductDecision(
+                decision_id=decision_id,
+                option_id=option_id,
+                state=ProductDecisionState.PROPOSED,
+                rationale=f"Question for owner {index:02d}",
+                decided_by_ref="user://owner",
+            ),
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+            idempotency_key=f"decision:page:{index:02d}",
+        )
+
+    before = repository.get(_PROJECT_ID)
+    first = router.create({"command": "list pending product decisions"})
+    second = router.create(
+        {"command": "list pending product decisions page 2"}
+    )
+    exact = router.create(
+        {"command": "show product decision decision-00"}
+    )
+
+    assert "1-8 із 10" in first.message
+    for index in range(8):
+        assert f"decision-{index:02d}" in first.message
+    assert "decision-08" not in first.message
+    assert "decision-owner" not in first.message
+    assert "page 2" in first.message
+
+    assert "9-10 із 10" in second.message
+    assert "decision-08" in second.message
+    assert "decision-owner" in second.message
+    assert "decision-00" not in second.message
+
+    assert exact.status == "completed"
+    assert exact.focus_id == "product-project-heading"
+    assert "decision-00" in exact.message
+    assert "Question for owner 00" in exact.message
+    assert "стан pending" in exact.message
+    assert repository.get(_PROJECT_ID) == before
+
+
 def test_approval_is_two_step_and_replay_does_not_mint_second_effect(
     tmp_path: Path,
 ) -> None:
@@ -265,6 +392,47 @@ def test_unknown_or_forged_confirmation_cannot_create_authority(
     assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
 
 
+def test_restart_invalidates_ephemeral_request_and_fresh_request_recovers(
+    tmp_path: Path,
+) -> None:
+    store, repository, _service, router = _build(tmp_path / "restart-request.db")
+    first = router.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    stale_request = _approval_request_id(first.message)
+
+    restarted_authority = ApprovalAuthority()
+    restarted_service = ProductProjectCommandService(
+        repository,
+        approval_verifier=restarted_authority.verifier(),
+    )
+    restarted = PackagedProductCommandRouter(
+        products=restarted_service,
+        ordinary_handler=_ordinary_handler,
+        selection_store=PackagedProductSelectionStore(store),
+        decision_approval_authority=restarted_authority,
+    )
+
+    with pytest.raises(PackagedProductJourneyError, match="іншому запуску|невідомий"):
+        restarted.create(
+            {"command": f"confirm product decision approval {stale_request}"}
+        )
+
+    fresh = restarted.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    fresh_request = _approval_request_id(fresh.message)
+    assert fresh_request != stale_request
+    restarted.create(
+        {"command": f"confirm product decision approval {fresh_request}"}
+    )
+
+    assert restarted_service.decision_history(
+        _PROJECT_ID, "decision-owner"
+    )[-1].state == "approved"
+    assert repository.get(_PROJECT_ID).row_version == 2
+
+
 def test_stale_project_between_request_and_confirmation_fails_closed_then_recovers(
     tmp_path: Path,
 ) -> None:
@@ -311,10 +479,19 @@ def test_stale_project_between_request_and_confirmation_fails_closed_then_recove
     [
         ("approve product decision", "decision_id"),
         ("reject product decision", "decision_id"),
+        ("show product decision", "decision_id"),
         ("confirm product decision approval", "approval request_id"),
         (
             "confirm product decision approval forged",
             "approval request_id",
+        ),
+        (
+            "list pending product decisions page 0",
+            "1..1000000",
+        ),
+        (
+            "list pending product decisions page many",
+            "додатним цілим",
         ),
     ],
 )
@@ -337,6 +514,9 @@ def test_owner_decision_commands_fail_closed_on_missing_or_malformed_identity(
 def test_packaged_help_exposes_keyboard_two_step_owner_flow() -> None:
     html = Path("src/nika_core/ui/web/index.html").read_text(encoding="utf-8")
 
+    assert "list pending product decisions" in html
+    assert "list pending product decisions page &lt;номер&gt;" in html
+    assert "show product decision &lt;decision_id&gt;" in html
     assert "approve product decision &lt;decision_id&gt;" in html
     assert "reject product decision &lt;decision_id&gt;" in html
     assert (

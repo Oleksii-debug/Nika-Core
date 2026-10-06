@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import unicodedata
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ from nika_core.tools import ToolRisk
 
 _MAX_STORED_HANDOFF_BYTES = 1024 * 1024
 _SQLITE_INTEGER_MAX = (1 << 63) - 1
+_MAX_DECISION_ID_CHARS = 160
 
 
 def _reject_nonfinite_evidence(_value: str) -> None:
@@ -113,6 +115,23 @@ def _validated_text(value: object, *, label: str) -> str:
     return value
 
 
+def _validated_decision_id(value: object) -> str:
+    decision_id = _validated_text(value, label="product decision decision_id")
+    if (
+        len(decision_id) > _MAX_DECISION_ID_CHARS
+        or decision_id != decision_id.strip()
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+            for character in decision_id
+        )
+    ):
+        raise ProductProjectError(
+            "product decision decision_id must be a safe presentation identity "
+            f"of at most {_MAX_DECISION_ID_CHARS} characters"
+        )
+    return decision_id
+
+
 def _snapshot_decision(decision: object) -> ProductDecision:
     if type(decision) is not ProductDecision:
         raise ProductProjectError("product decision must be an exact ProductDecision")
@@ -127,10 +146,7 @@ def _snapshot_decision(decision: object) -> ProductDecision:
     if type(state) is not ProductDecisionState:
         raise ProductProjectError("product decision state must be ProductDecisionState")
     return ProductDecision(
-        decision_id=_validated_text(
-            decision_id,
-            label="product decision decision_id",
-        ),
+        decision_id=_validated_decision_id(decision_id),
         option_id=_validated_text(
             option_id,
             label="product decision option_id",
@@ -521,7 +537,7 @@ class ProductDecisionRepository:
 
     def get(self, project_id: str, decision_id: str) -> StoredProductDecision:
         project_id = _validated_text(project_id, label="project_id")
-        decision_id = _validated_text(decision_id, label="decision_id")
+        decision_id = _validated_decision_id(decision_id)
         with self.store.connection() as conn:
             decision = self._latest_conn(conn, project_id, decision_id)
             if decision is None:
@@ -554,7 +570,7 @@ class ProductDecisionRepository:
         decision_id: str,
     ) -> tuple[StoredProductDecision, ...]:
         project_id = _validated_text(project_id, label="project_id")
-        decision_id = _validated_text(decision_id, label="decision_id")
+        decision_id = _validated_decision_id(decision_id)
         with self.store.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM product_decisions WHERE project_id=? AND decision_id=? "
@@ -575,7 +591,7 @@ class ProductDecisionRepository:
     ) -> ProductProject:
         project_id = _validated_text(project_id, label="project_id")
         requirement_id = _validated_text(requirement_id, label="requirement_id")
-        decision_id = _validated_text(decision_id, label="decision_id")
+        decision_id = _validated_decision_id(decision_id)
         expected_row_version = _strict_int(
             expected_row_version,
             label="expected ProductProject row_version",
@@ -680,10 +696,7 @@ class ProductDecisionRepository:
             replay["operation_kind"],
             label="persisted decision replay operation_kind",
         )
-        stored_entity_id = _validated_text(
-            replay["entity_id"],
-            label="persisted decision replay entity_id",
-        )
+        stored_entity_id = _validated_decision_id(replay["entity_id"])
         stored_fingerprint = _validated_text(
             replay["input_fingerprint"],
             label="persisted decision replay input_fingerprint",
@@ -871,10 +884,7 @@ class ProductDecisionRepository:
                 "persisted product decision state is invalid"
             ) from exc
         decision = ProductDecision(
-            decision_id=_validated_text(
-                row["decision_id"],
-                label="persisted product decision decision_id",
-            ),
+            decision_id=_validated_decision_id(row["decision_id"]),
             option_id=_validated_text(
                 row["option_id"],
                 label="persisted product decision option_id",

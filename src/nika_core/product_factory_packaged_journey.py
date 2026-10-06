@@ -79,6 +79,15 @@ _DECISION_CONFIRM_PREFIXES = (
     "підтвердь схвалення рішення productproject",
     "підтвердити схвалення рішення productproject",
 )
+_DECISION_SHOW_PREFIXES = (
+    "show product decision",
+    "покажи рішення productproject",
+)
+_PENDING_DECISION_LIST_COMMANDS = (
+    "list pending product decisions",
+    "покажи рішення productproject, що очікують",
+)
+_PENDING_DECISION_PAGE_SIZE = 8
 _DAILY_ACTIVITY_REPORT_COMMANDS = frozenset(
     {
         "daily activity report",
@@ -254,6 +263,42 @@ def packaged_product_decision_action(command: str) -> tuple[str, str] | None:
                 "approval request_id має починатися з «approval-request-»."
             )
         return action, value
+    return None
+
+
+def packaged_product_decision_query(command: str) -> tuple[str, str | int] | None:
+    """Recognize bounded decision discovery/read commands for ambiguous pending sets."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split())
+    lowered = normalized.casefold()
+    for base in _PENDING_DECISION_LIST_COMMANDS:
+        if lowered == base:
+            return "list", 1
+        for marker in (" page ", " сторінка "):
+            prefix = base + marker
+            if not lowered.startswith(prefix):
+                continue
+            raw_page = normalized[len(prefix) :].strip()
+            if not raw_page.isascii() or not raw_page.isdecimal():
+                raise PackagedProductJourneyError(
+                    "Номер сторінки рішень має бути додатним цілим числом."
+                )
+            page = int(raw_page)
+            if page < 1 or page > 1_000_000:
+                raise PackagedProductJourneyError(
+                    "Номер сторінки рішень має бути в межах 1..1000000."
+                )
+            return "list", page
+
+    decision_id = _prefixed_owner_identifier(
+        command,
+        prefixes=_DECISION_SHOW_PREFIXES,
+        label="decision_id",
+        maximum=160,
+    )
+    if decision_id is not None:
+        return "show", decision_id
     return None
 
 
@@ -524,6 +569,88 @@ class PackagedProductCommandRouter:
                 f"{decision.title}; ризик R{decision.risk_level}; {decision.question}"
             ),
             focus_id="product-project-decision-heading",
+        )
+
+    def _project_detail_for_decision_read(self) -> ProductProjectDetail:
+        project_id = self._active_project_id
+        if project_id is None:
+            raise PackagedProductJourneyError(
+                "Поточний ProductProject не вибрано. Спочатку створіть або відкрийте його."
+            )
+        try:
+            return self._products.inspect_project(project_id)
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. Застарілий вибір очищено."
+            ) from exc
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "ProductProject changed while decision state was read; retry the command."
+            ) from exc
+
+    def _describe_product_decision(self, decision_id: str) -> UIResult:
+        detail = self._project_detail_for_decision_read()
+        matches = [
+            item for item in detail.decisions if item.decision_id == decision_id
+        ]
+        if len(matches) != 1:
+            raise PackagedProductJourneyError(
+                f"Рішення ProductProject не знайдено: {decision_id}."
+            )
+        decision = matches[0]
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                f"Рішення ProductProject: {decision.decision_id}; "
+                f"{decision.title}; стан {decision.state}; ризик R{decision.risk_level}; "
+                f"{decision.question}"
+            ),
+            focus_id="product-project-heading",
+        )
+
+    def _list_pending_product_decisions(self, page: int) -> UIResult:
+        detail = self._project_detail_for_decision_read()
+        pending = sorted(
+            (item for item in detail.decisions if item.state == "pending"),
+            key=lambda item: item.decision_id,
+        )
+        if not pending:
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message="Рішень ProductProject, що очікують власника, немає.",
+                focus_id="product-project-heading",
+            )
+        start = (page - 1) * _PENDING_DECISION_PAGE_SIZE
+        if start >= len(pending):
+            last_page = (len(pending) - 1) // _PENDING_DECISION_PAGE_SIZE + 1
+            raise PackagedProductJourneyError(
+                f"Сторінка {page} відсутня. Остання сторінка: {last_page}."
+            )
+        selected = pending[start : start + _PENDING_DECISION_PAGE_SIZE]
+        end = start + len(selected)
+        summary = " | ".join(
+            f"{item.decision_id}; {item.title}; R{item.risk_level}"
+            for item in selected
+        )
+        next_hint = (
+            ""
+            if end >= len(pending)
+            else (
+                " Наступна сторінка: list pending product decisions page "
+                f"{page + 1}."
+            )
+        )
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                f"Рішення ProductProject, що очікують власника: "
+                f"{start + 1}-{end} із {len(pending)}. {summary}.{next_hint}"
+            ),
+            focus_id="product-project-heading",
         )
 
     def _prepare_owner_decision(
@@ -822,6 +949,18 @@ class PackagedProductCommandRouter:
             # Direct command text and unrelated UI fields are classification input only.
             # Only the canonical target identity crosses into incumbent task-control authority.
             return handler({"task_id": task_id} if task_id is not None else {})
+        decision_query = packaged_product_decision_query(command)
+        if decision_query is not None:
+            query, identity = decision_query
+            if query == "show":
+                if type(identity) is not str:
+                    raise PackagedProductJourneyError("invalid ProductDecision query identity")
+                return self._describe_product_decision(identity)
+            if query == "list":
+                if type(identity) is not int:
+                    raise PackagedProductJourneyError("invalid ProductDecision page identity")
+                return self._list_pending_product_decisions(identity)
+            raise PackagedProductJourneyError("unsupported ProductDecision query")
         decision_action = packaged_product_decision_action(command)
         if decision_action is not None:
             action, identity = decision_action
