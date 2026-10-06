@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Mapping
@@ -88,12 +89,19 @@ class ContainedLocalProductFactoryPorts:
 
     worker: ContainedLocalCodingWorker
     policy: ContainedLocalCodingPolicy
+    effect_authorizer: Callable[[ComponentWorkRequest], None] | None = None
+
+    def _require_effect_authority(self, request: ComponentWorkRequest) -> None:
+        authorizer = self.effect_authorizer
+        if authorizer is not None:
+            authorizer(request)
 
     async def context_for(
         self,
         request: ComponentWorkRequest,
     ) -> CodingWorkerDispatchContext:
         self.policy.__post_init__()
+        self._require_effect_authority(request)
         tree_digest = self.worker.repository_tree_digest(
             request.repository_id,
             request.base_sha,
@@ -138,6 +146,7 @@ class ContainedLocalProductFactoryPorts:
         job,
         result,
     ) -> CodingWorkerExecutionEvidence:
+        self._require_effect_authority(request)
         evidence = self.worker.execution_evidence(job.job_id)
         if result.job_id != job.job_id:
             raise ValueError(

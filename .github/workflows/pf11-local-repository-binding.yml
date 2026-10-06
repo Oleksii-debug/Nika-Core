@@ -5,8 +5,10 @@ on:
     paths:
       - "src/nika_core/product_project_schema.py"
       - "src/nika_core/product_factory_local_repository_binding.py"
+      - "src/nika_core/product_factory_local_coding.py"
       - "scripts/nika_windows.py"
       - "tests/test_product_factory_local_repository_binding.py"
+      - "tests/test_product_factory_contained_local_coding.py"
       - "tests/test_product_factory_packaged_local_startup.py"
       - ".github/workflows/pf11-local-repository-binding.yml"
   workflow_dispatch:
@@ -50,12 +52,15 @@ jobs:
           python -m ruff check
           src/nika_core/product_project_schema.py
           src/nika_core/product_factory_local_repository_binding.py
+          src/nika_core/product_factory_local_coding.py
           scripts/nika_windows.py
           tests/test_product_factory_local_repository_binding.py
+          tests/test_product_factory_contained_local_coding.py
           tests/test_product_factory_packaged_local_startup.py
       - name: Run local repository binding regressions
         run: >-
           python -m pytest
           tests/test_product_factory_local_repository_binding.py
+          tests/test_product_factory_contained_local_coding.py
           tests/test_product_factory_packaged_local_startup.py
           -q

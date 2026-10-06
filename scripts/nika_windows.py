@@ -8,6 +8,7 @@ import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from pydantic import ValidationError
@@ -33,6 +34,7 @@ from nika_core.packaged_agent_builder import (
 from nika_core.packaged_intelligence_mode import PackagedIntelligenceModeCommandAdapter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
+from nika_core.product_factory_coordinator import ComponentWorkRequest
 from nika_core.product_factory_local_repository_binding import (
     ProductFactoryLocalRepositoryBindings,
 )
@@ -65,6 +67,7 @@ from nika_core.product_factory_packaged_planning import (
     PackagedTeamPlanResult,
 )
 from nika_core.product_factory_packaged_preparation import (
+    PackagedProductFactoryExecutionPlan,
     PackagedProductFactoryPreparationService,
 )
 from nika_core.product_factory_packaged_status import (
@@ -353,6 +356,7 @@ def build_windows_bridge(
         )
 
     local_product_factory_runtime_active = False
+    local_product_factory_program = None
     local_product_factory_worker_repositories: Mapping[str, Path] | None = None
     local_product_factory_launch_model_revision: int | None = None
     local_product_factory_launch_settings_revision: int | None = None
@@ -585,7 +589,10 @@ def build_windows_bridge(
             assert product_factory_execution_plan_files is not None
             execution_plan_resolver = product_factory_execution_plan_files.resolve
         if local_product_factory_runtime_active:
-            if local_product_factory_worker_repositories is None:
+            if (
+                local_product_factory_worker_repositories is None
+                or local_product_factory_program is None
+            ):
                 raise RuntimeError(
                     "local Product Factory host repository authority is unavailable"
                 )
@@ -594,13 +601,44 @@ def build_windows_bridge(
                 product_repository,
             )
             local_execution_plan_resolver = execution_plan_resolver
+            local_execution_plans: dict[
+                str,
+                PackagedProductFactoryExecutionPlan,
+            ] = {}
+            local_execution_plans_lock = Lock()
 
-            def resolve_local_execution_plan(project_id: str):
+            def require_local_repository_effect_authority(
+                request: ComponentWorkRequest,
+            ) -> None:
+                with local_execution_plans_lock:
+                    plan = local_execution_plans.get(request.project_id)
+                if (
+                    plan is None
+                    or request.repository_id not in plan.base_shas
+                ):
+                    raise RuntimeError(
+                        "local Product Factory work is outside the admitted "
+                        "execution-plan repository authority"
+                    )
+                local_repository_bindings.require_plan_roots_within(
+                    plan,
+                    allowed_roots=local_product_factory_worker_repositories,
+                )
+
+            local_product_factory_program.ports.effect_authorizer = (
+                require_local_repository_effect_authority
+            )
+
+            def resolve_local_execution_plan(
+                project_id: str,
+            ) -> PackagedProductFactoryExecutionPlan:
                 plan = local_execution_plan_resolver(project_id)
                 local_repository_bindings.require_plan_roots_within(
                     plan,
                     allowed_roots=local_product_factory_worker_repositories,
                 )
+                with local_execution_plans_lock:
+                    local_execution_plans[project_id] = plan
                 return plan
 
             execution_plan_resolver = resolve_local_execution_plan

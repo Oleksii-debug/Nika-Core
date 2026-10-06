@@ -1038,10 +1038,27 @@ def test_windows_bridge_wires_durable_repository_binding_before_local_execution(
         "local_repository_bindings.require_plan_roots_within(",
         resolver_index,
     )
-    controller_index = source.index(
-        "PackagedProductFactoryExecutionController(",
+    effect_index = source.index(
+        "def require_local_repository_effect_authority(",
         binding_index,
     )
+    effect_wiring_index = source.index(
+        "local_product_factory_program.ports.effect_authorizer",
+        effect_index,
+    )
+    controller_index = source.index(
+        "PackagedProductFactoryExecutionController(",
+        effect_wiring_index,
+    )
 
-    assert import_index < resolver_index < binding_index < controller_index
+    assert (
+        import_index
+        < resolver_index
+        < binding_index
+        < effect_index
+        < effect_wiring_index
+        < controller_index
+    )
     assert "allowed_roots=local_product_factory_worker_repositories" in source
+    assert "local_execution_plans[project_id] = plan" in source
+    assert source.count("local_repository_bindings.require_plan_roots_within(") >= 2
