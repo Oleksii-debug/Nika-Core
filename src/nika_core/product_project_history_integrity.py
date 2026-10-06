@@ -8,7 +8,9 @@ from datetime import datetime
 from itertools import pairwise
 from typing import Any
 
+from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
+    ProductDecision,
     ProductDecisionState,
     ProductProjectError,
     ProductProjectSpec,
@@ -441,12 +443,28 @@ class ProductProjectHistoricalIntegrityService:
             (project_id,),
         ).fetchall()
         by_type: dict[str, list[Any]] = defaultdict(list)
+        decision_expected_row_versions: dict[int, int] = {}
+        causal_row_version = 0
+        causal_event_types = {
+            "product_project.spec_versioned",
+            "product_project.decision_recorded",
+            "product_project.status_changed",
+        }
         for row in audit_rows:
             event_type = self._required_text(
                 row["event_type"],
                 label="ProductProject audit event type",
             )
             by_type[event_type].append(row)
+            if event_type in causal_event_types:
+                if event_type == "product_project.decision_recorded":
+                    event_id = self._required_json_int(
+                        row["event_id"],
+                        minimum=1,
+                        label="product decision audit event_id",
+                    )
+                    decision_expected_row_versions[event_id] = causal_row_version
+                causal_row_version += 1
 
         self._validate_creation_audit(by_type.get("product_project.created", []))
         self._validate_research_audits(
@@ -457,9 +475,12 @@ class ProductProjectHistoricalIntegrityService:
             by_type.get("product_project.spec_versioned", []),
             spec_rows,
         )
-        self._validate_decision_audits(
+        trusted_approved_decisions = self._validate_decision_audits(
+            conn,
+            project_id,
             by_type.get("product_project.decision_recorded", []),
             decision_rows,
+            expected_row_versions=decision_expected_row_versions,
         )
         lifecycle = self._validate_lifecycle_audits(
             by_type.get("product_project.status_changed", []),
@@ -478,6 +499,7 @@ class ProductProjectHistoricalIntegrityService:
             project_id,
             spec_rows=spec_rows,
             decision_rows=decision_rows,
+            trusted_approved_decisions=trusted_approved_decisions,
             lifecycle=lifecycle,
         )
         return lifecycle, idempotency_count
@@ -551,7 +573,15 @@ class ProductProjectHistoricalIntegrityService:
         if audited != expected_versions:
             raise ProductProjectError("spec revision audit history does not match durable specs")
 
-    def _validate_decision_audits(self, audit_rows: list[Any], decision_rows: list[Any]) -> None:
+    def _validate_decision_audits(
+        self,
+        conn: Any,
+        project_id: str,
+        audit_rows: list[Any],
+        decision_rows: list[Any],
+        *,
+        expected_row_versions: dict[int, int],
+    ) -> set[tuple[str, int]]:
         durable = {
             (
                 self._required_text(
@@ -567,6 +597,7 @@ class ProductProjectHistoricalIntegrityService:
             for row in decision_rows
         }
         audited: set[tuple[str, int]] = set()
+        trusted_approved: set[tuple[str, int]] = set()
         for row in audit_rows:
             payload = self._json_object(row["payload_json"], label="product decision audit")
             try:
@@ -581,6 +612,46 @@ class ProductProjectHistoricalIntegrityService:
                         audit_decided_by_ref,
                         label="product decision audit decided_by_ref",
                     )
+                approval_authority = payload.get("approval_authority")
+                trusted_approval = approval_authority is not None
+                expected_trusted_actor: str | None = None
+                audit_action_fingerprint: str | None = None
+                audit_effect_fingerprint: str | None = None
+                if trusted_approval:
+                    if (
+                        state is not ProductDecisionState.APPROVED
+                        or type(approval_authority) is not dict
+                    ):
+                        raise ValueError("invalid approval_authority")
+                    approval_identity = {
+                        "approval_id": self._required_text(
+                            approval_authority.get("approval_id"),
+                            label="product decision approval approval_id",
+                        ),
+                        "issuer_id": self._required_text(
+                            approval_authority.get("issuer_id"),
+                            label="product decision approval issuer_id",
+                        ),
+                        "authority_version": self._required_text(
+                            approval_authority.get("authority_version"),
+                            label="product decision approval authority_version",
+                        ),
+                    }
+                    self._required_text(
+                        approval_authority.get("request_id"),
+                        label="product decision approval request_id",
+                    )
+                    audit_action_fingerprint = self._required_text(
+                        approval_authority.get("action_fingerprint"),
+                        label="product decision approval action_fingerprint",
+                    )
+                    audit_effect_fingerprint = self._required_text(
+                        approval_authority.get("effect_fingerprint"),
+                        label="product decision approval effect_fingerprint",
+                    )
+                    expected_trusted_actor = "approval://" + hashlib.sha256(
+                        self._canonical(approval_identity).encode()
+                    ).hexdigest()
                 raw_evidence = payload["evidence_package_ids"]
                 if not isinstance(raw_evidence, list) or any(
                     type(ref) is not str or not ref.strip()
@@ -609,7 +680,15 @@ class ProductProjectHistoricalIntegrityService:
                 durable_row["decided_by_ref"],
                 label="durable product decision decided_by_ref",
             )
-            if (
+            if trusted_approval:
+                if (
+                    audit_decided_by_ref is None
+                    or audit_decided_by_ref != durable_decided_by_ref
+                    or audit_decided_by_ref != expected_trusted_actor
+                ):
+                    raise ProductProjectError("product decision audit actor drift")
+                trusted_approved.add(key)
+            elif (
                 audit_decided_by_ref is not None
                 and audit_decided_by_ref != durable_decided_by_ref
             ):
@@ -629,12 +708,126 @@ class ProductProjectHistoricalIntegrityService:
             durable_evidence = tuple(parsed_durable_evidence)
             if evidence != durable_evidence:
                 raise ProductProjectError("product decision audit evidence drift")
+            if trusted_approval:
+                event_id = self._required_json_int(
+                    row["event_id"],
+                    minimum=1,
+                    label="product decision audit event_id",
+                )
+                expected_row_version = expected_row_versions.get(event_id)
+                if expected_row_version is None:
+                    raise ProductProjectError(
+                        "product decision audit lacks causal row-version identity"
+                    )
+                expected_action, expected_effect = (
+                    self._trusted_approval_fingerprints(
+                        conn,
+                        project_id,
+                        key=key,
+                        durable_row=durable_row,
+                        durable_evidence=durable_evidence,
+                        expected_row_version=expected_row_version,
+                    )
+                )
+                if (
+                    audit_action_fingerprint != expected_action
+                    or audit_effect_fingerprint != expected_effect
+                ):
+                    raise ProductProjectError(
+                        "product decision approval authority fingerprint drift"
+                    )
             audited.add(key)
             self._time(row["created_at"], label=f"product decision audit {key[0]}")
         if audited != set(durable):
             raise ProductProjectError(
                 "product decision audit history does not match durable decisions"
             )
+        return trusted_approved
+
+    def _trusted_approval_fingerprints(
+        self,
+        conn: Any,
+        project_id: str,
+        *,
+        key: tuple[str, int],
+        durable_row: Any,
+        durable_evidence: tuple[str, ...],
+        expected_row_version: int,
+    ) -> tuple[str, str]:
+        receipt_rows = conn.execute(
+            "SELECT operation_key FROM product_project_mutation_idempotency "
+            "WHERE project_id=? AND operation_kind='product_decision.record' "
+            "AND entity_id=? AND entity_version=?",
+            (project_id, key[0], key[1]),
+        ).fetchall()
+        if len(receipt_rows) != 1:
+            raise ProductProjectError(
+                "trusted product decision lacks one exact idempotency receipt"
+            )
+        idempotency_key = self._required_text(
+            receipt_rows[0]["operation_key"],
+            label="trusted product decision idempotency key",
+        )
+        option_id = self._required_text(
+            durable_row["option_id"],
+            label="trusted product decision option_id",
+        )
+        rationale = self._required_text(
+            durable_row["rationale"],
+            label="trusted product decision rationale",
+        )
+        decided_by_ref = self._required_text(
+            durable_row["decided_by_ref"],
+            label="trusted product decision actor",
+        )
+        mutation_fingerprint = self._fingerprint(
+            {
+                "project_id": project_id,
+                "decision_id": key[0],
+                "option_id": option_id,
+                "state": ProductDecisionState.APPROVED.value,
+                "rationale": rationale,
+                "decided_by_ref": None,
+            }
+        )
+
+        exact_payloads: list[dict[str, str]] = []
+        for package_id in durable_evidence:
+            research = conn.execute(
+                "SELECT payload_json FROM product_research_handoffs "
+                "WHERE project_id=? AND package_id=?",
+                (project_id, package_id),
+            ).fetchall()
+            if len(research) != 1 or type(research[0]["payload_json"]) is not str:
+                raise ProductProjectError(
+                    "trusted product decision evidence payload is unavailable"
+                )
+            exact_payloads.append(
+                {
+                    "package_id": package_id,
+                    "payload_sha256": hashlib.sha256(
+                        research[0]["payload_json"].encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+        evidence_fingerprint = hashlib.sha256(
+            self._canonical(exact_payloads).encode("utf-8")
+        ).hexdigest()
+        intent = ProductDecisionRepository._build_approval_intent(
+            project_id,
+            ProductDecision(
+                decision_id=key[0],
+                option_id=option_id,
+                state=ProductDecisionState.APPROVED,
+                rationale=rationale,
+                decided_by_ref=decided_by_ref,
+            ),
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
+            mutation_fingerprint=mutation_fingerprint,
+            evidence_fingerprint=evidence_fingerprint,
+        )
+        return intent.approval_fingerprint, intent.effect_fingerprint
 
     def _validate_lifecycle_audits(
         self,
@@ -904,6 +1097,7 @@ class ProductProjectHistoricalIntegrityService:
         *,
         spec_rows: list[Any],
         decision_rows: list[Any],
+        trusted_approved_decisions: set[tuple[str, int]],
         lifecycle: tuple[_LifecycleEvent, ...],
     ) -> int:
         create_rows = conn.execute(
@@ -973,6 +1167,7 @@ class ProductProjectHistoricalIntegrityService:
                 minimum=1,
                 label="product decision version",
             )
+            decision_key = (decision_id, decision_version)
             try:
                 state = ProductDecisionState(row["state"])
             except (TypeError, ValueError) as exc:
@@ -992,7 +1187,10 @@ class ProductProjectHistoricalIntegrityService:
                     ),
                     "decided_by_ref": (
                         None
-                        if state is ProductDecisionState.APPROVED
+                        if (
+                            state is ProductDecisionState.APPROVED
+                            and decision_key in trusted_approved_decisions
+                        )
                         else self._required_text(
                             row["decided_by_ref"],
                             label="product decision decided_by_ref",
@@ -1000,7 +1198,7 @@ class ProductProjectHistoricalIntegrityService:
                     ),
                 }
             )
-            durable_decisions[(decision_id, decision_version)] = (
+            durable_decisions[decision_key] = (
                 expected_fingerprint,
                 self._time(
                     row["created_at"],
