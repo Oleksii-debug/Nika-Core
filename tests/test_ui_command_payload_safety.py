@@ -84,7 +84,7 @@ def test_wide_payload_bounds_total_elements_without_copying() -> None:
 
 def test_utf8_byte_budget_includes_structure_and_multibyte_text() -> None:
     # '{"text":"..."}' uses 11 bytes of compact JSON framing.
-    allowed = 1_048_576 - len('{"text":""}'.encode("utf-8"))
+    allowed = 1_048_576 - len(b'{"text":""}')
     assert command({"text": "x" * allowed}).payload["text"] == "x" * allowed
     with pytest.raises(ValidationError, match="byte limit"):
         command({"text": "x" * (allowed + 1)})
