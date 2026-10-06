@@ -216,14 +216,6 @@ def build_windows_bridge(
             else None
         ),
     )
-    try:
-        backend.start_startup_recovery()
-    except Exception as exc:
-        backend.close()
-        raise _StartupRecoveryInventoryError(
-            "packaged startup recovery inventory failed"
-        ) from exc
-
     products = ProductProjectCommandService(ProductProjectRepository(store))
 
     def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
@@ -323,6 +315,13 @@ def build_windows_bridge(
         },
         state_provider=source_state,
     )
+    try:
+        backend.start_startup_recovery()
+    except Exception as exc:
+        backend.close()
+        raise _StartupRecoveryInventoryError(
+            "packaged startup recovery inventory failed"
+        ) from exc
     return bridge, products
 
 

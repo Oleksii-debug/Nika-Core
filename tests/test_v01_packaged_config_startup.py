@@ -106,6 +106,38 @@ def test_storage_startup_failure_is_accessible_private_and_does_not_launch_shell
     assert not config.database_path.exists()
 
 
+
+def test_bridge_composition_failure_happens_before_startup_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+    recovery_started: list[bool] = []
+
+    def record_recovery(_self: object, **_kwargs: object) -> dict[str, object]:
+        recovery_started.append(True)
+        return {}
+
+    def fail_product_service(_repository: object) -> object:
+        raise RuntimeError("PRIVATE_POST_BACKEND_COMPOSITION_CANARY")
+
+    monkeypatch.setattr(
+        nika_windows.DesktopBackend,
+        "start_startup_recovery",
+        record_recovery,
+    )
+    monkeypatch.setattr(
+        nika_windows,
+        "ProductProjectCommandService",
+        fail_product_service,
+    )
+
+    with pytest.raises(RuntimeError, match="PRIVATE_POST_BACKEND_COMPOSITION_CANARY"):
+        nika_windows.build_windows_bridge(config)
+
+    assert recovery_started == []
+
+
 def test_actual_corrupt_database_is_not_overwritten_during_failed_startup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
