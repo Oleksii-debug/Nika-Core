@@ -357,7 +357,7 @@ function Verify-ManifestAndNotices {
     }
     $actualFiles = @{}
     foreach ($file in (Get-ChildItem -LiteralPath $BundleDir -File -Recurse -Force)) {
-        $relative = [System.IO.Path]::GetRelativePath($BundleDir, $file.FullName).Replace('\\', '/')
+        $relative = [System.IO.Path]::GetRelativePath($BundleDir, $file.FullName).Replace('\', '/')
         if ($relative -eq 'release-manifest.json') { continue }
         Require (-not $actualFiles.ContainsKey($relative)) 'Bundle contains duplicate relative file identity.'
         $actualFiles[$relative] = $true
