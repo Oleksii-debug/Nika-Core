@@ -241,7 +241,7 @@ def test_contained_local_multi_repository_host_drives_packaged_prepare_and_dispa
                         python,
                         "-c",
                         "from pathlib import Path; "
-                        "assert Path('src/core.py').read_text() == 'VALUE = 2\\n'",
+                        "assert Path('src/core.py').read_text() == 'VALUE = 2\n'",
                     ),
                 ),
             ),
@@ -277,10 +277,10 @@ def test_contained_local_multi_repository_host_drives_packaged_prepare_and_dispa
     assert len(outcomes) == 1
     assert outcomes[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
     assert planner.calls == 1
-    assert (repository / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 1\\n"
+    assert (repository / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     work_id = prepared.state.coordinator.snapshot().records[0].request.work_id
     candidate = program.worker.candidate_worktree(work_id)
-    assert (candidate / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 2\\n"
+    assert (candidate / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 2\n"
 
 
 def test_policy_rejects_relative_or_noncanonical_executable_identity() -> None:
