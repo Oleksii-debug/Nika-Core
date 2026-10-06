@@ -102,8 +102,12 @@ class PackagedBuildRuntimeSession:
             self.store,
             self.startup,
             self.activation,
+            effect_admission_guard=self._continuation_effect_allowed,
         )
         await continuation(prepared)
+
+    def _continuation_effect_allowed(self) -> bool:
+        return self._runtime_status(self._raw_snapshot()) == "active"
 
     def _raw_snapshot(self) -> dict[str, object]:
         return self.settings.snapshot(runtime_status="not_configured")

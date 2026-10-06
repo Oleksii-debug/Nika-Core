@@ -385,6 +385,64 @@ def test_continuation_reconciles_uncertain_pf5_once_without_replay(
     ]
 
 
+def test_effect_admission_guard_blocks_next_component_after_settings_drift(
+    tmp_path,
+    monkeypatch,
+):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    allowed = True
+    continuation = PackagedReviewedBuildContinuation(
+        store,
+        _startup(tmp_path),
+        _activated(
+            {
+                (PROJECT_ID, "repo-a", "component-a"),
+                (PROJECT_ID, "repo-b", "component-b"),
+            }
+        ),
+        effect_admission_guard=lambda: allowed,
+    )
+    calls = []
+
+    class Controller:
+        def advance_component(self, *, state, component_id):
+            nonlocal allowed
+            calls.append(component_id)
+            if component_id == "component-a":
+                allowed = False
+            return SimpleNamespace(
+                state=BuildExecutionState.SUCCEEDED,
+                spec=SimpleNamespace(
+                    request=SimpleNamespace(
+                        project_id=PROJECT_ID,
+                        work_id=f"pf5-{component_id}",
+                    )
+                ),
+            )
+
+    monkeypatch.setattr(
+        continuation_module,
+        "build_configured_packaged_reviewed_build_controller",
+        lambda *_args, **_kwargs: Controller(),
+    )
+
+    with pytest.raises(
+        continuation_module.PackagedBuildContinuationError,
+        match="effect authority changed",
+    ):
+        continuation._advance(
+            _prepared(
+                [
+                    _record("component-a", "repo-a", WorkState.ACCEPTED),
+                    _record("component-b", "repo-b", WorkState.ACCEPTED),
+                ]
+            )
+        )
+
+    assert calls == ["component-a"]
+
+
 def test_continuation_settles_current_pf5_work_without_starting_next_after_cancel(
     tmp_path,
     monkeypatch,
