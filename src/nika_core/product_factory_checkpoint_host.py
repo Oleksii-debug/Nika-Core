@@ -316,6 +316,28 @@ class ProductFactoryCheckpointHost:
         )
         return None if admitted is None else admitted[0]
 
+    def latest_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        host_task_id: str,
+        project_id: str,
+    ) -> PersistedProductFactoryCheckpoint | None:
+        """Read the canonical PF checkpoint inside a caller-owned transaction."""
+
+        if not isinstance(conn, sqlite3.Connection):
+            raise TypeError("conn must be a sqlite3.Connection")
+        if not conn.in_transaction:
+            raise ProductFactoryCheckpointError(
+                "caller-owned checkpoint read requires an active SQLite transaction"
+            )
+        admitted = self._latest_with_authority_on_connection(
+            conn,
+            host_task_id=host_task_id,
+            project_id=project_id,
+        )
+        return None if admitted is None else admitted[0]
+
     def _latest_with_authority(
         self,
         *,
@@ -326,27 +348,40 @@ class ProductFactoryCheckpointHost:
             # SELECT alone does not open a Python sqlite3 read transaction. Keep
             # the host anchors and every checkpoint row in one committed snapshot.
             conn.execute("BEGIN")
-            host_payload = self._require_host_task(
+            return self._latest_with_authority_on_connection(
                 conn,
                 host_task_id=host_task_id,
                 project_id=project_id,
             )
-            head = _host_task_checkpoint_head(host_payload, required=False)
-            checkpoint_count = self._checkpoint_count(conn, host_task_id=host_task_id)
-            if head is None:
-                if checkpoint_count:
-                    raise ProductFactoryCheckpointIntegrityError(
-                        "durable Product Factory checkpoints have no canonical host-task head; "
-                        "explicit reconciliation is required"
-                    )
-                return None
-            record = self._validated_committed_head(
-                conn,
-                host_task_id=host_task_id,
-                project_id=project_id,
-                host_payload=host_payload,
-            )
-            return record, _host_task_trusted_plan(host_payload, required=True)
+
+    def _latest_with_authority_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        host_task_id: str,
+        project_id: str,
+    ) -> tuple[PersistedProductFactoryCheckpoint, str] | None:
+        host_payload = self._require_host_task(
+            conn,
+            host_task_id=host_task_id,
+            project_id=project_id,
+        )
+        head = _host_task_checkpoint_head(host_payload, required=False)
+        checkpoint_count = self._checkpoint_count(conn, host_task_id=host_task_id)
+        if head is None:
+            if checkpoint_count:
+                raise ProductFactoryCheckpointIntegrityError(
+                    "durable Product Factory checkpoints have no canonical host-task head; "
+                    "explicit reconciliation is required"
+                )
+            return None
+        record = self._validated_committed_head(
+            conn,
+            host_task_id=host_task_id,
+            project_id=project_id,
+            host_payload=host_payload,
+        )
+        return record, _host_task_trusted_plan(host_payload, required=True)
 
     def inspect_latest(
         self,
