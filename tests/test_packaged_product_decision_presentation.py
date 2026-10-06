@@ -11,6 +11,7 @@ from _product_decision_test_support import ApprovedProductProjectCommandService
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_command.command_center import ProductCommandCenter
+from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductJourneyError,
@@ -154,6 +155,165 @@ def test_pending_product_decision_is_bounded_and_visible_without_authority(
         assert forbidden not in serialized
 
 
+def test_state_refresh_uses_bounded_decision_summary_not_full_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _router, provider = _build(tmp_path / "bounded refresh.db")
+    for index in range(12):
+        _add_pending(
+            service,
+            repository,
+            package_id=f"research-refresh-{index:02d}",
+            option_id=f"option-refresh-{index:02d}",
+            decision_id=f"decision-refresh-{index:02d}",
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+        )
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("packaged state refresh must not materialize decision list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
+
+    project = provider()["product_project"]
+
+    assert project is not None
+    assert project["decision_count"] == 12
+    assert project["decision_state_counts"] == {"pending": 12}
+    assert project["current_decision"] is None
+
+
+def test_bounded_state_refresh_preserves_mixed_counts_and_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "bounded mixed restart.db"
+    service, repository, _router, provider = _build(database)
+    for suffix in ("pending", "approved", "rejected"):
+        _add_pending(
+            service,
+            repository,
+            package_id=f"research-mixed-{suffix}",
+            option_id=f"option-mixed-{suffix}",
+            decision_id=f"decision-mixed-{suffix}",
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+        )
+
+    for suffix, state in (
+        ("approved", ProductDecisionState.APPROVED),
+        ("rejected", ProductDecisionState.REJECTED),
+    ):
+        service.record_decision(
+            _PROJECT_ID,
+            ProductDecision(
+                decision_id=f"decision-mixed-{suffix}",
+                option_id=f"option-mixed-{suffix}",
+                state=state,
+                rationale=f"Owner finalized {suffix}",
+                decided_by_ref="user://owner",
+            ),
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+            idempotency_key=f"decision:mixed:{suffix}:final",
+        )
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("packaged state refresh must not materialize decision list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
+
+    first = provider()["product_project"]
+    assert first is not None
+    assert first["decision_count"] == 3
+    assert first["decision_state_counts"] == {
+        "approved": 1,
+        "pending": 1,
+        "rejected": 1,
+    }
+    assert first["current_decision"] is not None
+    assert first["current_decision"]["decision_id"] == "decision-mixed-pending"
+
+    _service, _repository, _router, restarted_provider = _build(database)
+    restarted = restarted_provider()["product_project"]
+    assert restarted == first
+
+
+def test_bounded_state_refresh_rejects_project_change_during_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _router, provider = _build(tmp_path / "bounded race.db")
+    _add_pending(
+        service,
+        repository,
+        package_id="research-race",
+        option_id="option-race",
+        decision_id="decision-race",
+        expected_row_version=0,
+    )
+    original = ProductDecisionRepository.summarize_latest
+    moved = False
+
+    def summarize_then_move(
+        decisions: ProductDecisionRepository,
+        project_id: str,
+    ):
+        nonlocal moved
+        summary = original(decisions, project_id)
+        if not moved:
+            current = repository.get(project_id)
+            repository.update_spec(
+                project_id,
+                current.spec,
+                expected_row_version=current.row_version,
+                change_reason="bounded presentation concurrency regression",
+            )
+            moved = True
+        return summary
+
+    monkeypatch.setattr(
+        ProductDecisionRepository,
+        "summarize_latest",
+        summarize_then_move,
+    )
+
+    with pytest.raises(PackagedProductJourneyError, match="refresh required"):
+        provider()
+
+
+def test_bounded_state_refresh_validates_hidden_corrupt_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "bounded hidden corruption.db"
+    service, repository, _router, provider = _build(database)
+    for index in range(2):
+        _add_pending(
+            service,
+            repository,
+            package_id=f"research-hidden-{index:02d}",
+            option_id=f"option-hidden-{index:02d}",
+            decision_id=f"decision-hidden-{index:02d}",
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+        )
+
+    store = SQLiteStore(database)
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_decisions SET decision_id=? "
+            "WHERE project_id=? AND decision_id=?",
+            ("decision-hidden\ncontrol", _PROJECT_ID, "decision-hidden-01"),
+        )
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("packaged state refresh must not materialize decision list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
+
+    with pytest.raises(ValueError, match="safe presentation identity"):
+        provider()
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -166,6 +326,7 @@ def test_pending_product_decision_is_bounded_and_visible_without_authority(
 def test_current_product_decision_command_is_read_only_and_restart_safe(
     tmp_path: Path,
     command: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     database = tmp_path / "decision restart.db"
     service, repository, _router, _provider = _build(database)
@@ -180,6 +341,11 @@ def test_current_product_decision_command_is_read_only_and_restart_safe(
     before = repository.get(_PROJECT_ID)
 
     _restarted_service, restarted_repository, restarted, _state = _build(database)
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("current decision command must not materialize decision list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
     result = restarted.create({"command": command})
 
     assert result.status == "completed"
@@ -188,6 +354,43 @@ def test_current_product_decision_command_is_read_only_and_restart_safe(
     assert "ризик R3" in result.message
     assert "Needs owner confirmation" in result.message
     assert restarted_repository.get(_PROJECT_ID) == before
+
+
+def test_current_productproject_command_uses_bounded_decision_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, router, _provider = _build(tmp_path / "bounded metadata.db")
+    for index in range(5):
+        _add_pending(
+            service,
+            repository,
+            package_id=f"research-metadata-{index:02d}",
+            option_id=f"option-metadata-{index:02d}",
+            decision_id=f"decision-metadata-{index:02d}",
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+        )
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("current ProductProject must not materialize decision list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
+
+    result = router.create({"command": "show current productproject"})
+
+    assert result.status == "completed"
+    assert _PROJECT_ID in result.message
+
+    store = SQLiteStore(tmp_path / "bounded metadata.db")
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_decisions SET decision_id=? "
+            "WHERE project_id=? AND decision_id=?",
+            ("decision-metadata\ncontrol", _PROJECT_ID, "decision-metadata-04"),
+        )
+    with pytest.raises(ValueError, match="safe presentation identity"):
+        router.create({"command": "show current productproject"})
 
 
 def test_multiple_pending_decisions_are_not_auto_selected_in_packaged_ui(

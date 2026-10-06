@@ -13,7 +13,11 @@ from nika_core.product_command.contracts import (
     ProductUserDecision,
 )
 from nika_core.product_command.reference_safety import safe_evidence_reference
-from nika_core.product_decisions import ProductDecisionRepository, StoredProductDecision
+from nika_core.product_decisions import (
+    ProductDecisionRepository,
+    ProductDecisionSetSummary,
+    StoredProductDecision,
+)
 from nika_core.product_project import (
     ProductDecision,
     ProductDecisionState,
@@ -106,6 +110,39 @@ class ProductProjectCommandService:
                 "retry from a fresh snapshot"
             )
         return project_detail(after, decisions=decisions), after.spec.credential_refs
+
+    def inspect_project_presentation_context(
+        self,
+        project_id: str,
+    ) -> tuple[
+        ProductProjectDetail,
+        tuple[str, ...],
+        ProductDecisionSetSummary,
+    ]:
+        """Read bounded decision presentation data under one ProductProject fence."""
+
+        before = self._repository.get(project_id)
+        decision_summary = self._decisions.summarize_latest(project_id)
+        after = self._repository.get(project_id)
+        if (
+            before.row_version != after.row_version
+            or before.spec_version != after.spec_version
+            or before.status != after.status
+            or before.updated_at != after.updated_at
+        ):
+            raise ProductProjectPresentationConsistencyError(
+                "ProductProject changed while PF5 was composing bounded presentation; retry"
+            )
+        visible_decisions = (
+            (decision_summary.sole_pending,)
+            if decision_summary.sole_pending is not None
+            else ()
+        )
+        return (
+            project_detail(after, decisions=visible_decisions),
+            after.spec.credential_refs,
+            decision_summary,
+        )
 
     def inspect_decision(
         self,
@@ -257,6 +294,26 @@ class ProductProjectCommandService:
             idempotency_key=idempotency_key,
         )
 
+    def _record_decision_effect(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        idempotency_key: str,
+        approval: ApprovalEvidence | None,
+        now: datetime | None,
+    ) -> None:
+        expected_row_version = self._require_expected_row_version(expected_row_version)
+        self._decisions.record(
+            project_id,
+            decision,
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
+        )
+
     def record_decision(
         self,
         project_id: str,
@@ -267,8 +324,7 @@ class ProductProjectCommandService:
         approval: ApprovalEvidence | None = None,
         now: datetime | None = None,
     ) -> ProductProjectDetail:
-        expected_row_version = self._require_expected_row_version(expected_row_version)
-        self._decisions.record(
+        self._record_decision_effect(
             project_id,
             decision,
             expected_row_version=expected_row_version,
@@ -277,6 +333,31 @@ class ProductProjectCommandService:
             now=now,
         )
         return self.inspect_project(project_id)
+
+    def record_decision_for_presentation(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        idempotency_key: str,
+        approval: ApprovalEvidence | None = None,
+        now: datetime | None = None,
+    ) -> ProductProjectDetail:
+        """Commit through PF1, then return the bounded packaged presentation."""
+
+        self._record_decision_effect(
+            project_id,
+            decision,
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
+        )
+        detail, _credential_refs, _summary = self.inspect_project_presentation_context(
+            project_id
+        )
+        return detail
 
     def persist_decision(
         self,
