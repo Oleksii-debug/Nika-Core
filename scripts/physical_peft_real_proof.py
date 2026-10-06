@@ -82,6 +82,17 @@ def _sha256_file(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), total
 
 
+def _require_candidate_tokenization_sha256(manifest: dict[str, object]) -> str:
+    value = manifest.get("tokenization_sha256")
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        _fail("physical proof candidate lacks canonical tokenization evidence")
+    return value
+
+
 def _is_reparse(value: os.stat_result) -> bool:
     attributes = int(getattr(value, "st_file_attributes", 0))
     flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
@@ -571,6 +582,7 @@ def verify(root: Path) -> None:
     manifest = candidate_adapter_manifest(evidence_candidate)
     if manifest.get("schema") != "nika-peft-candidate-v2":
         _fail("pilot proof requires a candidate-v2 tensor-evidence manifest")
+    tokenization_sha256 = _require_candidate_tokenization_sha256(manifest)
     if manifest.get("candidate_artifact_ref") != _CANDIDATE_REF:
         _fail("physical proof candidate logical reference changed")
     if (
@@ -618,6 +630,7 @@ def verify(root: Path) -> None:
         "runtime_versions": assets["runtime_versions"],
         "schema_version": report.schema_version,
         "trained_adapter_tensors_sha256": report.trained_adapter_tensors_sha256,
+        "tokenization_sha256": tokenization_sha256,
     }
     (evidence_dir / "physical-proof-summary.json").write_text(
         _canonical_json(summary) + "\n",
