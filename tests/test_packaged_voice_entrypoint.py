@@ -330,19 +330,25 @@ def test_packaged_bridge_exposes_voice_actions_state_and_cleanup(
         return fake
 
     monkeypatch.setattr(nika_windows, "build_packaged_voice", fake_build)
-    config = AppConfig(database_path=(tmp_path / "nika.db").resolve())
-
-    session = nika_windows.build_windows_session(config)
+    cleanup_callbacks: list[Any] = []
+    bridge, _products = nika_windows.build_windows_bridge(
+        AppConfig(database_path=(tmp_path / "nika.db").resolve()),
+        start_startup_recovery=False,
+        register_cleanup=cleanup_callbacks.append,
+    )
     try:
-        state = session.bridge.get_state()
+        state = bridge.get_state()
         assert state["ok"] is True
         assert state["state"]["voice"] == fake.snapshot()
-        assert captured_submit == [session.backend.submit_packaged_coroutine]
+        assert len(captured_submit) == 1
+        submit = captured_submit[0]
+        assert callable(submit)
+        assert submit.__self__.submit_packaged_coroutine == submit
 
-        start = session.bridge.dispatch(
+        start = bridge.dispatch(
             {"request_id": "voice-start", "action_id": "voice.start", "payload": {}}
         )
-        cancel = session.bridge.dispatch(
+        cancel = bridge.dispatch(
             {"request_id": "voice-cancel", "action_id": "voice.cancel", "payload": {}}
         )
         assert start["status"] == "accepted"
@@ -350,25 +356,30 @@ def test_packaged_bridge_exposes_voice_actions_state_and_cleanup(
         assert fake.started == 1
         assert fake.cancelled == 1
     finally:
-        session.close()
+        for cleanup in reversed(cleanup_callbacks):
+            cleanup()
     assert fake.closed is True
-
-
-
 
 def test_shared_desktop_host_tracks_packaged_voice_future(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _FakeVoice()
-    monkeypatch.setattr(
-        nika_windows,
-        "build_packaged_voice",
-        lambda _root, **_kwargs: fake,
+    captured_submit: list[Any] = []
+
+    def fake_build(_root: Path, *, submit: Any = None) -> _FakeVoice:
+        captured_submit.append(submit)
+        return fake
+
+    monkeypatch.setattr(nika_windows, "build_packaged_voice", fake_build)
+    cleanup_callbacks: list[Any] = []
+    nika_windows.build_windows_bridge(
+        AppConfig(database_path=(tmp_path / "nika.db").resolve()),
+        start_startup_recovery=False,
+        register_cleanup=cleanup_callbacks.append,
     )
-    session = nika_windows.build_windows_session(
-        AppConfig(database_path=(tmp_path / "nika.db").resolve())
-    )
+    assert len(captured_submit) == 1
+    backend = captured_submit[0].__self__
 
     async def packaged_work() -> None:
         return None
@@ -382,16 +393,16 @@ def test_shared_desktop_host_tracks_packaged_voice_future(
             coroutine.close()
             return pending
 
-    monkeypatch.setattr(session.backend, "_host", lambda: _FakeHost())
+    monkeypatch.setattr(backend, "_host", lambda: _FakeHost())
     try:
-        returned = session.backend.submit_packaged_coroutine(coroutine)
+        returned = backend.submit_packaged_coroutine(coroutine)
         assert returned is pending
-        assert pending in session.backend._packaged_futures
+        assert pending in backend._packaged_futures
         pending.set_result(None)
-        assert pending not in session.backend._packaged_futures
+        assert pending not in backend._packaged_futures
     finally:
-        session.close()
-
+        for cleanup in reversed(cleanup_callbacks):
+            cleanup()
 
 def test_packaged_voice_actions_are_registered_without_forced_shortcuts() -> None:
     actions = build_default_action_registry()
