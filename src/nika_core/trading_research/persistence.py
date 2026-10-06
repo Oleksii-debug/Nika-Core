@@ -67,10 +67,13 @@ class TradingStateRepository:
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
             )
             _verify_migration_schema(conn)
-            row = conn.execute(
-                "SELECT MAX(version) AS version FROM trading_research_schema_migrations"
-            ).fetchone()
-            current = int(row["version"] or 0)
+            version_rows = conn.execute(
+                "SELECT version FROM trading_research_schema_migrations ORDER BY version"
+            ).fetchall()
+            versions = tuple(row["version"] for row in version_rows)
+            if any(type(version) is not int or version < 1 for version in versions):
+                raise RuntimeError("invalid trading research migration version")
+            current = max(versions, default=0)
             if current > _TRADER_SCHEMA_VERSION:
                 raise RuntimeError("trading research schema is newer than supported")
             if current == 0:
