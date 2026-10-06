@@ -86,24 +86,17 @@ class OpenHandsProductFactoryPolicy:
     def __post_init__(self) -> None:
         if type(self.allowed_executables) is not tuple or not self.allowed_executables:
             raise ValueError("OpenHands Product Factory requires pinned executables")
-        canonical_executables: list[str] = []
         for item in self.allowed_executables:
-            if type(item) is not str or not item.strip() or item != item.strip():
+            if (
+                type(item) is not str
+                or not item
+                or item != item.strip()
+                or "\x00" in item
+            ):
                 raise ValueError("OpenHands executable identities must be canonical text")
-            path = pathlib.Path(item)
-            if not path.is_absolute():
-                raise ValueError("OpenHands executable identities must be absolute paths")
-            try:
-                resolved = path.resolve(strict=True)
-            except OSError as exc:
-                raise ValueError("OpenHands executable identity does not exist") from exc
-            if not resolved.is_file():
-                raise ValueError("OpenHands executable identity must be a regular file")
-            canonical_executables.append(str(resolved))
-        if tuple(canonical_executables) != self.allowed_executables:
-            raise ValueError("OpenHands executable paths must already be canonical")
-        if len({item.casefold() for item in canonical_executables}) != len(
-            canonical_executables
+        ProcessPolicy(self.allowed_executables).__post_init__()
+        if len({item.casefold() for item in self.allowed_executables}) != len(
+            self.allowed_executables
         ):
             raise ValueError("OpenHands executable identities must be unique")
 
