@@ -545,3 +545,96 @@ def test_unbind_is_version_fenced_and_removes_authority(
     )
     with pytest.raises(KeyError):
         bindings.require(project.project_id, repository.repository_id)
+
+
+def test_plan_aware_bind_rejects_stale_project_with_same_locator(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    stale_plan = _plan(project, repository)
+    updated = ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed after the execution plan was loaded",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="stale plan bind regression",
+        idempotency_key="update:product-1:stale-plan-bind",
+    )
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    root = _root(tmp_path)
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="execution plan is stale",
+    ):
+        bindings.bind_for_plan(
+            plan=stale_plan,
+            repository_id=repository.repository_id,
+            root=root,
+            expected_binding_version=None,
+        )
+    with pytest.raises(KeyError):
+        bindings.require(project.project_id, repository.repository_id)
+
+    rebound = bindings.bind_for_plan(
+        plan=_plan(updated, repository),
+        repository_id=repository.repository_id,
+        root=root,
+        expected_binding_version=None,
+    )
+    assert rebound.binding_version == 1
+
+
+def test_plan_aware_unbind_rejects_stale_project_without_revoking_binding(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    plan = _plan(project, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    root = _root(tmp_path)
+    bound = bindings.bind_for_plan(
+        plan=plan,
+        repository_id=repository.repository_id,
+        root=root,
+        expected_binding_version=None,
+    )
+    updated = ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed before stale-plan unbind",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="stale plan unbind regression",
+        idempotency_key="update:product-1:stale-plan-unbind",
+    )
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="execution plan is stale",
+    ):
+        bindings.unbind_for_plan(
+            plan=plan,
+            repository_id=repository.repository_id,
+            expected_binding_version=bound.binding_version,
+        )
+    assert (
+        bindings.require(project.project_id, repository.repository_id).binding_version
+        == bound.binding_version
+    )
+
+    bindings.unbind_for_plan(
+        plan=_plan(updated, repository),
+        repository_id=repository.repository_id,
+        expected_binding_version=bound.binding_version,
+    )
+    with pytest.raises(KeyError):
+        bindings.require(project.project_id, repository.repository_id)
