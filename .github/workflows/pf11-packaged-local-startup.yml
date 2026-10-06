@@ -1,0 +1,66 @@
+name: PF11 Packaged Local Factory Startup
+
+on:
+  pull_request:
+    paths:
+      - "scripts/nika_windows.py"
+      - "src/nika_core/config.py"
+      - "src/nika_core/kernel/default_actions.py"
+      - "src/nika_core/product_factory_packaged_local_settings.py"
+      - "src/nika_core/product_factory_packaged_local_startup.py"
+      - "src/nika_core/product_factory_local_model_program.py"
+      - "src/nika_core/training_ollama_manifest.py"
+      - "src/nika_core/v01_model_settings.py"
+      - "tests/test_product_factory_packaged_local_startup.py"
+      - ".github/workflows/pf11-packaged-local-startup.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+concurrency:
+  group: pf11-packaged-local-startup-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  startup:
+    name: Packaged local startup authority (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
+      - name: Install focused qualification dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Verify installed dependency consistency
+        run: python -m pip check
+      - name: Lint packaged local startup slice
+        run: >-
+          python -m ruff check
+          scripts/nika_windows.py
+          src/nika_core/config.py
+          src/nika_core/kernel/default_actions.py
+          src/nika_core/product_factory_packaged_local_settings.py
+          src/nika_core/product_factory_packaged_local_startup.py
+          src/nika_core/v01_model_settings.py
+          tests/test_product_factory_packaged_local_startup.py
+      - name: Run packaged local startup regressions
+        run: >-
+          python -m pytest
+          tests/test_product_factory_packaged_local_startup.py
+          -q
