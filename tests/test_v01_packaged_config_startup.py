@@ -287,13 +287,29 @@ def test_shell_preflight_imports_pywebview_after_complete_assets(
     assert imported == ["webview"]
 
 
-def test_shell_deferred_startup_runs_before_hidden_window_is_shown(
+def test_shell_deferred_startup_waits_for_native_shown_before_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
     create_kwargs: dict[str, object] = {}
 
+    class ShownEvent:
+        callback = None
+
+        def __iadd__(self, callback):
+            self.callback = callback
+            return self
+
+        def fire(self) -> None:
+            assert self.callback is not None
+            self.callback()
+
+    class Events:
+        shown = ShownEvent()
+
     class Window:
+        events = Events()
+
         def show(self) -> None:
             events.append("show")
 
@@ -309,10 +325,10 @@ def test_shell_deferred_startup_runs_before_hidden_window_is_shown(
             return window
 
         @staticmethod
-        def start(func=None, *, gui: str) -> None:
+        def start(*, gui: str) -> None:
             assert gui == "edgechromium"
-            assert func is not None
-            func()
+            events.append("native-shown")
+            window.events.shown.fire()
 
     monkeypatch.setattr(ui_shell, "preflight_windows_shell", lambda: None)
     monkeypatch.setattr(ui_shell, "import_module", lambda _name: WebView)
@@ -324,7 +340,7 @@ def test_shell_deferred_startup_runs_before_hidden_window_is_shown(
 
     assert result is window
     assert create_kwargs["hidden"] is True
-    assert events == ["recovery", "show"]
+    assert events == ["native-shown", "recovery", "show"]
 
 
 def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
@@ -332,7 +348,23 @@ def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
 ) -> None:
     events: list[str] = []
 
+    class ShownEvent:
+        callback = None
+
+        def __iadd__(self, callback):
+            self.callback = callback
+            return self
+
+        def fire(self) -> None:
+            assert self.callback is not None
+            self.callback()
+
+    class Events:
+        shown = ShownEvent()
+
     class Window:
+        events = Events()
+
         def show(self) -> None:
             events.append("show")
 
@@ -347,10 +379,10 @@ def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
             return window
 
         @staticmethod
-        def start(func=None, *, gui: str) -> None:
+        def start(*, gui: str) -> None:
             assert gui == "edgechromium"
-            assert func is not None
-            func()
+            events.append("native-shown")
+            window.events.shown.fire()
 
     def fail_recovery() -> None:
         events.append("recovery")
@@ -365,7 +397,7 @@ def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
             on_gui_started=fail_recovery,
         )
 
-    assert events == ["recovery", "destroy"]
+    assert events == ["native-shown", "recovery", "destroy"]
 
 
 @pytest.mark.parametrize(
@@ -385,11 +417,16 @@ def test_shell_launch_failure_is_accessible_private_and_returns_error(
     monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
     bridge = object()
     products = object()
-    monkeypatch.setattr(
-        nika_windows,
-        "build_windows_bridge",
-        lambda _config, **_kwargs: (bridge, products),
-    )
+    def build(
+        _config: AppConfig,
+        *,
+        defer_startup_recovery,
+        **_kwargs: object,
+    ) -> tuple[object, object]:
+        defer_startup_recovery(lambda: None)
+        return bridge, products
+
+    monkeypatch.setattr(nika_windows, "build_windows_bridge", build)
     messages: list[str] = []
     monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
 
@@ -460,11 +497,16 @@ def test_shell_launch_boundary_does_not_swallow_process_exit(
 ) -> None:
     config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
     monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
-    monkeypatch.setattr(
-        nika_windows,
-        "build_windows_bridge",
-        lambda _config, **_kwargs: (object(), object()),
-    )
+    def build(
+        _config: AppConfig,
+        *,
+        defer_startup_recovery,
+        **_kwargs: object,
+    ) -> tuple[object, object]:
+        defer_startup_recovery(lambda: None)
+        return object(), object()
+
+    monkeypatch.setattr(nika_windows, "build_windows_bridge", build)
 
     def stop_process(*_args: object, **_kwargs: object) -> None:
         raise SystemExit(73)

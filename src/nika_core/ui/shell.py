@@ -68,10 +68,9 @@ def launch_windows_shell(
             callback_failure.append(exc)
             window.destroy()
 
-    if on_gui_started is None:
-        webview.start(gui="edgechromium")
-    else:
-        webview.start(finish_startup, gui="edgechromium")
-        if callback_failure:
-            raise callback_failure[0]
+    if on_gui_started is not None:
+        window.events.shown += finish_startup
+    webview.start(gui="edgechromium")
+    if callback_failure:
+        raise callback_failure[0]
     return window
