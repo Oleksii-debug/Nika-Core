@@ -1496,7 +1496,7 @@ def test_completed_final_step_replays_existing_candidate_without_overwrite(
     assert candidate.read_bytes() == candidate_bytes
 
 
-def test_existing_candidate_replay_holds_authority_during_manifest_and_hash(
+def test_existing_candidate_replay_parses_private_snapshot_from_held_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1511,7 +1511,8 @@ def test_existing_candidate_replay_holds_authority_during_manifest_and_hash(
         config.output_root,
         request.candidate_artifact_ref,
     )
-    carrier = json.loads(candidate.read_bytes())
+    candidate_bytes = candidate.read_bytes()
+    carrier = json.loads(candidate_bytes)
     expected_manifest = json.loads(
         carrier["metadata"]["nika_adapter_manifest"]
     )
@@ -1524,7 +1525,9 @@ def test_existing_candidate_replay_holds_authority_during_manifest_and_hash(
         return real_open(path)
 
     def manifest_from_fake_candidate(path: Path) -> dict[str, object]:
-        assert path == candidate
+        assert path != candidate
+        assert path.name == peft._CANDIDATE_FILE
+        assert path.read_bytes() == candidate_bytes
         events.append("manifest")
         current = json.loads(path.read_bytes())
         return json.loads(current["metadata"]["nika_adapter_manifest"])
@@ -1542,7 +1545,7 @@ def test_existing_candidate_replay_holds_authority_during_manifest_and_hash(
     )
 
     assert observed_sha256 == expected_sha256
-    assert events == ["open", "manifest", "open"]
+    assert events == ["open", "manifest"]
 
 
 def test_existing_candidate_replay_rejects_manifest_to_digest_mutation(
