@@ -59,6 +59,8 @@ _TRAINING_STATUS_PREFIXES = (
     "покажи статус навчання",
     "статус навчання",
 )
+
+
 _TASK_PAUSE_COMMANDS = frozenset(
     {
         "pause task",

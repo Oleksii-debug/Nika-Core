@@ -240,7 +240,9 @@ class AgentDefinitionRepository:
         """Return one integrity-validated latest version per agent for bounded presentation."""
 
         if type(limit) is not int or not 1 <= limit <= 100:
-            raise ValueError("agent definition list limit must be an exact integer from 1 to 100")
+            raise ValueError(
+                "agent definition list limit must be an exact integer from 1 to 100"
+            )
         with self._store.connection() as conn:
             rows = conn.execute(
                 "SELECT defs.version, defs.definition_json, defs.status, "
