@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -111,6 +112,7 @@ _SCALE_TIER_KEYS = frozenset(
     }
 )
 _MAX_SCALE_VALUE = (1 << 63) - 1
+_MAX_STATIC_STAGING_BYTES = (1 << 63) - 1
 _RESOURCE_KEYS = frozenset({"max_cpu_percent", "max_memory_percent"})
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
@@ -1102,6 +1104,172 @@ def _preflight_output_root(path: Path) -> tuple[Path, os.stat_result]:
     return path, parent_stat
 
 
+def _stable_regular_file_size(path: Path, *, name: str) -> int:
+    """Read one file identity/size without consuming or publishing its bytes."""
+
+    descriptor: int | None = None
+    try:
+        before = os.lstat(path)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+        ):
+            _fail(f"{name} must be a canonical non-linked regular file")
+        descriptor = _open_authority_snapshot(path)
+        opened = os.fstat(descriptor)
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+    except PhysicalPilotDriverError:
+        raise
+    except OSError as exc:
+        raise PhysicalPilotDriverError(
+            f"{name} size could not be snapshotted"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    identities = (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+        (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+    )
+    if (
+        len(set(identities)) != 1
+        or before.st_size < 0
+        or before.st_size > _MAX_STATIC_STAGING_BYTES
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+    ):
+        _fail(f"{name} changed while its size was being snapshotted")
+    return before.st_size
+
+
+def _stable_model_directory_size(
+    model_dir: Path,
+    *,
+    expected_manifest_sha256: str,
+) -> int:
+    """Count mandatory model snapshot bytes under the canonical manifest authority."""
+
+    try:
+        before_manifest = model_directory_manifest_sha256(model_dir)
+    except ValueError as exc:
+        raise PhysicalPilotDriverError(
+            "model_dir is not a canonical local model directory"
+        ) from exc
+    if before_manifest != expected_manifest_sha256:
+        _fail("model_dir changed before storage preflight")
+    try:
+        paths = sorted(
+            model_dir.rglob("*"),
+            key=lambda item: item.relative_to(model_dir).as_posix(),
+        )
+        total = 0
+        for path in paths:
+            value = os.lstat(path)
+            if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
+                _fail("model_dir changed during storage preflight")
+            if stat.S_ISDIR(value.st_mode):
+                continue
+            if not stat.S_ISREG(value.st_mode):
+                _fail("model_dir changed during storage preflight")
+            total += value.st_size
+            if total < 0 or total > _MAX_STATIC_STAGING_BYTES:
+                _fail("model_dir staging size exceeds supported bounds")
+    except PhysicalPilotDriverError:
+        raise
+    except OSError as exc:
+        raise PhysicalPilotDriverError(
+            "model_dir could not be sized for storage preflight"
+        ) from exc
+    try:
+        after_manifest = model_directory_manifest_sha256(model_dir)
+    except ValueError as exc:
+        raise PhysicalPilotDriverError(
+            "model_dir changed during storage preflight"
+        ) from exc
+    if after_manifest != expected_manifest_sha256:
+        _fail("model_dir changed during storage preflight")
+    return total
+
+
+def _preflight_static_storage(
+    *,
+    output_root: Path,
+    expected_parent: os.stat_result,
+    base_gguf_path: Path,
+    model_dir: Path,
+    model_dir_manifest_sha256: str,
+    initial_adapter_path: Path | None,
+) -> int:
+    """Reject a run whose output volume cannot hold mandatory immutable staging."""
+
+    required_bytes = _stable_regular_file_size(
+        base_gguf_path,
+        name="base_gguf_path",
+    )
+    model_bytes = _stable_model_directory_size(
+        model_dir,
+        expected_manifest_sha256=model_dir_manifest_sha256,
+    )
+    if required_bytes > _MAX_STATIC_STAGING_BYTES - model_bytes:
+        _fail("mandatory PEFT staging size exceeds supported bounds")
+    required_bytes += model_bytes
+    if initial_adapter_path is not None:
+        adapter_bytes = _stable_regular_file_size(
+            initial_adapter_path,
+            name="initial_adapter_path",
+        )
+        if required_bytes > _MAX_STATIC_STAGING_BYTES - adapter_bytes:
+            _fail("mandatory PEFT staging size exceeds supported bounds")
+        required_bytes += adapter_bytes
+
+    try:
+        parent_before = os.lstat(output_root.parent)
+        if (
+            stat.S_ISLNK(parent_before.st_mode)
+            or _is_reparse(parent_before)
+            or not stat.S_ISDIR(parent_before.st_mode)
+            or (parent_before.st_dev, parent_before.st_ino)
+            != (expected_parent.st_dev, expected_parent.st_ino)
+        ):
+            _fail("output_root parent changed before storage preflight")
+        usage = shutil.disk_usage(output_root.parent)
+        parent_after = os.lstat(output_root.parent)
+    except PhysicalPilotDriverError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise PhysicalPilotDriverError(
+            "output volume free space could not be inspected"
+        ) from exc
+    if (
+        stat.S_ISLNK(parent_after.st_mode)
+        or _is_reparse(parent_after)
+        or not stat.S_ISDIR(parent_after.st_mode)
+        or (parent_after.st_dev, parent_after.st_ino)
+        != (expected_parent.st_dev, expected_parent.st_ino)
+    ):
+        _fail("output_root parent changed during storage preflight")
+    free_bytes = usage.free
+    if (
+        type(free_bytes) is not int
+        or free_bytes < 0
+        or free_bytes > _MAX_STATIC_STAGING_BYTES
+    ):
+        _fail("output volume reported invalid free-space telemetry")
+    if free_bytes < required_bytes:
+        _fail(
+            "output volume lacks free space for mandatory PEFT static staging"
+        )
+    return required_bytes
+
+
 def _require_disjoint_output_root(path: Path, *, protected_roots: tuple[Path, ...]) -> None:
     for root in protected_roots:
         if path == root or path.is_relative_to(root):
@@ -1516,7 +1684,7 @@ def run_physical_pilot_from_config(
         if initial_adapter_path.suffix.casefold() != ".safetensors":
             _fail("initial_adapter_path must use the .safetensors suffix")
     try:
-        model_directory_manifest_sha256(model_dir)
+        model_dir_manifest_sha256 = model_directory_manifest_sha256(model_dir)
     except ValueError as exc:
         raise PhysicalPilotDriverError(
             "model_dir is not a canonical local model directory"
@@ -1528,6 +1696,14 @@ def run_physical_pilot_from_config(
     _require_disjoint_output_root(
         output_root,
         protected_roots=protected_roots,
+    )
+    _preflight_static_storage(
+        output_root=output_root,
+        expected_parent=output_parent_snapshot,
+        base_gguf_path=base_gguf_path,
+        model_dir=model_dir,
+        model_dir_manifest_sha256=model_dir_manifest_sha256,
+        initial_adapter_path=initial_adapter_path,
     )
 
     package_bytes = _read_bounded_file(
