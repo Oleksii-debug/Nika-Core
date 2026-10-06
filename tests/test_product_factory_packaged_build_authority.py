@@ -28,6 +28,7 @@ from nika_core.product_factory_deployment import (
     Platform,
     ResourceEnvelope,
 )
+from nika_core.product_factory_local_build_execution import _dispatch_digest
 from nika_core.product_factory_local_coding import ContainedLocalCodingPolicy
 from nika_core.product_factory_multi_repository import RepositoryGraphAuthority
 from nika_core.product_factory_orchestration import (
@@ -732,12 +733,16 @@ def test_historical_authority_rejects_work_without_effect_admission(
         )
 
 
-class _UncertainBuildPort:
+class _StartedUncertainBuildPort:
+    def __init__(self, inner) -> None:
+        self.inner = inner
+
     def run(self, dispatch: BuildExecutionDispatch):
+        self.inner._claim_effect(dispatch, _dispatch_digest(dispatch))
         raise BuildExecutionPortError("simulated effect acknowledgement loss")
 
     def inspect(self, dispatch: BuildExecutionDispatch):
-        return None
+        return self.inner.inspect(dispatch)
 
 
 def test_packaged_restart_uses_historical_authority_only_for_dispatched_work(
@@ -765,10 +770,19 @@ def test_packaged_restart_uses_historical_authority_only_for_dispatched_work(
     host.submit(spec)
     host.prepare(spec.request.work_id)
     dispatch = host.begin_dispatch(spec.request.work_id)
-    host.node_port = _UncertainBuildPort()
+    local_node = host.node_port
+    host.node_port = _StartedUncertainBuildPort(local_node)
     uncertain = host.execute(spec.request.work_id)
     assert uncertain.state is BuildExecutionState.RECONCILE_REQUIRED
-    _mark_effect_started(store, runtime, dispatch)
+    assert local_node.inspect(dispatch) is None
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT effect_dispatch_id "
+            "FROM product_factory_build_authority_bindings WHERE work_id = ?",
+            (spec.request.work_id,),
+        ).fetchone()
+    assert row is not None
+    assert row["effect_dispatch_id"] == dispatch.dispatch_id
 
     runtime.authorities.configure(
         _template(argv_suffix=("--wheel",)),
