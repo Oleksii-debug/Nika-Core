@@ -530,6 +530,7 @@ async def test_entry_ports_fail_closed_if_repository_is_replaced_after_host_chec
     ):
         await entry.program.ports.context_for(request)
 
+
 @pytest.mark.asyncio
 async def test_entry_ports_reject_product_project_version_change_after_host_check(
     tmp_path: pathlib.Path,
