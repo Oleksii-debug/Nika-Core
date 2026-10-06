@@ -9,9 +9,7 @@ on:
       - "src/nika_core/product_command/**"
       - "src/nika_core/product_project.py"
       - "src/nika_core/product_decisions.py"
-      - "src/nika_core/product_factory_packaged_journey.py"
-      - "src/nika_core/product_factory_packaged_planning.py"
-      - "src/nika_core/product_factory_packaged_status.py"
+      - "src/nika_core/product_factory_*.py"
       - "src/nika_core/speech/**"
       - "src/nika_core/microphone_capture.py"
       - "src/nika_core/sherpa_onnx_stt.py"
@@ -52,6 +50,7 @@ on:
       - "tests/test_packaged_product_decision_presentation.py"
       - "tests/test_packaged_product_status_presentation.py"
       - "tests/test_product_factory_packaged_journey.py"
+      - "tests/test_packaged_product_factory_preparation.py"
       - "tests/test_packaged_product_factory_team_plan.py"
       - "tests/test_packaged_product_factory_status.py"
       - "tests/test_m5_product_project_semantic_status.py"
@@ -107,9 +106,7 @@ on:
       - "src/nika_core/product_command/**"
       - "src/nika_core/product_project.py"
       - "src/nika_core/product_decisions.py"
-      - "src/nika_core/product_factory_packaged_journey.py"
-      - "src/nika_core/product_factory_packaged_planning.py"
-      - "src/nika_core/product_factory_packaged_status.py"
+      - "src/nika_core/product_factory_*.py"
       - "src/nika_core/speech/**"
       - "src/nika_core/microphone_capture.py"
       - "src/nika_core/sherpa_onnx_stt.py"
@@ -150,6 +147,7 @@ on:
       - "tests/test_packaged_product_decision_presentation.py"
       - "tests/test_packaged_product_status_presentation.py"
       - "tests/test_product_factory_packaged_journey.py"
+      - "tests/test_packaged_product_factory_preparation.py"
       - "tests/test_packaged_product_factory_team_plan.py"
       - "tests/test_packaged_product_factory_status.py"
       - "tests/test_m5_product_project_semantic_status.py"
@@ -267,6 +265,7 @@ jobs:
           tests/test_packaged_product_decision_presentation.py
           tests/test_packaged_product_status_presentation.py
           tests/test_product_factory_packaged_journey.py
+          tests/test_packaged_product_factory_preparation.py
           tests/test_packaged_product_factory_team_plan.py
           tests/test_packaged_product_factory_status.py
           tests/test_m5_product_project_semantic_status.py
