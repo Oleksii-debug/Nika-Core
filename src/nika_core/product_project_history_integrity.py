@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime
 from itertools import pairwise
 from typing import Any
@@ -780,22 +780,17 @@ class ProductProjectHistoricalIntegrityService:
                 raw_spec,
                 label=f"ProductProject spec version {result_spec_version}",
             )
-            try:
-                durable_spec = ProductProjectSpec.from_dict(raw)
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ProductProjectError(
-                    f"invalid ProductProject spec version {result_spec_version}"
-                ) from exc
-            effective_spec = replace(
-                durable_spec,
-                supersedes_spec_version=None,
-                revision_reason="",
-            )
+            # Reconstruct the writer input from the durable JSON object itself.
+            # Re-materializing through the current dataclass could inject future
+            # defaults and invalidate a historically correct fingerprint.
+            effective_spec = dict(raw)
+            effective_spec["supersedes_spec_version"] = None
+            effective_spec["revision_reason"] = ""
             expected_fingerprint = self._fingerprint(
                 {
                     "project_id": project_id,
                     "expected_row_version": expected_row_version,
-                    "spec": effective_spec.to_dict(),
+                    "spec": effective_spec,
                     "change_reason": change_reason,
                 }
             )
@@ -929,15 +924,14 @@ class ProductProjectHistoricalIntegrityService:
             spec_rows[0]["spec_json"],
             label="initial ProductProject specification",
         )
-        try:
-            initial_spec = ProductProjectSpec.from_dict(initial_raw)
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ProductProjectError("invalid initial ProductProject specification") from exc
+        # The creation writer hashed the same object that it stored as spec JSON.
+        # Hash the durable object directly so later model defaults cannot rewrite
+        # the historical fingerprint during an upgrade/restart validation.
         expected_create_fingerprint = self._fingerprint(
             {
                 "project_id": project_id,
                 "name": project_name,
-                "spec": initial_spec.to_dict(),
+                "spec": initial_raw,
             }
         )
         if create_row["input_fingerprint"] != expected_create_fingerprint:
