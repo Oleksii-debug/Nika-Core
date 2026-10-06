@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import pathlib
 import stat
 from dataclasses import dataclass
@@ -170,8 +171,9 @@ class ProductFactoryLocalRepositoryBindings:
                         "local repository binding version changed"
                     )
             conn.execute(
-                "INSERT INTO audit_events(event_type,entity_type,entity_id,payload_json,created_at) "
-                "VALUES ('product_factory.local_repository.bound','product_project',?,?,?)",
+                "INSERT INTO audit_events("
+                "event_type,entity_type,entity_id,payload_json,created_at"
+                ") VALUES ('product_factory.local_repository.bound','product_project',?,?,?)",
                 (
                     project_id,
                     _audit_payload(repository, identity, version),
@@ -322,7 +324,7 @@ def _snapshot_repository(repository: RepositoryRef) -> RepositoryRef:
 
 
 def _filesystem_identity(root: pathlib.Path) -> _FilesystemIdentity:
-    if type(root) is not pathlib.Path:
+    if not isinstance(root, pathlib.Path):
         raise TypeError("root must be pathlib.Path")
     try:
         resolved = ensure_real_directory_root(root, label="Product Factory repository root")
@@ -536,10 +538,6 @@ def _is_reparse_point(file_stat: object) -> bool:
     return bool(flag and getattr(file_stat, "st_file_attributes", 0) & flag)
 
 
-def _json_text(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"')
-
-
 def _audit_payload(
     repository: RepositoryRef,
     identity: _FilesystemIdentity,
@@ -548,12 +546,15 @@ def _audit_payload(
     path_digest = hashlib.sha256(
         identity.root_path.encode("utf-8", errors="surrogatepass")
     ).hexdigest()
-    return (
-        "{"
-        f'"binding_version":{version},'
-        f'"locator":"{_json_text(repository.locator)}",'
-        f'"provider":"{_json_text(repository.provider)}",'
-        f'"repository_id":"{_json_text(repository.repository_id)}",'
-        f'"root_sha256":"{path_digest}"'
-        "}"
+    return json.dumps(
+        {
+            "binding_version": version,
+            "locator": repository.locator,
+            "provider": repository.provider,
+            "repository_id": repository.repository_id,
+            "root_sha256": path_digest,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
