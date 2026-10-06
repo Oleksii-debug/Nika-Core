@@ -488,6 +488,10 @@ def _git(
                 timeout=timeout_seconds,
                 check=False,
             )
+    except ProcessExecutionError:
+        raise WorkspaceSecurityError(
+            "git command executable authority changed before launch"
+        ) from None
     except subprocess.TimeoutExpired:
         raise WorkspaceSecurityError("git command timed out") from None
     except (OSError, subprocess.SubprocessError):
@@ -620,20 +624,25 @@ def prepare_private_git_workspace(
         "--quiet",
         f"refs/heads/{plan.branch_name}",
     )
-    with _PinnedExecutableLaunchGuard(
-        pathlib.Path(collision_argv[0]),
-        collision_argv[1:],
-    ) as launch_executable:
-        collision = subprocess.run(
-            (str(launch_executable), *collision_argv[1:]),
-            cwd=job_root,
-            env=dict(plan.environment),
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+    try:
+        with _PinnedExecutableLaunchGuard(
+            pathlib.Path(collision_argv[0]),
+            collision_argv[1:],
+        ) as launch_executable:
+            collision = subprocess.run(
+                (str(launch_executable), *collision_argv[1:]),
+                cwd=job_root,
+                env=dict(plan.environment),
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+    except ProcessExecutionError:
+        raise WorkspaceSecurityError(
+            "unable to prove job branch collision executable authority"
+        ) from None
     if collision.returncode == 0:
         raise WorkspaceSecurityError("job branch already exists in private metadata")
     if collision.returncode not in {1}:
