@@ -168,7 +168,7 @@ class FailureResultWorker:
         raise AssertionError(f"unexpected recover: {request.work_id}:{state}")
 
 
-def _fixture(tmp_path: Path):
+def _fixture(tmp_path: Path, *, worker=None):
     store = SQLiteStore(tmp_path / "product factory підготовка.db")
     store.initialize()
     repository = ProductProjectRepository(store)
@@ -215,7 +215,10 @@ def _fixture(tmp_path: Path):
         permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
     )
     tasks = TaskQueue(store)
-    host = MultiRepositoryProductFactoryHost(store, NeverDispatchWorker())
+    host = MultiRepositoryProductFactoryHost(
+        store,
+        NeverDispatchWorker() if worker is None else worker,
+    )
     service = PackagedProductFactoryPreparationService(
         repository=repository,
         tasks=tasks,
@@ -278,6 +281,7 @@ def test_prepare_is_exact_idempotent_and_restart_restores_same_authority(
 def test_prepare_after_execution_progress_restores_latest_without_reset(
     tmp_path: Path,
 ) -> None:
+    worker = FailureResultWorker()
     (
         _store,
         _repository,
@@ -288,11 +292,8 @@ def test_prepare_after_execution_progress_restores_latest_without_reset(
         plan,
         _bases,
         _goals,
-    ) = _fixture(tmp_path)
+    ) = _fixture(tmp_path, worker=worker)
     prepared = service.prepare(plan)
-    worker = FailureResultWorker()
-    service._host.worker = worker
-    service._host._program.worker = worker
 
     outcomes = asyncio.run(
         service._host.dispatch_ready(
@@ -320,6 +321,7 @@ def test_prepare_after_execution_progress_restores_latest_without_reset(
 def test_prepare_rejects_changed_plan_without_resetting_durable_progress(
     tmp_path: Path,
 ) -> None:
+    worker = FailureResultWorker()
     (
         _store,
         _repository,
@@ -330,11 +332,8 @@ def test_prepare_rejects_changed_plan_without_resetting_durable_progress(
         plan,
         _bases,
         _goals,
-    ) = _fixture(tmp_path)
+    ) = _fixture(tmp_path, worker=worker)
     prepared = service.prepare(plan)
-    worker = FailureResultWorker()
-    service._host.worker = worker
-    service._host._program.worker = worker
     asyncio.run(
         service._host.dispatch_ready(
             host_task_id=prepared.host_task_id,
