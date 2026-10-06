@@ -55,10 +55,18 @@ from nika_core.training_evaluation_comparison import (
 )
 from nika_core.training_evaluation_execution import run_attested_challenger_benchmark
 from nika_core.training_evaluation_subprocess import RegistrySubprocessLoadedModelAttestor
+from nika_core.training_materials import (
+    TrainingMaterialEvidence,
+    TrainingMaterialSetEvidence,
+)
 from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
 from nika_core.training_scale import (
+    TrainingScaleAuthorization,
     TrainingScaleError,
     TrainingScalePlan,
+    TrainingScaleProgressionProof,
+    authorize_training_scale,
+    build_scale_progression_proof,
     restore_scale_progression_proof_from_trusted_digest,
 )
 from nika_core.training_runtime import (
@@ -856,6 +864,76 @@ def _find_pilot_task(
     return matches[0]
 
 
+def _recover_scale_authority(
+    *,
+    task: TaskRecord,
+    pilot: PhysicalTrainingPilotReport,
+    package: FrozenLearningPackage,
+    base_artifact_ref: str,
+) -> tuple[TrainingScalePlan, TrainingScaleAuthorization] | None:
+    payload = task.payload
+    if frozenset(payload) == _LEGACY_TRAINING_TASK_KEYS:
+        return None
+    if frozenset(payload) != _SCALE_TRAINING_TASK_KEYS:
+        _fail("physical scale task payload is not canonical")
+    try:
+        plan = TrainingScalePlan.from_canonical_payload(payload["scale_plan"])
+    except (KeyError, TrainingScaleError, TypeError, ValueError) as exc:
+        raise PhysicalEvaluationDriverError(
+            "physical scale plan could not be restored from durable task state"
+        ) from exc
+    if plan.plan_sha256 != payload["scale_plan_sha256"]:
+        _fail("durable physical scale plan digest changed")
+    tier_id = payload["scale_tier_id"]
+    previous_proof: TrainingScaleProgressionProof | None = None
+    proof_sha256 = payload["progression_proof_sha256"]
+    proof_payload = payload["progression_proof"]
+    if proof_sha256 is not None:
+        try:
+            previous_proof = restore_scale_progression_proof_from_trusted_digest(
+                proof_payload,
+                trusted_proof_sha256=proof_sha256,
+            )
+        except (TrainingScaleError, TypeError, ValueError) as exc:
+            raise PhysicalEvaluationDriverError(
+                "previous scale progression proof is not canonical durable state"
+            ) from exc
+
+    try:
+        workspace_sha256 = hashlib.sha256(
+            task.workspace_id.encode("utf-8", errors="strict")
+        ).hexdigest()
+        materials = TrainingMaterialSetEvidence.from_package(
+            package,
+            workspace_sha256=workspace_sha256,
+            materials=tuple(
+                TrainingMaterialEvidence.from_shard(shard)
+                for shard in package.shards
+            ),
+        )
+        authorization = authorize_training_scale(
+            plan=plan,
+            tier_id=tier_id,
+            job_id=pilot.job_id,
+            base_artifact=ArtifactIdentity(base_artifact_ref, pilot.base_sha256),
+            candidate_artifact_ref=pilot.candidate_artifact_ref,
+            material_evidence=materials,
+            execution_plan_sha256=pilot.execution_plan_sha256,
+            max_steps=pilot.completed_steps,
+            progression_proof=previous_proof,
+        )
+    except (TrainingScaleError, TypeError, ValueError, UnicodeError) as exc:
+        raise PhysicalEvaluationDriverError(
+            "physical scale authorization could not be rebuilt from durable evidence"
+        ) from exc
+    if (
+        materials.training_material_sha256 != pilot.training_material_sha256
+        or authorization.authorization_sha256 != pilot.scale_authorization_sha256
+    ):
+        _fail("rebuilt physical scale authority does not match completed pilot evidence")
+    return plan, authorization
+
+
 def _verify_completed_checkpoint(
     store: SQLiteStore,
     *,
@@ -1643,6 +1721,12 @@ def run_physical_evaluation_from_config(
         job_id=pilot.job_id,
     )
     _verify_completed_checkpoint(store, task=task, report=pilot)
+    scale_authority = _recover_scale_authority(
+        task=task,
+        pilot=pilot,
+        package=package,
+        base_artifact_ref=config.base_artifact_ref,
+    )
 
     spec = TrainingJobSpec(
         job_id=pilot.job_id,
