@@ -583,7 +583,7 @@ def verify(root: Path) -> None:
     except OSError as exc:
         raise ProofError("scale evidence directory could not be created") from exc
     summary = {
-        "schema": "nika-real-physical-scale-progression-proof-v1",
+        "schema": "nika-real-physical-scale-progression-proof-v2",
         "source_sha": source_sha,
         "platform": "windows",
         "promotion_policy": "non-regression",
