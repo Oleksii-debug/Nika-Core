@@ -1870,6 +1870,8 @@ def _write_checkpoint_marker(
     except OSError:
         _fail("checkpoint_marker_write_failed")
     finally:
+        if not published and temporary_identity is not None:
+            _best_effort_unlink_identity(path, temporary_identity)
         if not published:
             try:
                 if temporary.exists():
