@@ -53,3 +53,26 @@ def test_release_gates_execute_factory_operator_proof_on_packaged_exe() -> None:
     assert wrapper_name in m11
     assert wrapper_name in m12
     assert m11.count('      - "scripts/m5_uia_proof.ps1"') == 2
+
+    source_paths = (
+        "src/nika_core/product_command/**",
+        "src/nika_core/product_project.py",
+        "src/nika_core/product_decisions.py",
+        "src/nika_core/product_factory_packaged_journey.py",
+        "src/nika_core/product_factory_packaged_planning.py",
+        "src/nika_core/product_factory_packaged_status.py",
+    )
+    for source_path in source_paths:
+        assert m11.count(f'      - "{source_path}"') == 2
+
+    regression_paths = (
+        "tests/test_product_factory_packaged_journey.py",
+        "tests/test_packaged_product_factory_status.py",
+        "tests/test_m5_product_project_semantic_status.py",
+        "tests/test_m5_product_factory_operator_uia.py",
+    )
+    regressions = m11.split("- name: Run M11 M12 source regressions", 1)[1]
+    regressions = regressions.split("- name: Build standalone", 1)[0]
+    for regression_path in regression_paths:
+        assert m11.count(f'      - "{regression_path}"') == 2
+        assert f"          {regression_path}" in regressions
