@@ -93,6 +93,20 @@ class Authority:
 
 
 @dataclass
+class FailingEffectMarkerAuthority(Authority):
+    def mark_effect_started_with_connection(
+        self,
+        conn,
+        dispatch: BuildExecutionDispatch,
+    ) -> None:
+        conn.execute(
+            "INSERT INTO test_effect_marker_probe(dispatch_id) VALUES (?)",
+            (dispatch.dispatch_id,),
+        )
+        raise ValueError("simulated authority marker failure")
+
+
+@dataclass
 class Policies:
     value: BuildOutputPolicy
 
@@ -511,6 +525,58 @@ def test_network_grant_is_rejected_before_effect_marker(tmp_path) -> None:
     with pytest.raises(BuildExecutionPortError, match="preparation failed"):
         adapter.run(dispatch)
 
+    assert adapter.inspect(dispatch) is None
+
+
+def test_effect_authority_marker_failure_rolls_back_start_and_marker(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root, sha = _repository(tmp_path)
+    store = _store(tmp_path)
+    command = _command()
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE test_effect_marker_probe "
+            "(dispatch_id TEXT PRIMARY KEY)"
+        )
+    authority = FailingEffectMarkerAuthority(
+        _authority("work-marker-rollback", command)
+    )
+    adapter = _adapter(
+        tmp_path,
+        store,
+        root,
+        authority,
+        Policies(_policy("work-marker-rollback")),
+    )
+    dispatch = _dispatch(sha, "work-marker-rollback", command)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("process must not launch after marker failure")
+
+    monkeypatch.setattr(
+        "nika_core.product_factory_local_build_execution.run_typed_process",
+        forbidden,
+    )
+
+    with pytest.raises(
+        BuildExecutionPortError,
+        match="could not be durably admitted",
+    ):
+        adapter.run(dispatch)
+
+    with store.connection() as conn:
+        marker_count = conn.execute(
+            "SELECT COUNT(*) FROM test_effect_marker_probe"
+        ).fetchone()[0]
+        audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE entity_type = ? AND entity_id = ?",
+            ("product_factory_build_dispatch", dispatch.dispatch_id),
+        ).fetchone()[0]
+    assert marker_count == 0
+    assert audit_count == 0
     assert adapter.inspect(dispatch) is None
 
 
