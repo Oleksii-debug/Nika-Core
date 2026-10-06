@@ -122,7 +122,7 @@ class LearningSkillApplier:
         if canonical.target is not LearningUpdateTarget.SKILL:
             raise ValueError("learning skill adapter accepts only SKILL update intents")
         if canonical.update_schema != SKILL_UPDATE_SCHEMA:
-            raise ValueError("unsupported learning learned-skill update schema")
+            raise ValueError("unsupported learning skill update schema")
         if type(workspace_id) is not str or workspace_id != canonical.workspace_id:
             raise ValueError("learned-skill workspace does not match cognition scope")
         if type(agent_id) is not str or agent_id != canonical.agent_id:
@@ -140,17 +140,19 @@ class LearningSkillApplier:
         created = canonical.expected_revision_sha256 is None
         if conn is None:
             snapshot = self._skills.compare_and_put(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            skill_id=skill_id,                value=value,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                skill_id=skill_id,
+                value=value,
                 expected_revision_sha256=canonical.expected_revision_sha256,
             )
         else:
             snapshot = self._skills.compare_and_put_with_connection(
                 conn,
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            skill_id=skill_id,                value=value,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                skill_id=skill_id,
+                value=value,
                 expected_revision_sha256=canonical.expected_revision_sha256,
             )
         return LearningSkillApplyReceipt(
