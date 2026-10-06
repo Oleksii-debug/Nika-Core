@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from threading import RLock
 from typing import Protocol
 
 from nika_core.product_factory_build_execution import (
@@ -98,6 +99,7 @@ class DurableBuildExecutionHost:
     _last_fingerprint: str | None = field(default=None, init=False, repr=False)
     _poisoned: bool = field(default=False, init=False, repr=False)
     _needs_restore: bool = field(default=False, init=False, repr=False)
+    _mutation_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._needs_restore = self.checkpoints.has_checkpoint()
@@ -109,82 +111,90 @@ class DurableBuildExecutionHost:
     def submit(
         self, spec: BuildExecutionSpec, *, now: datetime | None = None
     ) -> BuildExecutionRecord:
-        self._ensure_usable()
-        record = self.coordinator.submit(spec, now=now)
-        self._persist_if_changed()
-        return record
+        with self._mutation_lock:
+            self._ensure_usable()
+            record = self.coordinator.submit(spec, now=now)
+            self._persist_if_changed()
+            return record
 
     def prepare(self, work_id: str, *, now: datetime | None = None) -> BuildExecutionRecord:
-        self._ensure_usable()
-        record = self.coordinator.prepare(work_id, now=now)
-        self._persist_if_changed()
-        return record
+        with self._mutation_lock:
+            self._ensure_usable()
+            record = self.coordinator.prepare(work_id, now=now)
+            self._persist_if_changed()
+            return record
 
     def begin_dispatch(
         self, work_id: str, *, now: datetime | None = None
     ) -> BuildExecutionDispatch:
-        self._ensure_usable()
-        dispatch = self.coordinator.begin_dispatch(work_id, now=now)
-        self._persist_if_changed()
-        return dispatch
+        with self._mutation_lock:
+            self._ensure_usable()
+            dispatch = self.coordinator.begin_dispatch(work_id, now=now)
+            self._persist_if_changed()
+            return dispatch
 
     def execute(self, work_id: str, *, now: datetime | None = None) -> BuildExecutionRecord:
-        self._ensure_usable()
-        port = _DurableNodePort(self)
-        record = self.coordinator.run_dispatch(work_id, port, now=now)
-        self._persist_if_changed()
-        return record
+        with self._mutation_lock:
+            self._ensure_usable()
+            port = _DurableNodePort(self)
+            record = self.coordinator.run_dispatch(work_id, port, now=now)
+            self._persist_if_changed()
+            return record
 
     def reconcile(self, work_id: str, *, now: datetime | None = None) -> BuildExecutionRecord:
-        self._ensure_usable()
-        port = _DurableNodePort(self)
-        record = self.coordinator.reconcile(work_id, port, now=now)
-        self._persist_if_changed()
-        return record
+        with self._mutation_lock:
+            self._ensure_usable()
+            port = _DurableNodePort(self)
+            record = self.coordinator.reconcile(work_id, port, now=now)
+            self._persist_if_changed()
+            return record
 
     def retry(self, work_id: str, *, now: datetime | None = None) -> BuildExecutionRecord:
-        self._ensure_usable()
-        record = self.coordinator.retry(work_id, now=now)
-        self._persist_if_changed()
-        return record
+        with self._mutation_lock:
+            self._ensure_usable()
+            record = self.coordinator.retry(work_id, now=now)
+            self._persist_if_changed()
+            return record
 
     def restore_latest(self, *, now: datetime | None = None) -> DurableBuildExecutionSnapshot:
-        if self._poisoned:
-            raise BuildExecutionDurabilityError(
-                "poisoned PF5 host must be discarded before durable recovery"
-            )
-        registry_before = self.coordinator.nodes.snapshot()
-        sequence_before = self._sequence
-        fingerprint_before = self._last_fingerprint
-        file_evidence_before = dict(self._file_evidence)
-        needs_restore_before = self._needs_restore
-        restored = False
-        try:
-            saved = self.checkpoints.latest()
-            self._sequence = saved.snapshot.sequence
-            self._last_fingerprint = durable_state_fingerprint(saved.snapshot)
-            self._file_evidence = {
-                item.work_id: item for item in saved.snapshot.file_evidence
-            }
-            candidate = self._restore_registry_leases(saved.snapshot, now=now)
-            self._validate_file_evidence(candidate.coordinator)
-            self.coordinator.restore(candidate.coordinator, now=now)
-            self._needs_restore = False
-            self._persist_if_changed()
-            result = self._durable_snapshot(self._sequence)
-            restored = True
-            return result
-        finally:
-            if not restored:
-                self.coordinator.nodes.restore(registry_before)
-                self._sequence = sequence_before
-                self._last_fingerprint = fingerprint_before
-                self._file_evidence = file_evidence_before
-                self._needs_restore = needs_restore_before
+        with self._mutation_lock:
+            if self._poisoned:
+                raise BuildExecutionDurabilityError(
+                    "poisoned PF5 host must be discarded before durable recovery"
+                )
+            registry_before = self.coordinator.nodes.snapshot()
+            sequence_before = self._sequence
+            fingerprint_before = self._last_fingerprint
+            file_evidence_before = dict(self._file_evidence)
+            needs_restore_before = self._needs_restore
+            restored = False
+            try:
+                saved = self.checkpoints.latest()
+                self._sequence = saved.snapshot.sequence
+                self._last_fingerprint = durable_state_fingerprint(saved.snapshot)
+                self._file_evidence = {
+                    item.work_id: item for item in saved.snapshot.file_evidence
+                }
+                candidate = self._restore_registry_leases(saved.snapshot, now=now)
+                self._validate_file_evidence(candidate.coordinator)
+                self.coordinator.restore(candidate.coordinator, now=now)
+                self._needs_restore = False
+                self._persist_if_changed()
+                result = self._durable_snapshot(self._sequence)
+                restored = True
+                return result
+            finally:
+                if not restored:
+                    self.coordinator.nodes.restore(registry_before)
+                    self._sequence = sequence_before
+                    self._last_fingerprint = fingerprint_before
+                    self._file_evidence = file_evidence_before
+                    self._needs_restore = needs_restore_before
 
     def snapshot(self) -> DurableBuildExecutionSnapshot:
-        self._ensure_usable()
-        return self._durable_snapshot(self._sequence)
+        with self._mutation_lock:
+            self._ensure_usable()
+            return self._durable_snapshot(self._sequence)
 
     def _before_run(self, dispatch: BuildExecutionDispatch) -> None:
         record = self.coordinator.get(dispatch.work_id)
