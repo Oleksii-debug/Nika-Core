@@ -27,11 +27,18 @@ _MODEL_LICENSE_REFERENCE = "https://www.apache.org/licenses/LICENSE-2.0"
 _MODEL_FILES = (
     "config.json",
     "generation_config.json",
+    "model.safetensors",
     "special_tokens_map.json",
     "tokenizer.json",
     "tokenizer_config.json",
 )
 _GGUF_FILE = "gguf/tiny-random-f16.gguf"
+_PINNED_ASSET_SHA256 = {
+    "model.safetensors": (
+        "a4eb5dcdfc71d3a8f297bb1c2a672d3babe04f102480addde293210778805d30"
+    ),
+    _GGUF_FILE: "1010fc48b2a1880a01fa5e267eb35bf586e3e3ad5539ff5b0e025e4f63616a82",
+}
 _WORKSPACE_ID = "physical-proof-workspace"
 _CANDIDATE_REF = "models/physical-proof-candidate"
 _RUNTIME_PACKAGES = (
@@ -77,7 +84,12 @@ def _canonical_json(payload: object) -> str:
     )
 
 
-def _download_file(relative_path: str, destination: Path) -> dict[str, object]:
+def _download_file(
+    relative_path: str,
+    destination: Path,
+    *,
+    expected_sha256: str | None = None,
+) -> dict[str, object]:
     url = (
         f"https://huggingface.co/{_MODEL_REPOSITORY}/resolve/"
         f"{_MODEL_REVISION}/{relative_path}?download=true"
@@ -107,6 +119,9 @@ def _download_file(relative_path: str, destination: Path) -> dict[str, object]:
             os.fsync(out.fileno())
         if total <= 0:
             _fail(f"model asset is empty: {relative_path}")
+        actual_sha256 = digest.hexdigest()
+        if expected_sha256 is not None and actual_sha256 != expected_sha256:
+            _fail(f"model asset digest mismatch: {relative_path}")
         os.replace(temporary, destination)
     except ProofError:
         temporary.unlink(missing_ok=True)
@@ -116,7 +131,7 @@ def _download_file(relative_path: str, destination: Path) -> dict[str, object]:
         raise ProofError(f"model asset download failed: {relative_path}") from exc
     return {
         "path": relative_path,
-        "sha256": digest.hexdigest(),
+        "sha256": actual_sha256,
         "size_bytes": total,
     }
 
@@ -170,9 +185,19 @@ def prepare(root: Path, trainer_executable: Path) -> None:
 
     assets: list[dict[str, object]] = []
     for relative_path in _MODEL_FILES:
-        assets.append(_download_file(relative_path, model_dir / relative_path))
+        assets.append(
+            _download_file(
+                relative_path,
+                model_dir / relative_path,
+                expected_sha256=_PINNED_ASSET_SHA256.get(relative_path),
+            )
+        )
     gguf_path = root / "base.gguf"
-    gguf_asset = _download_file(_GGUF_FILE, gguf_path)
+    gguf_asset = _download_file(
+        _GGUF_FILE,
+        gguf_path,
+        expected_sha256=_PINNED_ASSET_SHA256[_GGUF_FILE],
+    )
     assets.append(gguf_asset)
     gguf_sha256 = str(gguf_asset["sha256"])
 
