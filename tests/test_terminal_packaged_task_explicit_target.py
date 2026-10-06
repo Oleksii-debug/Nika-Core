@@ -75,6 +75,7 @@ def _wait_for_state(
         ("resume task {task_id}", "resume"),
         ("stop task {task_id}", "stop"),
         ("task status {task_id}", "status"),
+        ("current task status {task_id}", "status"),
         ("призупини завдання {task_id}", "pause"),
         ("продовж завдання {task_id}", "resume"),
         ("зупини завдання {task_id}", "stop"),
