@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Iterable
 from dataclasses import dataclass
 from inspect import getattr_static
@@ -33,8 +34,17 @@ def _canonical_runtime_id(value: object) -> str:
         raise ValueError(
             f"runtime_id must contain at most {MAX_RUNTIME_ID_CHARS} characters"
         )
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise ValueError("runtime_id must not contain control characters")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("runtime_id must be valid UTF-8") from exc
+    if any(
+        unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+        for char in value
+    ):
+        raise ValueError(
+            "runtime_id must not contain control, format, or line-separator characters"
+        )
     return value
 
 
@@ -124,7 +134,13 @@ class RuntimeRegistry:
         )
         for item in registered:
             self._verified_runtime(item)
-        return tuple(item.descriptor for item in registered)
+        return tuple(
+            RuntimeDescriptor(
+                runtime_id=item.descriptor.runtime_id,
+                capabilities=item.descriptor.capabilities,
+            )
+            for item in registered
+        )
 
     @staticmethod
     def _verified_runtime(registered: _RegisteredRuntime) -> AgentRuntimePort:

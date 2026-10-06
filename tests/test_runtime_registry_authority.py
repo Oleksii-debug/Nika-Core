@@ -70,7 +70,16 @@ def test_registry_malformed_lookup_preserves_unknown_runtime_contract() -> None:
     registry = RuntimeRegistry()
     registry.register(ReferenceRuntime())
 
-    for runtime_id in (" reference", "reference\nforged", "r" * 129):
+    for runtime_id in (
+        " reference",
+        "reference\nforged",
+        "reference\u0085forged",
+        "reference\u200bforged",
+        "reference\u2028forged",
+        "reference\u202eforged",
+        "reference\ud800forged",
+        "r" * 129,
+    ):
         with pytest.raises(KeyError, match="Unknown runtime identifier"):
             registry.get(runtime_id)
 
@@ -87,6 +96,59 @@ def test_registry_rejects_unbounded_or_control_runtime_ids() -> None:
     control.runtime_id = "reference\nforged"
     with pytest.raises(ValueError, match="control characters"):
         registry.register(control)
+
+
+@pytest.mark.parametrize(
+    "runtime_id",
+    (
+        "reference\u0085forged",
+        "reference\u200bforged",
+        "reference\u2028forged",
+        "reference\u2029forged",
+        "reference\u202eforged",
+    ),
+)
+def test_registry_rejects_unsafe_unicode_runtime_ids(runtime_id: str) -> None:
+    registry = RuntimeRegistry()
+    runtime = ReferenceRuntime()
+    runtime.runtime_id = runtime_id
+
+    with pytest.raises(ValueError, match="control, format, or line-separator"):
+        registry.register(runtime)
+
+    assert registry.describe() == ()
+
+
+def test_registry_rejects_non_utf8_high_surrogate_runtime_id() -> None:
+    registry = RuntimeRegistry()
+    runtime = ReferenceRuntime()
+    runtime.runtime_id = "reference\ud800forged"
+
+    with pytest.raises(ValueError, match="runtime_id must be valid UTF-8"):
+        registry.register(runtime)
+
+    assert registry.describe() == ()
+
+
+def test_registry_rejects_non_utf8_low_surrogate_runtime_id() -> None:
+    registry = RuntimeRegistry()
+    runtime = ReferenceRuntime()
+    runtime.runtime_id = "reference\udfffforged"
+
+    with pytest.raises(ValueError, match="runtime_id must be valid UTF-8"):
+        registry.register(runtime)
+
+    assert registry.describe() == ()
+
+
+def test_registry_preserves_printable_unicode_runtime_id() -> None:
+    registry = RuntimeRegistry()
+    runtime = ReferenceRuntime()
+    runtime.runtime_id = "локальний-рушій"
+    registry.register(runtime)
+
+    assert registry.get("локальний-рушій") is runtime
+    assert registry.describe()[0].runtime_id == "локальний-рушій"
 
 
 def test_registry_rejects_noncanonical_capability_carriers() -> None:
@@ -208,6 +270,35 @@ def test_registry_blocks_post_registration_callable_effect_replacement(
         registry.select({RuntimeCapability.DETERMINISTIC_NO_LLM})
     with pytest.raises(RuntimeError, match="runtime effects changed"):
         registry.describe()
+
+
+def test_describe_runtime_id_mutation_cannot_rewrite_registry_snapshot() -> None:
+    registry = RuntimeRegistry()
+    runtime = ReferenceRuntime()
+    registry.register(runtime)
+
+    descriptor = registry.describe()[0]
+    object.__setattr__(descriptor, "runtime_id", "forged-runtime")
+
+    assert registry.get("reference") is runtime
+    assert registry.describe()[0].runtime_id == "reference"
+
+
+def test_describe_capability_mutation_cannot_rewrite_registry_snapshot() -> None:
+    registry = RuntimeRegistry()
+    runtime = ReferenceRuntime()
+    registry.register(runtime)
+
+    descriptor = registry.describe()[0]
+    object.__setattr__(
+        descriptor,
+        "capabilities",
+        frozenset({RuntimeCapability.DURABLE_RESUME}),
+    )
+
+    assert registry.select({RuntimeCapability.DETERMINISTIC_NO_LLM}) is runtime
+    with pytest.raises(LookupError, match="No runtime satisfies"):
+        registry.select({RuntimeCapability.DURABLE_RESUME})
 
 
 def test_registry_returns_stable_snapshot_descriptors() -> None:
