@@ -57,6 +57,7 @@ _TRAINING_RUNTIME_METADATA_KEYS = {
 }
 _MAX_MODEL_DIR_FILES = 10_000
 _MAX_MODEL_DIR_BYTES = 16 * 1024 * 1024 * 1024
+_MAX_MODEL_LOAD_AUTHORITY_FILES = 128
 _MODEL_SNAPSHOT_DIR = "model-snapshot"
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
@@ -1086,6 +1087,138 @@ def _model_directory_snapshot(config: TrainerConfig, job_root: Path) -> Path:
         if existing_digest != config.model_dir_manifest_sha256:
             _fail("model_dir_snapshot_publish_failed")
     return target
+
+
+def _close_foundation_load_authority(
+    authority: tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...],
+) -> None:
+    for _path, descriptor, _identity in authority:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _foundation_model_files(model_dir: Path) -> tuple[Path, ...]:
+    try:
+        paths = sorted(
+            model_dir.rglob("*"),
+            key=lambda item: item.relative_to(model_dir).as_posix(),
+        )
+    except OSError:
+        _fail("foundation_load_authority_invalid")
+    files: list[Path] = []
+    for path in paths:
+        try:
+            value = os.lstat(path)
+        except OSError:
+            _fail("foundation_load_authority_invalid")
+        if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
+            _fail("foundation_load_authority_invalid")
+        if stat.S_ISDIR(value.st_mode):
+            continue
+        if not stat.S_ISREG(value.st_mode):
+            _fail("foundation_load_authority_invalid")
+        files.append(path)
+        if len(files) > _MAX_MODEL_LOAD_AUTHORITY_FILES:
+            _fail("foundation_load_authority_file_limit")
+    if not files:
+        _fail("foundation_load_authority_invalid")
+    return tuple(files)
+
+
+def _open_foundation_load_authority(
+    model_dir: Path,
+    base_gguf: Path,
+    *,
+    expected_model_manifest_sha256: str,
+    expected_base_sha256: str,
+) -> tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...]:
+    try:
+        before_manifest = model_directory_manifest_sha256(model_dir)
+    except ValueError:
+        _fail("foundation_load_authority_invalid")
+    if before_manifest != expected_model_manifest_sha256:
+        _fail("model_dir_changed_before_load")
+
+    paths = (base_gguf, *_foundation_model_files(model_dir))
+    opened: list[tuple[Path, int, tuple[int, int, int, int, int]]] = []
+    try:
+        for path in paths:
+            before = _require_regular_unlinked(
+                path,
+                code="foundation_load_authority_invalid",
+            )
+            if before.st_nlink != 1:
+                _fail("foundation_load_authority_invalid")
+            descriptor = _open_readonly_snapshot(path)
+            opened_stat = os.fstat(descriptor)
+            identity = _stable_stat_identity(before)
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or _is_reparse(opened_stat)
+                or opened_stat.st_nlink != 1
+                or _stable_stat_identity(opened_stat) != identity
+            ):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                _fail("foundation_load_authority_invalid")
+            opened.append((path, descriptor, identity))
+
+        observed_base_sha256, _ = _hash_regular_snapshot(
+            base_gguf,
+            code="foundation_load_authority_invalid",
+        )
+        if not hmac.compare_digest(
+            observed_base_sha256,
+            expected_base_sha256,
+        ):
+            _fail("staged_base_digest_mismatch")
+        try:
+            after_open_manifest = model_directory_manifest_sha256(model_dir)
+        except ValueError:
+            _fail("foundation_load_authority_invalid")
+        if after_open_manifest != expected_model_manifest_sha256:
+            _fail("model_dir_changed_before_load")
+        return tuple(opened)
+    except PeftTrainerError:
+        _close_foundation_load_authority(tuple(opened))
+        raise
+    except OSError:
+        _close_foundation_load_authority(tuple(opened))
+        _fail("foundation_load_authority_invalid")
+
+
+def _verify_foundation_load_authority(
+    authority: tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...],
+    *,
+    model_dir: Path,
+    expected_model_manifest_sha256: str,
+) -> None:
+    try:
+        observed_manifest = model_directory_manifest_sha256(model_dir)
+    except ValueError:
+        _fail("foundation_changed_during_load")
+    if observed_manifest != expected_model_manifest_sha256:
+        _fail("foundation_changed_during_load")
+    for path, descriptor, identity in authority:
+        try:
+            opened = os.fstat(descriptor)
+        except OSError:
+            _fail("foundation_changed_during_load")
+        current = _require_regular_unlinked(
+            path,
+            code="foundation_changed_during_load",
+        )
+        if (
+            opened.st_nlink != 1
+            or current.st_nlink != 1
+            or _stable_stat_identity(opened) != identity
+            or _stable_stat_identity(current) != identity
+        ):
+            _fail("foundation_changed_during_load")
 
 
 def _require_directory_unlinked(path: Path, *, code: str) -> os.stat_result:
@@ -3052,17 +3185,26 @@ def _train_one_step(
         if previous_checkpoint is None
         else None
     )
+    foundation_load_authority: tuple[
+        tuple[Path, int, tuple[int, int, int, int, int]], ...
+    ] = ()
     initial_adapter_load_authority: tuple[
         tuple[Path, int, tuple[int, int, int, int, int]], ...
     ] = ()
-    if initial_adapter_dir is not None:
-        initial_adapter_load_authority = _open_initial_adapter_load_authority(
-            initial_adapter_dir,
-            config=config,
-            request=request,
-        )
 
     try:
+        foundation_load_authority = _open_foundation_load_authority(
+            staged_model_dir,
+            staged_base,
+            expected_model_manifest_sha256=config.model_dir_manifest_sha256,
+            expected_base_sha256=config.base_gguf_sha256,
+        )
+        if initial_adapter_dir is not None:
+            initial_adapter_load_authority = _open_initial_adapter_load_authority(
+                initial_adapter_dir,
+                config=config,
+                request=request,
+            )
         tokenizer = AutoTokenizer.from_pretrained(
             os.fspath(staged_model_dir),
             gguf_file=os.fspath(staged_base),
@@ -3110,6 +3252,13 @@ def _train_one_step(
                 )
             ):
                 _fail("resume_tokenization_evidence_mismatch")
+        _verify_foundation_load_authority(
+            foundation_load_authority,
+            model_dir=staged_model_dir,
+            expected_model_manifest_sha256=config.model_dir_manifest_sha256,
+        )
+        _close_foundation_load_authority(foundation_load_authority)
+        foundation_load_authority = ()
 
         if previous_checkpoint is None and initial_adapter_dir is None:
             lora = LoraConfig(
@@ -3231,6 +3380,8 @@ def _train_one_step(
     except (OSError, RuntimeError, TypeError, ValueError):
         _fail("training_step_failed")
     finally:
+        if foundation_load_authority:
+            _close_foundation_load_authority(foundation_load_authority)
         if initial_adapter_load_authority:
             _close_initial_adapter_load_authority(
                 initial_adapter_load_authority
