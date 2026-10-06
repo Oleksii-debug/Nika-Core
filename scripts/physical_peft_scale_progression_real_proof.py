@@ -27,6 +27,7 @@ from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
 _TIER0_ID = "pilot"
 _TIER1_ID = "scale-1"
 _TIER1_STEPS = 3
+_TIER1_JOB_ID = "physical-scale-proof-tier1-job"
 _TIER1_CANDIDATE_REF = "models/nika-physical-scale-tier1-adapter"
 _EXPERIMENT_ID = "physical-scale-progression-real-proof-v1"
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -263,6 +264,49 @@ def _require_tier1_config_continuity(
             _fail(f"tier-1 config changed preserved field: {key}")
 
 
+def _tier1_candidate_descriptor() -> dict[str, str]:
+    return {
+        "model_id": "nika-physical-scale-tier1-adapter",
+        "source_reference": "project-internal:physical-scale-progression-proof",
+        "license_reference": "project-internal:Nika-Core",
+    }
+
+
+def _require_tier1_transition_values(
+    root: Path,
+    tier1: dict[str, object],
+    *,
+    tier0: PhysicalTrainingPilotReport,
+    proof: object,
+) -> Path:
+    try:
+        output_root = Path(str(tier1.get("output_root", ""))).resolve(strict=True)
+        initial_adapter = Path(
+            str(tier1.get("initial_adapter_path", ""))
+        ).resolve(strict=True)
+        expected_adapter = candidate_artifact_path(
+            root / "run",
+            tier0.candidate_artifact_ref,
+        ).resolve(strict=True)
+    except OSError as exc:
+        raise ProofError("tier-1 transition paths are unavailable") from exc
+    if (
+        tier1.get("schema_version") != 3
+        or tier1.get("job_id") != _TIER1_JOB_ID
+        or tier1.get("base_artifact_ref") != tier0.candidate_artifact_ref
+        or tier1.get("output_root") != str(output_root)
+        or output_root != (root / "tier1-run").resolve(strict=True)
+        or tier1.get("candidate_artifact_ref") != _TIER1_CANDIDATE_REF
+        or tier1.get("candidate_descriptor") != _tier1_candidate_descriptor()
+        or tier1.get("scale_tier_id") != _TIER1_ID
+        or tier1.get("progression_proof") != proof.canonical_payload()
+        or initial_adapter != expected_adapter
+        or tier1.get("initial_adapter_path") != str(initial_adapter)
+    ):
+        _fail("tier-1 config does not encode the exact scale transition")
+    return initial_adapter
+
+
 def _cross_tier_runtime_authority(
     tier0: PhysicalTrainingPilotReport,
     tier1: PhysicalTrainingPilotReport,
@@ -488,17 +532,13 @@ def prepare_tier1(root: Path) -> None:
     config.update(
         {
             "schema_version": 3,
-            "job_id": "physical-scale-proof-tier1-job",
+            "job_id": _TIER1_JOB_ID,
             "frozen_package_path": str(package_path.resolve(strict=True)),
             "frozen_package_sha256": tier1_package.manifest_sha256,
             "base_artifact_ref": report.candidate_artifact_ref,
             "output_root": str((root / "tier1-run").resolve()),
             "candidate_artifact_ref": _TIER1_CANDIDATE_REF,
-            "candidate_descriptor": {
-                "model_id": "nika-physical-scale-tier1-adapter",
-                "source_reference": "project-internal:physical-scale-progression-proof",
-                "license_reference": "project-internal:Nika-Core",
-            },
+            "candidate_descriptor": _tier1_candidate_descriptor(),
             "scale_tier_id": _TIER1_ID,
             "initial_adapter_path": str(initial_adapter),
             "progression_proof": proof.canonical_payload(),
@@ -572,18 +612,14 @@ def verify(root: Path) -> None:
 
     tier1_config = _read_object(root / "tier1-physical-pilot.json")
     _require_tier1_config_continuity(tier0_config, tier1_config)
-    if (
-        tier1_config.get("schema_version") != 3
-        or tier1_config.get("scale_tier_id") != _TIER1_ID
-        or tier1_config.get("base_artifact_ref")
-        != tier0.candidate_artifact_ref
-        or tier1_config.get("scale_plan") != expected_plan
-        or tier1_config.get("progression_proof")
-        != proof.canonical_payload()
-    ):
-        _fail("tier-1 config does not consume exact promoted progression authority")
-
-    initial_adapter = Path(str(tier1_config["initial_adapter_path"]))
+    if tier1_config.get("scale_plan") != expected_plan:
+        _fail("tier-1 config does not preserve the exact scale plan")
+    initial_adapter = _require_tier1_transition_values(
+        root,
+        tier1_config,
+        tier0=tier0,
+        proof=proof,
+    )
     initial_sha256, initial_size = _sha256_file(initial_adapter)
     if (
         initial_sha256 != tier0.candidate_sha256
@@ -614,6 +650,7 @@ def verify(root: Path) -> None:
     tier1 = _pilot_report(tier1_root)
     if (
         tier1.completed_steps != _TIER1_STEPS
+        or tier1.job_id != _TIER1_JOB_ID
         or tier1.platform != "windows"
         or tier1.base_sha256 != tier0.candidate_sha256
         or tier1.candidate_artifact_ref != _TIER1_CANDIDATE_REF
