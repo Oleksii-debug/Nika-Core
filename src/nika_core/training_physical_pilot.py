@@ -36,7 +36,7 @@ _REPORT_DOMAIN_V6 = b"nika-peft-physical-pilot-report-v6\x00"
 _MAX_REPORT_BYTES = 32 * 1024
 _MAX_CANDIDATE_MANIFEST_BYTES = 512 * 1024
 _MAX_TEXT_BYTES = 1024
-_MAX_STEPS = 1_000_000
+PHYSICAL_TRAININGPHYSICAL_TRAINING_MAX_STEPS = 1_000_000
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_FILE_SHARE_WRITE = 0x00000002
@@ -557,7 +557,7 @@ class PhysicalTrainingPilotReport:
         if self.schema_version == _LEGACY_SCHEMA_VERSION:
             if self.completed_steps != 2:
                 _fail("legacy physical pilot report requires exactly two completed steps")
-        elif not 2 <= self.completed_steps <= _MAX_STEPS:
+        elif not 2 <= self.completed_steps <= PHYSICAL_TRAINING_MAX_STEPS:
             _fail("physical pilot report requires a bounded multi-step completion")
 
     def canonical_payload(self) -> dict[str, object]:
@@ -870,7 +870,7 @@ def _snapshot_run_evidence(
         if (
             type(value.next_step) is not int
             or value.next_step < 0
-            or value.next_step > _MAX_STEPS
+            or value.next_step > PHYSICAL_TRAINING_MAX_STEPS
         ):
             _fail(f"{label} has an invalid step boundary")
         base = value.base_artifact
@@ -974,7 +974,7 @@ def build_physical_training_pilot_report(
         _fail("physical pilot must pause exactly after its first trainer step")
     if restart_probe.next_step != 1:
         _fail("restarted runtime did not reopen the one-step durable checkpoint")
-    if not 2 <= completed.next_step <= _MAX_STEPS:
+    if not 2 <= completed.next_step <= PHYSICAL_TRAINING_MAX_STEPS:
         _fail("physical pilot must complete a bounded multi-step run")
     if paused.candidate_sha256 is not None or restart_probe.candidate_sha256 is not None:
         _fail("paused pilot evidence must not already publish a candidate")
@@ -1143,7 +1143,7 @@ def run_physical_training_pilot(
         raise TypeError("restart factories must be callable")
     if not callable(candidate_descriptor_factory):
         raise TypeError("candidate_descriptor_factory must be callable")
-    if not 2 <= canonical_spec.max_steps <= _MAX_STEPS:
+    if not 2 <= canonical_spec.max_steps <= PHYSICAL_TRAINING_MAX_STEPS:
         _fail("physical pilot requires at least two bounded training steps")
     if worker.last_accepted_consumed_materials_sha256 is not None:
         _fail("initial worker already carries accepted consumed-material evidence")
