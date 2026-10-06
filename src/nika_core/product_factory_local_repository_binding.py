@@ -555,28 +555,34 @@ class ProductFactoryLocalRepositoryBindings:
     ) -> MappingProxyType[str, pathlib.Path]:
         if type(plan) is not PackagedProductFactoryExecutionPlan:
             raise TypeError("plan must be an exact PackagedProductFactoryExecutionPlan")
-        project = self._projects.get(plan.project_id)
-        _require_plan_project(plan, project)
+        # Keep the complete durable repository projection under one writer fence.
+        # Individual require() calls also validate filesystem identity, while this
+        # transaction prevents bind/rebind/unbind or ProductProject writes from
+        # committing between repository members of the returned plan snapshot.
+        with self._store.connection() as fence:
+            fence.execute("BEGIN IMMEDIATE")
+            project = self._projects._get_conn(fence, plan.project_id)
+            _require_plan_project(plan, project)
 
-        resolved: dict[str, pathlib.Path] = {}
-        for repository in plan.graph.repositories:
-            binding = self.require(plan.project_id, repository.repository_id)
-            if (
-                binding.provider != repository.provider
-                or binding.locator != repository.locator
-            ):
-                raise ProductFactoryLocalRepositoryBindingError(
-                    "local repository binding does not match the execution-plan repository"
-                )
-            if repository.locator not in project.spec.repository_refs:
-                raise ProductFactoryLocalRepositoryBindingError(
-                    "execution-plan repository is not present in current ProductProject"
-                )
-            resolved[repository.repository_id] = binding.root
+            resolved: dict[str, pathlib.Path] = {}
+            for repository in plan.graph.repositories:
+                binding = self.require(plan.project_id, repository.repository_id)
+                if (
+                    binding.provider != repository.provider
+                    or binding.locator != repository.locator
+                ):
+                    raise ProductFactoryLocalRepositoryBindingError(
+                        "local repository binding does not match the execution-plan repository"
+                    )
+                if repository.locator not in project.spec.repository_refs:
+                    raise ProductFactoryLocalRepositoryBindingError(
+                        "execution-plan repository is not present in current ProductProject"
+                    )
+                resolved[repository.repository_id] = binding.root
 
-        project_after = self._projects.get(plan.project_id)
-        _require_plan_project(plan, project_after)
-        return MappingProxyType(resolved)
+            project_after = self._projects._get_conn(fence, plan.project_id)
+            _require_plan_project(plan, project_after)
+            return MappingProxyType(resolved)
 
     def _require_project_repository(
         self,
