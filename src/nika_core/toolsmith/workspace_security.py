@@ -123,12 +123,19 @@ def _sterile_git_config_args() -> tuple[str, ...]:
 def validate_sterile_git_environment(environment: object) -> dict[str, str]:
     if not isinstance(environment, collections.abc.Mapping):
         raise WorkspaceSecurityError("sterile Git environment must be a string mapping")
+    try:
+        items = tuple(environment.items())
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise WorkspaceSecurityError("sterile Git environment could not be snapshotted") from exc
+
     snapshot: dict[str, str] = {}
-    for key, value in environment.items():
+    for key, value in items:
         if type(key) is not str or type(value) is not str:
             raise WorkspaceSecurityError("sterile Git environment must contain exact strings")
         if "\x00" in key or "\x00" in value:
             raise WorkspaceSecurityError("sterile Git environment must be NUL-free")
+        if key in snapshot:
+            raise WorkspaceSecurityError("sterile Git environment contains duplicate keys")
         snapshot[key] = value
     canonical = sterile_git_environment(snapshot)
     if snapshot != canonical:
@@ -384,19 +391,29 @@ def ensure_path_policy(
 def sterile_git_environment(
     source: collections.abc.Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    source_env = dict(os.environ if source is None else source)
+    try:
+        source_env = dict(os.environ if source is None else source)
+    except (TypeError, ValueError) as exc:
+        raise WorkspaceSecurityError("source environment must be a string mapping") from exc
+
     environment: dict[str, str] = {}
     for key, value in source_env.items():
-        if type(key) is not str or type(value) is not str:
-            raise WorkspaceSecurityError("Git environment must contain exact strings")
-        if "\x00" in key or "\x00" in value:
-            raise WorkspaceSecurityError("Git environment must be NUL-free")
-        normalized_key = key.upper()
+        if type(key) is not str:
+            raise WorkspaceSecurityError("environment keys must be exact text")
+        identity = key.upper()
         if (
-            normalized_key in _ALLOWED_ENVIRONMENT_VARIABLES
-            and normalized_key not in _GIT_CREDENTIAL_VARIABLES
+            identity not in _ALLOWED_ENVIRONMENT_VARIABLES
+            or identity in _GIT_CREDENTIAL_VARIABLES
         ):
-            environment[normalized_key] = value
+            continue
+        if type(value) is not str or "\x00" in value:
+            raise WorkspaceSecurityError(
+                "allowed environment values must be exact NUL-free text"
+            )
+        if identity in environment and environment[identity] != value:
+            raise WorkspaceSecurityError("conflicting environment variable aliases")
+        environment[identity] = value
+
     null_device = "NUL" if os.name == "nt" else "/dev/null"
     environment.update(
         {

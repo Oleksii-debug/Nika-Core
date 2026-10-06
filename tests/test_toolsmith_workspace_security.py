@@ -101,6 +101,40 @@ def test_sterile_git_environment_drops_credentials_and_git_overrides() -> None:
     assert "PYTHONPATH" not in environment
 
 
+def test_sterile_git_environment_rejects_behavioral_key_spoof() -> None:
+    class EnvironmentKey(str):
+        def upper(self) -> str:
+            return "PATH"
+
+    with pytest.raises(WorkspaceSecurityError, match="keys must be exact text"):
+        sterile_git_environment({EnvironmentKey("GITHUB_TOKEN"): "secret"})
+
+
+def test_sterile_git_environment_rejects_behavioral_allowed_value() -> None:
+    class EnvironmentValue(str):
+        pass
+
+    with pytest.raises(WorkspaceSecurityError, match="exact NUL-free text"):
+        sterile_git_environment({"PATH": EnvironmentValue("trusted")})
+
+
+def test_sterile_git_environment_rejects_conflicting_case_aliases() -> None:
+    with pytest.raises(WorkspaceSecurityError, match="conflicting environment"):
+        sterile_git_environment({"PATH": "trusted", "Path": "attacker"})
+
+
+def test_sterile_git_environment_canonicalizes_equivalent_case_aliases() -> None:
+    environment = sterile_git_environment({"Path": "same", "PATH": "same"})
+
+    assert environment["PATH"] == "same"
+    assert "Path" not in environment
+
+
+def test_sterile_git_environment_rejects_nul_in_allowed_value() -> None:
+    with pytest.raises(WorkspaceSecurityError, match="NUL-free"):
+        sterile_git_environment({"PATH": "trusted\x00attacker"})
+
+
 def test_private_git_plan_separates_production_metadata(tmp_path: Path) -> None:
     production = tmp_path / "production"
     job_root = tmp_path / "jobs" / "job-1"
