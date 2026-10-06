@@ -20,6 +20,7 @@ from nika_core.model_artifacts import (
 )
 from nika_core.model_engineering import EvaluationPurpose
 from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
+from nika_core.training_scale import TrainingScalePlan, TrainingScaleTier
 
 
 def _payload(tmp_path: Path) -> dict[str, object]:
@@ -132,11 +133,35 @@ def _scale_task_payload(
     kind: str = "physical_peft_pilot",
     proof_sha256: str | None = None,
 ) -> dict[str, object]:
+    plan = TrainingScalePlan(
+        plan_id="physical-scale",
+        evaluation_set_sha256="e" * 64,
+        tiers=(
+            TrainingScaleTier(
+                tier_id="pilot",
+                max_training_records=10,
+                max_training_bytes=4096,
+                max_validation_records=10,
+                max_validation_bytes=4096,
+                max_steps=2,
+            ),
+            TrainingScaleTier(
+                tier_id="small",
+                max_training_records=100,
+                max_training_bytes=65536,
+                max_validation_records=20,
+                max_validation_bytes=8192,
+                max_steps=8,
+            ),
+        ),
+    )
     return {
         "job_id": "pilot-job",
         "kind": kind,
+        "progression_proof": None if proof_sha256 is None else {},
         "progression_proof_sha256": proof_sha256,
-        "scale_plan_sha256": "8" * 64,
+        "scale_plan": plan.canonical_payload(),
+        "scale_plan_sha256": plan.plan_sha256,
         "scale_tier_id": "pilot" if kind == "physical_peft_pilot" else "small",
     }
 
