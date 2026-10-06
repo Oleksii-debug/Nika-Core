@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.packaged_intelligence_mode import (
@@ -15,6 +16,7 @@ from nika_core.product_factory_packaged_journey import PackagedProductCommandRou
 from nika_core.product_project import ProductProjectRepository
 from nika_core.ui.bridge_models import UIResult
 from nika_core.v01_model_settings import V01ModelSettings
+from scripts import nika_windows
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -199,6 +201,39 @@ def test_mode_namespace_is_exact_and_ordinary_commands_keep_existing_route(
 
     assert ordinary_result.message == "ordinary-task"
     assert len(ordinary.calls) == 1
+
+
+def test_real_windows_bridge_executes_mode_command_without_creating_task(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "Дані Nika" / "ніка.db"
+    config = AppConfig(database_path=database)
+
+    bridge, _products = nika_windows.build_windows_bridge(
+        config,
+        start_startup_recovery=False,
+    )
+    result = bridge.dispatch(
+        {
+            "request_id": "direct-mode-command",
+            "action_id": "task.create",
+            "payload": {
+                "command": (
+                    "режим інтелекту ollama qwen3:8b "
+                    "http://localhost:11434"
+                )
+            },
+        }
+    )
+
+    assert result["request_id"] == "direct-mode-command"
+    assert result["status"] == "completed"
+    assert result["focus_id"] == "command-input"
+    state = bridge.get_state()
+    assert state["ok"] is True
+    assert state["state"]["v01_model_settings"]["route_kind"] == "ollama"
+    assert state["state"]["v01_model_settings"]["model"] == "qwen3:8b"
+    assert TaskQueue(SQLiteStore(database)).list_recent(limit=10) == ()
 
 
 def test_packaged_windows_composition_exposes_accessible_mode_command_help() -> None:
