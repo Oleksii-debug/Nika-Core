@@ -10,6 +10,7 @@ from nika_core.product_factory_packaged_preparation import (
 from nika_core.product_factory_toolsmith_integration import (
     ComponentCapabilityGap,
     ComponentCapabilityResume,
+    DurableProductFactoryRepairPort,
     ProductFactoryToolsmithBridge,
 )
 
@@ -90,6 +91,38 @@ class PackagedProductFactoryCapabilityGapPlan:
 
 
 @dataclass(slots=True)
+class _PackagedRepairAuthority(DurableProductFactoryRepairPort):
+    preparation: PackagedProductFactoryPreparationService
+    prepared: PreparedProductFactory
+
+    def preview_repair(
+        self,
+        *,
+        component_id: str,
+        reason: str,
+    ):
+        return self.preparation.preview_repair(
+            self.prepared,
+            component_id=component_id,
+            reason=reason,
+        )
+
+    def commit_repair(
+        self,
+        *,
+        component_id: str,
+        reason: str,
+        expected_next_work_id: str,
+    ):
+        return self.preparation.commit_repair(
+            self.prepared,
+            component_id=component_id,
+            reason=reason,
+            expected_next_work_id=expected_next_work_id,
+        )
+
+
+@dataclass(slots=True)
 class PackagedProductFactoryToolsmithService:
     """Presentation-neutral exact handoff from packaged Product Factory to Toolsmith.
 
@@ -113,7 +146,7 @@ class PackagedProductFactoryToolsmithService:
                 plan.project_id,
                 plan.component_id,
             )
-        except (KeyError, ValueError, RuntimeError) as exc:
+        except Exception as exc:  # noqa: BLE001
             raise PackagedProductFactoryToolsmithError(
                 "current Product Factory repair authority is unavailable"
             ) from exc
@@ -135,7 +168,7 @@ class PackagedProductFactoryToolsmithService:
                 reason=_DURABLE_GAP_REASON,
                 attempted_methods=plan.attempted_methods,
             )
-        except (ValueError, RuntimeError) as exc:
+        except Exception as exc:  # noqa: BLE001
             raise PackagedProductFactoryToolsmithError(
                 "durable Toolsmith capability-gap handoff was rejected"
             ) from exc
@@ -154,8 +187,12 @@ class PackagedProductFactoryToolsmithService:
                 component_id=plan.component_id,
                 expected_work_id=plan.expected_work_id,
                 expected_capability_id=plan.capability_id,
+                repair_authority=_PackagedRepairAuthority(
+                    self.preparation,
+                    prepared,
+                ),
             )
-        except (ValueError, RuntimeError) as exc:
+        except Exception as exc:  # noqa: BLE001
             raise PackagedProductFactoryToolsmithError(
                 "durable Toolsmith capability-gap resume was rejected"
             ) from exc
@@ -166,7 +203,7 @@ class PackagedProductFactoryToolsmithService:
     ) -> PreparedProductFactory:
         try:
             prepared = self.preparation.restore(plan.project_id)
-        except (KeyError, ValueError, RuntimeError) as exc:
+        except Exception as exc:  # noqa: BLE001
             raise PackagedProductFactoryToolsmithError(
                 "current Product Factory authority is unavailable"
             ) from exc
