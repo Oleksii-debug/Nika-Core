@@ -141,7 +141,8 @@ class ModelGateway:
             cancelled = False
             try:
                 async with asyncio.timeout(remaining):
-                    response = await provider.complete(attempt_request)
+                    provider_task = asyncio.create_task(provider.complete(attempt_request))
+                    response = await provider_task
             except TimeoutError:
                 error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
