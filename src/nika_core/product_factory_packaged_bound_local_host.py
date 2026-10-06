@@ -30,6 +30,7 @@ class PackagedBoundLocalProductFactoryHostError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _BindingSnapshot:
+    project_id: str
     repository_id: str
     provider: str
     locator: str
@@ -41,6 +42,44 @@ class _BindingSnapshot:
 class _ProgramEntry:
     program: ContainedLocalCodingProgram
     bindings: Mapping[str, _BindingSnapshot]
+
+
+@dataclass(frozen=True, slots=True)
+class _EntryRepositoryAuthority:
+    bindings: ProductFactoryLocalRepositoryBindings
+    projects: ProductProjectRepository
+    expected: Mapping[str, _BindingSnapshot]
+
+    def require_component_root(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        root: Path,
+    ) -> None:
+        expected = self.expected.get(repository_id)
+        if expected is None or expected.project_id != project_id:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "component repository is outside the prepared binding snapshot"
+            )
+        current = self.bindings.require(project_id, repository_id)
+        actual = _binding_snapshot(current)
+        if actual != expected:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "local repository binding changed during contained-local execution"
+            )
+        project = self.projects.get(project_id)
+        if (
+            project.status != "active"
+            or expected.locator not in project.spec.repository_refs
+        ):
+            raise PackagedBoundLocalProductFactoryHostError(
+                "local repository binding is no longer authorized by ProductProject"
+            )
+        if Path(root) != expected.root:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "contained-local worker root differs from prepared binding authority"
+            )
 
 
 class PackagedBoundLocalProductFactoryHost:
@@ -324,6 +363,11 @@ class PackagedBoundLocalProductFactoryHost:
             startup=self._startup,
             repositories=repositories,
         )
+        program.ports.repository_authority = _EntryRepositoryAuthority(
+            bindings=self._bindings,
+            projects=self._projects,
+            expected=snapshots,
+        )
         return _ProgramEntry(program=program, bindings=snapshots)
 
     def _require_state_bindings(
@@ -364,11 +408,18 @@ def _snapshot_map(
             raise PackagedBoundLocalProductFactoryHostError(
                 "duplicate local repository binding identity"
             )
-        result[binding.repository_id] = _BindingSnapshot(
-            repository_id=binding.repository_id,
-            provider=binding.provider,
-            locator=binding.locator,
-            root=binding.root,
-            binding_version=binding.binding_version,
-        )
+        result[binding.repository_id] = _binding_snapshot(binding)
     return result
+
+
+def _binding_snapshot(
+    binding: ProductFactoryLocalRepositoryBinding,
+) -> _BindingSnapshot:
+    return _BindingSnapshot(
+        project_id=binding.project_id,
+        repository_id=binding.repository_id,
+        provider=binding.provider,
+        locator=binding.locator,
+        root=binding.root,
+        binding_version=binding.binding_version,
+    )

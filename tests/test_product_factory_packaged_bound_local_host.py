@@ -332,3 +332,106 @@ def test_dynamic_host_does_not_infer_missing_local_binding(
             project,
             _graph(project.project_id, repository),
         )
+
+
+@pytest.mark.asyncio
+async def test_entry_ports_revalidate_binding_after_host_check_before_effect(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    first_root = _repository(tmp_path, "first repository")
+    second_root = _repository(tmp_path, "second repository")
+    base_sha = _git(first_root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    state = host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
+    )
+    entry = host._require_state_bindings("host-task", state)
+    request = state.coordinator.snapshot().records[0].request
+
+    second = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=second_root,
+        expected_binding_version=first.binding_version,
+    )
+    assert second.binding_version == first.binding_version + 1
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="changed during contained-local execution",
+    ):
+        await entry.program.ports.context_for(request)
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="changed during contained-local execution",
+    ):
+        await entry.program.ports.collect(request, object(), object())
+
+
+def test_entry_repository_authority_rejects_same_root_rebind_version_change(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    current = host._bindings_for_graph(
+        project,
+        _graph(project.project_id, repository),
+    )
+    entry = host._entry_for("host-task", current)
+    authority = entry.program.ports.repository_authority
+    assert authority is not None
+
+    second = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=first.binding_version,
+    )
+    assert second.root == first.root
+    assert second.binding_version == first.binding_version + 1
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="changed during contained-local execution",
+    ):
+        authority.require_component_root(
+            project_id=project.project_id,
+            repository_id=repository.repository_id,
+            root=root,
+        )
