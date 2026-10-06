@@ -52,7 +52,7 @@ def _startup(tmp_path):
     )
 
 
-def _config_json() -> str:
+def _config_json(executable: str = "python") -> str:
     payload = {
         "schema": "nika.product-factory.packaged-build-runtime.v1",
         "node": {
@@ -77,7 +77,7 @@ def _config_json() -> str:
                 "required_toolchains": ["python"],
                 "resources": {"cpu_cores": 1, "memory_mb": 1024, "disk_mb": 2048},
                 "command_id": "build",
-                "argv": ["python", "-m", "build"],
+                "argv": [executable, "-m", "build"],
                 "output_paths": ["dist"],
                 "max_changed_files": 32,
                 "lease_seconds": 120,
@@ -142,6 +142,32 @@ def test_configured_session_requires_active_packaged_pf4(tmp_path):
     assert session.snapshot()["runtime_status"] == "product_factory_required"
     assert session.execution_focus() == "product-factory-build-authority-json"
     assert session.post_dispatch_enabled is False
+
+
+def test_session_real_activation_binds_canonical_pf5_authority(tmp_path):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    settings = PackagedBuildRuntimeSettings(store)
+    startup = _startup(tmp_path)
+    executable = startup.policy.allowed_executables[0]
+    raw = _config_json(executable)
+    assert settings.configure({"revision": 0, "config_json": raw}).status == "completed"
+
+    session = build_packaged_build_runtime_session(
+        store,
+        settings=settings,
+        startup=startup,
+        product_factory_active=True,
+    )
+
+    assert session.snapshot()["runtime_status"] == "active"
+    assert session.post_dispatch_enabled is True
+    assert session.activation is not None
+    session.activation.require_component(
+        project_id=PROJECT_ID,
+        repository_id="repo",
+        component_id="component",
+    )
 
 
 def test_session_activates_exact_launch_generation(tmp_path, monkeypatch):
