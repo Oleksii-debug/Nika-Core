@@ -125,6 +125,148 @@ def test_private_git_plan_separates_production_metadata(tmp_path: Path) -> None:
     assert "GITHUB_TOKEN" not in plan.environment
 
 
+@pytest.mark.parametrize(
+    "base_sha",
+    (
+        "a" * 39,
+        "a" * 41,
+        "g" * 40,
+        ("a" * 39) + " ",
+    ),
+)
+def test_sterile_git_plan_rejects_invalid_base_sha(
+    tmp_path: Path,
+    base_sha: str,
+) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-invalid-base"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="40-character hexadecimal SHA"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name="toolsmith/job",
+            base_sha=base_sha,
+        )
+
+
+def test_sterile_git_plan_rejects_behavioral_base_sha(tmp_path: Path) -> None:
+    class BaseSha(str):
+        pass
+
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-behavioral-base"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="40-character hexadecimal SHA"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name="toolsmith/job",
+            base_sha=BaseSha("a" * 40),
+        )
+
+
+def test_sterile_git_plan_preserves_uppercase_hex_base_sha(tmp_path: Path) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-uppercase-base"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    plan = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
+        branch_name="toolsmith/job",
+        base_sha="A" * 40,
+    )
+
+    assert plan.base_sha == "A" * 40
+
+
+@pytest.mark.parametrize(
+    "branch_name",
+    (
+        " toolsmith/job",
+        "toolsmith/job ",
+        "-toolsmith/job",
+        "toolsmith\njob",
+        "toolsmith\x7fjob",
+    ),
+)
+def test_sterile_git_plan_rejects_ambiguous_branch_identity(
+    tmp_path: Path,
+    branch_name: str,
+) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-ambiguous-branch"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="control data"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name=branch_name,
+            base_sha="a" * 40,
+        )
+
+
+def test_sterile_git_plan_rejects_behavioral_string_branch_name(tmp_path: Path) -> None:
+    class BranchName(str):
+        pass
+
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-behavioral-branch"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="control data"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name=BranchName("toolsmith/job"),
+            base_sha="a" * 40,
+        )
+
+
+@pytest.mark.parametrize("separator", ("\u0085", "\u2028", "\u2029"))
+def test_sterile_git_plan_rejects_unicode_branch_line_boundaries(
+    tmp_path: Path,
+    separator: str,
+) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-line-boundary"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="control data"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name=f"toolsmith{separator}branch",
+            base_sha="a" * 40,
+        )
+
+
+def test_sterile_git_plan_preserves_safe_unicode_branch_name(tmp_path: Path) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-unicode"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    plan = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
+        branch_name="toolsmith/гілка",
+        base_sha="a" * 40,
+    )
+
+    assert plan.branch_name == "toolsmith/гілка"
+
+
 def test_job_workspace_cannot_live_inside_production_repository(tmp_path: Path) -> None:
     production = tmp_path / "production"
     production.mkdir()
@@ -197,6 +339,20 @@ def test_tree_evidence_refuses_symlinks(tmp_path: Path) -> None:
         pytest.skip("symlink creation unavailable on this host")
     with pytest.raises(WorkspaceSecurityError, match="symlinks"):
         collect_tree_evidence(root)
+
+
+def test_production_integrity_snapshot_rejects_behavioral_identity_carriers() -> None:
+    class BaseSha(str):
+        pass
+
+    class TreeDigest(str):
+        pass
+
+    with pytest.raises(WorkspaceSecurityError, match="40-character hexadecimal SHA"):
+        ProductionIntegritySnapshot(BaseSha("c" * 40), "d" * 64)
+
+    with pytest.raises(WorkspaceSecurityError, match="tree_digest"):
+        ProductionIntegritySnapshot("c" * 40, TreeDigest("d" * 64))
 
 
 def test_production_integrity_must_match_exactly() -> None:
