@@ -350,6 +350,118 @@ def test_non_windows_gate_precedes_filesystem_effects(
     assert not config.physical_pilot_output_root.exists()
 
 
+def test_evaluation_rejects_output_root_replacement_after_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    root = config.physical_pilot_output_root
+    root.mkdir()
+    displaced = tmp_path / "displaced-evaluation-root"
+
+    monkeypatch.setattr(driver, "_is_windows", lambda: True)
+    monkeypatch.setattr(
+        driver,
+        "_open_windows_directory_stability_lock",
+        lambda *args, **kwargs: None,
+    )
+
+    def replace_root(
+        _: driver.PhysicalEvaluationConfig,
+        *,
+        output_root: Path,
+    ) -> dict[str, object]:
+        output_root.rename(displaced)
+        output_root.mkdir()
+        return {"schema": "synthetic"}
+
+    monkeypatch.setattr(
+        driver,
+        "_run_physical_evaluation_from_stable_root",
+        replace_root,
+    )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="physical_pilot_output_root changed",
+    ):
+        driver.run_physical_evaluation_from_config(config)
+
+    assert root.is_dir()
+    assert displaced.is_dir()
+
+
+def test_trusted_progression_rejects_output_root_replacement_after_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "trusted-progression-root"
+    root.mkdir()
+    displaced = tmp_path / "displaced-progression-root"
+
+    monkeypatch.setattr(
+        driver,
+        "_open_windows_directory_stability_lock",
+        lambda *args, **kwargs: None,
+    )
+
+    def replace_root(
+        stable_root: Path,
+        *,
+        workspace_id: str,
+        expected_claim: dict[str, object],
+    ) -> object:
+        assert workspace_id == "evaluation-workspace"
+        assert expected_claim == {}
+        stable_root.rename(displaced)
+        stable_root.mkdir()
+        return object()
+
+    monkeypatch.setattr(
+        driver,
+        "_load_trusted_scale_progression_proof_from_root",
+        replace_root,
+    )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="trusted progression output root changed",
+    ):
+        driver.load_trusted_scale_progression_proof(
+            root,
+            workspace_id="evaluation-workspace",
+            expected_claim={},
+        )
+
+    assert root.is_dir()
+    assert displaced.is_dir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory-share semantics")
+def test_output_root_stability_lock_denies_rename_until_closed(tmp_path: Path) -> None:
+    root = tmp_path / "physical-output-root"
+    root.mkdir()
+    canonical, snapshot = driver._canonical_directory_snapshot(
+        root,
+        name="physical output root",
+    )
+    moved = tmp_path / "moved-output-root"
+
+    handle = driver._open_windows_directory_stability_lock(
+        canonical,
+        snapshot,
+        name="physical output root",
+    )
+    try:
+        with pytest.raises(OSError):
+            root.rename(moved)
+    finally:
+        driver._close_windows_stability_lock(handle)
+
+    root.rename(moved)
+    assert moved.is_dir()
+
+
 def test_find_pilot_task_requires_exact_unique_identity(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "pilot.sqlite3")
     store.initialize()
