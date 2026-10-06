@@ -139,6 +139,18 @@ class PackagedBuildAuthoritySnapshot:
     revision: int
     digest: str
 
+    def __post_init__(self) -> None:
+        template = _snapshot_template(self.template)
+        revision = _revision(self.revision)
+        digest = _digest(self.digest, "template digest")
+        if _digest_payload(_encode_template(template)) != digest:
+            raise PackagedBuildAuthorityError(
+                "packaged build authority snapshot digest does not match template"
+            )
+        object.__setattr__(self, "template", template)
+        object.__setattr__(self, "revision", revision)
+        object.__setattr__(self, "digest", digest)
+
 
 @dataclass(frozen=True, slots=True)
 class _BoundBuildAuthority:
@@ -187,6 +199,7 @@ class PackagedBuildAuthorityStore:
     ) -> PackagedBuildAuthoritySnapshot:
         if type(template) is not PackagedBuildAuthorityTemplate:
             raise TypeError("template must be exact PackagedBuildAuthorityTemplate")
+        template = _snapshot_template(template)
         if type(expected_revision) is not int or expected_revision < 0:
             raise PackagedBuildAuthorityError(
                 "expected build authority revision must be non-negative"
@@ -329,6 +342,11 @@ class PackagedBuildAuthorityStore:
             raise PackagedBuildAuthorityError("row_version must be non-negative")
         if type(authority) is not PackagedBuildAuthoritySnapshot:
             raise TypeError("authority must be exact PackagedBuildAuthoritySnapshot")
+        authority = PackagedBuildAuthoritySnapshot(
+            authority.template,
+            authority.revision,
+            authority.digest,
+        )
         template = authority.template
         if (
             component_id != template.component_id
@@ -784,6 +802,43 @@ class _CapturingReviewedPolicyPort:
             )
         self.resolution = self.delegate.resolve_with_snapshot(**kwargs)
         return self.resolution.policy
+
+
+def _snapshot_template(
+    value: object,
+) -> PackagedBuildAuthorityTemplate:
+    if type(value) is not PackagedBuildAuthorityTemplate:
+        raise PackagedBuildAuthorityError(
+            "packaged build authority template carrier is invalid"
+        )
+    try:
+        return PackagedBuildAuthorityTemplate(
+            project_id=value.project_id,
+            repository_id=value.repository_id,
+            component_id=value.component_id,
+            node_id=value.node_id,
+            platform=value.platform,
+            workspace_relpath=value.workspace_relpath,
+            required_features=value.required_features,
+            required_toolchains=value.required_toolchains,
+            resources=ResourceEnvelope(
+                value.resources.cpu_cores,
+                value.resources.memory_mb,
+                value.resources.disk_mb,
+            ),
+            command_id=value.command_id,
+            argv=value.argv,
+            output_paths=value.output_paths,
+            max_changed_files=value.max_changed_files,
+            lease_seconds=value.lease_seconds,
+            require_gpu=value.require_gpu,
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        if isinstance(exc, PackagedBuildAuthorityError):
+            raise
+        raise PackagedBuildAuthorityError(
+            "packaged build authority template failed canonical re-admission"
+        ) from exc
 
 
 def _binding_from_row(row: sqlite3.Row) -> _BoundBuildAuthority:
