@@ -513,6 +513,43 @@ def test_inline_credential_material_is_not_accepted_into_durable_argv() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "credential_option",
+    (
+        "--token",
+        "--password",
+        "--api-key",
+        "--access-token",
+        "--refresh-token",
+    ),
+)
+def test_split_form_credential_material_is_rejected_before_storage(
+    credential_option: str,
+) -> None:
+    executable = str(Path(sys.executable).resolve())
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="credential material",
+    ):
+        PackagedBuildAuthorityTemplate(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            component_id=COMPONENT_ID,
+            node_id=NODE_ID,
+            platform=_platform(),
+            workspace_relpath="products/build",
+            required_features=frozenset({"build"}),
+            required_toolchains=frozenset({"python"}),
+            resources=ResourceEnvelope(1, 1024, 2048),
+            command_id="build",
+            argv=(executable, credential_option, "plaintext-secret"),
+            output_paths=("products/build",),
+            max_changed_files=8,
+            lease_seconds=120,
+        )
+
+
 def test_wrong_work_identity_cannot_resolve_bound_authority(
     tmp_path: Path,
 ) -> None:
