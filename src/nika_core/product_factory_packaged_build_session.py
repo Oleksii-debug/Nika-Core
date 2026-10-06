@@ -45,7 +45,10 @@ class PackagedBuildRuntimeSession:
             raise TypeError("PF5 session store must be exact SQLiteStore")
         if type(self.settings) is not PackagedBuildRuntimeSettings:
             raise TypeError("PF5 session settings must be exact PackagedBuildRuntimeSettings")
-        if self.startup is not None and type(self.startup) is not PackagedLocalProductFactoryStartup:
+        if (
+            self.startup is not None
+            and type(self.startup) is not PackagedLocalProductFactoryStartup
+        ):
             raise TypeError("PF5 session startup authority is invalid")
         if type(self.product_factory_active) is not bool:
             raise TypeError("PF5 session product_factory_active must be exact bool")
@@ -53,7 +56,10 @@ class PackagedBuildRuntimeSession:
             raise TypeError("PF5 session launch revision must be a non-negative integer")
         if self.launch_config_json is not None and type(self.launch_config_json) is not str:
             raise TypeError("PF5 session launch config must be text or None")
-        if self.activation is not None and type(self.activation) is not ActivatedPackagedBuildRuntime:
+        if (
+            self.activation is not None
+            and type(self.activation) is not ActivatedPackagedBuildRuntime
+        ):
             raise TypeError("PF5 session activation must be exact ActivatedPackagedBuildRuntime")
         if type(self.launch_invalid) is not bool or type(self.activation_failed) is not bool:
             raise TypeError("PF5 session failure flags must be exact bool")
