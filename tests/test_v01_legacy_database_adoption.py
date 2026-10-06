@@ -269,6 +269,81 @@ def test_startup_lock_rejects_path_swapped_for_symlink_during_open(
     assert not target.exists()
 
 
+def _valid_pending_payload(source: Path) -> bytes:
+    return json.dumps(
+        {
+            "version": 1,
+            "adoption_id": "a" * 32,
+            "source_path": str(source.resolve()),
+            "source_digest": "b" * 64,
+            "target_was_absent": True,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def test_pending_record_snapshot_rejects_indirect_and_nonregular_paths(tmp_path):
+    pending = tmp_path / ".nika.db.legacy-adoption.json"
+    sentinel = tmp_path / "private-pending"
+    sentinel.write_bytes(_valid_pending_payload(tmp_path / "old.db"))
+    try:
+        pending.symlink_to(sentinel)
+    except (NotImplementedError, OSError):
+        pytest.skip("filesystem does not support symlinks")
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._read_pending_record(pending)
+    assert sentinel.read_bytes() == _valid_pending_payload(tmp_path / "old.db")
+
+    pending.unlink()
+    pending.mkdir()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._read_pending_record(pending)
+
+
+def test_pending_record_snapshot_rejects_path_swap_after_open(tmp_path, monkeypatch):
+    pending = tmp_path / ".nika.db.legacy-adoption.json"
+    pending.write_bytes(_valid_pending_payload(tmp_path / "old.db"))
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(_valid_pending_payload(tmp_path / "other.db"))
+    original_open = adoption._open_readonly_snapshot
+    swapped = False
+
+    def swap_after_open(path):
+        nonlocal swapped
+        fd = original_open(path)
+        if Path(path) == pending and not swapped:
+            swapped = True
+            try:
+                replacement.replace(pending)
+            except OSError:
+                adoption.os.close(fd)
+                pytest.skip("filesystem cannot replace a pending record held open")
+        return fd
+
+    monkeypatch.setattr(adoption, "_open_readonly_snapshot", swap_after_open)
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._read_pending_record(pending)
+    assert swapped
+
+
+def test_pending_record_snapshot_rejects_oversize_before_json_decode(tmp_path):
+    pending = tmp_path / ".nika.db.legacy-adoption.json"
+    pending.write_bytes(b"x" * (adoption._MAX_PENDING_BYTES + 1))
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._read_pending_record(pending)
+
+
+def test_pending_record_snapshot_reads_exact_valid_record(tmp_path):
+    pending = tmp_path / ".nika.db.legacy-adoption.json"
+    source = tmp_path / "Дані" / "old.db"
+    payload = _valid_pending_payload(source)
+    pending.write_bytes(payload)
+    record = adoption._read_pending_record(pending)
+    assert isinstance(record, dict)
+    assert record["source_path"] == str(source.resolve())
+    assert record["target_was_absent"] is True
+
+
 def test_startup_lock_rejects_inode_swap_after_open(tmp_path, monkeypatch):
     import nika_core.reliability.recovery_lease as lease_module
 
