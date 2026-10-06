@@ -35,6 +35,9 @@ agent = [
   "psutil>=7,<8",
   "mcp>=2,<3",
 ]
+# Compatibility extra retained for existing install commands. OpenHands runs in a
+# separately provisioned Agent Server; no OpenHands/FastMCP packages enter Nika.
+coding-openhands = []
 embedded-ai = [
   "foundry-local-sdk-winml>=1.2.3,<2; sys_platform == 'win32'",
   "foundry-local-sdk>=1.2.3,<2; sys_platform != 'win32'",
