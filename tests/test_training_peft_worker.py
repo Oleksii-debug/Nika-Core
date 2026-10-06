@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -841,7 +840,9 @@ def test_resumed_manifest_binds_loaded_pre_step_tensor_state(
     first_state, first_candidate = peft._train_one_step(request, config, consumed)
     assert first_candidate is None
 
-    job_root = config.output_root / peft._candidate_key(request.candidate_artifact_ref)
+    job_root = config.output_root / peft._candidate_key(
+        request.candidate_artifact_ref
+    )
     prior_adapter = (
         job_root / "trainer" / "checkpoint-1" / "adapter" / peft._CANDIDATE_FILE
     )
@@ -877,7 +878,6 @@ def test_resumed_manifest_binds_loaded_pre_step_tensor_state(
     manifest = json.loads(carrier["metadata"]["nika_adapter_manifest"])
     assert manifest["previous_adapter_tensors_sha256"] == expected_previous_sha256
     assert manifest["previous_adapter_tensors_sha256"] != forged_previous_sha256
-
 
 def test_new_job_can_warm_start_from_promoted_candidate(
     tmp_path: Path,
@@ -917,7 +917,9 @@ def test_new_job_can_warm_start_from_promoted_candidate(
         "consumed_materials_sha256": "7" * 64,
         "job_fingerprint": "8" * 64,
         "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
+        "previous_adapter_tensors_sha256": "6" * 64,
         "schema": "nika-peft-candidate-v2",
+        "trained_adapter_tensors_sha256": "9" * 64,
         "step_number": 2,
         "trainer_artifact_id": "a" * 64,
         "trainer_implementation_sha256": "b" * 64,
@@ -1748,7 +1750,10 @@ def test_candidate_manifest_reader_rejects_non_finite_published_tensor(
         lambda: (_fake_stack()[0], safe_open, _fake_safe_serialize),
     )
 
-    with pytest.raises(peft.PeftTrainerError, match="candidate_safetensors_non_finite"):
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="candidate_safetensors_non_finite",
+    ):
         peft.candidate_adapter_manifest(candidate.resolve())
 
 
@@ -1877,9 +1882,11 @@ def test_candidate_manifest_reader_rejects_tensor_state_mismatch(
         lambda: (_fake_stack()[0], safe_open, _fake_safe_serialize),
     )
 
-    with pytest.raises(peft.PeftTrainerError, match="candidate_tensor_state_mismatch"):
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="candidate_tensor_state_mismatch",
+    ):
         peft.candidate_adapter_manifest(candidate.resolve())
-
 
 def test_candidate_manifest_v2_and_v3_contracts_are_exact_and_disjoint(
     tmp_path: Path,
@@ -2057,7 +2064,6 @@ def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
 
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_not_canonical"):
         peft.candidate_adapter_manifest(candidate.resolve())
-
 
 def test_candidate_manifest_rejects_unhashable_target_carrier(tmp_path: Path) -> None:
     request, base = _parsed(tmp_path)

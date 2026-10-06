@@ -2050,7 +2050,6 @@ def _adapter_tensor_sha256(
     )
 
 
-
 def _snapshot_adapter_weights_sha256(
     model: object,
     job_root: Path,
@@ -2060,6 +2059,7 @@ def _snapshot_adapter_weights_sha256(
     torch: Any,
 ) -> tuple[str, str]:
     """Bind exact bytes and canonical tensors from one loaded-model adapter snapshot."""
+
     try:
         with tempfile.TemporaryDirectory(
             prefix=".adapter-weight-snapshot-",
@@ -2097,7 +2097,6 @@ def _snapshot_adapter_weights_sha256(
     if size <= 0:
         _fail("adapter_weight_snapshot_failed")
     return digest, tensor_sha256
-
 
 def _train_one_step(
     request: ParsedRequest,
@@ -2777,7 +2776,6 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
     ):
         _fail("candidate_tensor_state_mismatch")
     return manifest
-
 
 def _response(
     request: ParsedRequest,
