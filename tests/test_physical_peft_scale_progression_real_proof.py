@@ -141,6 +141,30 @@ def test_candidate_file_authority_rejects_manifest_time_mutation(
         proof._candidate_file_authority(candidate, name="candidate")
 
 
+def test_candidate_file_authority_parses_private_byte_snapshot(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate.safetensors"
+    payload = b"candidate-authority-bytes"
+    candidate.write_bytes(payload)
+
+    def inspect_manifest_path(path: Path) -> dict[str, object]:
+        parsed_path = Path(path)
+        assert parsed_path != candidate
+        assert parsed_path.read_bytes() == payload
+        return {"payload_sha256": _sha(parsed_path.read_bytes())}
+
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", inspect_manifest_path)
+
+    digest, size, manifest = proof._candidate_file_authority(candidate, name="candidate")
+
+    assert digest == _sha(payload)
+    assert size == len(payload)
+    assert manifest == {"payload_sha256": _sha(payload)}
+
+
 def test_candidate_manifest_digest_uses_physical_canonical_json(
     proof: ModuleType,
 ) -> None:

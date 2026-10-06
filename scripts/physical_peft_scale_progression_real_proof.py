@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 from pathlib import Path
 from typing import NoReturn
 
@@ -270,6 +271,62 @@ def _read_held_candidate_bytes(descriptor: int, *, name: str) -> bytes:
     return b"".join(chunks)
 
 
+def _candidate_manifest_from_payload(
+    payload: bytes,
+    *,
+    name: str,
+) -> dict[str, object]:
+    """Parse the manifest from a private byte-exact candidate snapshot."""
+
+    if type(payload) is not bytes or not payload:
+        _fail(f"{name} private manifest snapshot is invalid")
+    try:
+        with tempfile.TemporaryDirectory(prefix=".nika-peft-scale-candidate-") as snapshot_root:
+            snapshot_path = Path(snapshot_root) / "adapter_model.safetensors"
+            _write_new(snapshot_path, payload)
+            descriptor: int | None = None
+            try:
+                descriptor = _open_readonly_snapshot(snapshot_path)
+                _require_open_snapshot_identity(
+                    snapshot_path,
+                    descriptor,
+                    name=f"{name} private manifest snapshot",
+                )
+                if (
+                    _read_held_candidate_bytes(
+                        descriptor,
+                        name=f"{name} private manifest snapshot",
+                    )
+                    != payload
+                ):
+                    _fail(f"{name} private manifest snapshot changed before parse")
+                manifest = candidate_adapter_manifest(snapshot_path.resolve(strict=True))
+                _require_open_snapshot_identity(
+                    snapshot_path,
+                    descriptor,
+                    name=f"{name} private manifest snapshot",
+                )
+                if (
+                    _read_held_candidate_bytes(
+                        descriptor,
+                        name=f"{name} private manifest snapshot",
+                    )
+                    != payload
+                ):
+                    _fail(f"{name} private manifest snapshot changed during parse")
+                return manifest
+            finally:
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+    except ProofError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ProofError(f"{name} private manifest snapshot could not be verified") from exc
+
+
 def _candidate_file_authority(
     path: Path,
     *,
@@ -295,7 +352,7 @@ def _candidate_file_authority(
         if len(payload) != before.st_size:
             _fail(f"{name} changed while it was being read")
 
-        manifest = candidate_adapter_manifest(path.resolve(strict=True))
+        manifest = _candidate_manifest_from_payload(payload, name=name)
 
         _require_open_snapshot_identity(path, descriptor, name=name)
         after = os.fstat(descriptor)
