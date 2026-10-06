@@ -323,6 +323,34 @@ def test_job_workspace_cannot_live_inside_production_repository(tmp_path: Path) 
         )
 
 
+def test_typed_argv_rejects_scalar_text_carrier() -> None:
+    with pytest.raises(WorkspaceSecurityError, match="argv must contain"):
+        validate_typed_argv("python.exe", {"python.exe"})  # type: ignore[arg-type]
+
+
+def test_typed_argv_rejects_behavioral_argument_text() -> None:
+    class Argument(str):
+        pass
+
+    with pytest.raises(WorkspaceSecurityError, match="argv must contain"):
+        validate_typed_argv((Argument("python.exe"),), {"python.exe"})
+
+
+def test_typed_argv_rejects_behavioral_allowlist_text() -> None:
+    class Executable(str):
+        pass
+
+    with pytest.raises(WorkspaceSecurityError, match="exact text identities"):
+        validate_typed_argv(("python.exe",), (Executable("python.exe"),))
+
+
+def test_typed_argv_snapshots_list_inputs_to_exact_tuple() -> None:
+    argv = ["python.exe", "-m", "pytest"]
+    allowed = ["python.exe"]
+
+    assert validate_typed_argv(argv, allowed) == ("python.exe", "-m", "pytest")
+
+
 def test_typed_argv_rejects_shells_and_non_allowlisted_executables() -> None:
     with pytest.raises(WorkspaceSecurityError, match="shell"):
         validate_typed_argv(("powershell.exe", "-Command", "pytest"), {"powershell.exe"})

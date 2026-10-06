@@ -129,8 +129,6 @@ def validate_sterile_git_environment(environment: object) -> dict[str, str]:
             raise WorkspaceSecurityError("sterile Git environment must contain exact strings")
         if "\x00" in key or "\x00" in value:
             raise WorkspaceSecurityError("sterile Git environment must be NUL-free")
-        if key in snapshot:
-            raise WorkspaceSecurityError("sterile Git environment contains duplicate keys")
         snapshot[key] = value
     canonical = sterile_git_environment(snapshot)
     if snapshot != canonical:
@@ -466,24 +464,44 @@ def validate_typed_argv(
     argv: collections.abc.Sequence[str],
     allowed_executables: collections.abc.Iterable[str],
 ) -> tuple[str, ...]:
-    if not argv or any(not argument or "\x00" in argument for argument in argv):
+    if isinstance(argv, (str, bytes)):
         raise WorkspaceSecurityError("argv must contain non-empty NUL-free arguments")
-    executable = argv[0]
+    try:
+        typed_argv = tuple(argv)
+    except TypeError as exc:
+        raise WorkspaceSecurityError(
+            "argv must contain non-empty NUL-free arguments"
+        ) from exc
+    if not typed_argv or any(
+        type(argument) is not str or not argument or "\x00" in argument
+        for argument in typed_argv
+    ):
+        raise WorkspaceSecurityError("argv must contain non-empty NUL-free arguments")
+
+    executable = typed_argv[0]
     windows_path = pathlib.PureWindowsPath(executable)
     basename = windows_path.name.casefold()
     if basename in _SHELL_EXECUTABLES or windows_path.suffix.casefold() in _WINDOWS_BATCH_SUFFIXES:
         raise WorkspaceSecurityError("generic shell and Windows batch entrypoints are forbidden")
 
+    if isinstance(allowed_executables, (str, bytes)):
+        raise WorkspaceSecurityError("allowed executable set must not be empty")
+    try:
+        allowed = tuple(allowed_executables)
+    except TypeError as exc:
+        raise WorkspaceSecurityError("allowed executable set must not be empty") from exc
+    if any(type(item) is not str for item in allowed):
+        raise WorkspaceSecurityError("allowed executable set must contain exact text identities")
     allowlist = {
         _executable_identity_key(item)
-        for item in allowed_executables
+        for item in allowed
         if item.strip()
     }
     if not allowlist:
         raise WorkspaceSecurityError("allowed executable set must not be empty")
     if _executable_identity_key(executable) not in allowlist:
         raise WorkspaceSecurityError("executable identity is not exactly allowlisted")
-    return tuple(argv)
+    return typed_argv
 
 
 def assert_cleanup_tree_safe(root: pathlib.Path) -> None:
