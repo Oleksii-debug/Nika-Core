@@ -401,6 +401,29 @@ def test_git_launch_rejects_same_path_change_against_earlier_digest(
         )
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor launch only")
+def test_posix_absolute_git_launch_owns_descriptor_guard(
+    tmp_path: pathlib.Path,
+) -> None:
+    git_executable = shutil.which("git")
+    if git_executable is None:
+        pytest.skip("Git CLI unavailable")
+    executable = pathlib.Path(git_executable).resolve(strict=True)
+    expected_sha256 = execution_module._pinned_executable_sha256(executable)
+
+    result = execution_module._git(
+        (str(executable), "--version"),
+        cwd=tmp_path,
+        environment=sterile_git_environment(
+            {"PATH": os.environ.get("PATH", "")}
+        ),
+        expected_executable_sha256=expected_sha256,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.startswith("git version ")
+
+
 def test_private_git_rejects_replacement_after_host_git_admission(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
