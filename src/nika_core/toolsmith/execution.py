@@ -118,6 +118,97 @@ def _pinned_executable_descriptor_sha256(descriptor: int) -> str:
         ) from exc
 
 
+def _open_posix_executable_launch_snapshot(
+    source_descriptor: int,
+    expected_sha256: str,
+) -> int:
+    """Freeze admitted executable bytes into one sealed anonymous launch object."""
+
+    memfd_create = getattr(os, "memfd_create", None)
+    allow_sealing = getattr(os, "MFD_ALLOW_SEALING", 0)
+    close_on_exec = getattr(os, "MFD_CLOEXEC", 0)
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise ProcessExecutionError(
+            "immutable POSIX executable launch snapshot is unavailable"
+        ) from exc
+
+    seal_names = (
+        "F_ADD_SEALS",
+        "F_GET_SEALS",
+        "F_SEAL_WRITE",
+        "F_SEAL_SHRINK",
+        "F_SEAL_GROW",
+        "F_SEAL_SEAL",
+    )
+    if (
+        not callable(memfd_create)
+        or not allow_sealing
+        or any(not hasattr(fcntl, name) for name in seal_names)
+    ):
+        raise ProcessExecutionError(
+            "immutable POSIX executable launch snapshot is unavailable"
+        )
+
+    snapshot: int | None = None
+    try:
+        snapshot = memfd_create(
+            "nika-executable",
+            flags=close_on_exec | allow_sealing,
+        )
+        os.lseek(source_descriptor, 0, os.SEEK_SET)
+        while True:
+            chunk = os.read(source_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            view = memoryview(chunk)
+            while view:
+                written = os.write(snapshot, view)
+                if written <= 0:
+                    raise OSError("short executable snapshot write")
+                view = view[written:]
+
+        os.fchmod(snapshot, 0o500)
+        required_seals = (
+            fcntl.F_SEAL_WRITE
+            | fcntl.F_SEAL_SHRINK
+            | fcntl.F_SEAL_GROW
+            | fcntl.F_SEAL_SEAL
+        )
+        fcntl.fcntl(snapshot, fcntl.F_ADD_SEALS, required_seals)
+        observed_seals = fcntl.fcntl(snapshot, fcntl.F_GET_SEALS)
+        if observed_seals & required_seals != required_seals:
+            raise ProcessExecutionError(
+                "immutable POSIX executable launch snapshot could not be sealed"
+            )
+        if (
+            _pinned_executable_descriptor_sha256(snapshot)
+            != expected_sha256
+        ):
+            raise ProcessExecutionError(
+                "pinned runtime executable bytes changed during launch snapshot"
+            )
+        os.lseek(snapshot, 0, os.SEEK_SET)
+        return snapshot
+    except ProcessExecutionError:
+        if snapshot is not None:
+            try:
+                os.close(snapshot)
+            except OSError:
+                pass
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        if snapshot is not None:
+            try:
+                os.close(snapshot)
+            except OSError:
+                pass
+        raise ProcessExecutionError(
+            "unable to freeze pinned runtime executable bytes for launch"
+        ) from exc
+
+
 def _open_windows_executable_launch_lock(path: pathlib.Path) -> int:
     """Hold one final executable path against write/delete replacement."""
 
@@ -281,6 +372,29 @@ class _PinnedExecutableLaunchGuard:
                     raise ProcessExecutionError(
                         "pinned runtime executable bytes changed before process launch"
                     )
+                if not os.access(readmitted, os.X_OK):
+                    raise ProcessExecutionError(
+                        "pinned runtime executable is not executable"
+                    )
+
+                snapshot_descriptor = _open_posix_executable_launch_snapshot(
+                    descriptor,
+                    self._expected_sha256,
+                )
+                try:
+                    os.close(descriptor)
+                except OSError as exc:
+                    try:
+                        os.close(snapshot_descriptor)
+                    except OSError:
+                        pass
+                    self._descriptor = None
+                    raise ProcessExecutionError(
+                        "unable to release admitted executable descriptor"
+                    ) from exc
+                self._descriptor = snapshot_descriptor
+                descriptor = snapshot_descriptor
+                descriptor_stat = os.fstat(descriptor)
 
                 for descriptor_root in (
                     pathlib.Path("/proc/self/fd"),
