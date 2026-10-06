@@ -11,6 +11,9 @@ import pytest
 import nika_core.product_factory_packaged_local_startup as startup_module
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.product_factory_packaged_local_settings import (
+    PackagedLocalProductFactorySettings,
+)
 from nika_core.product_factory_packaged_local_startup import (
     PackagedLocalProductFactoryStartupError,
     build_packaged_local_product_factory_program,
@@ -507,3 +510,302 @@ def test_program_composition_fails_closed_when_promoted_manifest_is_missing(
             settings=settings,
             startup=startup,
         )
+
+def _bridge_command(
+    bridge: object,
+    *,
+    request_id: str,
+    command: str,
+) -> dict[str, object]:
+    dispatch = getattr(bridge, "dispatch")
+    result = dispatch(
+        {
+            "request_id": request_id,
+            "action_id": "task.create",
+            "payload": {"command": command},
+        }
+    )
+    assert isinstance(result, dict)
+    return result
+
+
+def _changed_ollama_payload(*, revision: int, model: str) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "revision": revision,
+        "route_kind": "ollama",
+        "provider_id": "ollama",
+        "model": model,
+        "base_url": "http://localhost:11434",
+        "credential_ref": None,
+        "private_data_allowed": False,
+        "timeout_seconds": 60.0,
+    }
+
+
+def test_windows_bridge_blocks_new_factory_pass_after_model_revision_changes(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    repository = _repository(tmp_path)
+    database = (tmp_path / "model-stale.db").resolve()
+    raw = _startup_json(
+        tmp_path,
+        repository,
+        executable=str(pathlib.Path(executable).resolve()),
+    )
+    seed_store = SQLiteStore(database)
+    seed_store.initialize()
+    _configure_ollama(V01ModelSettings(seed_store))
+    cleanup: list[object] = []
+
+    try:
+        bridge, _products = nika_windows.build_windows_bridge(
+            AppConfig(
+                database_path=database,
+                product_factory_local_startup_json=raw,
+            ),
+            start_startup_recovery=False,
+            register_cleanup=cleanup.append,
+        )
+        created = _bridge_command(
+            bridge,
+            request_id="create-before-model-change",
+            command="Створи застосунок для доступного каталогу",
+        )
+        assert created["status"] == "completed"
+
+        changed = bridge.dispatch(
+            {
+                "request_id": "change-model",
+                "action_id": "settings.model.configure",
+                "payload": _changed_ollama_payload(
+                    revision=1,
+                    model="qwen3:8b-reconfigured",
+                ),
+            }
+        )
+        assert changed["status"] == "completed"
+
+        state = bridge.get_state()
+        local_state = state["state"]["product_factory_local_startup"]
+        assert local_state["runtime_status"] == "restart_required"
+
+        run = _bridge_command(
+            bridge,
+            request_id="run-after-model-change",
+            command="Run current Product Factory",
+        )
+        assert run["status"] == "rejected"
+        assert "Перезапустіть Nika" in str(run["message"])
+        assert run["focus_id"] == "model-route-kind"
+    finally:
+        for callback in reversed(cleanup):
+            callback()
+
+
+def test_windows_bridge_blocks_new_factory_pass_after_startup_settings_change(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    repository = _repository(tmp_path)
+    database = (tmp_path / "startup-stale.db").resolve()
+    raw = _startup_json(
+        tmp_path,
+        repository,
+        executable=str(pathlib.Path(executable).resolve()),
+    )
+    seed_store = SQLiteStore(database)
+    seed_store.initialize()
+    _configure_ollama(V01ModelSettings(seed_store))
+    saved = PackagedLocalProductFactorySettings(seed_store).configure(
+        {"revision": 0, "config_json": raw}
+    )
+    assert saved.status == "completed"
+    cleanup: list[object] = []
+
+    try:
+        bridge, _products = nika_windows.build_windows_bridge(
+            AppConfig(database_path=database),
+            start_startup_recovery=False,
+            register_cleanup=cleanup.append,
+        )
+        created = _bridge_command(
+            bridge,
+            request_id="create-before-startup-change",
+            command="Створи застосунок для доступного каталогу",
+        )
+        assert created["status"] == "completed"
+
+        changed_body = json.loads(raw)
+        changed_body["lease_seconds"] = 301
+        changed_raw = json.dumps(
+            changed_body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        changed = bridge.dispatch(
+            {
+                "request_id": "change-local-startup",
+                "action_id": "settings.product_factory_local.configure",
+                "payload": {"revision": 1, "config_json": changed_raw},
+            }
+        )
+        assert changed["status"] == "completed"
+
+        state = bridge.get_state()
+        local_state = state["state"]["product_factory_local_startup"]
+        assert local_state["runtime_status"] == "restart_required"
+
+        run = _bridge_command(
+            bridge,
+            request_id="run-after-startup-change",
+            command="Run current Product Factory",
+        )
+        assert run["status"] == "rejected"
+        assert "Перезапустіть Nika" in str(run["message"])
+        assert run["focus_id"] == "product-factory-local-startup-json"
+    finally:
+        for callback in reversed(cleanup):
+            callback()
+
+
+def test_windows_bridge_does_not_activate_mixed_model_authority_during_startup(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    repository = _repository(tmp_path)
+    database = (tmp_path / "startup-model-race.db").resolve()
+    raw = _startup_json(
+        tmp_path,
+        repository,
+        executable=str(pathlib.Path(executable).resolve()),
+    )
+    seed_store = SQLiteStore(database)
+    seed_store.initialize()
+    _configure_ollama(V01ModelSettings(seed_store))
+    original_build = nika_windows.build_packaged_local_product_factory_program
+
+    def build_then_change_model(
+        store: SQLiteStore,
+        *,
+        settings: V01ModelSettings,
+        startup: object,
+    ) -> object:
+        program = original_build(
+            store,
+            settings=settings,
+            startup=startup,
+        )
+        changed = settings.configure(
+            _changed_ollama_payload(
+                revision=1,
+                model="qwen3:8b-raced",
+            )
+        )
+        assert changed.status == "completed"
+        return program
+
+    monkeypatch.setattr(
+        nika_windows,
+        "build_packaged_local_product_factory_program",
+        build_then_change_model,
+    )
+    cleanup: list[object] = []
+    try:
+        bridge, _products = nika_windows.build_windows_bridge(
+            AppConfig(
+                database_path=database,
+                product_factory_local_startup_json=raw,
+            ),
+            start_startup_recovery=False,
+            register_cleanup=cleanup.append,
+        )
+        state = bridge.get_state()
+        assert (
+            state["state"]["product_factory_local_startup"]["runtime_status"]
+            == "invalid"
+        )
+        assert state["state"]["product_factory_execution_plan"] is None
+    finally:
+        for callback in reversed(cleanup):
+            callback()
+
+
+def test_windows_bridge_does_not_activate_changed_startup_authority_mid_build(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    repository = _repository(tmp_path)
+    database = (tmp_path / "startup-settings-race.db").resolve()
+    raw = _startup_json(
+        tmp_path,
+        repository,
+        executable=str(pathlib.Path(executable).resolve()),
+    )
+    seed_store = SQLiteStore(database)
+    seed_store.initialize()
+    _configure_ollama(V01ModelSettings(seed_store))
+    saved = PackagedLocalProductFactorySettings(seed_store).configure(
+        {"revision": 0, "config_json": raw}
+    )
+    assert saved.status == "completed"
+    original_build = nika_windows.build_packaged_local_product_factory_program
+
+    def build_then_change_startup(
+        store: SQLiteStore,
+        *,
+        settings: V01ModelSettings,
+        startup: object,
+    ) -> object:
+        program = original_build(
+            store,
+            settings=settings,
+            startup=startup,
+        )
+        changed_body = json.loads(raw)
+        changed_body["lease_seconds"] = 302
+        changed_raw = json.dumps(
+            changed_body,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        changed = PackagedLocalProductFactorySettings(store).configure(
+            {"revision": 1, "config_json": changed_raw}
+        )
+        assert changed.status == "completed"
+        return program
+
+    monkeypatch.setattr(
+        nika_windows,
+        "build_packaged_local_product_factory_program",
+        build_then_change_startup,
+    )
+    cleanup: list[object] = []
+    try:
+        bridge, _products = nika_windows.build_windows_bridge(
+            AppConfig(database_path=database),
+            start_startup_recovery=False,
+            register_cleanup=cleanup.append,
+        )
+        state = bridge.get_state()
+        assert (
+            state["state"]["product_factory_local_startup"]["runtime_status"]
+            == "invalid"
+        )
+        assert state["state"]["product_factory_execution_plan"] is None
+    finally:
+        for callback in reversed(cleanup):
+            callback()
