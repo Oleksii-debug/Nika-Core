@@ -29,6 +29,7 @@ from nika_core.packaging.windows import default_windows_plan
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
+_VOICE_RUNTIME_EVIDENCE_NAME = "packaged-voice-runtime-proof.json"
 _PACKAGED_INSTALLER_NAME = "install_nika_core.ps1"
 _DATA_ADOPTION_EVIDENCE_NAME = "packaged-data-adoption-proof.json"
 _RECOVERY_DIALOG_TITLE = "Nika Core — відновлення даних"
@@ -346,6 +347,78 @@ def _stage_canonical_installer(project_root: Path, bundle_dir: Path) -> Path:
             os.close(descriptor)
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+    return target
+
+
+
+def prove_packaged_voice_runtime(bundle_dir: Path, *, source_sha: str) -> Path:
+    """Prove frozen local-voice imports without opening a microphone or loading a model."""
+
+    executable = bundle_dir / "NikaCore.exe"
+    if not executable.is_file():
+        raise RuntimeError(f"packaged voice proof executable is missing: {executable}")
+    if not _FULL_SHA_RE.fullmatch(source_sha):
+        raise ValueError("packaged voice proof requires exact source SHA")
+
+    with tempfile.TemporaryDirectory(prefix="nika-voice-runtime-proof-") as temporary:
+        output = Path(temporary) / "voice-runtime.json"
+        completed = subprocess.run(
+            [
+                str(executable),
+                "--voice-runtime-proof",
+                "--voice-runtime-proof-output",
+                str(output),
+            ],
+            check=False,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"packaged voice runtime proof failed: exit {completed.returncode}"
+            )
+        try:
+            payload = json.loads(output.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(
+                "packaged voice runtime proof did not emit valid JSON evidence"
+            ) from exc
+
+    if not isinstance(payload, dict):
+        raise TypeError("packaged voice runtime proof evidence must be a JSON object")
+    required_true = (
+        "numpy_imported",
+        "sherpa_onnx_imported",
+        "sherpa_native_imported",
+        "sounddevice_imported",
+        "sounddevice_data_proven",
+    )
+    if (
+        payload.get("schema") != "nika.packaged-voice-runtime-proof:v1"
+        or any(payload.get(field) is not True for field in required_true)
+        or payload.get("microphone_opened") is not False
+        or payload.get("model_loaded") is not False
+    ):
+        raise RuntimeError("packaged voice runtime proof returned invalid evidence")
+    for forbidden_true in ("human_tested", "nvda_verified", "production_release_ready"):
+        if payload.get(forbidden_true) is not False:
+            raise RuntimeError(f"packaged voice proof may not set {forbidden_true}=true")
+
+    target = bundle_dir / _VOICE_RUNTIME_EVIDENCE_NAME
+    evidence = {
+        "schema_version": 1,
+        "source_sha": source_sha,
+        "packaged_executable_proven": True,
+        **{field: True for field in required_true},
+        "microphone_opened": False,
+        "model_loaded": False,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    target.write_text(
+        json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return target
 
 
@@ -711,6 +784,7 @@ def build(
     plan = default_windows_plan(project_root)
     PyInstaller.__main__.run(list(plan.pyinstaller_args()))
 
+    prove_packaged_voice_runtime(plan.bundle_dir, source_sha=exact_source_sha)
     prove_packaged_product_journey(plan.bundle_dir, source_sha=exact_source_sha)
     prove_packaged_data_adoption(plan.bundle_dir, source_sha=exact_source_sha)
     build_third_party_notices(plan.bundle_dir)
