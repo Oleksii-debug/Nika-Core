@@ -87,6 +87,66 @@ class _SelfCancellingProvider:
         raise AssertionError("self-cancelling provider must not complete")
 
 
+class _BehavioralCancellationError(ModelGatewayError):
+    def __getattribute__(self, name: str) -> object:
+        if name == "code":
+            raise asyncio.CancelledError()
+        return super().__getattribute__(name)
+
+
+class _BehavioralErrorCarrierProvider:
+    def __init__(self) -> None:
+        self.complete_calls = 0
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            provider_id="trusted",
+            kind=ProviderKind.LOCAL,
+            supports_private_data=True,
+        )
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.complete_calls += 1
+        raise _BehavioralCancellationError(
+            ModelErrorCode.CANCELLED,
+            "behavioral typed carrier",
+            provider_id="trusted",
+            retryable=True,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        )
+
+
+class _CancelOnCompare(str):
+    def __eq__(self, other: object) -> bool:
+        raise asyncio.CancelledError()
+
+
+class _BehavioralProviderIdentityProvider:
+    def __init__(self) -> None:
+        self.complete_calls = 0
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            provider_id="trusted",
+            kind=ProviderKind.LOCAL,
+            supports_private_data=True,
+        )
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.complete_calls += 1
+        error = ModelGatewayError(
+            ModelErrorCode.UNAVAILABLE,
+            "behavioral provider identity",
+            provider_id="trusted",
+            retryable=True,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        )
+        error.provider_id = _CancelOnCompare("trusted")
+        raise error
+
+
 class _FallbackProvider:
     def __init__(self) -> None:
         self.complete_calls = 0
@@ -234,6 +294,48 @@ def test_provider_cannot_self_cancel_gateway_task_or_trigger_fallback(
         asyncio.run(gateway.complete(_request(fallback=True)))
 
     error = caught.value
+    assert error.code is ModelErrorCode.PROVIDER_ERROR
+    assert error.provider_id == "trusted"
+    assert error.retryable is False
+    assert error.failure_effect is ModelFailureEffect.UNKNOWN
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert primary.complete_calls == 1
+    assert fallback.complete_calls == 0
+
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="provider-cancellation-authority",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.failed",
+    ]
+
+
+@pytest.mark.parametrize(
+    "provider_factory",
+    [_BehavioralErrorCarrierProvider, _BehavioralProviderIdentityProvider],
+)
+def test_behavioral_provider_error_carrier_cannot_escape_gateway_normalization(
+    tmp_path: Path,
+    provider_factory: (
+        type[_BehavioralErrorCarrierProvider]
+        | type[_BehavioralProviderIdentityProvider]
+    ),
+) -> None:
+    audit = _audit(tmp_path)
+    primary = provider_factory()
+    fallback = _FallbackProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(gateway.complete(_request(fallback=True)))
+
+    error = caught.value
+    assert type(error) is ModelGatewayError
     assert error.code is ModelErrorCode.PROVIDER_ERROR
     assert error.provider_id == "trusted"
     assert error.retryable is False
