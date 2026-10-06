@@ -149,6 +149,86 @@ def test_approval_is_two_step_and_replay_does_not_mint_second_effect(
     assert len(service.decision_history(_PROJECT_ID, "decision-owner")) == 2
 
 
+def test_repeated_approval_request_reuses_same_live_host_request(
+    tmp_path: Path,
+) -> None:
+    _store, repository, service, router = _build(tmp_path / "repeat-request.db")
+
+    first = router.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    second = router.create(
+        {"command": "схвали рішення ProductProject decision-owner"}
+    )
+
+    assert _approval_request_id(first.message) == _approval_request_id(second.message)
+    assert repository.get(_PROJECT_ID).row_version == 1
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
+
+
+def test_changing_active_product_project_cancels_old_approval_request(
+    tmp_path: Path,
+) -> None:
+    _store, repository, service, router = _build(tmp_path / "selection-change.db")
+    requested = router.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    request_id = _approval_request_id(requested.message)
+
+    switched = router.create(
+        {"command": "Create product application for a different owner decision"}
+    )
+    assert switched.status == "completed"
+    assert router.active_project_id != _PROJECT_ID
+
+    with pytest.raises(PackagedProductJourneyError, match="змінився"):
+        router.create(
+            {"command": f"confirm product decision approval {request_id}"}
+        )
+    with pytest.raises(PackagedProductJourneyError, match="невідомий|прострочений"):
+        router.create(
+            {"command": f"confirm product decision approval {request_id}"}
+        )
+
+    assert repository.get(_PROJECT_ID).row_version == 1
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
+
+
+def test_changed_research_evidence_between_request_and_confirm_fails_closed(
+    tmp_path: Path,
+) -> None:
+    store, repository, service, router = _build(tmp_path / "evidence-change.db")
+    requested = router.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    request_id = _approval_request_id(requested.message)
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM product_research_handoffs "
+            "WHERE project_id=? AND package_id=?",
+            (_PROJECT_ID, "research-owner-decision"),
+        ).fetchone()
+        assert row is not None
+        conn.execute(
+            "UPDATE product_research_handoffs SET payload_json=? "
+            "WHERE project_id=? AND package_id=?",
+            (
+                row["payload_json"] + " ",
+                _PROJECT_ID,
+                "research-owner-decision",
+            ),
+        )
+
+    with pytest.raises(PackagedProductJourneyError, match="змінилися після запиту"):
+        router.create(
+            {"command": f"confirm product decision approval {request_id}"}
+        )
+
+    assert repository.get(_PROJECT_ID).row_version == 1
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
+
+
 def test_reject_is_exact_id_durable_and_idempotent(tmp_path: Path) -> None:
     _store, repository, service, router = _build(tmp_path / "reject.db")
 
