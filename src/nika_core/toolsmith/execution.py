@@ -804,11 +804,12 @@ def _git(
     try:
         executable = pathlib.Path(command[0])
         if executable.is_absolute():
-            with _PinnedExecutableLaunchGuard(
+            launch_guard = _PinnedExecutableLaunchGuard(
                 executable,
                 command[1:],
                 expected_sha256=expected_executable_sha256,
-            ) as launch_executable:
+            )
+            with launch_guard as launch_executable:
                 launch_command = (
                     (str(launch_executable), *command[1:])
                     if os.name == "nt"
@@ -999,11 +1000,12 @@ def prepare_private_git_workspace(
         f"refs/heads/{plan.branch_name}",
     )
     try:
-        with _PinnedExecutableLaunchGuard(
+        collision_guard = _PinnedExecutableLaunchGuard(
             pathlib.Path(collision_argv[0]),
             collision_argv[1:],
             expected_sha256=git_executable_sha256,
-        ) as launch_executable:
+        )
+        with collision_guard as launch_executable:
             collision_command = (
                 (str(launch_executable), *collision_argv[1:])
                 if os.name == "nt"
@@ -1014,7 +1016,7 @@ def prepare_private_git_workspace(
                 if os.name == "nt"
                 else {
                     "executable": str(launch_executable),
-                    "pass_fds": launch_guard.pass_fds,
+                    "pass_fds": collision_guard.pass_fds,
                 }
             )
             collision = subprocess.run(
