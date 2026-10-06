@@ -29,6 +29,30 @@ from nika_core.research.knowledge_schema import initialize_knowledge_schema
 class SQLiteStore:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
+        self._database_identity = (
+            None
+            if str(self.path) == ":memory:"
+            else self.path.expanduser().resolve(strict=False)
+        )
+
+    def require_connection(self, conn: sqlite3.Connection) -> None:
+        """Fail closed unless conn is bound to this store's main database."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        rows = conn.execute("PRAGMA database_list").fetchall()
+        main_rows = tuple(row for row in rows if row[1] == "main")
+        if len(main_rows) != 1:
+            raise ValueError("connection does not expose one canonical main database")
+        database_file = main_rows[0][2]
+        if self._database_identity is None:
+            if database_file != "":
+                raise ValueError("connection does not belong to this SQLiteStore")
+            return
+        if not database_file:
+            raise ValueError("connection does not belong to this SQLiteStore")
+        actual_identity = Path(database_file).expanduser().resolve(strict=False)
+        if actual_identity != self._database_identity:
+            raise ValueError("connection does not belong to this SQLiteStore")
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:

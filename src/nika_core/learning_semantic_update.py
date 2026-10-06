@@ -139,8 +139,7 @@ class LearningSemanticUpdateRouter:
         address: SemanticUpdateAddress,
     ) -> SemanticUpdateReceipt:
         """Route one semantic target effect inside the shared caller transaction."""
-        if type(conn) is not sqlite3.Connection:
-            raise TypeError("conn must be an exact sqlite3.Connection")
+        self._store.require_connection(conn)
         return self._apply(
             conn,
             intent=intent,
