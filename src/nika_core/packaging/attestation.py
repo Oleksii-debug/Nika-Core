@@ -1,19 +1,26 @@
 from __future__ import annotations
 
-import hashlib
 import json
+import os
 import re
-from dataclasses import asdict, dataclass
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from nika_core.packaging.release import verify_distributable_evidence
+from nika_core.packaging.release import (
+    _bounded_json_depth,
+    _read_stable_release_bytes,
+    _stable_release_file_identity,
+    verify_distributable_evidence,
+)
 
 _SLSA_PROVENANCE_V1 = "https://slsa.dev/provenance/v1"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _ATTESTATION_ID_RE = re.compile(r"^[1-9][0-9]*$")
+_MAX_ATTESTATION_VERIFICATION_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,18 +42,20 @@ class ReleaseAttestationEvidence:
     production_release_ready: bool
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _read_verification(path: Path) -> list[dict[str, Any]]:
+    content = _read_stable_release_bytes(
+        path,
+        max_bytes=_MAX_ATTESTATION_VERIFICATION_BYTES,
+    )
+    if content is None:
+        raise ValueError(
+            "attestation verification output is unreadable, unstable, or exceeds the size limit"
+        )
+    if not _bounded_json_depth(content):
+        raise ValueError("attestation verification output exceeds structural limits")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        payload = json.loads(content.decode("utf-8-sig"))
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError("attestation verification output is invalid JSON") from exc
     if not isinstance(payload, list) or not payload:
         raise ValueError("attestation verification output must contain at least one result")
@@ -125,7 +134,10 @@ def build_release_attestation_evidence(
             "pre-human distributable evidence mismatch: " + ", ".join(distributable_findings)
         )
 
-    artifact_sha256 = _sha256(artifact_path)
+    artifact_identity = _stable_release_file_identity(artifact_path)
+    if artifact_identity is None:
+        raise ValueError("attestation artifact changed during evidence binding")
+    artifact_size, artifact_sha256 = artifact_identity
     if not _SHA256_RE.fullmatch(artifact_sha256):
         raise ValueError("artifact SHA-256 calculation failed")
 
@@ -135,12 +147,31 @@ def build_release_attestation_evidence(
             "verified attestation output does not contain SLSA provenance for exact artifact digest"
         )
 
+    # Bind provenance to the same distributable contract before and after the
+    # attestation verifier output is consumed. Every artifact observation uses
+    # the canonical held-descriptor snapshot authority, including Windows's
+    # write/delete sharing fence.
+    refreshed_findings = verify_distributable_evidence(
+        artifact_path,
+        prehuman_evidence_path,
+        source_sha=normalized_source_sha,
+        artifact_reference=artifact_reference,
+        expected_product_version=expected_product_version,
+    )
+    if refreshed_findings:
+        raise ValueError(
+            "pre-human distributable evidence changed during attestation: "
+            + ", ".join(refreshed_findings)
+        )
+    if _stable_release_file_identity(artifact_path) != artifact_identity:
+        raise ValueError("attestation artifact changed during evidence binding")
+
     return ReleaseAttestationEvidence(
         schema_version=1,
         commit_sha=normalized_source_sha,
         artifact_reference=artifact_reference,
         artifact_sha256=artifact_sha256,
-        artifact_size=artifact_path.stat().st_size,
+        artifact_size=artifact_size,
         repository=repository,
         signer_workflow=signer_workflow,
         source_ref=source_ref,
@@ -158,8 +189,68 @@ def write_release_attestation_evidence(
     path: Path,
     evidence: ReleaseAttestationEvidence,
 ) -> None:
+    if type(evidence) is not ReleaseAttestationEvidence:
+        raise ValueError("attestation evidence has invalid provenance identity")
+    payload = {
+        name: getattr(evidence, name, None)
+        for name in ReleaseAttestationEvidence.__dataclass_fields__
+    }
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != 1
+        or payload["verification_result_bound"] is not True
+        or payload["source_ref"] != "refs/heads/main"
+        or payload["human_tested"] is not False
+        or payload["nvda_verified"] is not False
+        or payload["production_release_ready"] is not False
+    ):
+        raise ValueError("attestation evidence has invalid automated release gates")
+
+    repository = payload["repository"]
+    attestation_id = payload["attestation_id"]
+    artifact_reference = payload["artifact_reference"]
+    if (
+        not isinstance(payload["commit_sha"], str)
+        or not _SOURCE_SHA_RE.fullmatch(payload["commit_sha"])
+        or not isinstance(payload["artifact_sha256"], str)
+        or not _SHA256_RE.fullmatch(payload["artifact_sha256"])
+        or type(payload["artifact_size"]) is not int
+        or not 0 < payload["artifact_size"] <= 2**63 - 1
+        or not isinstance(artifact_reference, str)
+        or not artifact_reference
+        or artifact_reference != artifact_reference.strip()
+        or not artifact_reference.isprintable()
+        or len(artifact_reference.encode("utf-8")) > 2048
+        or not isinstance(repository, str)
+        or not _REPOSITORY_RE.fullmatch(repository)
+        or payload["signer_workflow"]
+        != f"{repository}/.github/workflows/m12-prehuman-release-gate.yml"
+        or payload["predicate_type"] != _SLSA_PROVENANCE_V1
+        or not isinstance(attestation_id, str)
+        or not _ATTESTATION_ID_RE.fullmatch(attestation_id)
+        or payload["attestation_url"]
+        != f"https://github.com/{repository}/attestations/{attestation_id}"
+    ):
+        raise ValueError("attestation evidence has invalid provenance identity")
+
+    serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(asdict(evidence), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=".m12-attestation-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)

@@ -676,6 +676,36 @@ def _stable_release_file_snapshot(
     return snapshot
 
 
+def _stable_release_file_identity(path: Path) -> tuple[int, str] | None:
+    snapshot = _stable_release_file_snapshot(path, scan_secrets=False)
+    if snapshot is None:
+        return None
+    return snapshot.size, snapshot.sha256
+
+
+def _read_stable_release_bytes(path: Path, *, max_bytes: int) -> bytes | None:
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("max_bytes must be a non-negative exact integer")
+    try:
+        with _open_release_file_for_snapshot(path) as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_size > max_bytes:
+                return None
+            content = handle.read(max_bytes + 1)
+            after = os.fstat(handle.fileno())
+        current = path.stat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if len(content) > max_bytes or not _release_file_snapshot_is_stable(
+        before,
+        after,
+        current,
+        len(content),
+    ):
+        return None
+    return content
+
+
 def build_release_manifest(
     bundle_dir: Path,
     *,
@@ -864,12 +894,11 @@ def _decode_json_object(content: str) -> dict[str, Any] | None:
 
 
 def _read_evidence_object(evidence_path: Path) -> dict[str, Any] | None:
-    try:
-        with evidence_path.open("rb") as handle:
-            content = handle.read(_MAX_PREHUMAN_EVIDENCE_BYTES + 1)
-    except OSError:
-        return None
-    if len(content) > _MAX_PREHUMAN_EVIDENCE_BYTES or not _bounded_json_depth(content):
+    content = _read_stable_release_bytes(
+        evidence_path,
+        max_bytes=_MAX_PREHUMAN_EVIDENCE_BYTES,
+    )
+    if content is None or not _bounded_json_depth(content):
         return None
     try:
         text = content.decode("utf-8-sig")
