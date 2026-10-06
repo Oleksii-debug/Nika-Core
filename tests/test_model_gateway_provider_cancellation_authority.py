@@ -324,7 +324,11 @@ class _BlockingProvider:
         raise AssertionError("blocking provider must be cancelled")
 
 
-def _request(*, fallback: bool) -> ModelRequest:
+def _request(
+    *,
+    fallback: bool,
+    timeout_seconds: float = 5.0,
+) -> ModelRequest:
     return ModelRequest(
         request_id="provider-cancellation-authority",
         messages=(ModelMessage(role="user", content="fixture"),),
@@ -332,7 +336,7 @@ def _request(*, fallback: bool) -> ModelRequest:
         provider_id="trusted",
         fallback_provider_ids=("fallback",) if fallback else (),
         privacy=PrivacyClass.PUBLIC,
-        timeout_seconds=5.0,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -617,6 +621,46 @@ def test_stale_cancellation_count_cannot_authorize_provider_forged_cancel(
         "model.requested",
         "model.failed",
     ]
+
+
+def test_provider_cannot_launder_timeout_cancellation_into_late_success(
+    tmp_path: Path,
+) -> None:
+    audit = _audit(tmp_path)
+    primary = _CancellationSwallowingProvider(outcome="success")
+    fallback = _FallbackProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(
+            gateway.complete(
+                _request(
+                    fallback=True,
+                    timeout_seconds=0.01,
+                )
+            )
+        )
+
+    error = caught.value
+    assert error.code is ModelErrorCode.TIMEOUT
+    assert error.provider_id == "trusted"
+    assert error.retryable is False
+    assert error.failure_effect is ModelFailureEffect.UNKNOWN
+    assert primary.complete_calls == 1
+    assert fallback.complete_calls == 0
+
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="provider-cancellation-authority",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.failed",
+    ]
+    assert events[-1].payload["code"] == ModelErrorCode.TIMEOUT.value
+    assert events[-1].payload["failure_effect"] == ModelFailureEffect.UNKNOWN.value
 
 
 @pytest.mark.parametrize("outcome", ["success", "typed_error", "untyped_error"])
