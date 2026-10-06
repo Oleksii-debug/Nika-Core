@@ -90,11 +90,14 @@ class PackagedLocalRepositoryOperator:
             )
             if expected_version is None:
                 raise ValueError("unbind requires an exact binding version")
-            self._repository_for(project_id, repository_id)
+            plan = self._plan(project_id)
+            self._repository_from_plan(plan, repository_id)
             self._bindings.unbind(
                 project_id=project_id,
                 repository_id=repository_id,
                 expected_binding_version=expected_version,
+                expected_project_spec_version=plan.expected_spec_version,
+                expected_project_row_version=plan.expected_row_version,
             )
         except (KeyError, TypeError, ValueError, OSError) as exc:
             _log_failure("unbind", exc)
@@ -190,6 +193,7 @@ class PackagedLocalRepositoryOperator:
                     " Недійсні прив’язки можна безпечно замінити, вказавши "
                     "новий шлях; поточна CAS-версія збережена без розкриття старого шляху."
                 )
+            self._bindings.validate_plan(plan)
             return {
                 "status": "ready",
                 "project_id": plan.project_id,
