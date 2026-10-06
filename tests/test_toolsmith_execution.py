@@ -194,7 +194,7 @@ def test_typed_runner_rejects_final_executable_identity_change(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows CreateProcess boundary only")
-def test_windows_typed_runner_holds_executable_during_popen(
+def test_windows_typed_runner_holds_launch_paths_during_popen(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -204,6 +204,12 @@ def test_windows_typed_runner_holds_executable_during_popen(
     source = pathlib.Path(comspec).resolve(strict=True)
     executable = tmp_path / "runner.exe"
     replacement = tmp_path / "replacement.exe"
+    workspace = tmp_path / "workspace"
+    cwd = workspace / "cwd"
+    moved_cwd = workspace / "moved-cwd"
+    moved_workspace = tmp_path / "moved-workspace"
+    workspace.mkdir()
+    cwd.mkdir()
     shutil.copy2(source, executable)
     replacement.write_bytes(b"replacement executable bytes")
     original_popen = execution_module.subprocess.Popen
@@ -214,6 +220,10 @@ def test_windows_typed_runner_holds_executable_during_popen(
         attempted = True
         with pytest.raises(OSError):
             os.replace(replacement, executable)
+        with pytest.raises(OSError):
+            os.replace(cwd, moved_cwd)
+        with pytest.raises(OSError):
+            os.replace(workspace, moved_workspace)
         return original_popen(*args, **kwargs)
 
     monkeypatch.setattr(execution_module.subprocess, "Popen", probing_popen)
@@ -226,7 +236,8 @@ def test_windows_typed_runner_holds_executable_during_popen(
             max_output_bytes=4096,
             max_changed_files=1,
         ),
-        cwd=tmp_path,
+        cwd=cwd,
+        workspace_root=workspace,
         environment=sterile_git_environment(
             {"PATH": os.environ.get("PATH", "")}
         ),
@@ -236,9 +247,105 @@ def test_windows_typed_runner_holds_executable_during_popen(
     assert result.returncode == 0
     assert "guarded" in result.stdout.casefold()
     assert replacement.exists()
+    assert cwd.is_dir()
 
     os.replace(replacement, executable)
+    os.replace(cwd, moved_cwd)
+    os.replace(workspace, moved_workspace)
     assert executable.read_bytes() == b"replacement executable bytes"
+    assert (moved_workspace / "moved-cwd").is_dir()
+
+
+def test_typed_runner_rechecks_cancellation_at_final_launch_boundary(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cancellation = threading.Event()
+    original_guard = execution_module._PinnedExecutableLaunchGuard
+    popen_called = False
+
+    class CancellingGuard(original_guard):
+        def __enter__(self) -> pathlib.Path:
+            resolved = super().__enter__()
+            cancellation.set()
+            return resolved
+
+    def forbidden_popen(*args: object, **kwargs: object) -> object:
+        nonlocal popen_called
+        popen_called = True
+        raise AssertionError("Popen crossed a cancelled final launch boundary")
+
+    monkeypatch.setattr(
+        execution_module,
+        "_PinnedExecutableLaunchGuard",
+        CancellingGuard,
+    )
+    monkeypatch.setattr(execution_module.subprocess, "Popen", forbidden_popen)
+
+    result = run_typed_process(
+        (sys.executable, "-c", "print('must not run')"),
+        process_policy=_python_process_policy(),
+        resource_budget=ResourceBudget(
+            timeout_seconds=5,
+            max_output_bytes=4096,
+            max_changed_files=1,
+        ),
+        cwd=tmp_path,
+        environment=sterile_git_environment(
+            {"PATH": os.environ.get("PATH", "")}
+        ),
+        cancellation_event=cancellation,
+    )
+
+    assert result.cancelled is True
+    assert result.returncode != 0
+    assert popen_called is False
+
+
+def test_typed_runner_rechecks_deadline_at_final_launch_boundary(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monotonic_calls = 0
+    popen_called = False
+
+    class FakeTime:
+        @staticmethod
+        def monotonic() -> float:
+            nonlocal monotonic_calls
+            monotonic_calls += 1
+            return 0.0 if monotonic_calls == 1 else 2.0
+
+        @staticmethod
+        def sleep(_seconds: float) -> None:
+            raise AssertionError("sleep must not occur before rejected launch")
+
+    def forbidden_popen(*args: object, **kwargs: object) -> object:
+        nonlocal popen_called
+        popen_called = True
+        raise AssertionError("Popen crossed an expired final launch boundary")
+
+    monkeypatch.setattr(execution_module, "time", FakeTime())
+    monkeypatch.setattr(execution_module.subprocess, "Popen", forbidden_popen)
+
+    result = run_typed_process(
+        (sys.executable, "-c", "print('must not run')"),
+        process_policy=_python_process_policy(),
+        resource_budget=ResourceBudget(
+            timeout_seconds=1,
+            max_output_bytes=4096,
+            max_changed_files=1,
+        ),
+        cwd=tmp_path,
+        environment=sterile_git_environment(
+            {"PATH": os.environ.get("PATH", "")}
+        ),
+    )
+
+    assert result.timed_out is True
+    assert result.returncode != 0
+    assert popen_called is False
+    assert monotonic_calls >= 2
 
 
 def test_typed_runner_uses_final_executable_launch_guard(
