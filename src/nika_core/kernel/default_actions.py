@@ -18,6 +18,8 @@ def build_default_action_registry() -> ActionRegistry:
         ActionDefinition("agent.stop", "Зупинити агента", "Агенти", "Ctrl+Shift+S"),
         ActionDefinition("voice.start", "Почати голосовий ввід", "Голос", None),
         ActionDefinition("voice.cancel", "Скасувати голосовий ввід", "Голос", None),
+        ActionDefinition("voice.model.import", "Імпортувати голосову модель", "Голос", None),
+        ActionDefinition("voice.model.cancel", "Скасувати імпорт голосової моделі", "Голос", None),
         ActionDefinition("speech.start", "Озвучити текст", "Голос", None),
         ActionDefinition("speech.cancel", "Скасувати озвучення", "Голос", None),
         ActionDefinition("team.sources.configure", "Зберегти джерела команди", "Джерела", None),
