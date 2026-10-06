@@ -29,6 +29,34 @@ from nika_core.packaging.windows import default_windows_plan
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
+_PF11_TEAM_PLAN_EVIDENCE_NAME = "pf11-packaged-team-planning.json"
+_PACKAGED_TEAM_PLAN_PROOF_KEYS = frozenset(
+    {
+        "route",
+        "project_id",
+        "spec_version",
+        "state",
+        "team_plan_id",
+        "team_plan_binding_ref",
+        "team_plan_role_count",
+        "team_plan_independent_review_count",
+        "team_plan_permission_ceiling",
+        "team_plan_persisted_proven",
+        "team_plan_worker_dispatch_started",
+        "command_center_state_proven",
+        "current_command_proven",
+        "current_command_focus_proven",
+        "bridge_state_project_id",
+        "bridge_state_spec_version",
+        "bridge_state_status_count",
+        "bridge_state_decision_count",
+        "restart_selection_integrity_proven",
+        "bounded_projection_proven",
+        "human_tested",
+        "nvda_verified",
+        "production_release_ready",
+    }
+)
 _VOICE_RUNTIME_EVIDENCE_NAME = "packaged-voice-runtime-proof.json"
 _PACKAGED_INSTALLER_NAME = "install_nika_core.ps1"
 _DATA_ADOPTION_EVIDENCE_NAME = "packaged-data-adoption-proof.json"
@@ -166,7 +194,11 @@ def _pf11_regular_snapshot(path: Path) -> os.stat_result:
     return snapshot
 
 
-def _read_pf11_evidence(path: Path) -> dict[str, object]:
+def _read_pf11_evidence(
+    path: Path,
+    *,
+    expected_keys: frozenset[str] = PACKAGED_PF11_EVIDENCE_KEYS,
+) -> dict[str, object]:
     before = _pf11_regular_snapshot(path)
     if before.st_size > _PF11_MAX_EVIDENCE_BYTES:
         raise RuntimeError("packaged PF11 proof evidence exceeds the size limit")
@@ -219,9 +251,9 @@ def _read_pf11_evidence(path: Path) -> dict[str, object]:
     if type(payload) is not dict:
         raise TypeError("packaged PF11 proof evidence must be a JSON object")
     keys = frozenset(payload)
-    if keys != PACKAGED_PF11_EVIDENCE_KEYS:
-        missing = sorted(PACKAGED_PF11_EVIDENCE_KEYS - keys)
-        unexpected = sorted(keys - PACKAGED_PF11_EVIDENCE_KEYS)
+    if keys != expected_keys:
+        missing = sorted(expected_keys - keys)
+        unexpected = sorted(keys - expected_keys)
         raise RuntimeError(
             "packaged PF11 proof evidence schema mismatch: "
             f"missing={missing!r}, unexpected={unexpected!r}"
@@ -477,6 +509,132 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
         "bounded_projection_proven": True,
         "bridge_state_status_count": status_count,
         "bridge_state_decision_count": decision_count,
+        "packaged_executable_proven": True,
+        "restart_replay_proven": True,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    target.write_text(
+        json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return target
+
+
+def _require_team_plan_proof(payload: dict[str, object]) -> dict[str, object]:
+    def exact_nonnegative_int(field: str) -> int:
+        value = payload.get(field)
+        if type(value) is not int or value < 0:
+            raise RuntimeError(f"packaged PF11 team-plan proof returned invalid {field}")
+        return value
+
+    def nonempty_text(field: str) -> str:
+        value = payload.get(field)
+        if type(value) is not str or not value.strip() or value != value.strip():
+            raise RuntimeError(f"packaged PF11 team-plan proof returned invalid {field}")
+        return value
+
+    project_id = nonempty_text("project_id")
+    plan_id = nonempty_text("team_plan_id")
+    binding_ref = nonempty_text("team_plan_binding_ref")
+    role_count = exact_nonnegative_int("team_plan_role_count")
+    review_count = exact_nonnegative_int("team_plan_independent_review_count")
+    exact_nonnegative_int("bridge_state_status_count")
+    exact_nonnegative_int("bridge_state_decision_count")
+    if (
+        payload.get("route") != "product_project"
+        or payload.get("spec_version") != 2
+        or payload.get("state") != "active"
+        or not plan_id
+        or not binding_ref.startswith("pf-team-plan:v1:")
+        or role_count < 1
+        or review_count < 1
+        or review_count > role_count
+        or payload.get("team_plan_permission_ceiling") != ["read_project"]
+        or payload.get("team_plan_persisted_proven") is not True
+        or payload.get("team_plan_worker_dispatch_started") is not False
+        or payload.get("command_center_state_proven") is not True
+        or payload.get("current_command_proven") is not True
+        or payload.get("current_command_focus_proven") is not True
+        or payload.get("restart_selection_integrity_proven") is not True
+        or payload.get("bounded_projection_proven") is not True
+        or payload.get("bridge_state_project_id") != project_id
+        or payload.get("bridge_state_spec_version") != 2
+        or payload.get("human_tested") is not False
+        or payload.get("nvda_verified") is not False
+        or payload.get("production_release_ready") is not False
+    ):
+        raise RuntimeError("packaged PF11 team-plan proof returned invalid evidence")
+    return payload
+
+
+def prove_packaged_product_planning_journey(bundle_dir: Path, *, source_sha: str) -> Path:
+    """Run the packaged team planner twice and persist restart-bound planning evidence."""
+    executable = bundle_dir / "NikaCore.exe"
+    if not executable.is_file():
+        raise RuntimeError(f"packaged PF11 team-plan executable is missing: {executable}")
+    if not _FULL_SHA_RE.fullmatch(source_sha):
+        raise ValueError("packaged PF11 team-plan proof requires exact source SHA")
+
+    with tempfile.TemporaryDirectory(prefix="nika-pf11-team-plan-") as temporary:
+        root = Path(temporary)
+        database = root / "team-planning.db"
+        outputs: list[dict[str, object]] = []
+        environment = dict(os.environ)
+        environment["NIKA_DB_PATH"] = str(database)
+        for attempt in (1, 2):
+            output = root / f"team-plan-proof-{attempt}.json"
+            completed = subprocess.run(
+                [
+                    str(executable),
+                    "--pf11-team-plan-proof",
+                    "--pf11-team-plan-proof-output",
+                    str(output),
+                ],
+                check=False,
+                env=environment,
+                timeout=60,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"packaged PF11 team-plan proof failed on attempt {attempt}: "
+                    f"exit {completed.returncode}"
+                )
+            outputs.append(
+                _read_pf11_evidence(
+                    output,
+                    expected_keys=_PACKAGED_TEAM_PLAN_PROOF_KEYS,
+                )
+            )
+
+    first, second = outputs
+    if first != second:
+        raise RuntimeError("packaged PF11 team-plan restart replay changed durable identity")
+    first = _require_team_plan_proof(first)
+    project_id = first["project_id"]
+    target = bundle_dir / _PF11_TEAM_PLAN_EVIDENCE_NAME
+    evidence = {
+        "schema_version": 1,
+        "source_sha": source_sha,
+        "route": first["route"],
+        "product_project_id": project_id,
+        "product_project_spec_version": 2,
+        "product_project_state": first["state"],
+        "team_plan_id": first["team_plan_id"],
+        "team_plan_binding_ref": first["team_plan_binding_ref"],
+        "team_plan_role_count": first["team_plan_role_count"],
+        "team_plan_independent_review_count": first[
+            "team_plan_independent_review_count"
+        ],
+        "team_plan_permission_ceiling": ["read_project"],
+        "team_plan_persisted_proven": True,
+        "team_plan_worker_dispatch_started": False,
+        "product_command_center_proven": True,
+        "packaged_bridge_state_proven": True,
+        "bounded_projection_proven": True,
+        "bridge_state_status_count": first["bridge_state_status_count"],
+        "bridge_state_decision_count": first["bridge_state_decision_count"],
         "packaged_executable_proven": True,
         "restart_replay_proven": True,
         "human_tested": False,
@@ -786,6 +944,7 @@ def build(
 
     prove_packaged_voice_runtime(plan.bundle_dir, source_sha=exact_source_sha)
     prove_packaged_product_journey(plan.bundle_dir, source_sha=exact_source_sha)
+    prove_packaged_product_planning_journey(plan.bundle_dir, source_sha=exact_source_sha)
     prove_packaged_data_adoption(plan.bundle_dir, source_sha=exact_source_sha)
     build_third_party_notices(plan.bundle_dir)
     notice_findings = verify_third_party_notices(plan.bundle_dir)
