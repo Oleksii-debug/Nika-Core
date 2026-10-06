@@ -44,6 +44,7 @@ from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.ui.packaged_speech import PackagedSpeechFeature, build_packaged_speech
 from nika_core.ui.packaged_voice import PackagedVoiceFeature, build_packaged_voice
+from nika_core.ui.packaged_voice_model_setup import PackagedVoiceModelSetup
 from nika_core.training_runtime import TrainingStatusService
 from nika_core.ui.shell import launch_windows_shell, preflight_windows_shell
 from nika_core.v01_cloud_model_permission import (
@@ -282,12 +283,20 @@ def build_windows_bridge(
             else None
         ),
     )
+    if register_cleanup is not None:
+        register_cleanup(backend.close)
     voice: PackagedVoiceFeature = build_packaged_voice(
         config.database_path.parent,
         submit=backend.submit_packaged_coroutine,
     )
     if register_cleanup is not None and voice.available:
         register_cleanup(voice.close)
+    voice_model_setup = PackagedVoiceModelSetup(
+        config.database_path.parent,
+        submit=backend.submit_packaged_coroutine,
+    )
+    if register_cleanup is not None:
+        register_cleanup(voice_model_setup.close)
     speech: PackagedSpeechFeature = build_packaged_speech()
     if register_cleanup is not None:
         register_cleanup(speech.close)
@@ -351,6 +360,7 @@ def build_windows_bridge(
         state["v01_model_settings"] = model_settings.snapshot()
         state["speech"] = speech.snapshot()
         state["voice"] = voice.snapshot()
+        state["voice_model_setup"] = voice_model_setup.snapshot()
         return agent_builder_state.decorate(state)
 
     def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
@@ -386,6 +396,8 @@ def build_windows_bridge(
             "agent.stop": backend.stop_agent,
             "voice.start": voice.start,
             "voice.cancel": voice.cancel,
+            "voice.model.import": voice_model_setup.start,
+            "voice.model.cancel": voice_model_setup.cancel,
             "speech.start": speech.speak,
             "speech.cancel": speech.cancel,
             "team.sources.configure": source_settings.configure,
@@ -409,12 +421,15 @@ def build_windows_bridge(
             backend.start_startup_recovery()
         except Exception as exc:
             try:
-                voice.close()
+                speech.close()
             finally:
                 try:
-                    speech.close()
+                    voice_model_setup.close()
                 finally:
-                    backend.close()
+                    try:
+                        voice.close()
+                    finally:
+                        backend.close()
             raise _StartupRecoveryInventoryError(
                 "packaged startup recovery inventory failed"
             ) from exc
