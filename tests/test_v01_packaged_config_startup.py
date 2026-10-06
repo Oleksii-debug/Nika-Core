@@ -7,7 +7,13 @@ import pytest
 from pydantic_settings import SettingsError
 
 from nika_core.config import AppConfig
+from nika_core.ui import shell as ui_shell
 from scripts import nika_windows
+
+
+@pytest.fixture(autouse=True)
+def _shell_preflight_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(nika_windows, "preflight_windows_shell", lambda: None)
 
 
 @pytest.mark.parametrize(
@@ -122,6 +128,78 @@ def test_actual_corrupt_database_is_not_overwritten_during_failed_startup(
     assert len(messages) == 1
     assert "PRIVATE_" not in messages[0]
     assert database.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        FileNotFoundError("PRIVATE_UI_RESOURCE_PATH_CANARY"),
+        ImportError("PRIVATE_PYWEBVIEW_IMPORT_CANARY"),
+    ],
+)
+def test_shell_preflight_failure_happens_before_runtime_recovery_and_is_redacted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+    monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
+    messages: list[str] = []
+    monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
+
+    def fail_preflight() -> None:
+        raise failure
+
+    monkeypatch.setattr(nika_windows, "preflight_windows_shell", fail_preflight)
+    monkeypatch.setattr(
+        nika_windows,
+        "build_windows_bridge",
+        lambda _config: pytest.fail("runtime recovery must not start before shell preflight"),
+    )
+    monkeypatch.setattr(
+        nika_windows,
+        "launch_windows_shell",
+        lambda *_args, **_kwargs: pytest.fail("shell must not launch after failed preflight"),
+    )
+
+    assert nika_windows.main([]) == 1
+    assert len(messages) == 1
+    assert "Не вдалося підготувати інтерфейс Nika" in messages[0]
+    assert "не відновлювалися" in messages[0]
+    assert "PRIVATE_" not in messages[0]
+    assert not config.database_path.exists()
+
+
+def test_shell_preflight_checks_assets_before_importing_pywebview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "index.html").write_text("<html></html>", encoding="utf-8")
+    (tmp_path / "app.js").write_text("window.NIKA = true;", encoding="utf-8")
+    imported: list[str] = []
+    monkeypatch.setattr(ui_shell, "web_asset_root", lambda: tmp_path)
+    monkeypatch.setattr(ui_shell, "import_module", lambda name: imported.append(name))
+
+    with pytest.raises(FileNotFoundError):
+        ui_shell.preflight_windows_shell()
+
+    assert imported == []
+
+
+def test_shell_preflight_imports_pywebview_after_complete_assets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("index.html", "app.js", "styles.css"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    imported: list[str] = []
+    monkeypatch.setattr(ui_shell, "web_asset_root", lambda: tmp_path)
+    monkeypatch.setattr(ui_shell, "import_module", lambda name: imported.append(name))
+
+    ui_shell.preflight_windows_shell()
+
+    assert imported == ["webview"]
+
 
 @pytest.mark.parametrize(
     "failure",

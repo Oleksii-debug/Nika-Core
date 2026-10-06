@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,16 @@ def web_asset_root() -> Path:
 
 def index_path() -> Path:
     return web_asset_root() / "index.html"
+
+
+def preflight_windows_shell() -> None:
+    """Validate packaged UI inputs before startup recovery may produce effects."""
+
+    for required in ("index.html", "app.js", "styles.css"):
+        path = web_asset_root() / required
+        if not path.is_file() or path.stat().st_size == 0:
+            raise FileNotFoundError(f"Відсутній або порожній ресурс інтерфейсу: {path}")
+    import_module("webview")
 
 
 def launch_windows_shell(bridge: UIActionBridge, *, title: str = "Nika Core") -> Any:
@@ -27,14 +38,8 @@ def launch_windows_shell(bridge: UIActionBridge, *, title: str = "Nika Core") ->
     packaged WebView2 host.
     """
 
-    # index.html can exist even when the JavaScript bridge or stylesheet was
-    # lost after packaging. Fail before opening a blank/unusable NVDA window.
-    for required in ("index.html", "app.js", "styles.css"):
-        path = web_asset_root() / required
-        if not path.is_file() or path.stat().st_size == 0:
-            raise FileNotFoundError(f"Відсутній або порожній ресурс інтерфейсу: {path}")
-
-    import webview
+    preflight_windows_shell()
+    webview = import_module("webview")
 
     asset = index_path().resolve()
     window = webview.create_window(

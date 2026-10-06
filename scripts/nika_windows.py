@@ -37,7 +37,7 @@ from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.training_runtime import TrainingStatusService
-from nika_core.ui.shell import launch_windows_shell
+from nika_core.ui.shell import launch_windows_shell, preflight_windows_shell
 from nika_core.v01_cloud_model_permission import (
     CloudModelGrantRequest,
     CloudModelPermissionConfirm,
@@ -492,6 +492,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             command=args.pf11_proof_command,
             output_path=args.pf11_proof_output,
         )
+    try:
+        preflight_windows_shell()
+    except Exception as exc:  # noqa: BLE001 - redact packaged UI preflight failures
+        logging.getLogger(__name__).error(
+            "Packaged shell preflight failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося підготувати інтерфейс Nika. Перевірте цілісність "
+            "встановлення та повторіть запуск. Незавершені завдання не відновлювалися."
+        )
+        return 1
     try:
         bridge, _products = build_windows_bridge(config)
     except _StartupRecoveryInventoryError:
