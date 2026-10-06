@@ -319,12 +319,15 @@ class ModelGatewayAgentRuntime:
             self._active[key] = (task, hard_cancellable, True)
             task.cancel()
         try:
-            await task
+            await asyncio.shield(task)
         except asyncio.CancelledError:
-            pass
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            return task.cancelled()
         except ModelGatewayError:
-            pass
-        return True
+            return False
+        return False
 
     def _build_model_request(self, request: RuntimeRequest) -> ModelRequest:
         agent_id = self._required_text(request.payload, "agent_id")

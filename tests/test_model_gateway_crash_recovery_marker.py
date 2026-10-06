@@ -37,10 +37,12 @@ class _BarrierLocalProvider:
         release: asyncio.Event,
         *,
         supports_hard_cancellation: bool = False,
+        suppress_cancellation: bool = False,
     ) -> None:
         self._entered = entered
         self._release = release
         self._supports_hard_cancellation = supports_hard_cancellation
+        self._suppress_cancellation = suppress_cancellation
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -53,7 +55,11 @@ class _BarrierLocalProvider:
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self._entered.set()
-        await self._release.wait()
+        try:
+            await self._release.wait()
+        except asyncio.CancelledError:
+            if not self._suppress_cancellation:
+                raise
         return ModelResponse(
             request_id=request.request_id,
             text="deterministic embedded result",
@@ -311,5 +317,41 @@ def test_hard_cancellable_provider_is_advertised_and_can_cancel(tmp_path: Path) 
 
         assert accepted is True
         assert result.outcome is RuntimeOutcome.CANCELLED
+
+    asyncio.run(scenario())
+
+def test_hard_cancel_claim_requires_observed_task_cancellation(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "nika.db")
+        store.initialize()
+        definitions = _definitions(store)
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        gateway = ModelGateway()
+        gateway.register(
+            _BarrierLocalProvider(
+                entered,
+                release,
+                supports_hard_cancellation=True,
+                suppress_cancellation=True,
+            ),
+            default=True,
+        )
+        runtime = _runtime(gateway=gateway, definitions=definitions)
+        request = _request("suppressed-cancel-task")
+
+        assert RuntimeCapability.CANCELLATION in runtime.capabilities
+        execution = asyncio.create_task(runtime.run(request))
+        await entered.wait()
+        accepted = await runtime.cancel(
+            task_id=request.task_id,
+            thread_id=request.thread_id,
+        )
+        result = await execution
+        release.set()
+
+        assert accepted is False
+        assert result.outcome is RuntimeOutcome.COMPLETED
 
     asyncio.run(scenario())
