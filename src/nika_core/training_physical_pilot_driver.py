@@ -113,8 +113,10 @@ _MAX_SCALE_VALUE = (1 << 63) - 1
 _RESOURCE_KEYS = frozenset({"max_cpu_percent", "max_memory_percent"})
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_FILE_SHARE_WRITE = 0x00000002
 _WINDOWS_OPEN_EXISTING = 3
 _WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _TRAINER_KEYS = frozenset(
     {
@@ -188,6 +190,76 @@ def _open_authority_snapshot(path: Path) -> int:
     flags |= int(getattr(os, "O_NOFOLLOW", 0))
     flags |= int(getattr(os, "O_NONBLOCK", 0))
     return os.open(path, flags)
+
+
+def _close_windows_output_parent_stability_lock(handle: int | None) -> None:
+    if handle is None:
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        close_handle(ctypes.c_void_p(handle))
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        pass
+
+
+def _open_windows_output_parent_stability_lock(
+    path: Path,
+    expected_snapshot: os.stat_result,
+) -> int | None:
+    """Deny output-parent rename/delete while the durable root is created."""
+
+    if os.name != "nt":
+        return None
+    handle_value: int | None = None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            0,
+            _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS
+            | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        handle_value = int(handle)
+        current = os.lstat(path)
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or _is_reparse(current)
+            or not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino)
+            != (expected_snapshot.st_dev, expected_snapshot.st_ino)
+        ):
+            raise OSError("output_root parent changed while acquiring stability lock")
+        return handle_value
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        _close_windows_output_parent_stability_lock(handle_value)
+        raise PhysicalPilotDriverError(
+            "output_root parent directory could not be locked for creation"
+        ) from exc
 
 
 def _read_bounded_file(path: Path, *, max_bytes: int, name: str) -> bytes:
@@ -931,7 +1003,7 @@ def _require_existing_directory(path: Path, *, name: str) -> Path:
     return resolved
 
 
-def _preflight_output_root(path: Path) -> Path:
+def _preflight_output_root(path: Path) -> tuple[Path, os.stat_result]:
     try:
         parent = path.parent.resolve(strict=True)
         parent_stat = os.lstat(parent)
@@ -944,9 +1016,17 @@ def _preflight_output_root(path: Path) -> Path:
         or not stat.S_ISDIR(parent_stat.st_mode)
     ):
         _fail("output_root parent must be canonical and non-linked")
-    if path.exists():
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise PhysicalPilotDriverError(
+            "output_root destination could not be inspected"
+        ) from exc
+    else:
         _fail("output_root must not already exist")
-    return path
+    return path, parent_stat
 
 
 def _require_disjoint_output_root(path: Path, *, protected_roots: tuple[Path, ...]) -> None:
@@ -955,16 +1035,60 @@ def _require_disjoint_output_root(path: Path, *, protected_roots: tuple[Path, ..
             _fail("output_root must not be inside an input authority directory")
 
 
-def _create_output_root(path: Path) -> Path:
-    _preflight_output_root(path)
+def _create_output_root(
+    path: Path,
+    *,
+    expected_parent: os.stat_result,
+) -> Path:
+    parent_lock = _open_windows_output_parent_stability_lock(
+        path.parent,
+        expected_parent,
+    )
     try:
+        parent_before = os.lstat(path.parent)
+        if (
+            stat.S_ISLNK(parent_before.st_mode)
+            or _is_reparse(parent_before)
+            or not stat.S_ISDIR(parent_before.st_mode)
+            or (parent_before.st_dev, parent_before.st_ino)
+            != (expected_parent.st_dev, expected_parent.st_ino)
+        ):
+            _fail("output_root parent changed before durable creation")
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise PhysicalPilotDriverError(
+                "output_root destination could not be inspected"
+            ) from exc
+        else:
+            _fail("output_root must not already exist")
+
         path.mkdir()
         value = os.lstat(path)
+        parent_after = os.lstat(path.parent)
+        if (
+            stat.S_ISLNK(parent_after.st_mode)
+            or _is_reparse(parent_after)
+            or not stat.S_ISDIR(parent_after.st_mode)
+            or (parent_after.st_dev, parent_after.st_ino)
+            != (expected_parent.st_dev, expected_parent.st_ino)
+        ):
+            _fail("output_root parent changed during durable creation")
+        if (
+            stat.S_ISLNK(value.st_mode)
+            or _is_reparse(value)
+            or not stat.S_ISDIR(value.st_mode)
+        ):
+            _fail("output_root must be a non-linked directory")
+        return path
+    except PhysicalPilotDriverError:
+        raise
     except OSError as exc:
         raise PhysicalPilotDriverError("output_root could not be created") from exc
-    if stat.S_ISLNK(value.st_mode) or _is_reparse(value) or not stat.S_ISDIR(value.st_mode):
-        _fail("output_root must be a non-linked directory")
-    return path
+    finally:
+        _close_windows_output_parent_stability_lock(parent_lock)
 
 
 def _material_totals(materials: ResolvedTrainingPackage) -> tuple[int, int, int, int, int]:
@@ -1301,7 +1425,7 @@ def run_physical_pilot_from_config(
         raise PhysicalPilotDriverError(
             "model_dir is not a canonical local model directory"
         ) from exc
-    output_root = _preflight_output_root(config.output_root)
+    output_root, output_parent_snapshot = _preflight_output_root(config.output_root)
     protected_roots = (blob_store_root, model_dir)
     if initial_adapter_path is not None:
         protected_roots += (initial_adapter_path.parent,)
@@ -1355,7 +1479,10 @@ def run_physical_pilot_from_config(
         material_base_sha256=materials.evidence.base_artifact_sha256,
     )
 
-    output_root = _create_output_root(output_root)
+    output_root = _create_output_root(
+        output_root,
+        expected_parent=output_parent_snapshot,
+    )
     database_path = output_root / "physical-pilot.sqlite3"
     report_path = output_root / "physical-pilot-report.json"
     store = SQLiteStore(database_path)
