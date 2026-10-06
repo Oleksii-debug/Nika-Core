@@ -314,6 +314,7 @@ class ProductFactoryLocalRepositoryBindings:
                     now,
                 ),
             )
+            _require_filesystem_identity(root, identity)
 
         current = self.require(project_id, repository.repository_id)
         if current.binding_version != version:
@@ -872,18 +873,13 @@ def _same_physical_repository(
     first: _FilesystemIdentity,
     second: _FilesystemIdentity,
 ) -> bool:
+    if pathlib.Path(first.root_path) == pathlib.Path(second.root_path):
+        return True
     return (
-        first.root_device == second.root_device
+        first.root_inode != "0"
+        and second.root_inode != "0"
+        and first.root_device == second.root_device
         and first.root_inode == second.root_inode
-        and first.git_metadata_kind == second.git_metadata_kind
-        and first.git_metadata_device == second.git_metadata_device
-        and first.git_metadata_inode == second.git_metadata_inode
-        and first.gitfile_sha256 == second.gitfile_sha256
-        and first.git_target_device == second.git_target_device
-        and first.git_target_inode == second.git_target_inode
-        and first.git_commondir_sha256 == second.git_commondir_sha256
-        and first.git_common_device == second.git_common_device
-        and first.git_common_inode == second.git_common_inode
     )
 
 

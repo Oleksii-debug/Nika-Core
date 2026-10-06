@@ -319,6 +319,59 @@ def test_binding_rejects_same_physical_root_for_different_repository_ids(
         bindings.require(project.project_id, second_repository.repository_id)
 
 
+def test_binding_rejects_same_physical_root_after_git_metadata_replacement(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    first_repository = _repository_ref(
+        repository_id="repo-1",
+        locator="Oleksii-debug/first",
+    )
+    second_repository = _repository_ref(
+        repository_id="repo-2",
+        locator="Oleksii-debug/second",
+    )
+    project = _create_project_with_repositories(
+        store,
+        (first_repository, second_repository),
+    )
+    root = _root(tmp_path)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=first_repository,
+        root=root,
+        expected_binding_version=None,
+    )
+
+    original_git = tmp_path / "original git metadata"
+    (root / ".git").rename(original_git)
+    (root / ".git").mkdir()
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="already bound to another repository identity",
+    ):
+        bindings.bind(
+            project_id=project.project_id,
+            repository=second_repository,
+            root=root,
+            expected_binding_version=None,
+        )
+
+    assert bindings.current_binding_version(
+        project.project_id,
+        second_repository.repository_id,
+    ) is None
+
+    (root / ".git").rmdir()
+    original_git.rename(root / ".git")
+    assert bindings.require(
+        project.project_id,
+        first_repository.repository_id,
+    ).binding_version == first.binding_version
+
+
 def test_binding_allows_distinct_roots_for_distinct_repository_ids(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -742,6 +795,131 @@ def test_bind_rejects_filesystem_identity_changed_before_write(
             (project.project_id,),
         ).fetchone()[0]
     assert bound_audit_count == 0
+
+
+def test_bind_rolls_back_if_filesystem_changes_after_durable_write(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = _root(tmp_path, "late-swap repository")
+    moved = tmp_path / "late-swap original"
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    original_audit_payload = binding_module._audit_payload
+    swapped = False
+
+    def swapping_audit_payload(repository_arg, identity, version: int) -> str:
+        nonlocal swapped
+        payload = original_audit_payload(repository_arg, identity, version)
+        if not swapped:
+            swapped = True
+            root.rename(moved)
+            root.mkdir()
+            (root / ".git").mkdir()
+        return payload
+
+    monkeypatch.setattr(binding_module, "_audit_payload", swapping_audit_payload)
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="filesystem identity changed",
+    ):
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=root,
+            expected_binding_version=None,
+        )
+
+    assert swapped
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) is None
+    with store.connection() as conn:
+        generation = conn.execute(
+            "SELECT last_binding_version "
+            "FROM product_factory_local_repository_binding_generations "
+            "WHERE project_id=? AND repository_id=?",
+            (project.project_id, repository.repository_id),
+        ).fetchone()
+        audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE event_type='product_factory.local_repository.bound' "
+            "AND entity_type='product_project' AND entity_id=?",
+            (project.project_id,),
+        ).fetchone()[0]
+
+    assert generation is None
+    assert audit_count == 0
+
+
+def test_rebind_rolls_back_if_filesystem_changes_after_durable_write(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    first_root = _root(tmp_path, "late-rebind first")
+    replacement_root = _root(tmp_path, "late-rebind replacement")
+    moved = tmp_path / "late-rebind replacement original"
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    original_audit_payload = binding_module._audit_payload
+    swapped = False
+
+    def swapping_audit_payload(repository_arg, identity, version: int) -> str:
+        nonlocal swapped
+        payload = original_audit_payload(repository_arg, identity, version)
+        if not swapped:
+            swapped = True
+            replacement_root.rename(moved)
+            replacement_root.mkdir()
+            (replacement_root / ".git").mkdir()
+        return payload
+
+    monkeypatch.setattr(binding_module, "_audit_payload", swapping_audit_payload)
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="filesystem identity changed",
+    ):
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=replacement_root,
+            expected_binding_version=first.binding_version,
+        )
+
+    assert swapped
+    current = bindings.require(project.project_id, repository.repository_id)
+    assert current.binding_version == first.binding_version
+    assert current.root == first_root.resolve(strict=True)
+    with store.connection() as conn:
+        generation = conn.execute(
+            "SELECT last_binding_version "
+            "FROM product_factory_local_repository_binding_generations "
+            "WHERE project_id=? AND repository_id=?",
+            (project.project_id, repository.repository_id),
+        ).fetchone()
+        audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE event_type='product_factory.local_repository.bound' "
+            "AND entity_type='product_project' AND entity_id=?",
+            (project.project_id,),
+        ).fetchone()[0]
+
+    assert generation is not None
+    assert generation["last_binding_version"] == first.binding_version
+    assert audit_count == 1
 
 
 def test_rebind_rejects_filesystem_identity_changed_before_write_without_mutation(
