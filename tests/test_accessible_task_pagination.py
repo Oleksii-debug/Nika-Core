@@ -236,6 +236,16 @@ def test_html_and_script_expose_single_selection_task_controls() -> None:
     assert "setSelectedTaskControlsDisabled(selectedTaskId === null)" in script
 
 
+def test_task_selection_script_fails_closed_on_state_loss_and_noncanonical_ids() -> None:
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "src/nika_core/ui/web/app.js").read_text(encoding="utf-8")
+
+    assert "const canonicalTaskIdPattern =" in script
+    assert "canonicalTaskIdPattern.test(item.task_id)" in script
+    assert "function clearTaskSelection()" in script
+    assert "clearTaskSelection();\n    renderTaskPage(null);" in script
+
+
 def test_task_page_actions_reject_payload_authority(tmp_path: Path) -> None:
     backend, _queue = _backend(tmp_path)
 

@@ -375,6 +375,7 @@
     }
   }
 
+  const canonicalTaskIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
   const selectableTaskStates = new Set([
     "CREATED",
     "READY",
@@ -392,6 +393,11 @@
     }
   }
 
+  function clearTaskSelection() {
+    selectedTaskId = null;
+    setSelectedTaskControlsDisabled(true);
+  }
+
   function renderTasks(items) {
     const safeItems = Array.isArray(items) ? items : [];
     tasksList.replaceChildren();
@@ -404,7 +410,11 @@
         `ID: ${item.task_id} — ${presentState(taskStateLabels, item.state)} — `
         + (item.command || "Без назви")
       );
-      if (selectableTaskStates.has(item.state)) {
+      const canonicalTaskId = (
+        typeof item.task_id === "string"
+        && canonicalTaskIdPattern.test(item.task_id)
+      );
+      if (canonicalTaskId && selectableTaskStates.has(item.state)) {
         const input = document.createElement("input");
         const label = document.createElement("label");
         input.type = "radio";
@@ -430,8 +440,8 @@
       tasksList.appendChild(row);
     }
 
-    if (!selectionVisible) selectedTaskId = null;
-    setSelectedTaskControlsDisabled(selectedTaskId === null);
+    if (!selectionVisible) clearTaskSelection();
+    else setSelectedTaskControlsDisabled(false);
   }
 
   function renderTaskPage(snapshot) {
@@ -501,6 +511,7 @@
   function reportStateUnavailable() {
     renderStartupRecovery(null);
     renderModelSettings(null);
+    clearTaskSelection();
     renderTaskPage(null);
     renderProductProjectUnavailable(productProjectUnavailableMessage);
     renderTeamTaskUnavailable();
