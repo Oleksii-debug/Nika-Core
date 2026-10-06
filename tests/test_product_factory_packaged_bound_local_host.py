@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+import nika_core.product_factory_packaged_bound_local_host as bound_host_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_local_repository_binding import (
     ProductFactoryLocalRepositoryBindingError,
@@ -133,21 +134,27 @@ def _startup(tmp_path: pathlib.Path):
     return startup
 
 
+def _settings_payload(
+    *,
+    revision: int,
+    model: str = "qwen3:8b",
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "revision": revision,
+        "route_kind": "ollama",
+        "provider_id": "ollama",
+        "model": model,
+        "base_url": "http://localhost:11434",
+        "credential_ref": None,
+        "private_data_allowed": False,
+        "timeout_seconds": 60.0,
+    }
+
+
 def _settings(store: SQLiteStore) -> V01ModelSettings:
     settings = V01ModelSettings(store)
-    result = settings.configure(
-        {
-            "schema_version": 1,
-            "revision": 0,
-            "route_kind": "ollama",
-            "provider_id": "ollama",
-            "model": "qwen3:8b",
-            "base_url": "http://localhost:11434",
-            "credential_ref": None,
-            "private_data_allowed": False,
-            "timeout_seconds": 60.0,
-        }
-    )
+    result = settings.configure(_settings_payload(revision=0))
     assert result.status == "completed"
     return settings
 
@@ -184,6 +191,114 @@ def test_dynamic_host_builds_worker_only_from_durable_repository_binding(
     assert entry.program.worker.repositories == {
         repository.repository_id: durable_root,
     }
+
+
+@pytest.mark.parametrize(
+    "next_model",
+    ("qwen3:8b", "qwen3:8b-raced"),
+)
+def test_dynamic_host_rejects_model_revision_change_before_entry_construction(
+    tmp_path: pathlib.Path,
+    next_model: str,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    settings = _settings(store)
+    program = build_packaged_local_product_factory_program(
+        store,
+        settings=settings,
+        startup=_startup(tmp_path),
+    )
+    host = program.multi_repository_host
+    current = host._bindings_for_graph(
+        project,
+        _graph(project.project_id, repository),
+    )
+
+    changed = settings.configure(
+        _settings_payload(
+            revision=program.model_authority.revision,
+            model=next_model,
+        )
+    )
+    assert changed.status == "completed"
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="model authority changed; restart is required",
+    ):
+        host._entry_for("host-task", project, current)
+
+
+def test_dynamic_host_keeps_frozen_model_after_entry_admission(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    settings = _settings(store)
+    program = build_packaged_local_product_factory_program(
+        store,
+        settings=settings,
+        startup=_startup(tmp_path),
+    )
+    host = program.multi_repository_host
+    current = host._bindings_for_graph(
+        project,
+        _graph(project.project_id, repository),
+    )
+    original_builder = (
+        bound_host_module.build_repository_bound_packaged_local_product_factory_program
+    )
+    observed_authorities = []
+
+    def mutate_after_model_admission(*args, **kwargs):
+        authority = kwargs["model_authority"]
+        observed_authorities.append(authority)
+        changed = settings.configure(
+            _settings_payload(
+                revision=program.model_authority.revision,
+                model="qwen3:8b-raced",
+            )
+        )
+        assert changed.status == "completed"
+        return original_builder(*args, **kwargs)
+
+    monkeypatch.setattr(
+        bound_host_module,
+        "build_repository_bound_packaged_local_product_factory_program",
+        mutate_after_model_admission,
+    )
+
+    entry = host._entry_for("host-task", project, current)
+
+    assert observed_authorities == [program.model_authority]
+    assert entry.program.worker.planner.model == "qwen3:8b"
+    assert settings.snapshot()["model"] == "qwen3:8b-raced"
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="model authority changed; restart is required",
+    ):
+        host._entry_for("next-host-task", project, current)
+    assert len(observed_authorities) == 1
 
 
 def test_rebind_after_host_composition_fails_closed_before_worker_reuse(
