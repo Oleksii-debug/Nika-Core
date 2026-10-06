@@ -53,6 +53,7 @@ from nika_core.training_evaluation_champion import bind_champion_for_attested_ev
 from nika_core.training_evaluation_champion_execution import run_attested_champion_benchmark
 from nika_core.training_evaluation_comparison import (
     AttestedTrainingComparisonResult,
+    attested_training_comparison_evidence_sha256,
     experiment_snapshot_evidence_identity,
     run_attested_old_vs_new_comparison,
 )
@@ -149,6 +150,7 @@ _REPORT_KEYS_V1 = frozenset(
         "selected_candidate_id",
         "previous_champion_id",
         "training_binding_sha256",
+        "champion_binding_sha256",
         "champion_benchmark_sha256",
         "challenger_benchmark_sha256",
         "attestor_id",
@@ -160,6 +162,7 @@ _REPORT_KEYS_V1 = frozenset(
 _REPORT_KEYS = frozenset(
     {
         *_REPORT_KEYS_V1,
+        "champion_binding_sha256",
         "definition_sha256",
         "observations_sha256",
         "observation_count",
@@ -1316,6 +1319,11 @@ def _validate_progression_evaluation_authority(
         value = result[key]
         if value is not None:
             _sha256_text(value, name=f"progression evaluation {key}")
+    if (
+        _comparison_evidence_sha256_from_report(result)
+        != result["comparison_evidence_sha256"]
+    ):
+        _fail("progression evaluation comparison evidence digest is inconsistent")
     experiment_id = _require_text(
         result["experiment_id"],
         name="progression evaluation experiment_id",
@@ -1678,6 +1686,7 @@ def _canonical_report_payload(
         "selected_candidate_id": comparison_payload["selected_candidate_id"],
         "previous_champion_id": comparison_payload["previous_champion_id"],
         "training_binding_sha256": comparison_payload["training_binding_sha256"],
+        "champion_binding_sha256": comparison_payload["champion_binding_sha256"],
         "champion_benchmark_sha256": comparison_payload["champion_benchmark_sha256"],
         "challenger_benchmark_sha256": comparison_payload["challenger_benchmark_sha256"],
         "attestor_id": comparison_payload["attestor_id"],
@@ -1692,6 +1701,40 @@ def _canonical_report_payload(
         "observations_sha256": comparison_payload["observations_sha256"],
         "observation_count": comparison_payload["observation_count"],
     }
+
+
+def _comparison_evidence_sha256_from_report(
+    result: dict[str, object],
+) -> str:
+    payload: dict[str, object] = {
+        "schema": "nika-attested-training-comparison-v1",
+        "experiment_id": result["experiment_id"],
+        "experiment_status": result["experiment_status"],
+        "selected_candidate_id": result["selected_candidate_id"],
+        "previous_champion_id": result["previous_champion_id"],
+        "training_binding_sha256": result["training_binding_sha256"],
+        "champion_binding_sha256": result["champion_binding_sha256"],
+        "champion_benchmark_sha256": result["champion_benchmark_sha256"],
+        "challenger_benchmark_sha256": result["challenger_benchmark_sha256"],
+        "attestor_id": result["attestor_id"],
+        "attestor_sha256": result["attestor_sha256"],
+        "definition_sha256": result["definition_sha256"],
+        "observations_sha256": result["observations_sha256"],
+        "observation_count": result["observation_count"],
+    }
+    for key in (
+        "champion_provider_manifest_sha256",
+        "challenger_provider_manifest_sha256",
+    ):
+        value = result[key]
+        if value is not None:
+            payload[key] = value
+    try:
+        return attested_training_comparison_evidence_sha256(payload)
+    except (TypeError, ValueError) as exc:
+        raise PhysicalEvaluationDriverError(
+            "physical evaluation report cannot reproduce comparison evidence identity"
+        ) from exc
 
 
 def _validate_recovered_report_payload(
@@ -1742,7 +1785,13 @@ def _validate_recovered_report_payload(
         "attestor_sha256",
     ]
     if schema_version == _REPORT_SCHEMA_VERSION:
-        sha_keys.extend(("definition_sha256", "observations_sha256"))
+        sha_keys.extend(
+            (
+                "champion_binding_sha256",
+                "definition_sha256",
+                "observations_sha256",
+            )
+        )
     for key in sha_keys:
         _sha256_text(result[key], name=f"ledger result {key}")
     if schema_version == _REPORT_SCHEMA_VERSION:
@@ -1756,6 +1805,12 @@ def _validate_recovered_report_payload(
         value = result[key]
         if value is not None:
             _sha256_text(value, name=f"ledger result {key}")
+    if (
+        schema_version == _REPORT_SCHEMA_VERSION
+        and _comparison_evidence_sha256_from_report(result)
+        != result["comparison_evidence_sha256"]
+    ):
+        _fail("completed evaluation ledger comparison evidence digest is inconsistent")
     if result["experiment_status"] not in {"completed", "promoted"}:
         _fail("completed evaluation ledger result is not terminal")
     for key in ("selected_candidate_id", "previous_champion_id", "attestor_id"):
