@@ -265,6 +265,35 @@ def test_proof_rejects_inconsistent_comparison_evidence(
             report,
             pilot=pilot,
             evaluation_set_sha256=digest,
+            previous_champion_id="base-ref",
+        )
+
+
+def test_proof_rejects_wrong_previous_champion_authority(
+    proof: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _evaluation_report_fixture(proof)
+    digest = str(report["physical_pilot_evidence_sha256"])
+    pilot = SimpleNamespace(
+        schema_version=6,
+        platform="windows",
+        completed_steps=2,
+        evidence_sha256=digest,
+        candidate_artifact_ref="candidate-ref",
+    )
+    monkeypatch.setattr(
+        proof,
+        "_comparison_evidence_sha256_from_report",
+        lambda value: digest,
+    )
+
+    with pytest.raises(proof.ProofError, match="wrong previous_champion_id"):
+        proof._verified_evaluation_report(
+            report,
+            pilot=pilot,
+            evaluation_set_sha256=digest,
+            previous_champion_id="different-base",
         )
 
 

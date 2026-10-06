@@ -27,6 +27,7 @@ from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
 _MODEL_REPOSITORY = "amakhov/tiny-random-llama"
 _MODEL_REVISION = "fbf68d33cf68a9d1d4b71b3d098ae82c8c14443b"
 _MODEL_LICENSE = "Apache-2.0"
+_BASE_ARTIFACT_REF = "models/amakhov-tiny-random-llama"
 _MODEL_FILES = (
     "config.json",
     "generation_config.json",
@@ -319,11 +320,58 @@ def _runtime_versions() -> dict[str, str]:
     return result
 
 
+def _verified_pilot_config(
+    root: Path,
+    raw: bytes,
+    *,
+    pilot: PhysicalTrainingPilotReport,
+) -> dict[str, object]:
+    value = _load_object_bytes(raw, name="physical-pilot.json")
+    required = {
+        "schema_version": 1,
+        "base_artifact_ref": _BASE_ARTIFACT_REF,
+        "candidate_artifact_ref": pilot.candidate_artifact_ref,
+        "frozen_package_sha256": pilot.frozen_package_sha256,
+    }
+    for key, expected in required.items():
+        if value.get(key) != expected:
+            _fail(f"physical pilot config has wrong {key}")
+
+    runtime_versions = value.get("runtime_versions")
+    if (
+        type(runtime_versions) is not dict
+        or set(runtime_versions) != set(_RUNTIME_PACKAGES)
+        or runtime_versions != _runtime_versions()
+    ):
+        _fail("physical pilot runtime version authority changed")
+
+    expected_paths = {
+        "model_dir": (root / "model").resolve(strict=True),
+        "base_gguf_path": (root / "base.gguf").resolve(strict=True),
+        "output_root": (root / "run").resolve(strict=True),
+    }
+    for key, expected in expected_paths.items():
+        raw_path = value.get(key)
+        if type(raw_path) is not str:
+            _fail(f"physical pilot config has invalid {key}")
+        path = Path(raw_path)
+        if not path.is_absolute():
+            _fail(f"physical pilot config has non-absolute {key}")
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError as exc:
+            raise ProofError(f"physical pilot config {key} is unavailable") from exc
+        if resolved != expected:
+            _fail(f"physical pilot config points at a different {key}")
+    return value
+
+
 def _verified_evaluation_report(
     value: dict[str, object],
     *,
     pilot: PhysicalTrainingPilotReport,
     evaluation_set_sha256: str,
+    previous_champion_id: str,
 ) -> dict[str, object]:
     if frozenset(value) != _EVALUATION_REPORT_KEYS:
         _fail("physical evaluation report fields are invalid")
@@ -339,6 +387,7 @@ def _verified_evaluation_report(
         "requested_experiment_id": _EXPERIMENT_ID,
         "evaluation_set_sha256": evaluation_set_sha256,
         "selected_candidate_id": pilot.candidate_artifact_ref,
+        "previous_champion_id": previous_champion_id,
     }
     for key, expected in required.items():
         if value.get(key) != expected:
@@ -743,6 +792,16 @@ def verify(root: Path) -> None:
     report = PhysicalTrainingPilotReport.from_json(
         pilot_report_bytes.decode("utf-8", errors="strict")
     )
+    pilot_config_bytes = _stable_file_bytes(
+        root / "physical-pilot.json",
+        max_bytes=_MAX_EVIDENCE_MANIFEST_BYTES,
+        name="physical pilot config",
+    )
+    pilot_config = _verified_pilot_config(
+        root,
+        pilot_config_bytes,
+        pilot=report,
+    )
     evaluation_report_bytes = _stable_file_bytes(
         evaluation_report_path,
         max_bytes=_MAX_EVIDENCE_REPORT_BYTES,
@@ -757,6 +816,7 @@ def verify(root: Path) -> None:
         evaluation_report,
         pilot=report,
         evaluation_set_sha256=evaluation.content_sha256,
+        previous_champion_id=str(pilot_config["base_artifact_ref"]),
     )
     status = evaluation_report["experiment_status"]
     observation_count = evaluation_report["observation_count"]
@@ -807,6 +867,7 @@ def verify(root: Path) -> None:
         "proof_source_sha": source_sha,
         "model_dir_manifest_sha256": report.model_dir_manifest_sha256,
         "base_sha256": report.base_sha256,
+        "base_artifact_ref": pilot_config["base_artifact_ref"],
         "staged_assets_sha256": _sha256_bytes(staged_assets_bytes),
         "asset_repository": staged_assets["repository"],
         "asset_revision": staged_assets["revision"],
