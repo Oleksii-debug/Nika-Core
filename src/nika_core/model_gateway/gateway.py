@@ -152,6 +152,7 @@ class ModelGateway:
             missing_response = False
             terminal_error: ModelGatewayError | None = None
             cancelled = False
+            provider_finished_at: float | None = None
             try:
                 async with asyncio.timeout(remaining):
                     provider_task = asyncio.create_task(
@@ -165,6 +166,7 @@ class ModelGateway:
                     canonical_response, response_error, missing_response = (
                         await provider_task
                     )
+                    provider_finished_at = loop.time()
             except TimeoutError:
                 if self._admit_caller_cancellation(
                     request,
@@ -259,6 +261,16 @@ class ModelGateway:
                     cancellation_baseline,
                 ):
                     cancelled = True
+                elif provider_finished_at is None or provider_finished_at >= deadline:
+                    error = ModelGatewayError(
+                        ModelErrorCode.TIMEOUT,
+                        "model request exceeded its deadline",
+                        provider_id=capabilities.provider_id,
+                        retryable=False,
+                        failure_effect=ModelFailureEffect.UNKNOWN,
+                    )
+                    self._audit_failure(request, capabilities.provider_id, error)
+                    terminal_error = error
 
             # Raise after the provider exception handler so provider-controlled
             # diagnostics are not retained as public cause/context chains.
