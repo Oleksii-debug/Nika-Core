@@ -145,6 +145,15 @@ class _ResumeCheckpointLoadAuthority:
     ]
 
 
+@dataclass(frozen=True, slots=True)
+class _AdapterConfigPublicationAuthority:
+    adapter_dir: Path
+    config_path: Path
+    descriptor: int
+    directory_identity: tuple[int, int, int, int, int]
+    file_identity: tuple[int, int, int, int, int]
+
+
 def _fail(code: str) -> NoReturn:
     raise PeftTrainerError(code)
 
@@ -3695,7 +3704,24 @@ def _train_one_step(
         _fail("candidate_publish_failed")
     if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
         _fail("checkpoint_payload_changed_before_candidate")
-    adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
+    config_authority = _open_adapter_config_publication_authority(
+        adapter_dir,
+        checkpoint=checkpoint,
+        expected_payload_sha256=checkpoint_payload_sha256,
+    )
+    try:
+        adapter_config = _adapter_config_snapshot(
+            adapter_dir,
+            request,
+            config,
+        )
+        _verify_adapter_config_publication_authority(
+            config_authority,
+            checkpoint=checkpoint,
+            expected_payload_sha256=checkpoint_payload_sha256,
+        )
+    finally:
+        _close_adapter_config_publication_authority(config_authority)
     manifest_json = _candidate_manifest_json(
         request=request,
         config=config,
@@ -3816,6 +3842,117 @@ def _train_one_step(
         _best_effort_unlink_identity(candidate, temporary_identity)
         _fail("checkpoint_payload_changed_after_candidate")
     return resume_state, candidate_sha256
+
+
+def _close_adapter_config_publication_authority(
+    authority: _AdapterConfigPublicationAuthority,
+) -> None:
+    try:
+        os.close(authority.descriptor)
+    except OSError:
+        pass
+
+
+def _verify_adapter_config_publication_authority(
+    authority: _AdapterConfigPublicationAuthority,
+    *,
+    checkpoint: Path,
+    expected_payload_sha256: str,
+    code: str = "adapter_config_changed_during_candidate",
+) -> None:
+    directory = _require_directory_unlinked(
+        authority.adapter_dir,
+        code=code,
+    )
+    current = _require_regular_unlinked(
+        authority.config_path,
+        code=code,
+    )
+    try:
+        opened = os.fstat(authority.descriptor)
+    except OSError:
+        _fail(code)
+    if (
+        _stable_stat_identity(directory) != authority.directory_identity
+        or opened.st_nlink != 1
+        or current.st_nlink != 1
+        or _stable_stat_identity(opened) != authority.file_identity
+        or _stable_stat_identity(current) != authority.file_identity
+    ):
+        _fail(code)
+    if (
+        _checkpoint_payload_manifest_sha256(checkpoint)
+        != expected_payload_sha256
+    ):
+        _fail(code)
+
+
+def _open_adapter_config_publication_authority(
+    adapter_dir: Path,
+    *,
+    checkpoint: Path,
+    expected_payload_sha256: str,
+) -> _AdapterConfigPublicationAuthority:
+    expected_digest = _require_sha256(
+        expected_payload_sha256,
+        field="checkpoint_payload_sha256",
+    )
+    directory = _require_directory_unlinked(
+        adapter_dir,
+        code="adapter_config_publication_authority_invalid",
+    )
+    config_path = adapter_dir / "adapter_config.json"
+    before = _require_regular_unlinked(
+        config_path,
+        code="adapter_config_publication_authority_invalid",
+    )
+    if before.st_nlink != 1:
+        _fail("adapter_config_publication_authority_invalid")
+    try:
+        descriptor = _open_readonly_snapshot(config_path)
+    except OSError:
+        _fail("adapter_config_publication_authority_invalid")
+    authority = _AdapterConfigPublicationAuthority(
+        adapter_dir=adapter_dir,
+        config_path=config_path,
+        descriptor=descriptor,
+        directory_identity=_stable_stat_identity(directory),
+        file_identity=_stable_stat_identity(before),
+    )
+    try:
+        opened = os.fstat(descriptor)
+        current_directory = _require_directory_unlinked(
+            adapter_dir,
+            code="adapter_config_publication_authority_invalid",
+        )
+        current = _require_regular_unlinked(
+            config_path,
+            code="adapter_config_publication_authority_invalid",
+        )
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or opened.st_nlink != 1
+            or current.st_nlink != 1
+            or _stable_stat_identity(opened) != authority.file_identity
+            or _stable_stat_identity(current) != authority.file_identity
+            or _stable_stat_identity(current_directory)
+            != authority.directory_identity
+        ):
+            _fail("adapter_config_publication_authority_invalid")
+        _verify_adapter_config_publication_authority(
+            authority,
+            checkpoint=checkpoint,
+            expected_payload_sha256=expected_digest,
+            code="adapter_config_publication_authority_invalid",
+        )
+        return authority
+    except PeftTrainerError:
+        _close_adapter_config_publication_authority(authority)
+        raise
+    except OSError:
+        _close_adapter_config_publication_authority(authority)
+        _fail("adapter_config_publication_authority_invalid")
 
 
 def _looks_like_private_local_path(value: str) -> bool:
