@@ -20,6 +20,26 @@ def test_packaged_factory_operator_is_exercised_by_physical_m5_uia_proof() -> No
     )
 
     assert product_command in source
+    repository_control = (
+        "$factoryRepositoryControl = Wait-DescendantName "
+        "'Репозиторій з поточного плану' "
+        "([System.Windows.Automation.ControlType]::ComboBox)"
+    )
+    repository_root_control = (
+        "$factoryRepositoryRootControl = Wait-DescendantName "
+        "'Локальний Git-репозиторій — повний шлях' "
+        "([System.Windows.Automation.ControlType]::Edit)"
+    )
+    repository_bind_control = (
+        "$factoryRepositoryBindControl = Wait-DescendantName "
+        "'Зберегти прив’язку репозиторію' "
+        "([System.Windows.Automation.ControlType]::Button)"
+    )
+    assert repository_control in source
+    assert repository_root_control in source
+    assert repository_bind_control in source
+    assert "repository-binding control was enabled without local Product Factory" in source
+    assert "repository-binding controls are UIA-discoverable and fail closed" in source
     heading_capture = (
         "$factoryOperatorHeading = Wait-DescendantName 'Оператор Product Factory' "
         "([System.Windows.Automation.ControlType]::Text)"

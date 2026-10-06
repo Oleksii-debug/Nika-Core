@@ -739,6 +739,24 @@ try {
         $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
         $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
         $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
+        # Repository-binding controls must exist in the real frozen WebView2 even
+        # before local Product Factory prerequisites are configured. In this clean
+        # proof they must remain disabled: discoverability is required, but mutation
+        # without an active local host + admitted execution plan must fail closed.
+        $factoryRepositoryControl = Wait-DescendantName 'Репозиторій з поточного плану' ([System.Windows.Automation.ControlType]::ComboBox)
+        $factoryRepositoryRootControl = Wait-DescendantName 'Локальний Git-репозиторій — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
+        $factoryRepositoryBindControl = Wait-DescendantName 'Зберегти прив’язку репозиторію' ([System.Windows.Automation.ControlType]::Button)
+        foreach ($control in @(
+            $factoryRepositoryControl,
+            $factoryRepositoryRootControl,
+            $factoryRepositoryBindControl
+        )) {
+            if ((Resolve-BoundControlIdentity $control).Current.IsEnabled) {
+                throw 'Packaged repository-binding control was enabled without local Product Factory authority.'
+            }
+        }
+        Write-Host 'Packaged repository-binding controls are UIA-discoverable and fail closed before authority is configured.'
+
         $voiceModelSourceControl = Wait-DescendantName 'Папка локальної голосової моделі — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
         $voiceModelImportControl = Wait-DescendantName 'Імпортувати голосову модель' ([System.Windows.Automation.ControlType]::Button)
         $voiceModelCancelControl = Wait-DescendantName 'Скасувати імпорт голосової моделі' ([System.Windows.Automation.ControlType]::Button)
