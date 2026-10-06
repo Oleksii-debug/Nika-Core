@@ -332,11 +332,18 @@ def test_clock_must_be_exact_timezone_aware_utc_and_mints_no_event_on_failure(
         DatetimeSubclass(2030, 1, 1, tzinfo=UTC),
         datetime(2030, 1, 1, tzinfo=UTC).replace(tzinfo=None),
         datetime(2030, 1, 1, tzinfo=timezone(timedelta(hours=1))),
+        datetime(
+            2030,
+            1,
+            1,
+            tzinfo=timezone(timedelta(0), name="synthetic-zero-offset"),
+        ),
     ]
     expected: list[tuple[type[Exception], str]] = [
         (TypeError, "exact built-in datetime"),
         (TypeError, "exact built-in datetime"),
         (ValueError, "timezone-aware"),
+        (ValueError, "must use UTC"),
         (ValueError, "must use UTC"),
     ]
 
