@@ -17,7 +17,7 @@ from nika_core.background_life import (
     OwnerPresence,
     decide_background_work,
 )
-from nika_core.kernel.audit import AuditLog
+from nika_core.kernel.audit import AuditIntegrityError, AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.resources.manager import ResourceManager
@@ -1147,7 +1147,8 @@ class BackgroundDispatchGuard:
             expected_state=TaskState.PAUSED,
         )
         row = conn.execute(
-            "SELECT payload_json FROM audit_events "
+            "SELECT event_id, event_type, entity_type, entity_id, "
+            "payload_json, created_at FROM audit_events "
             "WHERE event_type = ? AND entity_type = ? AND entity_id = ? "
             "ORDER BY event_id DESC LIMIT 1",
             (_OWNER_RETURN_PAUSED_EVENT, "task", task_id),
@@ -1155,8 +1156,8 @@ class BackgroundDispatchGuard:
         if row is None:
             raise ValueError("PAUSED task lacks owner-return background pause provenance")
         try:
-            payload = json.loads(row["payload_json"])
-        except (TypeError, json.JSONDecodeError) as exc:
+            payload = AuditLog._event_from_row(row).payload
+        except AuditIntegrityError as exc:
             raise ValueError("owner-return pause provenance is malformed") from exc
         if type(payload) is not dict:
             raise ValueError("owner-return pause provenance is malformed")
@@ -1191,7 +1192,8 @@ class BackgroundDispatchGuard:
             expected_state=TaskState.PAUSED,
         )
         row = conn.execute(
-            "SELECT payload_json FROM audit_events "
+            "SELECT event_id, event_type, entity_type, entity_id, "
+            "payload_json, created_at FROM audit_events "
             "WHERE event_type = ? AND entity_type = ? AND entity_id = ? "
             "ORDER BY event_id DESC LIMIT 1",
             (_BACKGROUND_PAUSED_EVENT, "task", task_id),
@@ -1199,8 +1201,8 @@ class BackgroundDispatchGuard:
         if row is None:
             return False
         try:
-            payload = json.loads(row["payload_json"])
-        except (TypeError, json.JSONDecodeError):
+            payload = AuditLog._event_from_row(row).payload
+        except AuditIntegrityError:
             return False
         if type(payload) is not dict:
             return False
