@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sqlite3
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,11 @@ from nika_core.product_factory_orchestration import RepositoryRef
 from nika_core.product_factory_packaged_preparation import (
     PackagedProductFactoryExecutionPlan,
 )
-from nika_core.product_project import ProductProject, ProductProjectRepository
+from nika_core.product_project import (
+    ProductProject,
+    ProductProjectError,
+    ProductProjectRepository,
+)
 from nika_core.ui.bridge_models import UIResult
 
 _LOGGER = logging.getLogger(__name__)
@@ -31,6 +36,10 @@ class _PlanUnavailable(PackagedProductFactoryRepositoryBindingError):
 
 
 class _PlanStale(PackagedProductFactoryRepositoryBindingError):
+    pass
+
+
+class _AuthorityUnavailable(PackagedProductFactoryRepositoryBindingError):
     pass
 
 
@@ -85,6 +94,16 @@ class PackagedProductFactoryRepositoryBindingController:
                 message=(
                     "Завантажений JSON-план не відповідає поточній версії "
                     "ProductProject. Завантажте актуальний план."
+                ),
+            )
+        except _AuthorityUnavailable:
+            return _snapshot(
+                status="unavailable",
+                project_id=project_id,
+                repositories=[],
+                message=(
+                    "Не вдалося безпечно прочитати durable стан локальних "
+                    "репозиторіїв Product Factory."
                 ),
             )
 
@@ -154,6 +173,15 @@ class PackagedProductFactoryRepositoryBindingController:
                 ),
                 "product-factory-execution-plan-path",
             )
+        except _AuthorityUnavailable:
+            return _result(
+                "failed",
+                (
+                    "Не вдалося безпечно прочитати durable стан ProductProject. "
+                    "Прив’язку репозиторію не змінено."
+                ),
+                "product-factory-repository-root",
+            )
 
         repository = next(
             (
@@ -175,7 +203,7 @@ class PackagedProductFactoryRepositoryBindingController:
                 plan.project_id,
                 repository.repository_id,
             )
-        except ProductFactoryLocalRepositoryBindingError as exc:
+        except (ProductFactoryLocalRepositoryBindingError, sqlite3.Error) as exc:
             _log_failure("binding version read", exc)
             return _result(
                 "failed",
@@ -204,7 +232,12 @@ class PackagedProductFactoryRepositoryBindingController:
                 expected_project_spec_version=plan.expected_spec_version,
                 expected_project_row_version=plan.expected_row_version,
             )
-        except (ProductFactoryLocalRepositoryBindingError, OSError, ValueError) as exc:
+        except (
+            ProductFactoryLocalRepositoryBindingError,
+            OSError,
+            ValueError,
+            sqlite3.Error,
+        ) as exc:
             _log_failure("binding write", exc)
             return _result(
                 "rejected",
@@ -241,6 +274,11 @@ class PackagedProductFactoryRepositoryBindingController:
             project = self._projects.get(project_id)
         except KeyError as exc:
             raise _PlanStale("ProductProject no longer exists") from exc
+        except (ProductProjectError, sqlite3.Error) as exc:
+            _log_failure("ProductProject read", exc)
+            raise _AuthorityUnavailable(
+                "ProductProject durable state is unavailable"
+            ) from exc
         if (
             project.status != "active"
             or project.spec_version != plan.expected_spec_version
@@ -263,14 +301,25 @@ class PackagedProductFactoryRepositoryBindingController:
                 project_id,
                 repository.repository_id,
             )
-        except ProductFactoryLocalRepositoryBindingError:
-            version = None
+        except (ProductFactoryLocalRepositoryBindingError, sqlite3.Error) as exc:
+            _log_failure("binding snapshot version read", exc)
+            return _repository_state(
+                repository,
+                binding_status="invalid",
+                binding_version=None,
+                root=None,
+            )
         try:
             binding = self._bindings.require(project_id, repository.repository_id)
         except KeyError:
             binding_status = "unbound"
             root: str | None = None
-        except ProductFactoryLocalRepositoryBindingError:
+        except (
+            ProductFactoryLocalRepositoryBindingError,
+            OSError,
+            sqlite3.Error,
+        ) as exc:
+            _log_failure("binding snapshot authority read", exc)
             binding_status = "invalid"
             root = None
         else:
@@ -284,15 +333,30 @@ class PackagedProductFactoryRepositoryBindingController:
                 binding_status = "bound"
                 root = str(binding.root)
                 version = binding.binding_version
-        return {
-            "repository_id": repository.repository_id,
-            "provider": repository.provider,
-            "locator": repository.locator,
-            "default_branch": repository.default_branch,
-            "binding_status": binding_status,
-            "binding_version": version,
-            "root": root,
-        }
+        return _repository_state(
+            repository,
+            binding_status=binding_status,
+            binding_version=version,
+            root=root,
+        )
+
+
+def _repository_state(
+    repository: RepositoryRef,
+    *,
+    binding_status: str,
+    binding_version: int | None,
+    root: str | None,
+) -> dict[str, object]:
+    return {
+        "repository_id": repository.repository_id,
+        "provider": repository.provider,
+        "locator": repository.locator,
+        "default_branch": repository.default_branch,
+        "binding_status": binding_status,
+        "binding_version": binding_version,
+        "root": root,
+    }
 
 
 def _binding_payload(

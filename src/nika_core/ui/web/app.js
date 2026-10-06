@@ -880,6 +880,7 @@
       "project_required",
       "plan_required",
       "stale_plan",
+      "unavailable",
       "ready",
     ]);
     if (

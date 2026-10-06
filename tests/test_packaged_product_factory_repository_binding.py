@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -242,6 +243,69 @@ def test_bind_rejects_stale_plan_even_when_locator_survives(tmp_path: Path) -> N
     assert controller.snapshot(project.project_id)["status"] == "stale_plan"
 
 
+def test_controller_fails_closed_on_durable_read_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    projects = ProductProjectRepository(store)
+    bindings = ProductFactoryLocalRepositoryBindings(store, projects)
+    controller = PackagedProductFactoryRepositoryBindingController(
+        bindings=bindings,
+        projects=projects,
+        resolve_plan=lambda _project_id: plan,
+    )
+
+    def fail_project_read(_project_id: str):
+        raise sqlite3.DatabaseError("private durable failure")
+
+    monkeypatch.setattr(projects, "get", fail_project_read)
+    unavailable = controller.snapshot(project.project_id)
+    assert unavailable["status"] == "unavailable"
+    assert unavailable["repositories"] == []
+    assert "private durable failure" not in unavailable["message"]
+
+    rejected = controller.bind(
+        project.project_id,
+        {
+            "repository_id": repository.repository_id,
+            "root": str(_root(tmp_path, "never bound")),
+            "expected_binding_version": None,
+        },
+    )
+    assert rejected.status == "failed"
+    assert "private durable failure" not in rejected.message
+
+
+def test_binding_snapshot_contains_operational_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    projects = ProductProjectRepository(store)
+    bindings = ProductFactoryLocalRepositoryBindings(store, projects)
+    controller = PackagedProductFactoryRepositoryBindingController(
+        bindings=bindings,
+        projects=projects,
+        resolve_plan=lambda _project_id: plan,
+    )
+
+    def fail_version_read(_project_id: str, _repository_id: str):
+        raise sqlite3.DatabaseError("private binding failure")
+
+    monkeypatch.setattr(bindings, "current_binding_version", fail_version_read)
+    row = controller.snapshot(project.project_id)["repositories"][0]
+    assert row["binding_status"] == "invalid"
+    assert row["binding_version"] is None
+    assert row["root"] is None
+
+
 def test_controller_rejects_untrusted_repository_and_path_payload(
     tmp_path: Path,
 ) -> None:
@@ -307,6 +371,7 @@ def test_packaged_repository_binding_controls_and_bridge_contract() -> None:
     assert 'data-error-focus-target="product-factory-repository-root"' in html
 
     assert "renderProductFactoryRepositoryBindings(" in app
+    assert '"unavailable",' in app
     assert "state.product_factory_repository_bindings ?? null" in app
     assert 'actionId === "product.factory.repository.bind"' in app
     assert "payload.repository_id = repositoryId;" in app
