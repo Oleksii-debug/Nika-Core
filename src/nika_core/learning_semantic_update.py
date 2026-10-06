@@ -139,7 +139,7 @@ class LearningSemanticUpdateRouter:
         address: SemanticUpdateAddress,
     ) -> SemanticUpdateReceipt:
         """Route one semantic target effect inside the shared caller transaction."""
-        self._store.require_connection(conn)
+        self._store.require_transaction_connection(conn)
         return self._apply(
             conn,
             intent=intent,
