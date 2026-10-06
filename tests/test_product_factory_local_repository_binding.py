@@ -21,6 +21,7 @@ from nika_core.product_factory_packaged_preparation import (
     PackagedProductFactoryExecutionPlan,
 )
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
+from nika_core.product_project_schema import PRODUCT_PROJECT_MIGRATIONS
 
 
 def _store(tmp_path: pathlib.Path) -> SQLiteStore:
@@ -1081,13 +1082,8 @@ def test_binding_generation_migration_backfills_live_version(
         conn.execute(
             "DROP TABLE product_factory_local_repository_binding_generations"
         )
-        conn.execute(
-            "DELETE FROM product_project_schema_migrations WHERE version=7"
-        )
-
-    restarted_store = SQLiteStore(tmp_path / "стан Ніки" / "nika.db")
-    restarted_store.initialize()
-    with restarted_store.connection() as conn:
+        for statement in PRODUCT_PROJECT_MIGRATIONS[7]:
+            conn.execute(statement)
         generation = conn.execute(
             "SELECT last_binding_version "
             "FROM product_factory_local_repository_binding_generations "
@@ -1097,6 +1093,23 @@ def test_binding_generation_migration_backfills_live_version(
 
     assert generation is not None
     assert generation["last_binding_version"] == second.binding_version
+
+
+def test_product_project_migration_ledger_gap_fails_closed(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "DELETE FROM product_project_schema_migrations WHERE version=7"
+        )
+
+    restarted_store = SQLiteStore(store.path)
+    with pytest.raises(
+        RuntimeError,
+        match="migration ledger is non-contiguous",
+    ):
+        restarted_store.initialize()
 
 
 def test_unbind_rebind_advances_binding_generation_across_restart(
