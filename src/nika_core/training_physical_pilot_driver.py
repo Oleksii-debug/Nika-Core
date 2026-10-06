@@ -989,14 +989,18 @@ def _physical_training_task_payload(
             _fail("pilot training task must not carry progression authority")
         kind = "physical_peft_pilot"
         proof_sha256 = None
+        proof_payload = None
     else:
         if type(progression_proof) is not TrainingScaleProgressionProof:
             _fail("higher-tier training task requires trusted progression authority")
+        trusted = progression_proof.revalidated()
         kind = "physical_peft_scale_tier"
-        proof_sha256 = progression_proof.revalidated().proof_sha256
+        proof_sha256 = trusted.proof_sha256
+        proof_payload = trusted.canonical_payload()
     return {
         "job_id": job_id,
         "kind": kind,
+        "progression_proof": proof_payload,
         "progression_proof_sha256": proof_sha256,
         "scale_plan": canonical_plan.canonical_payload(),
         "scale_plan_sha256": canonical_plan.plan_sha256,

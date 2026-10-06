@@ -509,7 +509,36 @@ def test_physical_training_task_payload_persists_canonical_scale_plan(
     assert payload["scale_tier_id"] == "pilot"
     assert payload["scale_plan_sha256"] == plan.plan_sha256
     assert payload["scale_plan"] == plan.canonical_payload()
+    assert payload["progression_proof"] is None
     assert payload["progression_proof_sha256"] is None
+
+
+def test_higher_tier_task_payload_persists_exact_trusted_predecessor(
+    tmp_path: Path,
+) -> None:
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v3(tmp_path)))
+    assert config.scale_plan is not None
+    plan = driver.TrainingScalePlan(
+        plan_id=config.scale_plan.plan_id,
+        evaluation_set_sha256="e" * 64,
+        tiers=config.scale_plan.tiers,
+    )
+    claim = dict(config.progression_proof_payload or {})
+    claim["plan_sha256"] = plan.plan_sha256
+    claim["evaluation_set_sha256"] = plan.evaluation_set_sha256
+    trusted = _trusted_progression_proof(claim)
+
+    payload = driver._physical_training_task_payload(
+        job_id="small-job",
+        plan=plan,
+        tier_index=1,
+        progression_proof=trusted,
+    )
+
+    assert payload["kind"] == "physical_peft_scale_tier"
+    assert payload["scale_tier_id"] == "small"
+    assert payload["progression_proof"] == trusted.canonical_payload()
+    assert payload["progression_proof_sha256"] == trusted.proof_sha256
 
 
 def test_higher_tier_preflight_binds_plan_package_and_adapter(

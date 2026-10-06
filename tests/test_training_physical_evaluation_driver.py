@@ -183,6 +183,21 @@ def _scale_task_payload_with_plan(
     }
 
 
+def _scale_task_payload_with_chain(
+    *,
+    kind: str = "physical_peft_pilot",
+    proof: driver.TrainingScaleProgressionProof | None = None,
+) -> dict[str, object]:
+    payload = _scale_task_payload_with_plan(
+        kind=kind,
+        proof_sha256=None if proof is None else proof.proof_sha256,
+    )
+    payload["progression_proof"] = (
+        None if proof is None else proof.canonical_payload()
+    )
+    return payload
+
+
 def _pilot_report(
     *,
     descriptor: ModelArtifactDescriptor | None = None,
@@ -415,6 +430,93 @@ def test_find_pilot_task_accepts_plan_bound_scale_identity(
     )
 
     assert actual.task_id == expected.task_id
+
+
+def test_find_pilot_task_accepts_chained_higher_tier_identity(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    plan = driver.TrainingScalePlan.from_canonical_payload(_scale_plan_payload())
+    proof = training_scale._build_progression_proof(
+        plan_sha256=plan.plan_sha256,
+        tier_index=0,
+        authorization_sha256="2" * 64,
+        job_id="pilot-job",
+        job_fingerprint="3" * 64,
+        base_artifact_ref="models/base",
+        base_sha256="4" * 64,
+        candidate_artifact_ref="models/pilot-candidate",
+        candidate_sha256="5" * 64,
+        frozen_package_sha256="6" * 64,
+        training_material_sha256="7" * 64,
+        execution_plan_sha256="8" * 64,
+        comparison_evidence_sha256="9" * 64,
+        evaluation_set_sha256=plan.evaluation_set_sha256,
+    )
+    expected = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload={
+            **_scale_task_payload_with_chain(
+                kind="physical_peft_scale_tier",
+                proof=proof,
+            ),
+            "scale_tier_id": "small",
+        },
+    )
+
+    actual = driver._find_pilot_task(
+        store,
+        workspace_id="evaluation-workspace",
+        job_id="pilot-job",
+    )
+
+    assert actual.task_id == expected.task_id
+
+
+def test_find_pilot_task_rejects_chained_proof_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    plan = driver.TrainingScalePlan.from_canonical_payload(_scale_plan_payload())
+    proof = training_scale._build_progression_proof(
+        plan_sha256=plan.plan_sha256,
+        tier_index=0,
+        authorization_sha256="2" * 64,
+        job_id="pilot-job",
+        job_fingerprint="3" * 64,
+        base_artifact_ref="models/base",
+        base_sha256="4" * 64,
+        candidate_artifact_ref="models/pilot-candidate",
+        candidate_sha256="5" * 64,
+        frozen_package_sha256="6" * 64,
+        training_material_sha256="7" * 64,
+        execution_plan_sha256="8" * 64,
+        comparison_evidence_sha256="9" * 64,
+        evaluation_set_sha256=plan.evaluation_set_sha256,
+    )
+    payload = {
+        **_scale_task_payload_with_chain(
+            kind="physical_peft_scale_tier",
+            proof=proof,
+        ),
+        "progression_proof_sha256": "f" * 64,
+        "scale_tier_id": "small",
+    }
+    TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload=payload,
+    )
+
+    with pytest.raises(driver.PhysicalEvaluationDriverError, match="exactly one"):
+        driver._find_pilot_task(
+            store,
+            workspace_id="evaluation-workspace",
+            job_id="pilot-job",
+        )
 
 
 @pytest.mark.parametrize(
@@ -789,6 +891,73 @@ def test_durable_progression_loader_restores_only_completed_promoted_authority(
 
     assert restored.canonical_payload() == proof.canonical_payload()
     assert restored.proof_sha256 == proof.proof_sha256
+
+
+def test_higher_tier_evaluation_reuses_durable_predecessor_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = driver.TrainingScalePlan.from_canonical_payload(_scale_plan_payload())
+    prior = training_scale._build_progression_proof(
+        plan_sha256=plan.plan_sha256,
+        tier_index=0,
+        authorization_sha256="2" * 64,
+        job_id="pilot-job",
+        job_fingerprint="3" * 64,
+        base_artifact_ref="models/base",
+        base_sha256="4" * 64,
+        candidate_artifact_ref="models/pilot-candidate",
+        candidate_sha256="5" * 64,
+        frozen_package_sha256="6" * 64,
+        training_material_sha256="7" * 64,
+        execution_plan_sha256="8" * 64,
+        comparison_evidence_sha256="9" * 64,
+        evaluation_set_sha256=plan.evaluation_set_sha256,
+    )
+    pilot = _pilot_report()
+    task = SimpleNamespace(
+        payload={
+            **_scale_task_payload_with_chain(
+                kind="physical_peft_scale_tier",
+                proof=prior,
+            ),
+            "job_id": pilot.job_id,
+            "scale_tier_id": "small",
+        }
+    )
+    material = SimpleNamespace(
+        training_material_sha256=pilot.training_material_sha256,
+    )
+    observed: dict[str, object] = {}
+    authorization = SimpleNamespace(
+        authorization_sha256=pilot.scale_authorization_sha256,
+    )
+
+    monkeypatch.setattr(
+        driver,
+        "reconstruct_training_material_evidence",
+        lambda *_args, **_kwargs: material,
+    )
+
+    def authorize(**kwargs: object) -> SimpleNamespace:
+        observed.update(kwargs)
+        return authorization
+
+    monkeypatch.setattr(driver, "authorize_training_scale", authorize)
+    run = SimpleNamespace(base_artifact=object())
+
+    context = driver._reconstruct_scale_progression_context(
+        task=task,
+        package=object(),
+        workspace_id="evaluation-workspace",
+        pilot=pilot,
+        run=run,
+    )
+
+    assert context is not None
+    assert context.plan.plan_sha256 == plan.plan_sha256
+    assert observed["progression_proof"] == prior
+    assert observed["tier_id"] == "small"
 
 
 def test_durable_progression_loader_rejects_forged_claim_selection(

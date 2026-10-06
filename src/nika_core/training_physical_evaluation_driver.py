@@ -105,6 +105,9 @@ _SCALE_TRAINING_TASK_KEYS = frozenset(
 _SCALE_TRAINING_TASK_KEYS_WITH_PLAN = frozenset(
     {*_SCALE_TRAINING_TASK_KEYS, "scale_plan"}
 )
+_SCALE_TRAINING_TASK_KEYS_WITH_CHAIN = frozenset(
+    {*_SCALE_TRAINING_TASK_KEYS_WITH_PLAN, "progression_proof"}
+)
 _EVALUATION_OPERATION_TYPE = "training.physical_old_new_evaluation"
 _SCALE_PROGRESSION_OPERATION_TYPE = "training.physical_scale_progression"
 _SCALE_PROGRESSION_RESULT_KEYS = frozenset(
@@ -829,6 +832,7 @@ def _matches_physical_training_task_payload(
     if keys not in {
         _SCALE_TRAINING_TASK_KEYS,
         _SCALE_TRAINING_TASK_KEYS_WITH_PLAN,
+        _SCALE_TRAINING_TASK_KEYS_WITH_CHAIN,
     }:
         return False
     kind = payload.get("kind")
@@ -859,7 +863,26 @@ def _matches_physical_training_task_payload(
     )
     if len(matching) != 1:
         return False
-    return (kind == "physical_peft_pilot") == (matching[0] == 0)
+    tier_index = matching[0]
+    if (kind == "physical_peft_pilot") != (tier_index == 0):
+        return False
+    if keys != _SCALE_TRAINING_TASK_KEYS_WITH_CHAIN:
+        return True
+    raw_progression = payload.get("progression_proof")
+    if tier_index == 0:
+        return raw_progression is None
+    try:
+        prior = _task_progression_proof(
+            raw_progression,
+            expected_sha256=proof_sha256,
+        )
+    except (PhysicalEvaluationDriverError, TrainingScaleError, TypeError, ValueError):
+        return False
+    return (
+        prior.plan_sha256 == plan.plan_sha256
+        and prior.tier_index == tier_index - 1
+        and prior.evaluation_set_sha256 == plan.evaluation_set_sha256
+    )
 
 
 def _find_pilot_task(
@@ -1011,10 +1034,27 @@ def _reconstruct_scale_progression_context(
     raw_plan = payload.get("scale_plan")
     if raw_plan is None:
         return None
-    if payload.get("kind") != "physical_peft_pilot":
-        return None
     try:
         plan = TrainingScalePlan.from_canonical_payload(raw_plan)
+        matching = tuple(
+            index
+            for index, tier in enumerate(plan.tiers)
+            if tier.tier_id == payload["scale_tier_id"]
+        )
+        if len(matching) != 1:
+            _fail("durable training task scale tier is not unique")
+        tier_index = matching[0]
+        previous_proof: TrainingScaleProgressionProof | None = None
+        if tier_index == 0:
+            if payload.get("progression_proof") is not None:
+                _fail("pilot training task unexpectedly carries progression authority")
+        else:
+            if "progression_proof" not in payload:
+                return None
+            previous_proof = _task_progression_proof(
+                payload["progression_proof"],
+                expected_sha256=payload.get("progression_proof_sha256"),
+            )
         materials = reconstruct_training_material_evidence(
             package,
             workspace_id=workspace_id,
@@ -1028,6 +1068,7 @@ def _reconstruct_scale_progression_context(
             material_evidence=materials,
             execution_plan_sha256=pilot.execution_plan_sha256,
             max_steps=pilot.completed_steps,
+            progression_proof=previous_proof,
         )
     except (KeyError, TrainingScaleError, TypeError, ValueError) as exc:
         raise PhysicalEvaluationDriverError(
@@ -1135,6 +1176,37 @@ def _scale_progression_claim(value: object) -> dict[str, object]:
     if value["base_artifact_ref"] == value["candidate_artifact_ref"]:
         _fail("scale progression claim cannot overwrite its base artifact")
     return dict(value)
+
+
+def _task_progression_proof(
+    value: object,
+    *,
+    expected_sha256: object,
+) -> TrainingScaleProgressionProof:
+    claim = _scale_progression_claim(value)
+    expected = _sha256_text(
+        expected_sha256,
+        name="task progression proof_sha256",
+    )
+    restored = training_scale._build_progression_proof(
+        plan_sha256=claim["plan_sha256"],
+        tier_index=claim["tier_index"],
+        authorization_sha256=claim["authorization_sha256"],
+        job_id=claim["job_id"],
+        job_fingerprint=claim["job_fingerprint"],
+        base_artifact_ref=claim["base_artifact_ref"],
+        base_sha256=claim["base_sha256"],
+        candidate_artifact_ref=claim["candidate_artifact_ref"],
+        candidate_sha256=claim["candidate_sha256"],
+        frozen_package_sha256=claim["frozen_package_sha256"],
+        training_material_sha256=claim["training_material_sha256"],
+        execution_plan_sha256=claim["execution_plan_sha256"],
+        comparison_evidence_sha256=claim["comparison_evidence_sha256"],
+        evaluation_set_sha256=claim["evaluation_set_sha256"],
+    )
+    if restored.proof_sha256 != expected:
+        _fail("task progression proof payload does not match its durable digest")
+    return restored
 
 
 def _completed_progression_record(
