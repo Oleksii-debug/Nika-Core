@@ -230,6 +230,8 @@ class ProductFactoryToolsmithBridge:
         binding: ProductProjectCoordinatorBinding,
         coordinator: ProductFactoryCoordinator,
         component_id: str,
+        expected_work_id: str | None = None,
+        expected_capability_id: str | None = None,
     ) -> ComponentCapabilityResume | None:
         """Restart-safe registered capability → exact Product Factory repair transition.
 
@@ -253,6 +255,17 @@ class ProductFactoryToolsmithBridge:
             raise ProductFactoryToolsmithError(str(exc)) from exc
         if durable is None:
             return None
+        if expected_work_id is not None and durable.work_id != expected_work_id:
+            raise ProductFactoryToolsmithError(
+                "durable capability binding belongs to a different failed work item"
+            )
+        if (
+            expected_capability_id is not None
+            and durable.capability_id != expected_capability_id
+        ):
+            raise ProductFactoryToolsmithError(
+                "durable capability binding belongs to a different capability"
+            )
 
         durable = self._ensure_gap_begun(bindings, durable)
         checkpoint = _component_gap_from_binding(durable)
