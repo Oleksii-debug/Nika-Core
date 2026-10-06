@@ -43,6 +43,21 @@ def test_equivalent_database_aliases_preserve_explicit_unicode_path(
 
 
 @pytest.mark.parametrize("alias", ["NIKA_DB_PATH", "NIKA_DATABASE_PATH"])
+@pytest.mark.parametrize("value", ["", "   "])
+def test_present_empty_database_alias_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    alias: str,
+    value: str,
+) -> None:
+    monkeypatch.delenv("NIKA_DB_PATH", raising=False)
+    monkeypatch.delenv("NIKA_DATABASE_PATH", raising=False)
+    monkeypatch.setenv(alias, value)
+
+    with pytest.raises(ValueError, match="database_path must be absolute"):
+        AppConfig.from_environment()
+
+
+@pytest.mark.parametrize("alias", ["NIKA_DB_PATH", "NIKA_DATABASE_PATH"])
 def test_single_database_alias_still_selects_explicit_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias: str
 ) -> None:
