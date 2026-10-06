@@ -6,6 +6,7 @@ from threading import Event
 import pytest
 
 import nika_core.ui.packaged_speech as packaged_speech
+from nika_core.config import AppConfig
 from nika_core.kernel.default_actions import build_default_action_registry
 from nika_core.speech import (
     SpeechError,
@@ -14,6 +15,7 @@ from nika_core.speech import (
     SpeechRequest,
 )
 from nika_core.ui.packaged_speech import PackagedSpeechFeature
+from scripts import nika_windows
 
 
 class _FakeSpeechPort:
@@ -285,3 +287,54 @@ def test_packaged_speech_ui_preserves_single_live_region() -> None:
     assert 'state.speech ?? null' in script
     assert 'if (actionId === "speech.start") payload.text = speechText?.value ?? "";' in script
     assert "function renderSpeech(snapshot)" in script
+
+def test_current_windows_bridge_wires_speech_state_actions_and_cleanup(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = _FakeSpeechPort()
+    feature = PackagedSpeechFeature(output=port)
+    monkeypatch.setattr(nika_windows, "build_packaged_speech", lambda: feature)
+    cleanup_callbacks: list[object] = []
+
+    bridge, _products = nika_windows.build_windows_bridge(
+        AppConfig(database_path=(tmp_path / "nika.db").resolve()),
+        start_startup_recovery=False,
+        register_cleanup=cleanup_callbacks.append,
+    )
+
+    state = bridge.get_state()
+    assert state["ok"] is True
+    speech_state = state["state"]["speech"]
+    assert speech_state["schema"] == "nika.packaged-speech-state:v1"
+    assert speech_state["status"] == "idle"
+    assert "text" not in speech_state
+    assert cleanup_callbacks == [feature.close]
+
+    started = bridge.dispatch(
+        {
+            "request_id": "packaged-speech-current-terminal",
+            "action_id": "speech.start",
+            "payload": {"text": "Явний локальний тест озвучення."},
+        }
+    )
+    assert started["request_id"] == "packaged-speech-current-terminal"
+    assert started["status"] == "completed"
+    snapshot = _wait_for_status(feature, "completed")
+    assert snapshot["spoken_characters"] == len("Явний локальний тест озвучення.")
+    assert [request.text for request in port.requests] == [
+        "Явний локальний тест озвучення."
+    ]
+
+    cleanup = cleanup_callbacks[0]
+    assert callable(cleanup)
+    cleanup()
+    rejected = bridge.dispatch(
+        {
+            "request_id": "packaged-speech-after-close",
+            "action_id": "speech.start",
+            "payload": {"text": "Не запускати після cleanup."},
+        }
+    )
+    assert rejected["status"] == "rejected"
+
