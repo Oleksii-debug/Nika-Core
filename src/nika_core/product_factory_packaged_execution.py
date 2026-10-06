@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Callable, Coroutine
 from concurrent.futures import Future
 from threading import Lock
-from typing import Any
+from typing import Any, Protocol
 
 from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
 from nika_core.product_factory_packaged_preparation import (
@@ -26,6 +27,15 @@ PackagedCoroutineSubmitter = Callable[
     [Coroutine[Any, Any, Any]],
     Future[Any],
 ]
+
+
+class PackagedReviewedBuildRunnerPort(Protocol):
+    def advance(
+        self,
+        prepared: PreparedProductFactory,
+        *,
+        max_count: int = 32,
+    ) -> object: ...
 
 
 class PackagedProductFactoryExecutionError(RuntimeError):
@@ -53,6 +63,7 @@ class PackagedProductFactoryExecutionController:
         host: MultiRepositoryProductFactoryHost,
         resolve_plan: ProductFactoryExecutionPlanResolver,
         submit: PackagedCoroutineSubmitter,
+        build_runner: PackagedReviewedBuildRunnerPort | None = None,
         max_parallel: int = 4,
         max_count: int = 32,
     ) -> None:
@@ -66,6 +77,10 @@ class PackagedProductFactoryExecutionController:
             raise TypeError("Product Factory execution-plan resolver must be callable")
         if not callable(submit):
             raise TypeError("packaged coroutine submitter must be callable")
+        if build_runner is not None and not callable(
+            getattr(build_runner, "advance", None)
+        ):
+            raise TypeError("packaged reviewed build runner is invalid")
         if type(max_parallel) is not int or not 1 <= max_parallel <= 32:
             raise ValueError("Product Factory max_parallel must be 1..32")
         if type(max_count) is not int or not 1 <= max_count <= 256:
@@ -75,6 +90,7 @@ class PackagedProductFactoryExecutionController:
         self._host = host
         self._resolve_plan = resolve_plan
         self._submit = submit
+        self._build_runner = build_runner
         self._max_parallel = max_parallel
         self._max_count = max_count
         self._lock = Lock()
@@ -175,6 +191,12 @@ class PackagedProductFactoryExecutionController:
             max_parallel=self._max_parallel,
             max_count=self._max_count,
         )
+        if self._build_runner is not None:
+            await asyncio.to_thread(
+                self._build_runner.advance,
+                prepared,
+                max_count=self._max_count,
+            )
 
     def _done(self, project_id: str, future: Future[Any]) -> None:
         try:
