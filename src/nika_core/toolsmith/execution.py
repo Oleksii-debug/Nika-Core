@@ -28,6 +28,7 @@ from nika_core.toolsmith.workspace_security import (
     ensure_path_policy,
     ensure_real_directory_root,
     sterile_process_environment,
+    validate_git_branch_name,
     validate_typed_argv,
 )
 
@@ -780,19 +781,7 @@ def run_typed_process(
 
 
 def _validate_branch_name(branch_name: str) -> None:
-    if (
-        not branch_name
-        or branch_name != branch_name.strip()
-        or branch_name.startswith("-")
-        or "\x00" in branch_name
-        or any(
-            ord(character) < 32
-            or ord(character) == 127
-            or character in "\u0085\u2028\u2029"
-            for character in branch_name
-        )
-    ):
-        raise WorkspaceSecurityError("branch name is empty, ambiguous or contains control data")
+    validate_git_branch_name(branch_name)
 
 
 def _git(
