@@ -20,6 +20,7 @@ from nika_core.product_factory_deployment import (
     ResourceEnvelope,
 )
 from nika_core.product_factory_multi_repository import RepositoryGraphAuthority
+from nika_core.product_factory_review_authority import ProductFactoryReviewSubject
 
 
 class ReviewedBuildAdmissionError(ValueError):
@@ -144,14 +145,27 @@ def reviewed_component_build_spec(
         raise ReviewedBuildAdmissionError(
             "reviewed-build admission requires exact ProductFactoryCoordinator"
         )
-    if type(component_id) is not str or not component_id or component_id != component_id.strip():
-        raise ReviewedBuildAdmissionError("reviewed-build component id must be exact non-empty text")
+    if (
+        type(component_id) is not str
+        or not component_id
+        or component_id != component_id.strip()
+    ):
+        raise ReviewedBuildAdmissionError(
+            "reviewed-build component id must be exact non-empty text"
+        )
     _validate_authority(authority)
 
     snapshot = coordinator.snapshot()
-    if snapshot.project_id != authority.project_id or coordinator.graph.project_id != authority.project_id:
+    if (
+        snapshot.project_id != authority.project_id
+        or coordinator.graph.project_id != authority.project_id
+    ):
         raise ReviewedBuildAdmissionError(
             "PF4 coordinator project does not match durable repository-graph authority"
+        )
+    if coordinator.graph != authority.graph:
+        raise ReviewedBuildAdmissionError(
+            "PF4 coordinator graph does not match durable repository-graph authority"
         )
 
     component = next(
@@ -169,11 +183,14 @@ def reviewed_component_build_spec(
     if record is None:
         raise ReviewedBuildAdmissionError("reviewed-build component has no PF4 work record")
     _validate_accepted_record(authority, component, record)
+    _verify_current_review_authority(coordinator, record)
 
     result = record.result
     review = record.review
-    assert result is not None
-    assert review is not None
+    if result is None or review is None:
+        raise ReviewedBuildAdmissionError(
+            "accepted PF4 work lost result/review evidence during build admission"
+        )
 
     review_fingerprint = reviewed_candidate_fingerprint(
         authority=authority,
@@ -381,6 +398,46 @@ def _validate_accepted_record(authority, component, record: WorkRecord) -> None:
     if result.producer_actor_id == review.reviewer_id:
         raise ReviewedBuildAdmissionError(
             "accepted PF4 producer and independent reviewer must differ"
+        )
+
+
+def _verify_current_review_authority(
+    coordinator: ProductFactoryCoordinator,
+    record: WorkRecord,
+) -> None:
+    result = record.result
+    review = record.review
+    if result is None or review is None or result.producer_actor_id is None:
+        raise ReviewedBuildAdmissionError(
+            "accepted PF4 work lacks exact trusted review subject evidence"
+        )
+    review_authority = coordinator.review_authority
+    if review_authority is None:
+        raise ReviewedBuildAdmissionError(
+            "current trusted independent review authority is required for PF5 admission"
+        )
+    subject = ProductFactoryReviewSubject(
+        project_id=record.request.project_id,
+        component_id=record.request.component_id,
+        work_id=record.request.work_id,
+        repository_id=record.request.repository_id,
+        base_sha=record.request.base_sha,
+        result_sha=result.result_sha,
+        diff_digest=result.diff_digest,
+        attempt=record.request.attempt,
+        producer_actor_id=result.producer_actor_id,
+        reviewer_id=review.reviewer_id,
+        accepted=review.accepted,
+    )
+    try:
+        verified = review_authority.verify(subject, review.evidence_refs)
+    except Exception as exc:
+        raise ReviewedBuildAdmissionError(
+            "current trusted independent review authority verification failed"
+        ) from exc
+    if verified is not True:
+        raise ReviewedBuildAdmissionError(
+            "current trusted independent review authority rejected build admission"
         )
 
 
