@@ -326,7 +326,7 @@ def test_context_rejects_repository_not_explicitly_authorized(
         _run(program.ports.context_for(request))
 
 
-def test_policy_rejects_url_hosts_relative_executables_and_workspace_overlap(
+def test_policy_rejects_url_hosts_noncanonical_executables_and_workspace_overlap(
     tmp_path: pathlib.Path,
 ) -> None:
     python = str(pathlib.Path(sys.executable).resolve(strict=True))
@@ -338,9 +338,16 @@ def test_policy_rejects_url_hosts_relative_executables_and_workspace_overlap(
             approved_hosts=("https://agent.example",),
             resource_budget=budget,
         )
-    with pytest.raises(ValueError, match="absolute paths"):
+    remote_policy = OpenHandsProductFactoryPolicy(
+        allowed_executables=("python",),
+        approved_hosts=("localhost",),
+        resource_budget=budget,
+    )
+    assert remote_policy.allowed_executables == ("python",)
+
+    with pytest.raises(ValueError, match="canonical text"):
         OpenHandsProductFactoryPolicy(
-            allowed_executables=("python",),
+            allowed_executables=(" python",),
             approved_hosts=("localhost",),
             resource_budget=budget,
         )
