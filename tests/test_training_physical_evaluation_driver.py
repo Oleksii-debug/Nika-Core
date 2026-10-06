@@ -1559,6 +1559,25 @@ def test_completed_ledger_result_recovers_without_new_effect_identity(
     )
     assert recovered == payload
 
+    boolean_version = dict(payload)
+    boolean_version["schema_version"] = True
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="invalid report schema version",
+    ):
+        driver._validate_recovered_report_payload(
+            boolean_version,
+            pilot=_pilot_report(),
+            requested_experiment_id=config.experiment_id,
+            evaluation_set=evaluation,
+            execution_config=config.benchmark,
+            experiment_id=experiment_id,
+            training_binding_sha256="a" * 64,
+            attestor_id="evaluator-artifact",
+            attestor_sha256="c" * 64,
+        )
+
+
 def test_report_writer_is_no_clobber(tmp_path: Path) -> None:
     path = tmp_path / "physical-old-new-evaluation-report.json"
     path.write_text("existing\n", encoding="utf-8")
