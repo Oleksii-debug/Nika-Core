@@ -279,7 +279,8 @@ class PackagedProductCommandRouter:
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
     Explicit daily-report, training-status, intelligence-mode and long-task control intents
-    delegate only to injected incumbent handlers. Explicit Agent Builder intent delegates only to an injected
+    delegate only to injected incumbent handlers. Explicit Agent Builder intent delegates only
+    to an injected
     safe-draft handler. Toolsmith remains a separate fail-closed route. No high-impact external
     action is launched merely by command classification.
     """
