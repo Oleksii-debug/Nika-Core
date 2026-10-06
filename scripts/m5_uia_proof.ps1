@@ -40,7 +40,16 @@ public static class NikaUiaNative
 }
 '@
 
-$requiredNames = @('Nika Core', 'Що має зробити Nika?', 'Створити завдання', 'Клавіатура')
+$requiredNames = @(
+    'Nika Core',
+    'Що має зробити Nika?',
+    'Створити завдання',
+    'Голос Nika',
+    'Текст для озвучення',
+    'Озвучити текст',
+    'Скасувати озвучення',
+    'Клавіатура'
+)
 
 # WebView2 enables renderer accessibility on demand when assistive technology such
 # as a screen reader is detected. GitHub-hosted Windows runners do not run a
@@ -677,6 +686,18 @@ try {
         $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
         $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
         $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
+        $speechTextControl = Wait-DescendantName 'Текст для озвучення' ([System.Windows.Automation.ControlType]::Edit)
+        $speechStartControl = Wait-DescendantName 'Озвучити текст' ([System.Windows.Automation.ControlType]::Button)
+        $speechCancelControl = Wait-DescendantName 'Скасувати озвучення' ([System.Windows.Automation.ControlType]::Button)
+        if (-not (Resolve-BoundControlIdentity $speechStartControl).Current.IsEnabled) {
+            throw 'Packaged local speech Start control must be enabled while speech is idle.'
+        }
+        if ((Resolve-BoundControlIdentity $speechCancelControl).Current.IsEnabled) {
+            throw 'Packaged local speech Cancel control must be disabled while speech is idle.'
+        }
+        Set-BoundControlFocus $speechTextControl
+        Wait-FocusName $speechTextControl
+        Write-Host 'Packaged speech controls are UIA-discoverable and keyboard-focusable; no audio effect was invoked.'
 
         Set-BoundControlFocus $startControl
         [System.Windows.Forms.SendKeys]::SendWait('%1')
