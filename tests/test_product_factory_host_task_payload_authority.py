@@ -186,10 +186,16 @@ def test_pf6_latest_rejects_checkpoint_identity_storage_alias(
     )
 
     with store.connection() as conn:
-        conn.execute(
-            f"UPDATE checkpoints SET {field} = ? WHERE checkpoint_id = ?",
-            (replacement, newest_id),
-        )
+        if field == "stage":
+            statement = (
+                "UPDATE checkpoints SET stage = ? WHERE checkpoint_id = ?"
+            )
+        else:
+            assert field == "checkpoint_id"
+            statement = (
+                "UPDATE checkpoints SET checkpoint_id = ? WHERE checkpoint_id = ?"
+            )
+        conn.execute(statement, (replacement, newest_id))
 
     with pytest.raises(ProductFactoryDeploymentCheckpointError, match=message):
         host.latest_snapshot(

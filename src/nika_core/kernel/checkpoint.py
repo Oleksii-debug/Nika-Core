@@ -389,47 +389,7 @@ class CheckpointService:
         stage: str | None,
     ) -> sqlite3.Row | None:
         task_id_bytes = task_id.encode("utf-8")
-        where = """
-            (
-                (typeof(task_id) = 'text' AND task_id = ?)
-                OR (
-                    typeof(task_id) <> 'text'
-                    AND length(CAST(task_id AS BLOB)) = ?
-                    AND substr(CAST(task_id AS BLOB), 1, ?) = ?
-                )
-            )
-        """
-        parameters: list[object] = [
-            _TEXT_MAX_BYTES + 1,
-            _TEXT_MAX_BYTES + 1,
-            _TEXT_MAX_BYTES + 1,
-            _JSON_MAX_BYTES + 1,
-            _CHECKSUM_HEX_LENGTH + 1,
-            task_id,
-            len(task_id_bytes),
-            _TEXT_MAX_BYTES + 1,
-            task_id_bytes,
-        ]
-        if stage is not None:
-            stage_bytes = stage.encode("utf-8")
-            where += """
-                AND (
-                    (typeof(stage) = 'text' AND stage = ?)
-                    OR (
-                        typeof(stage) <> 'text'
-                        AND length(CAST(stage AS BLOB)) = ?
-                        AND substr(CAST(stage AS BLOB), 1, ?) = ?
-                    )
-                )
-            """
-            parameters.extend(
-                (
-                    stage,
-                    len(stage_bytes),
-                    _TEXT_MAX_BYTES + 1,
-                    stage_bytes,
-                )
-            )
+        stage_bytes = b"" if stage is None else stage.encode("utf-8")
         return conn.execute(
             """
             SELECT typeof(checkpoint_id) AS checkpoint_id_storage_type,
@@ -448,14 +408,42 @@ class CheckpointService:
                    length(CAST(checksum_sha256 AS BLOB)) AS checksum_byte_length,
                    substr(CAST(checksum_sha256 AS BLOB), 1, ?) AS checksum_blob
             FROM checkpoints
-            WHERE
-            """
-            + where
-            + """
+            WHERE (
+                (typeof(task_id) = 'text' AND task_id = ?)
+                OR (
+                    typeof(task_id) <> 'text'
+                    AND length(CAST(task_id AS BLOB)) = ?
+                    AND substr(CAST(task_id AS BLOB), 1, ?) = ?
+                )
+            )
+            AND (
+                ? IS NULL
+                OR (typeof(stage) = 'text' AND stage = ?)
+                OR (
+                    typeof(stage) <> 'text'
+                    AND length(CAST(stage AS BLOB)) = ?
+                    AND substr(CAST(stage AS BLOB), 1, ?) = ?
+                )
+            )
             ORDER BY rowid DESC
             LIMIT 1
             """,
-            tuple(parameters),
+            (
+                _TEXT_MAX_BYTES + 1,
+                _TEXT_MAX_BYTES + 1,
+                _TEXT_MAX_BYTES + 1,
+                _JSON_MAX_BYTES + 1,
+                _CHECKSUM_HEX_LENGTH + 1,
+                task_id,
+                len(task_id_bytes),
+                _TEXT_MAX_BYTES + 1,
+                task_id_bytes,
+                stage,
+                stage,
+                len(stage_bytes),
+                _TEXT_MAX_BYTES + 1,
+                stage_bytes,
+            ),
         ).fetchone()
 
     @staticmethod
