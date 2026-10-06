@@ -319,6 +319,44 @@ def test_decode_preserves_benign_scheme_less_repository_locator(
     assert plan.graph.repositories[0].locator == locator
 
 
+@pytest.mark.parametrize(
+    ("carrier", "field"),
+    [
+        ("top", "project_id"),
+        ("repository", "repository_id"),
+        ("repository", "provider"),
+        ("repository", "default_branch"),
+        ("component", "component_id"),
+        ("component", "repository_id"),
+    ],
+)
+def test_decode_rejects_control_characters_in_identity_fields(
+    carrier: str,
+    field: str,
+) -> None:
+    claim = _claim()
+    if carrier == "top":
+        claim[field] = "identity\nforged"
+    elif carrier == "repository":
+        repositories = claim["repositories"]
+        assert isinstance(repositories, list)
+        repository = repositories[0]
+        assert isinstance(repository, dict)
+        repository[field] = "identity\nforged"
+    else:
+        components = claim["components"]
+        assert isinstance(components, list)
+        component = components[0]
+        assert isinstance(component, dict)
+        component[field] = "identity\nforged"
+
+    with pytest.raises(
+        PackagedExecutionPlanAdmissionError,
+        match="single-line identity text",
+    ):
+        decode_packaged_product_factory_execution_plan(_encode(claim))
+
+
 def test_decode_rejects_control_characters_in_credential_reference() -> None:
     claim = _claim()
     repositories = claim["repositories"]
