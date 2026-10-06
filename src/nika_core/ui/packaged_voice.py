@@ -488,43 +488,48 @@ def build_packaged_voice(
             ),
         )
 
-    microphone = WindowsWasapiMicrophoneCaptureAdapter()
-    service = OneShotVoiceTurnService(
-        microphone=MicrophoneCaptureService(microphone),
-        speech_to_text=SpeechToTextService(stt),
-        wake_detector=WakeActivationDetector(),
-        enable_voice_activity=True,
-    )
-    def request_factory(request_id: str) -> VoiceTurnRequest:
-        capabilities = microphone.capabilities
-        return VoiceTurnRequest(
-            request_id=request_id,
-            capture=MicrophoneCaptureRequest(
-                request_id=request_id,
-                provider_id=capabilities.provider_id,
-                device_id=capabilities.device_id,
-                sample_rate_hz=_SAMPLE_RATE_HZ,
-                sample_count=_SAMPLE_RATE_HZ * _CAPTURE_SECONDS,
-                policy=MicrophoneCapturePolicy(
-                    max_audio_bytes=_CAPTURE_BYTES,
-                    timeout_seconds=12.0,
-                ),
-            ),
-            stt_provider_id=stt.provider_id,
-            stt_model=_MODEL_ID,
-            language=_LANGUAGE,
-            stt_policy=SpeechToTextPolicy(
-                max_audio_bytes=_CAPTURE_BYTES,
-                max_transcript_chars=MAX_TRANSCRIPT_CHARS,
-                timeout_seconds=30.0,
-            ),
+    try:
+        microphone = WindowsWasapiMicrophoneCaptureAdapter()
+        service = OneShotVoiceTurnService(
+            microphone=MicrophoneCaptureService(microphone),
+            speech_to_text=SpeechToTextService(stt),
+            wake_detector=WakeActivationDetector(),
+            enable_voice_activity=True,
         )
 
-    return PackagedVoiceFeature(
-        controller=DesktopVoiceTurnController(
-            service=service,
-            request_factory=request_factory,
-            submit=submit,
-        ),
-        model_loader=stt,
-    )
+        def request_factory(request_id: str) -> VoiceTurnRequest:
+            capabilities = microphone.capabilities
+            return VoiceTurnRequest(
+                request_id=request_id,
+                capture=MicrophoneCaptureRequest(
+                    request_id=request_id,
+                    provider_id=capabilities.provider_id,
+                    device_id=capabilities.device_id,
+                    sample_rate_hz=_SAMPLE_RATE_HZ,
+                    sample_count=_SAMPLE_RATE_HZ * _CAPTURE_SECONDS,
+                    policy=MicrophoneCapturePolicy(
+                        max_audio_bytes=_CAPTURE_BYTES,
+                        timeout_seconds=12.0,
+                    ),
+                ),
+                stt_provider_id=stt.provider_id,
+                stt_model=_MODEL_ID,
+                language=_LANGUAGE,
+                stt_policy=SpeechToTextPolicy(
+                    max_audio_bytes=_CAPTURE_BYTES,
+                    max_transcript_chars=MAX_TRANSCRIPT_CHARS,
+                    timeout_seconds=30.0,
+                ),
+            )
+
+        return PackagedVoiceFeature(
+            controller=DesktopVoiceTurnController(
+                service=service,
+                request_factory=request_factory,
+                submit=submit,
+            ),
+            model_loader=stt,
+        )
+    except Exception:
+        stt.close()
+        raise

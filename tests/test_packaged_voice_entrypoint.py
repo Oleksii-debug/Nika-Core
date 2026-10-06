@@ -155,6 +155,44 @@ def test_packaged_voice_refuses_indirected_preexisting_model_before_native_open(
     assert "не встановлена безпечно" in feature.snapshot()["message"]
 
 
+def test_packaged_voice_releases_model_authority_when_microphone_build_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_root = tmp_path / "voice" / "whisper"
+    model_root.mkdir(parents=True)
+    for name in ("encoder.onnx", "decoder.onnx", "tokens.txt"):
+        (model_root / name).write_bytes(b"test")
+    monkeypatch.setattr(packaged_voice.sys, "platform", "win32")
+
+    closed: list[packaged_voice._PinnedModelAuthority] = []
+    original_close = packaged_voice._PinnedModelAuthority.close
+
+    def track_close(authority: packaged_voice._PinnedModelAuthority) -> None:
+        closed.append(authority)
+        original_close(authority)
+
+    class _FailingMicrophone:
+        def __init__(self) -> None:
+            raise RuntimeError("synthetic microphone construction failure")
+
+    monkeypatch.setattr(packaged_voice._PinnedModelAuthority, "close", track_close)
+    monkeypatch.setattr(
+        packaged_voice,
+        "WindowsWasapiMicrophoneCaptureAdapter",
+        _FailingMicrophone,
+    )
+
+    with pytest.raises(RuntimeError, match="synthetic microphone construction failure"):
+        packaged_voice.build_packaged_voice(
+            tmp_path.resolve(),
+            submit=lambda coroutine: Future(),
+        )
+
+    assert len(closed) == 1
+    assert closed[0].closed is True
+
+
 def test_packaged_voice_build_is_lazy_and_preserves_current_vad_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
