@@ -190,11 +190,21 @@ On success the command prints a minimized JSON payload and atomically creates:
 
 `physical-old-new-evaluation-report.json`
 
-inside `physical_pilot_output_root`. That report contains the requested experiment
-label, deterministic physical attempt ID, evidence digests, Experiment Engine
-status/selection IDs, benchmark evidence digests, and attestor identity. It does not
-contain model paths, evaluator paths, held-out prompts, expected answers,
-environment variables, credentials, or model bytes.
+inside `physical_pilot_output_root`. Report schema v2 contains the requested
+experiment label, deterministic physical attempt ID, evidence digests, Experiment
+Engine status/selection IDs, benchmark/binding evidence digests, attestor identity,
+and the canonical Experiment definition/observations digests plus observation count.
+Those Experiment identities are part of the aggregate attested-comparison digest, so
+restart recovery fails closed if terminal Experiment evidence drifts after evaluation.
+The report does not contain model paths, evaluator paths, held-out prompts, expected
+answers, environment variables, credentials, or model bytes.
+
+A legacy schema-v1 COMPLETED ledger result remains readable only for ordinary
+same-evaluation recovery after an interrupted report publication. It does not contain
+the Experiment evidence identities required to restore a trusted scale-progression
+proof, so it cannot authorize a new higher training tier after restart. Re-run the
+physical evaluation under the current schema before attempting scale progression;
+do not synthesize missing v2 digests.
 
 If that report already exists, the command refuses to repeat model effects. A
 `promoted` Experiment Engine status is selection evidence only; it is not model
