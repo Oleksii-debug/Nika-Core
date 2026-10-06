@@ -373,6 +373,124 @@ def test_packaged_authority_reaches_durable_pf5_prepared_state(
     assert host.checkpoints.latest().snapshot.sequence == 2
 
 
+def test_restart_after_dispatch_drift_recovers_only_to_inspection_state(
+    tmp_path: Path,
+) -> None:
+    store, startup, node, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={
+            "kind": "product_factory",
+            "product_project_id": PROJECT_ID,
+        },
+    )
+    host = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task.task_id,
+        project_id=PROJECT_ID,
+        node=node,
+        startup=startup,
+        trusted_authority=runtime.trusted_execution,
+        output_policies=runtime.output_policies,
+    )
+    host.submit(spec)
+    host.prepare(spec.request.work_id)
+    dispatch = host.begin_dispatch(spec.request.work_id)
+
+    runtime.authorities.configure(
+        _template(argv_suffix=("--replacement",), max_changed_files=3),
+        expected_revision=1,
+    )
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="changed after PF5 work admission",
+    ):
+        runtime.trusted_execution.resolve(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            work_id=spec.request.work_id,
+        )
+
+    restarted_runtime = PackagedBuildAuthorityRuntime(
+        PackagedBuildAuthorityStore(
+            store,
+            node=node,
+            startup=startup,
+        )
+    )
+    restarted = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task.task_id,
+        project_id=PROJECT_ID,
+        node=node,
+        startup=startup,
+        trusted_authority=restarted_runtime.trusted_execution,
+        output_policies=restarted_runtime.output_policies,
+    )
+    recovered = restarted.coordinator.get(spec.request.work_id)
+
+    assert recovered.state is BuildExecutionState.RECONCILE_REQUIRED
+    assert recovered.dispatch == dispatch
+    assert restarted.coordinator.trusted_authority is restarted_runtime.trusted_execution
+    assert restarted.reconcile(spec.request.work_id).state is (
+        BuildExecutionState.RECONCILE_REQUIRED
+    )
+
+
+def test_restart_after_prepared_authority_drift_still_fails_closed(
+    tmp_path: Path,
+) -> None:
+    store, startup, node, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={
+            "kind": "product_factory",
+            "product_project_id": PROJECT_ID,
+        },
+    )
+    host = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task.task_id,
+        project_id=PROJECT_ID,
+        node=node,
+        startup=startup,
+        trusted_authority=runtime.trusted_execution,
+        output_policies=runtime.output_policies,
+    )
+    host.submit(spec)
+    assert host.prepare(spec.request.work_id).state is BuildExecutionState.PREPARED
+
+    runtime.authorities.configure(
+        _template(argv_suffix=("--replacement",), max_changed_files=3),
+        expected_revision=1,
+    )
+    restarted_runtime = PackagedBuildAuthorityRuntime(
+        PackagedBuildAuthorityStore(
+            store,
+            node=node,
+            startup=startup,
+        )
+    )
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="changed after PF5 work admission",
+    ):
+        build_packaged_local_durable_build_host(
+            store,
+            host_task_id=task.task_id,
+            project_id=PROJECT_ID,
+            node=node,
+            startup=startup,
+            trusted_authority=restarted_runtime.trusted_execution,
+            output_policies=restarted_runtime.output_policies,
+        )
+
+
 def test_repeat_bind_rejects_resource_scope_drift_for_same_work(
     tmp_path: Path,
 ) -> None:

@@ -537,13 +537,13 @@ class PackagedBuildAuthorityStore:
             )
         return bound, current
 
-    def bound_output_policy(
+    def historical_bound_snapshot(
         self,
         *,
         project_id: str,
         repository_id: str,
         work_id: str,
-    ) -> BuildOutputPolicy:
+    ) -> tuple[_BoundBuildAuthority, PackagedBuildAuthoritySnapshot]:
         for label, value in (
             ("project_id", project_id),
             ("repository_id", repository_id),
@@ -559,7 +559,7 @@ class PackagedBuildAuthorityStore:
                 ).fetchone()
         except sqlite3.Error as exc:
             raise PackagedBuildAuthorityError(
-                "PF5 bound output authority could not be read"
+                "PF5 historical bound authority could not be read"
             ) from exc
         if row is None:
             raise PackagedBuildAuthorityError(
@@ -588,13 +588,27 @@ class PackagedBuildAuthorityStore:
             raise PackagedBuildAuthorityError(
                 "PF5 historical output authority identity does not match binding"
             )
-        PackagedBuildAuthoritySnapshot(
+        snapshot = PackagedBuildAuthoritySnapshot(
             template,
             bound.template_revision,
             bound.template_digest,
         )
+        return bound, snapshot
+
+    def bound_output_policy(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        work_id: str,
+    ) -> BuildOutputPolicy:
+        _bound, snapshot = self.historical_bound_snapshot(
+            project_id=project_id,
+            repository_id=repository_id,
+            work_id=work_id,
+        )
         return _output_policy(
-            template=template,
+            template=snapshot.template,
             project_id=project_id,
             repository_id=repository_id,
             work_id=work_id,
@@ -824,18 +838,30 @@ class PackagedTrustedExecutionAuthorityPort:
             repository_id=repository_id,
             work_id=work_id,
         )
-        template = snapshot.template
-        return ProjectExecutionAuthority(
+        return _execution_authority(
+            snapshot=snapshot,
             project_id=project_id,
             repository_id=repository_id,
             work_id=work_id,
-            permissions=frozenset({"build_release"}),
-            allowed_node_ids=(template.node_id,),
-            allowed_workspace_paths=(template.workspace_relpath,),
-            network_scopes=(),
-            credential_refs=(),
-            commands=(ApprovedBuildCommand(template.command_id, template.argv),),
-            evidence_refs=(_evidence_ref(snapshot),),
+        )
+
+    def resolve_recovery(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        work_id: str,
+    ) -> ProjectExecutionAuthority:
+        _bound, snapshot = self.authorities.historical_bound_snapshot(
+            project_id=project_id,
+            repository_id=repository_id,
+            work_id=work_id,
+        )
+        return _execution_authority(
+            snapshot=snapshot,
+            project_id=project_id,
+            repository_id=repository_id,
+            work_id=work_id,
         )
 
 
@@ -855,6 +881,28 @@ class PackagedTrustedBuildOutputPolicyPort:
             repository_id=repository_id,
             work_id=work_id,
         )
+
+
+def _execution_authority(
+    *,
+    snapshot: PackagedBuildAuthoritySnapshot,
+    project_id: str,
+    repository_id: str,
+    work_id: str,
+) -> ProjectExecutionAuthority:
+    template = snapshot.template
+    return ProjectExecutionAuthority(
+        project_id=project_id,
+        repository_id=repository_id,
+        work_id=work_id,
+        permissions=frozenset({"build_release"}),
+        allowed_node_ids=(template.node_id,),
+        allowed_workspace_paths=(template.workspace_relpath,),
+        network_scopes=(),
+        credential_refs=(),
+        commands=(ApprovedBuildCommand(template.command_id, template.argv),),
+        evidence_refs=(_evidence_ref(snapshot),),
+    )
 
 
 def _output_policy(

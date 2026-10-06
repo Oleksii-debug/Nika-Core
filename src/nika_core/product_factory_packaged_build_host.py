@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_build_execution import (
     BuildExecutionCoordinator,
+    BuildExecutionState,
+    ProjectExecutionAuthority,
     TrustedExecutionAuthorityPort,
 )
 from nika_core.product_factory_build_execution_host import (
@@ -86,6 +89,43 @@ class PackagedLocalBuildNodeAvailability:
         )
 
 
+_RECOVERY_ONLY_STATES = frozenset(
+    {
+        BuildExecutionState.DISPATCHING,
+        BuildExecutionState.EFFECT_IN_FLIGHT,
+        BuildExecutionState.RECONCILE_REQUIRED,
+        BuildExecutionState.SUCCEEDED,
+        BuildExecutionState.FAILED,
+    }
+)
+
+
+@dataclass(slots=True)
+class _RestoreExecutionAuthority:
+    current: TrustedExecutionAuthorityPort
+    recovery_resolve: Callable[..., ProjectExecutionAuthority]
+    recovery_work_ids: frozenset[str]
+
+    def resolve(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        work_id: str,
+    ) -> ProjectExecutionAuthority:
+        if work_id in self.recovery_work_ids:
+            return self.recovery_resolve(
+                project_id=project_id,
+                repository_id=repository_id,
+                work_id=work_id,
+            )
+        return self.current.resolve(
+            project_id=project_id,
+            repository_id=repository_id,
+            work_id=work_id,
+        )
+
+
 def build_packaged_local_durable_build_host(
     store: SQLiteStore,
     *,
@@ -151,7 +191,25 @@ def build_packaged_local_durable_build_host(
         checkpoints,
     )
     if checkpoints.has_checkpoint():
-        host.restore_latest()
+        saved = checkpoints.latest()
+        recovery_work_ids = frozenset(
+            record.spec.request.work_id
+            for record in saved.snapshot.coordinator.records
+            if record.state in _RECOVERY_ONLY_STATES
+        )
+        recovery_resolve = getattr(trusted_authority, "resolve_recovery", None)
+        if recovery_work_ids and callable(recovery_resolve):
+            coordinator.trusted_authority = _RestoreExecutionAuthority(
+                current=trusted_authority,
+                recovery_resolve=recovery_resolve,
+                recovery_work_ids=recovery_work_ids,
+            )
+            try:
+                host.restore_latest()
+            finally:
+                coordinator.trusted_authority = trusted_authority
+        else:
+            host.restore_latest()
     return host
 
 
