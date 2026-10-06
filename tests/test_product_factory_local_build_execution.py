@@ -42,6 +42,32 @@ class _Bindings:
         return self.binding
 
 
+class _DriftingBindings:
+    def __init__(self, binding: ProductFactoryLocalRepositoryBinding) -> None:
+        self.binding = binding
+        self.calls = 0
+
+    def require(
+        self,
+        project_id: str,
+        repository_id: str,
+    ) -> ProductFactoryLocalRepositoryBinding:
+        assert project_id == self.binding.project_id
+        assert repository_id == self.binding.repository_id
+        self.calls += 1
+        if self.calls <= 2:
+            return self.binding
+        return ProductFactoryLocalRepositoryBinding(
+            project_id=self.binding.project_id,
+            repository_id=self.binding.repository_id,
+            provider=self.binding.provider,
+            locator=self.binding.locator,
+            root=self.binding.root,
+            binding_version=self.binding.binding_version + 1,
+            updated_at="2026-10-06T00:01:00+00:00",
+        )
+
+
 def _git_executable() -> str:
     executable = shutil.which("git")
     if executable is None:
@@ -362,3 +388,50 @@ def test_contained_local_build_stale_claim_never_replays_effect_after_receipt_lo
         node.run(dispatch)
     assert calls == 1
     assert node.inspect(dispatch) is None
+
+def test_contained_local_build_authority_drift_after_effect_is_durable_uncertainty(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, source_sha = _repository(tmp_path)
+    node = _node(tmp_path, root)
+    original = node.repository_bindings.binding
+    node.repository_bindings = _DriftingBindings(original)
+    dispatch = _dispatch(source_sha, _build_argv())
+    calls = 0
+
+    def fake_process(argv, *, cwd, **kwargs):
+        nonlocal calls
+        calls += 1
+        artifact = cwd / "dist" / "artifact.txt"
+        artifact.parent.mkdir(exist_ok=True)
+        artifact.write_text("seed-built", encoding="utf-8")
+        return ProcessExecutionResult(
+            argv=tuple(argv),
+            returncode=0,
+            stdout="",
+            stderr="",
+            timed_out=False,
+            cancelled=False,
+            output_limit_exceeded=False,
+            isolation_class=IsolationClass.PROCESS_CONTAINED
+            if sys.platform.startswith("win")
+            else IsolationClass.POLICY_ONLY,
+        )
+
+    monkeypatch.setattr(local_build, "run_typed_process", fake_process)
+
+    with pytest.raises(BuildExecutionPortError):
+        node.run(dispatch)
+    assert calls == 1
+
+    inspected = node.inspect(dispatch)
+    assert inspected is not None
+    assert inspected.succeeded is False
+    assert inspected.uncertain is True
+    assert inspected.evidence_refs[0].startswith("local-build-uncertain:sha256:")
+
+    with pytest.raises(BuildExecutionPortError):
+        node.run(dispatch)
+    assert calls == 1
+
