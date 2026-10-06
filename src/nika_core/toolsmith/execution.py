@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections.abc
 import dataclasses
+import hashlib
 import os
 import pathlib
 import shutil
@@ -78,6 +79,18 @@ def _is_windows_reparse_point(file_stat: os.stat_result) -> bool:
     attributes = getattr(file_stat, "st_file_attributes", 0)
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     return bool(reparse_flag and attributes & reparse_flag)
+
+
+def _pinned_executable_sha256(path: pathlib.Path) -> str:
+    """Snapshot executable bytes for launch-continuity verification."""
+
+    try:
+        with path.open("rb") as source:
+            return hashlib.file_digest(source, "sha256").hexdigest()
+    except (OSError, ValueError) as exc:
+        raise ProcessExecutionError(
+            "unable to verify pinned runtime executable bytes"
+        ) from exc
 
 
 def _open_windows_executable_launch_lock(path: pathlib.Path) -> int:
@@ -176,9 +189,20 @@ class _PinnedExecutableLaunchGuard:
     concurrent write/delete replacement until CreateProcess has opened the image.
     """
 
-    def __init__(self, executable: pathlib.Path, arguments: tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        executable: pathlib.Path,
+        arguments: tuple[str, ...],
+        *,
+        expected_sha256: str | None = None,
+    ) -> None:
         self._executable = executable
         self._arguments = arguments
+        self._expected_sha256 = (
+            _pinned_executable_sha256(executable)
+            if expected_sha256 is None
+            else expected_sha256
+        )
         self._handle: int | None = None
 
     def __enter__(self) -> pathlib.Path:
@@ -192,6 +216,10 @@ class _PinnedExecutableLaunchGuard:
             if _resolution_chain_key(resolved) != _resolution_chain_key(self._executable):
                 raise ProcessExecutionError(
                     "pinned runtime executable changed before process launch"
+                )
+            if _pinned_executable_sha256(resolved) != self._expected_sha256:
+                raise ProcessExecutionError(
+                    "pinned runtime executable bytes changed before process launch"
                 )
             return resolved
         except Exception:
@@ -433,6 +461,10 @@ def run_typed_process(
     limit = resource_budget.max_output_bytes
 
     typed_argv = _pinned_runtime_argv(argv, process_policy.allowed_executables)
+    launch_guard = _PinnedExecutableLaunchGuard(
+        pathlib.Path(typed_argv[0]),
+        typed_argv[1:],
+    )
     raw_cwd = pathlib.Path(cwd)
     raw_workspace_root = raw_cwd if workspace_root is None else pathlib.Path(workspace_root)
     workspace_root = _validate_process_workspace_root(raw_workspace_root)
@@ -459,10 +491,7 @@ def run_typed_process(
 
     creationflags, start_new_session = process_group_popen_options()
 
-    with _PinnedExecutableLaunchGuard(
-        pathlib.Path(typed_argv[0]),
-        typed_argv[1:],
-    ) as launch_executable:
+    with launch_guard as launch_executable:
         with _PinnedDirectoryLaunchGuard(workspace_root, cwd) as launch_cwd:
             if cancellation_event is not None and cancellation_event.is_set():
                 return _cancelled_before_launch(typed_argv)
@@ -582,6 +611,7 @@ def _git(
     cwd: pathlib.Path,
     environment: collections.abc.Mapping[str, str],
     timeout_seconds: int = 60,
+    expected_executable_sha256: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = tuple(argv)
     if not command:
@@ -592,6 +622,7 @@ def _git(
             with _PinnedExecutableLaunchGuard(
                 executable,
                 command[1:],
+                expected_sha256=expected_executable_sha256,
             ) as launch_executable:
                 result = subprocess.run(
                     (str(launch_executable), *command[1:]),
@@ -682,6 +713,7 @@ def prepare_private_git_workspace(
     _validate_branch_name(plan.branch_name)
     job_root = _private_git_job_root(plan)
     git_executable = _resolve_host_git_executable(git_executable)
+    git_executable_sha256 = _pinned_executable_sha256(pathlib.Path(git_executable))
     if plan.private_git_dir.exists() or plan.worktree_root.exists():
         raise WorkspaceSecurityError("job-private Git paths already exist; refusing ambiguous reuse")
     if not (plan.repository_root / ".git").exists():
@@ -691,6 +723,7 @@ def prepare_private_git_workspace(
         (git_executable, "check-ref-format", "--branch", plan.branch_name),
         cwd=job_root,
         environment=plan.environment,
+        expected_executable_sha256=git_executable_sha256,
     )
 
     null_hooks = "NUL" if os.name == "nt" else "/dev/null"
@@ -711,6 +744,7 @@ def prepare_private_git_workspace(
         str(plan.repository_root),
         str(plan.private_git_dir),
     )
+        expected_executable_sha256=git_executable_sha256,
     _git(clone_argv, cwd=job_root, environment=plan.environment)
 
     git_prefix = (git_executable, *plan.config_args, "--git-dir", str(plan.private_git_dir))
@@ -720,6 +754,7 @@ def prepare_private_git_workspace(
             (*git_prefix, "remote"),
             cwd=job_root,
             environment=plan.environment,
+            expected_executable_sha256=git_executable_sha256,
         ).stdout.splitlines()
         if item.strip()
     )
@@ -728,6 +763,7 @@ def prepare_private_git_workspace(
             (*git_prefix, "remote", "remove", remote_name),
             cwd=job_root,
             environment=plan.environment,
+            expected_executable_sha256=git_executable_sha256,
         )
     remaining_remotes = tuple(
         item.strip()
@@ -735,6 +771,7 @@ def prepare_private_git_workspace(
             (*git_prefix, "remote"),
             cwd=job_root,
             environment=plan.environment,
+            expected_executable_sha256=git_executable_sha256,
         ).stdout.splitlines()
         if item.strip()
     )
@@ -745,6 +782,7 @@ def prepare_private_git_workspace(
         (*git_prefix, "rev-parse", "--verify", f"{plan.base_sha}^{{commit}}"),
         cwd=job_root,
         environment=plan.environment,
+        expected_executable_sha256=git_executable_sha256,
     )
     if base_result.stdout.strip().lower() != plan.base_sha.lower():
         raise WorkspaceSecurityError("pinned base SHA is not the exact private Git commit")
@@ -760,6 +798,7 @@ def prepare_private_git_workspace(
         with _PinnedExecutableLaunchGuard(
             pathlib.Path(collision_argv[0]),
             collision_argv[1:],
+            expected_sha256=git_executable_sha256,
         ) as launch_executable:
             collision = subprocess.run(
                 (str(launch_executable), *collision_argv[1:]),
@@ -795,6 +834,7 @@ def prepare_private_git_workspace(
         ),
         cwd=job_root,
         environment=plan.environment,
+        expected_executable_sha256=git_executable_sha256,
     )
     if (plan.worktree_root / ".git").exists():
         raise WorkspaceSecurityError("worker-visible worktree unexpectedly contains .git metadata")
@@ -803,6 +843,7 @@ def prepare_private_git_workspace(
         (*git_prefix, "rev-parse", "HEAD"),
         cwd=job_root,
         environment=plan.environment,
+        expected_executable_sha256=git_executable_sha256,
     ).stdout.strip()
     tree_evidence = collect_tree_evidence(plan.worktree_root)
     return PreparedGitWorkspace(plan, head, remaining_remotes, tree_evidence)
