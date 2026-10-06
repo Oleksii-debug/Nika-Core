@@ -544,6 +544,59 @@ class ProductDecisionRepository:
                 raise KeyError(decision_id)
             return decision
 
+    def list_latest_by_state(
+        self,
+        project_id: str,
+        state: ProductDecisionState,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[tuple[StoredProductDecision, ...], int]:
+        """Return one bounded page while validating the complete current decision set."""
+        project_id = _validated_text(project_id, label="project_id")
+        if type(state) is not ProductDecisionState:
+            raise TypeError("state must be an exact ProductDecisionState")
+        if type(limit) is not int or limit < 1 or limit > 500:
+            raise ValueError("limit must be an exact integer between 1 and 500")
+        if (
+            type(offset) is not int
+            or offset < 0
+            or offset > _SQLITE_INTEGER_MAX
+        ):
+            raise ValueError("offset must be an exact non-negative SQLite integer")
+
+        with self.store.connection() as conn:
+            conn.execute("BEGIN")
+            if not conn.execute(
+                "SELECT 1 FROM product_projects WHERE project_id=?",
+                (project_id,),
+            ).fetchone():
+                raise KeyError(project_id)
+            cursor = conn.execute(
+                "SELECT d.* FROM product_decisions d JOIN ("
+                "SELECT project_id,decision_id,MAX(decision_version) AS decision_version "
+                "FROM product_decisions WHERE project_id=? GROUP BY project_id,decision_id"
+                ") latest ON latest.project_id=d.project_id "
+                "AND latest.decision_id=d.decision_id "
+                "AND latest.decision_version=d.decision_version "
+                "ORDER BY d.decision_id",
+                (project_id,),
+            )
+            selected: list[StoredProductDecision] = []
+            matching = 0
+            while True:
+                rows = cursor.fetchmany(128)
+                if not rows:
+                    break
+                for row in rows:
+                    stored = self._from_row(row)
+                    if stored.decision.state is not state:
+                        continue
+                    if matching >= offset and len(selected) < limit:
+                        selected.append(stored)
+                    matching += 1
+            return tuple(selected), matching
+
     def list(self, project_id: str) -> tuple[StoredProductDecision, ...]:
         project_id = _validated_text(project_id, label="project_id")
         with self.store.connection() as conn:

@@ -171,6 +171,7 @@ def test_pf1_corrupt_unpresentable_persisted_decision_id_fails_closed(
 
 def test_multiple_pending_decisions_are_discoverable_by_bounded_pages_and_exact_read(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _store, repository, service, router = _build(tmp_path / "pending-pages.db")
     for index in range(9):
@@ -210,6 +211,11 @@ def test_multiple_pending_decisions_are_discoverable_by_bounded_pages_and_exact_
             expected_row_version=repository.get(_PROJECT_ID).row_version,
             idempotency_key=f"decision:page:{index:02d}",
         )
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("packaged decision reads must not materialize list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
 
     before = repository.get(_PROJECT_ID)
     first = router.create({"command": "list pending product decisions"})
