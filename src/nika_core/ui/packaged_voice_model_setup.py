@@ -196,10 +196,12 @@ class PackagedVoiceModelSetup:
             self._last_status = None
             self._last_message = None
 
+        started_event = Event()
         coroutine = self._run_import(
             {"source_root": source_text},
             generation=generation,
             cancel_event=cancel_event,
+            started_event=started_event,
         )
         try:
             future = self._submit(coroutine)
@@ -241,7 +243,9 @@ class PackagedVoiceModelSetup:
                 )
             self._active_future = future
         future.add_done_callback(
-            lambda done, identity=generation: self._submitted_done(identity, done)
+            lambda done, identity=generation, started=started_event: (
+                self._submitted_done(identity, started, done)
+            )
         )
 
         return UIResult(
@@ -251,7 +255,12 @@ class PackagedVoiceModelSetup:
             focus_id="voice-model-cancel",
         )
 
-    def _submitted_done(self, generation: int, future: Future[Any]) -> None:
+    def _submitted_done(
+        self,
+        generation: int,
+        started_event: Event,
+        future: Future[Any],
+    ) -> None:
         with self._lock:
             if self._active_future is not future:
                 return
@@ -263,6 +272,11 @@ class PackagedVoiceModelSetup:
         if future.cancelled():
             if cancel_event is not None:
                 cancel_event.set()
+            if started_event.is_set():
+                with self._lock:
+                    if generation == self._generation and self._active:
+                        self._cancelling = True
+                return
             status = "cancelled"
             message = "Імпорт голосової моделі скасовано."
         else:
@@ -384,17 +398,46 @@ class PackagedVoiceModelSetup:
         *,
         generation: int,
         cancel_event: Event,
+        started_event: Event,
     ) -> None:
         terminal_status: str
         terminal_message: str
         restart_required = False
-        try:
-            source_text = self._require_start_payload(payload)
-            await asyncio.to_thread(
+        cancellation: asyncio.CancelledError | None = None
+        started_event.set()
+        source_text = self._require_start_payload(payload)
+        worker = asyncio.create_task(
+            asyncio.to_thread(
                 self._perform_install,
                 source_text,
                 cancel_event=cancel_event,
             )
+        )
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError as exc:
+            cancellation = exc
+            cancel_event.set()
+            try:
+                await asyncio.shield(worker)
+            except _SetupCancelled:
+                terminal_status = "cancelled"
+                terminal_message = "Імпорт голосової моделі скасовано."
+            except _SetupInputError as worker_error:
+                terminal_status = "failed"
+                terminal_message = worker_error.public_message
+            except (OSError, RuntimeError):
+                terminal_status = "failed"
+                terminal_message = (
+                    "Не вдалося безпечно встановити локальну голосову модель."
+                )
+            else:
+                terminal_status = "restart_required"
+                terminal_message = (
+                    "Локальну голосову модель встановлено. Перезапустіть Nika Core, "
+                    "щоб увімкнути голосовий ввід."
+                )
+                restart_required = True
         except _SetupCancelled:
             terminal_status = "cancelled"
             terminal_message = "Імпорт голосової моделі скасовано."
@@ -421,6 +464,9 @@ class PackagedVoiceModelSetup:
             self._restart_required = restart_required
             self._last_status = terminal_status
             self._last_message = terminal_message
+
+        if cancellation is not None:
+            raise cancellation
 
     def _perform_install(
         self,
