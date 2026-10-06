@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import stat
 from collections.abc import Callable, Iterator
@@ -198,15 +199,17 @@ class SQLiteRecoveryManager:
         }
         if set(manifest) != expected:
             raise BackupVerificationError("backup manifest has unexpected or missing fields")
-        if manifest["format_version"] != _MANIFEST_VERSION:
+        if (
+            type(manifest["format_version"]) is not int
+            or manifest["format_version"] != _MANIFEST_VERSION
+        ):
             raise BackupVerificationError("unsupported backup manifest format")
         if manifest["database_file"] != database.name:
             raise BackupVerificationError("backup manifest does not match database filename")
-        try:
-            size = int(manifest["size_bytes"])
-            schema = int(manifest["schema_version"])
-        except (TypeError, ValueError) as exc:
-            raise BackupVerificationError("backup manifest numeric fields are invalid") from exc
+        if type(manifest["size_bytes"]) is not int or type(manifest["schema_version"]) is not int:
+            raise BackupVerificationError("backup manifest numeric fields are invalid")
+        size = manifest["size_bytes"]
+        schema = manifest["schema_version"]
         if size <= 0 or database.stat().st_size != size:
             raise BackupVerificationError("backup database size does not match manifest")
 
@@ -450,10 +453,24 @@ class SQLiteRecoveryManager:
 
     def _recover_interrupted_restore_unlocked(self) -> InterruptedRestoreResult | None:
         target = self._resolve_direct_restore_target(self._store.path)
-        marker_path = self._restore_marker_path(target)
-        if not marker_path.exists():
+        marker_path = self._existing_restore_marker(target)
+        if marker_path is None:
             return None
         marker = self._read_restore_marker(marker_path, target)
+        for name in (
+            marker["stage_file"],
+            marker["quarantine_file"],
+            marker["quarantine_wal_file"],
+            marker["quarantine_shm_file"],
+            self._manifest_path(target.parent / marker["quarantine_file"]).name,
+        ):
+            artifact = target.parent / name
+            if self._is_indirect_path(artifact) or (
+                artifact.exists() and not artifact.is_file()
+            ):
+                raise RestoreSafetyError(
+                    "interrupted restore artifact is indirect or not a regular file"
+                )
         stage = target.parent / marker["stage_file"]
         quarantine = target.parent / marker["quarantine_file"]
         old_sha = marker["current_sha256"]
@@ -532,7 +549,7 @@ class SQLiteRecoveryManager:
         backup: BackupArtifact,
     ) -> tuple[Path, Path]:
         marker_path = self._restore_marker_path(target)
-        if marker_path.exists():
+        if self._existing_restore_marker(target) is not None:
             raise RestoreSafetyError("an interrupted restore marker already exists")
         if plan.current_sha256 is None or not target.exists():
             raise RestorePlanStaleError(
@@ -705,7 +722,10 @@ class SQLiteRecoveryManager:
             raise RestoreSafetyError(
                 "interrupted restore marker has unexpected or missing fields"
             )
-        if marker["format_version"] != _RESTORE_MARKER_VERSION:
+        if (
+            type(marker["format_version"]) is not int
+            or marker["format_version"] != _RESTORE_MARKER_VERSION
+        ):
             raise RestoreSafetyError("unsupported interrupted restore marker format")
         if marker["target_file"] != target.name:
             raise RestoreSafetyError("interrupted restore marker targets another database")
@@ -720,6 +740,22 @@ class SQLiteRecoveryManager:
                 raise RestoreSafetyError(
                     "interrupted restore marker contains an unsafe path"
                 )
+        if not re.fullmatch(
+            rf"\.{re.escape(target.name)}\.restore-stage\.[0-9a-f]{{32}}\.tmp",
+            marker["stage_file"],
+        ):
+            raise RestoreSafetyError("interrupted restore marker contains an unsafe path")
+        if not re.fullmatch(
+            rf"{re.escape(target.name)}\.unrecoverable-"
+            rf"[0-9]{{8}}T[0-9]{{12}}Z-[0-9a-f]{{8}}\.sqlite3",
+            marker["quarantine_file"],
+        ):
+            raise RestoreSafetyError("interrupted restore marker contains an unsafe path")
+        if (
+            marker["quarantine_wal_file"] != marker["quarantine_file"] + "-wal"
+            or marker["quarantine_shm_file"] != marker["quarantine_file"] + "-shm"
+        ):
+            raise RestoreSafetyError("interrupted restore marker contains an unsafe path")
         for key in ("stage_sha256", "current_sha256", "backup_sha256"):
             value = marker[key]
             if not isinstance(value, str) or not self._is_sha256(value):
@@ -808,11 +844,26 @@ class SQLiteRecoveryManager:
         ) and versions[-1] <= SCHEMA_VERSION
 
     def _ensure_no_interrupted_restore(self) -> None:
-        if self._restore_marker_path(self._store.path.resolve()).exists():
+        if self._existing_restore_marker(self._store.path.resolve()) is not None:
             raise RestoreSafetyError(
                 "an interrupted restore marker exists; call "
                 "recover_interrupted_restore() before new backup/restore work"
             )
+
+    @classmethod
+    def _existing_restore_marker(cls, target: Path) -> Path | None:
+        marker_path = cls._restore_marker_path(target)
+        if cls._is_indirect_path(marker_path):
+            raise RestoreSafetyError(
+                "interrupted restore marker must be a direct regular file"
+            )
+        if not marker_path.exists():
+            return None
+        if not marker_path.is_file():
+            raise RestoreSafetyError(
+                "interrupted restore marker must be a direct regular file"
+            )
+        return marker_path
 
     @contextmanager
     def _hold_recovery_lease(self) -> Iterator[None]:
@@ -1144,9 +1195,53 @@ class SQLiteRecoveryManager:
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:
+        def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON recovery metadata key")
+                result[key] = value
+            return result
+
+        def _snapshot(info: os.stat_result) -> tuple[int, int, int, int, int]:
+            return (
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            )
+
+        def _direct_regular(info: os.stat_result) -> bool:
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            file_attributes = getattr(info, "st_file_attributes", 0)
+            return stat.S_ISREG(info.st_mode) and not bool(file_attributes & reparse_flag)
+
         try:
-            content = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            path_before = os.lstat(path)
+            if not _direct_regular(path_before):
+                raise ValueError("recovery metadata must be a direct regular file")
+            with path.open("rb") as handle:
+                opened_before = os.fstat(handle.fileno())
+                if not _direct_regular(opened_before) or not os.path.samestat(
+                    path_before, opened_before
+                ):
+                    raise ValueError("recovery metadata identity changed before read")
+                raw = handle.read(65_537)
+                opened_after = os.fstat(handle.fileno())
+            path_after = os.lstat(path)
+            if len(raw) > 65_536:
+                raise ValueError("recovery metadata exceeds 64 KiB")
+            if (
+                not _direct_regular(opened_after)
+                or not _direct_regular(path_after)
+                or _snapshot(opened_before) != _snapshot(opened_after)
+                or not os.path.samestat(opened_after, path_after)
+                or _snapshot(opened_after) != _snapshot(path_after)
+            ):
+                raise ValueError("recovery metadata changed while being read")
+            content = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_keys)
+        except (OSError, UnicodeError, ValueError, RecursionError) as exc:
             raise BackupVerificationError(
                 f"JSON recovery metadata is unreadable: {path.name}"
             ) from exc
