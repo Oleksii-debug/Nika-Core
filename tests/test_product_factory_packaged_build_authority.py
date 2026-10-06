@@ -339,6 +339,62 @@ def _mark_effect_started(
         runtime.trusted_execution.mark_effect_started_with_connection(conn, dispatch)
 
 
+def test_v1_authority_schema_migrates_to_effect_history_columns(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE product_factory_build_authority_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO product_factory_build_authority_schema VALUES (1, 'legacy')"
+        )
+        conn.execute(
+            "CREATE TABLE product_factory_build_authority_templates ("
+            "project_id TEXT NOT NULL, repository_id TEXT NOT NULL, "
+            "component_id TEXT NOT NULL, revision INTEGER NOT NULL "
+            "CHECK(revision > 0), template_json TEXT NOT NULL, "
+            "template_digest TEXT NOT NULL, configured_at TEXT NOT NULL, "
+            "PRIMARY KEY(project_id, repository_id, component_id))"
+        )
+        conn.execute(
+            "CREATE TABLE product_factory_build_authority_bindings ("
+            "work_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+            "repository_id TEXT NOT NULL, component_id TEXT NOT NULL, "
+            "candidate_work_id TEXT NOT NULL, source_sha TEXT NOT NULL, "
+            "review_fingerprint TEXT NOT NULL, spec_version INTEGER NOT NULL, "
+            "row_version INTEGER NOT NULL, graph_digest TEXT NOT NULL, "
+            "template_revision INTEGER NOT NULL, template_digest TEXT NOT NULL, "
+            "bound_at TEXT NOT NULL)"
+        )
+
+    PackagedBuildAuthorityStore(
+        store,
+        node=_node(),
+        startup=_startup(tmp_path),
+    )
+
+    with store.connection() as conn:
+        versions = tuple(
+            row["version"]
+            for row in conn.execute(
+                "SELECT version FROM product_factory_build_authority_schema "
+                "ORDER BY version"
+            ).fetchall()
+        )
+        columns = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(product_factory_build_authority_bindings)"
+            ).fetchall()
+        }
+    assert versions == (1, 2)
+    assert {"bound_template_json", "effect_dispatch_id"} <= columns
+
+
 def test_packaged_authority_drives_admission_execution_output_and_restart(
     tmp_path: Path,
 ) -> None:
@@ -552,6 +608,37 @@ def test_historical_authority_is_effect_bound_and_recovery_scoped(
     assert row is not None
     assert type(row["bound_template_json"]) is str
     assert row["effect_dispatch_id"] == dispatch.dispatch_id
+
+
+def test_missing_historical_template_payload_fails_closed_after_effect_marker(
+    tmp_path: Path,
+) -> None:
+    store, _startup_value, _node_value, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    work_id = spec.request.work_id
+    dispatch = _dispatch_for(runtime, spec)
+    _mark_effect_started(store, runtime, dispatch)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_factory_build_authority_bindings "
+            "SET bound_template_json = NULL WHERE work_id = ?",
+            (work_id,),
+        )
+    runtime.authorities.configure(
+        _template(argv_suffix=("--wheel",)),
+        expected_revision=1,
+    )
+
+    with runtime.trusted_execution.historical_recovery(frozenset({work_id})):
+        with pytest.raises(
+            PackagedBuildAuthorityError,
+            match="unavailable or corrupt",
+        ):
+            runtime.trusted_execution.resolve(
+                project_id=PROJECT_ID,
+                repository_id=REPOSITORY_ID,
+                work_id=work_id,
+            )
 
 
 def test_historical_authority_rejects_work_without_effect_admission(
