@@ -132,11 +132,12 @@ def test_voice_model_setup_background_cancel_is_cooperative(
     source = _write_source(tmp_path)
     data_root = tmp_path / "nika-data"
     data_root.mkdir()
-    submitted: list[Coroutine[Any, Any, Any]] = []
+    submitted: list[tuple[Coroutine[Any, Any, Any], Future[Any]]] = []
 
     def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
-        submitted.append(coroutine)
-        return Future()
+        future: Future[Any] = Future()
+        submitted.append((coroutine, future))
+        return future
 
     setup = PackagedVoiceModelSetup(data_root, submit=submit)
     started = setup.start({"source_root": str(source)})
@@ -150,7 +151,8 @@ def test_voice_model_setup_background_cancel_is_cooperative(
     assert cancelling["active"] is True
     assert duplicate.message == "Скасування імпорту голосової моделі вже запитано."
 
-    asyncio.run(submitted[0])
+    asyncio.run(submitted[0][0])
+    submitted[0][1].set_result(None)
     terminal = setup.snapshot()
 
     assert terminal["status"] == "cancelled"
@@ -158,6 +160,245 @@ def test_voice_model_setup_background_cancel_is_cooperative(
     assert terminal["can_import"] is True
     assert not (data_root / "voice" / "whisper").exists()
     assert not list((data_root / "voice").glob(".whisper-import-*"))
+
+
+def test_voice_model_setup_close_cancels_prestart_work_and_stays_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[tuple[Coroutine[Any, Any, Any], Future[Any]]] = []
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        future: Future[Any] = Future()
+        submitted.append((coroutine, future))
+        return future
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+    result = setup.start({"source_root": str(source)})
+
+    assert result.status == "accepted"
+    setup.close()
+    assert setup.snapshot()["status"] == "cancelling"
+
+    asyncio.run(submitted[0][0])
+    submitted[0][1].set_result(None)
+    snapshot = setup.snapshot()
+
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is False
+    assert not (data_root / "voice" / "whisper").exists()
+
+
+def test_voice_model_setup_rejects_invalid_submit_future_and_resets_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[Coroutine[Any, Any, Any]] = []
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        submitted.append(coroutine)
+        return object()  # type: ignore[return-value]
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+
+    result = setup.start({"source_root": str(source)})
+    snapshot = setup.snapshot()
+
+    assert result.status == "failed"
+    assert snapshot["status"] == "failed"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is True
+    assert len(submitted) == 1
+    assert submitted[0].cr_frame is None
+
+
+def test_voice_model_setup_cancelled_submit_future_settles_and_signals_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[Coroutine[Any, Any, Any]] = []
+    future: Future[Any] = Future()
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        submitted.append(coroutine)
+        return future
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+    result = setup.start({"source_root": str(source)})
+    cancel_event = setup._cancel_event  # noqa: SLF001 - lifecycle fence regression
+
+    assert result.status == "accepted"
+    assert cancel_event is not None
+    assert future.cancel() is True
+
+    snapshot = setup.snapshot()
+    assert cancel_event.is_set()
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is True
+    assert setup._active_future is None  # noqa: SLF001
+    submitted[0].close()
+
+
+def test_voice_model_setup_failed_submit_future_is_sanitized_and_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[Coroutine[Any, Any, Any]] = []
+    future: Future[Any] = Future()
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        submitted.append(coroutine)
+        return future
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+    result = setup.start({"source_root": str(source)})
+    cancel_event = setup._cancel_event  # noqa: SLF001 - lifecycle fence regression
+    canary = r"C:\private\voice-model-secret.onnx"
+
+    assert result.status == "accepted"
+    assert cancel_event is not None
+    future.set_exception(RuntimeError(canary))
+
+    snapshot = setup.snapshot()
+    assert cancel_event.is_set()
+    assert snapshot["status"] == "failed"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is True
+    assert canary not in repr(snapshot)
+    assert setup._active_future is None  # noqa: SLF001
+    submitted[0].close()
+
+
+def test_voice_model_setup_inflight_task_cancel_waits_for_worker_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    setup = PackagedVoiceModelSetup(data_root)
+    worker_started = model_setup.Event()
+    worker_settled = model_setup.Event()
+    cancel_event = model_setup.Event()
+    started_event = model_setup.Event()
+    submission_cancelled_event = model_setup.Event()
+
+    def blocked_install(
+        source_text: str,
+        *,
+        cancel_event: model_setup.Event | None,
+    ) -> None:
+        assert source_text == str(tmp_path)
+        assert cancel_event is not None
+        worker_started.set()
+        assert cancel_event.wait(timeout=2.0)
+        worker_settled.set()
+        raise model_setup._SetupCancelled("cancelled")  # noqa: SLF001
+
+    monkeypatch.setattr(setup, "_perform_install", blocked_install)
+    with setup._lock:  # noqa: SLF001 - focused lifecycle state setup
+        setup._generation = 1  # noqa: SLF001
+        setup._active = True  # noqa: SLF001
+        setup._cancel_event = cancel_event  # noqa: SLF001
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            setup._run_import(  # noqa: SLF001
+                {"source_root": str(tmp_path)},
+                generation=1,
+                cancel_event=cancel_event,
+                started_event=started_event,
+                submission_cancelled_event=submission_cancelled_event,
+            )
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 1.0
+        while not worker_started.is_set() and loop.time() < deadline:
+            await asyncio.sleep(0.005)
+        assert worker_started.is_set()
+        assert setup.snapshot()["status"] == "importing"
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    snapshot = setup.snapshot()
+    assert started_event.is_set()
+    assert worker_settled.is_set()
+    assert cancel_event.is_set()
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is True
+
+
+def test_voice_model_setup_precancelled_run_never_starts_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    setup = PackagedVoiceModelSetup(data_root)
+    cancel_event = model_setup.Event()
+    cancel_event.set()
+    started_event = model_setup.Event()
+    submission_cancelled_event = model_setup.Event()
+    submission_cancelled_event.set()
+    calls = 0
+
+    def forbidden_install(
+        source_text: str,
+        *,
+        cancel_event: model_setup.Event | None,
+    ) -> None:
+        del source_text, cancel_event
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(setup, "_perform_install", forbidden_install)
+    with setup._lock:  # noqa: SLF001 - focused lifecycle state setup
+        setup._generation = 1  # noqa: SLF001
+        setup._active = True  # noqa: SLF001
+        setup._cancelling = True  # noqa: SLF001
+        setup._cancel_event = cancel_event  # noqa: SLF001
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            setup._run_import(  # noqa: SLF001
+                {"source_root": str(tmp_path)},
+                generation=1,
+                cancel_event=cancel_event,
+                started_event=started_event,
+                submission_cancelled_event=submission_cancelled_event,
+            )
+        )
+
+    snapshot = setup.snapshot()
+    assert calls == 0
+    assert started_event.is_set()
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is True
 
 
 def test_voice_model_setup_existing_install_is_idempotent(
