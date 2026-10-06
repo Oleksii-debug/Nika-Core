@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
+import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskPayloadCorruptionError, decode_task_payload
 from nika_core.product_factory_local_coding import ContainedLocalCodingProgram
 from nika_core.product_factory_local_repository_binding import (
     ProductFactoryLocalRepositoryBinding,
@@ -26,6 +30,10 @@ from nika_core.product_factory_packaged_preparation import (
 )
 from nika_core.product_project import ProductProject, ProductProjectRepository
 from nika_core.v01_model_settings import V01ModelSettings
+
+_MODEL_AUTHORITY_KEY = "packaged_local_model_authority"
+_MODEL_AUTHORITY_SCHEMA = "nika.product-factory.packaged-model-authority.v1"
+_HOST_TASK_KIND = "product_factory"
 
 
 class PackagedBoundLocalProductFactoryHostError(RuntimeError):
@@ -54,6 +62,7 @@ class _ProgramEntry:
     project: _ProjectSnapshot
     program: ContainedLocalCodingProgram
     bindings: Mapping[str, _BindingSnapshot]
+    model_authority: _PackagedLocalOllamaAuthority
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,8 +191,19 @@ class PackagedBoundLocalProductFactoryHost:
             permission_ceiling=permission_ceiling,
         )
         self._bindings.resolve_for_plan(plan)
+        model_authority, bound_now = self._bind_or_load_host_model_authority(
+            host_task_id=host_task_id,
+            project_id=project.project_id,
+            bind_if_missing=True,
+        )
         bindings = self._bindings_for_graph(project, graph)
-        entry = self._entry_for(host_task_id, project, bindings)
+        entry = self._entry_for(
+            host_task_id,
+            project,
+            bindings,
+            model_authority=model_authority,
+            require_model_authority_current=bound_now,
+        )
         state = entry.program.multi_repository_host.initialize(
             host_task_id=host_task_id,
             project=project,
@@ -207,7 +227,17 @@ class PackagedBoundLocalProductFactoryHost:
             raise PackagedBoundLocalProductFactoryHostError(
                 "ProductProject has no durable local repository bindings"
             )
-        temporary = self._build_entry(project, current.values())
+        model_authority, _ = self._bind_or_load_host_model_authority(
+            host_task_id=host_task_id,
+            project_id=project.project_id,
+            bind_if_missing=False,
+        )
+        temporary = self._build_entry(
+            project,
+            current.values(),
+            model_authority=model_authority,
+            require_model_authority_current=False,
+        )
         state = temporary.program.multi_repository_host.restore(
             host_task_id=host_task_id,
             project=project,
@@ -220,6 +250,8 @@ class PackagedBoundLocalProductFactoryHost:
             self._entries[host_task_id] = self._build_entry(
                 state.binding.project,
                 exact.values(),
+                model_authority=model_authority,
+                require_model_authority_current=False,
             )
         self._require_state_bindings(host_task_id, state)
         return state
@@ -302,6 +334,104 @@ class PackagedBoundLocalProductFactoryHost:
             raise PackagedBoundLocalProductFactoryHostError(
                 "model authority changed after packaged startup; restart required"
             )
+
+    def _bind_or_load_host_model_authority(
+        self,
+        *,
+        host_task_id: str,
+        project_id: str,
+        bind_if_missing: bool,
+    ) -> tuple[_PackagedLocalOllamaAuthority, bool]:
+        if (
+            type(host_task_id) is not str
+            or not host_task_id
+            or host_task_id != host_task_id.strip()
+        ):
+            raise PackagedBoundLocalProductFactoryHostError(
+                "Product Factory host task identity is invalid"
+            )
+        if type(project_id) is not str or not project_id:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "ProductProject identity is invalid"
+            )
+
+        if bind_if_missing:
+            self._require_model_authority_current()
+
+        with self.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE" if bind_if_missing else "BEGIN")
+            row = conn.execute(
+                "SELECT payload_json FROM tasks WHERE task_id = ?",
+                (host_task_id,),
+            ).fetchone()
+            if row is None:
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "Product Factory host task does not exist"
+                )
+            raw_payload = row["payload_json"]
+            try:
+                payload = decode_task_payload(raw_payload)
+            except TaskPayloadCorruptionError as exc:
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "Product Factory host task payload is corrupt"
+                ) from exc
+            if (
+                payload.get("kind") != _HOST_TASK_KIND
+                or payload.get("product_project_id") != project_id
+            ):
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "host task is not bound to the expected ProductProject"
+                )
+
+            stored = payload.get(_MODEL_AUTHORITY_KEY)
+            if stored is not None:
+                return _decode_model_authority(stored), False
+            if not bind_if_missing:
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "Product Factory host task has no durable model authority"
+                )
+
+            prior_checkpoint = conn.execute(
+                "SELECT 1 FROM checkpoints WHERE task_id = ? LIMIT 1",
+                (host_task_id,),
+            ).fetchone()
+            if prior_checkpoint is not None:
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "legacy Product Factory host task has durable state but no model authority"
+                )
+
+            authority = self._model_authority
+            updated_payload = dict(payload)
+            updated_payload[_MODEL_AUTHORITY_KEY] = _encode_model_authority(authority)
+            canonical = _canonical_task_payload(updated_payload)
+            updated = conn.execute(
+                "UPDATE tasks SET payload_json = ? "
+                "WHERE task_id = ? AND payload_json = ?",
+                (canonical, host_task_id, raw_payload),
+            )
+            if updated.rowcount != 1:
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "Product Factory host task changed while binding model authority"
+                )
+            conn.execute(
+                "INSERT INTO audit_events("
+                "event_type,entity_type,entity_id,payload_json,created_at"
+                ") VALUES (?,?,?,?,?)",
+                (
+                    "product_factory.packaged_model_authority_bound",
+                    "task",
+                    host_task_id,
+                    _canonical_task_payload(
+                        {
+                            "revision": authority.revision,
+                            "selection_sha256": authority.selection_sha256,
+                            "artifact_pin_sha256": authority.artifact_pin_sha256,
+                        }
+                    ),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+            return authority, True
 
     def _bindings_for_project(
         self,
@@ -395,21 +525,38 @@ class PackagedBoundLocalProductFactoryHost:
         host_task_id: str,
         project: ProductProject,
         bindings: Mapping[str, ProductFactoryLocalRepositoryBinding],
+        *,
+        model_authority: _PackagedLocalOllamaAuthority | None = None,
+        require_model_authority_current: bool = True,
     ) -> _ProgramEntry:
         expected_project = _project_snapshot(project)
         expected = _snapshot_map(bindings.values())
+        expected_model_authority = (
+            self._model_authority
+            if model_authority is None
+            else model_authority
+        )
+        if type(expected_model_authority) is not _PackagedLocalOllamaAuthority:
+            raise TypeError("model_authority carrier is invalid")
         with self._lock:
             current = self._entries.get(host_task_id)
             if current is not None:
                 if (
                     current.project != expected_project
                     or dict(current.bindings) != expected
+                    or current.model_authority != expected_model_authority
                 ):
                     raise PackagedBoundLocalProductFactoryHostError(
-                        "ProductProject or local repository bindings changed after host composition"
+                        "ProductProject, repository bindings or model authority "
+                        "changed after host composition"
                     )
                 return current
-            entry = self._build_entry(project, bindings.values())
+            entry = self._build_entry(
+                project,
+                bindings.values(),
+                model_authority=expected_model_authority,
+                require_model_authority_current=require_model_authority_current,
+            )
             self._entries[host_task_id] = entry
             return entry
 
@@ -417,6 +564,9 @@ class PackagedBoundLocalProductFactoryHost:
         self,
         project: ProductProject,
         bindings: Iterable[ProductFactoryLocalRepositoryBinding],
+        *,
+        model_authority: _PackagedLocalOllamaAuthority | None = None,
+        require_model_authority_current: bool = True,
     ) -> _ProgramEntry:
         project_snapshot = _project_snapshot(project)
         snapshots = _snapshot_map(bindings)
@@ -435,13 +585,25 @@ class PackagedBoundLocalProductFactoryHost:
             repository_id: snapshot.root
             for repository_id, snapshot in snapshots.items()
         }
-        self._require_model_authority_current()
+        selected_model_authority = (
+            self._model_authority
+            if model_authority is None
+            else model_authority
+        )
+        if type(selected_model_authority) is not _PackagedLocalOllamaAuthority:
+            raise TypeError("model_authority carrier is invalid")
+        if require_model_authority_current:
+            if selected_model_authority != self._model_authority:
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "new Product Factory work cannot switch packaged model authority"
+                )
+            self._require_model_authority_current()
         program = _build_repository_bound_packaged_local_product_factory_program_with_authority(
             self.store,
             settings=self._settings,
             startup=self._startup,
             repositories=repositories,
-            model_authority=self._model_authority,
+            model_authority=selected_model_authority,
         )
         authority = _EntryRepositoryAuthority(
             bindings=self._bindings,
@@ -455,6 +617,7 @@ class PackagedBoundLocalProductFactoryHost:
             project=project_snapshot,
             program=program,
             bindings=snapshots,
+            model_authority=selected_model_authority,
         )
 
     def _require_state_bindings(
@@ -472,10 +635,17 @@ class PackagedBoundLocalProductFactoryHost:
         with self._lock:
             entry = self._entries.get(host_task_id)
         if entry is None:
+            model_authority, _ = self._bind_or_load_host_model_authority(
+                host_task_id=host_task_id,
+                project_id=state.binding.project.project_id,
+                bind_if_missing=False,
+            )
             entry = self._entry_for(
                 host_task_id,
                 state.binding.project,
                 current,
+                model_authority=model_authority,
+                require_model_authority_current=False,
             )
         if entry.project != _project_snapshot(state.binding.project):
             raise PackagedBoundLocalProductFactoryHostError(
@@ -490,6 +660,134 @@ class PackagedBoundLocalProductFactoryHost:
                 "local repository bindings changed after Product Factory preparation"
             )
         return entry
+
+
+def _canonical_task_payload(payload: Mapping[str, object]) -> str:
+    try:
+        return json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PackagedBoundLocalProductFactoryHostError(
+            "Product Factory host task payload is not canonical JSON"
+        ) from exc
+
+
+def _encode_model_authority(
+    authority: _PackagedLocalOllamaAuthority,
+) -> dict[str, object]:
+    if type(authority) is not _PackagedLocalOllamaAuthority:
+        raise TypeError("model_authority carrier is invalid")
+    return {
+        "schema": _MODEL_AUTHORITY_SCHEMA,
+        "revision": authority.revision,
+        "selection_sha256": authority.selection_sha256,
+        "artifact_pin_sha256": authority.artifact_pin_sha256,
+        "model": authority.model,
+        "base_url": authority.base_url,
+        "timeout_seconds": authority.timeout_seconds,
+        "expected_manifest_sha256": authority.expected_manifest_sha256,
+    }
+
+
+def _decode_model_authority(value: object) -> _PackagedLocalOllamaAuthority:
+    expected = {
+        "schema",
+        "revision",
+        "selection_sha256",
+        "artifact_pin_sha256",
+        "model",
+        "base_url",
+        "timeout_seconds",
+        "expected_manifest_sha256",
+    }
+    if (
+        type(value) is not dict
+        or set(value) != expected
+        or value.get("schema") != _MODEL_AUTHORITY_SCHEMA
+    ):
+        raise PackagedBoundLocalProductFactoryHostError(
+            "durable Product Factory model authority schema is invalid"
+        )
+
+    revision = value["revision"]
+    if type(revision) is not int or revision < 1:
+        raise PackagedBoundLocalProductFactoryHostError(
+            "durable Product Factory model revision is invalid"
+        )
+    selection_sha256 = _authority_digest(
+        value["selection_sha256"],
+        "selection_sha256",
+        allow_none=False,
+    )
+    artifact_pin_sha256 = _authority_digest(
+        value["artifact_pin_sha256"],
+        "artifact_pin_sha256",
+        allow_none=True,
+    )
+    expected_manifest_sha256 = _authority_digest(
+        value["expected_manifest_sha256"],
+        "expected_manifest_sha256",
+        allow_none=True,
+    )
+    model = _authority_text(value["model"], "model")
+    base_url = _authority_text(value["base_url"], "base_url")
+    timeout = value["timeout_seconds"]
+    if (
+        type(timeout) not in (int, float)
+        or isinstance(timeout, bool)
+        or not math.isfinite(float(timeout))
+        or float(timeout) <= 0
+    ):
+        raise PackagedBoundLocalProductFactoryHostError(
+            "durable Product Factory model timeout is invalid"
+        )
+    return _PackagedLocalOllamaAuthority(
+        revision=revision,
+        selection_sha256=selection_sha256,
+        artifact_pin_sha256=artifact_pin_sha256,
+        model=model,
+        base_url=base_url,
+        timeout_seconds=float(timeout),
+        expected_manifest_sha256=expected_manifest_sha256,
+    )
+
+
+def _authority_digest(
+    value: object,
+    label: str,
+    *,
+    allow_none: bool,
+) -> str | None:
+    if value is None and allow_none:
+        return None
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise PackagedBoundLocalProductFactoryHostError(
+            f"durable Product Factory {label} is invalid"
+        )
+    return value
+
+
+def _authority_text(value: object, label: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or "\x00" in value
+        or len(value.encode("utf-8")) > 4096
+    ):
+        raise PackagedBoundLocalProductFactoryHostError(
+            f"durable Product Factory {label} is invalid"
+        )
+    return value
 
 
 def _project_snapshot(project: ProductProject) -> _ProjectSnapshot:
