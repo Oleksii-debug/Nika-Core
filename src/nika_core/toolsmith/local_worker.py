@@ -218,6 +218,17 @@ class LocalCodingPlanPort(Protocol):
     async def plan(self, job: CodingJob) -> LocalCodingPlan: ...
 
 
+class LocalRepositoryExecutionAuthorityPort(Protocol):
+    """Revalidate one repository root immediately at contained-local effect boundaries."""
+
+    def require_repository_root(
+        self,
+        *,
+        repository_id: str,
+        root: pathlib.Path,
+    ) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class LocalExecutionEvidence:
     job_id: str
@@ -607,6 +618,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
     planner: LocalCodingPlanPort
     git_executable: str = "git"
     source_environment: Mapping[str, str] | None = None
+    repository_authority: LocalRepositoryExecutionAuthorityPort | None = None
 
     def __post_init__(self) -> None:
         parent = ensure_real_directory_root(
@@ -636,6 +648,21 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
         )
         self._active: dict[str, threading.Event] = {}
         self._active_lock = threading.Lock()
+
+    def _require_repository_authority(self, repository_id: str) -> None:
+        authority = self.repository_authority
+        if authority is None:
+            return
+        try:
+            root = pathlib.Path(self.repositories[repository_id])
+        except KeyError as exc:
+            raise ContainedLocalWorkerError(
+                "local repository identity is not configured"
+            ) from exc
+        authority.require_repository_root(
+            repository_id=repository_id,
+            root=root,
+        )
 
     def workspace_root_for(self, job_id: str) -> pathlib.Path:
         identity = _safe_text(job_id, "job_id")
@@ -934,6 +961,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             if prior is not None:
                 return self._existing_result(exact, prior)
 
+            self._require_repository_authority(exact.repository.repository_id)
             try:
                 self._validate_job(exact)
             except (ValueError, WorkspaceSecurityError, ContainedLocalWorkerError) as exc:
@@ -962,6 +990,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             if _job_fingerprint(exact) != authority_fingerprint:
                 return self._manual_reconcile(exact.job_id)
 
+            self._require_repository_authority(exact.repository.repository_id)
             try:
                 plan = _snapshot_plan(proposed, exact.resource_budget.max_changed_files)
                 for edit in plan.edits:
@@ -1053,6 +1082,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
         plan: LocalCodingPlan,
         cancellation: threading.Event,
     ) -> CodingResult:
+        self._require_repository_authority(job.repository.repository_id)
         root = self.ensure_workspace_root(job.job_id)
         self._save_phase(root, job, "preparing")
         if cancellation.is_set():
