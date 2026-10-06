@@ -8,6 +8,7 @@ import pathlib
 import shutil
 import stat
 import subprocess
+import tempfile
 import threading
 import time
 
@@ -128,6 +129,130 @@ def _pinned_executable_descriptor_sha256(descriptor: int) -> str:
         raise ProcessExecutionError(
             "unable to verify pinned runtime executable bytes"
         ) from exc
+
+
+def _copy_posix_executable_snapshot(
+    source_descriptor: int,
+    target_descriptor: int,
+    *,
+    expected_sha256: str,
+) -> None:
+    """Copy one admitted executable into private launch storage and bind its bytes."""
+
+    try:
+        os.lseek(source_descriptor, 0, os.SEEK_SET)
+        os.ftruncate(target_descriptor, 0)
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(source_descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining = memoryview(chunk)
+            while remaining:
+                written = os.write(target_descriptor, remaining)
+                if written <= 0:
+                    raise OSError("short write while snapshotting executable")
+                remaining = remaining[written:]
+        if digest.hexdigest() != expected_sha256:
+            raise ProcessExecutionError(
+                "pinned runtime executable bytes changed before process launch"
+            )
+        os.fchmod(target_descriptor, 0o500)
+        os.lseek(target_descriptor, 0, os.SEEK_SET)
+    except ProcessExecutionError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ProcessExecutionError(
+            "unable to snapshot pinned runtime executable for launch"
+        ) from exc
+
+
+def _open_posix_executable_snapshot(
+    source_descriptor: int,
+    *,
+    expected_sha256: str,
+) -> int:
+    """Return a private executable snapshot whose bytes cannot follow source mutation."""
+
+    memfd_create = getattr(os, "memfd_create", None)
+    allow_sealing = getattr(os, "MFD_ALLOW_SEALING", None)
+    if callable(memfd_create) and isinstance(allow_sealing, int):
+        snapshot_descriptor: int | None = None
+        try:
+            flags = getattr(os, "MFD_CLOEXEC", 0) | allow_sealing
+            snapshot_descriptor = memfd_create("nika-pinned-executable", flags)
+            _copy_posix_executable_snapshot(
+                source_descriptor,
+                snapshot_descriptor,
+                expected_sha256=expected_sha256,
+            )
+            import fcntl
+
+            seals = (
+                fcntl.F_SEAL_WRITE
+                | fcntl.F_SEAL_GROW
+                | fcntl.F_SEAL_SHRINK
+                | fcntl.F_SEAL_SEAL
+            )
+            fcntl.fcntl(snapshot_descriptor, fcntl.F_ADD_SEALS, seals)
+            applied_seals = fcntl.fcntl(snapshot_descriptor, fcntl.F_GET_SEALS)
+            if applied_seals & seals != seals:
+                raise OSError("executable snapshot seals were not applied")
+            return snapshot_descriptor
+        except ProcessExecutionError:
+            if snapshot_descriptor is not None:
+                os.close(snapshot_descriptor)
+            raise
+        except (AttributeError, ImportError, OSError, TypeError, ValueError):
+            if snapshot_descriptor is not None:
+                os.close(snapshot_descriptor)
+
+    try:
+        with tempfile.TemporaryFile(mode="w+b") as temporary:
+            temporary_descriptor = temporary.fileno()
+            _copy_posix_executable_snapshot(
+                source_descriptor,
+                temporary_descriptor,
+                expected_sha256=expected_sha256,
+            )
+            temporary_stat = os.fstat(temporary_descriptor)
+            for descriptor_root in (
+                pathlib.Path("/proc/self/fd"),
+                pathlib.Path("/dev/fd"),
+            ):
+                temporary_path = descriptor_root / str(temporary_descriptor)
+                snapshot_descriptor: int | None = None
+                try:
+                    launch_stat = temporary_path.stat()
+                    snapshot_descriptor = os.open(
+                        temporary_path,
+                        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
+                    )
+                    snapshot_stat = os.fstat(snapshot_descriptor)
+                except OSError:
+                    if snapshot_descriptor is not None:
+                        os.close(snapshot_descriptor)
+                    continue
+                if (
+                    launch_stat.st_dev == temporary_stat.st_dev
+                    and launch_stat.st_ino == temporary_stat.st_ino
+                    and snapshot_stat.st_dev == temporary_stat.st_dev
+                    and snapshot_stat.st_ino == temporary_stat.st_ino
+                ):
+                    os.lseek(snapshot_descriptor, 0, os.SEEK_SET)
+                    return snapshot_descriptor
+                os.close(snapshot_descriptor)
+    except ProcessExecutionError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise ProcessExecutionError(
+            "unable to snapshot pinned runtime executable for launch"
+        ) from exc
+
+    raise ProcessExecutionError(
+        "private POSIX executable snapshot is unavailable"
+    )
 
 
 def _open_windows_executable_launch_lock(path: pathlib.Path) -> int:
@@ -252,14 +377,13 @@ class _PinnedExecutableLaunchGuard:
                 | getattr(os, "O_NOFOLLOW", 0)
             )
             try:
-                descriptor = os.open(self._executable, flags)
+                source_descriptor = os.open(self._executable, flags)
             except OSError as exc:
                 raise ProcessExecutionError(
                     "unable to hold pinned runtime executable for launch"
                 ) from exc
-            self._descriptor = descriptor
             try:
-                descriptor_stat = os.fstat(descriptor)
+                descriptor_stat = os.fstat(source_descriptor)
                 readmitted = _resolve_pinned_executable(
                     self._executable,
                     self._arguments,
@@ -286,26 +410,31 @@ class _PinnedExecutableLaunchGuard:
                     raise ProcessExecutionError(
                         "pinned runtime executable changed before process launch"
                     )
-                if (
-                    _pinned_executable_descriptor_sha256(descriptor)
-                    != self._expected_sha256
-                ):
-                    raise ProcessExecutionError(
-                        "pinned runtime executable bytes changed before process launch"
-                    )
+                snapshot_descriptor = _open_posix_executable_snapshot(
+                    source_descriptor,
+                    expected_sha256=self._expected_sha256,
+                )
+            finally:
+                try:
+                    os.close(source_descriptor)
+                except OSError:
+                    pass
 
+            self._descriptor = snapshot_descriptor
+            try:
+                snapshot_stat = os.fstat(snapshot_descriptor)
                 for descriptor_root in (
                     pathlib.Path("/proc/self/fd"),
                     pathlib.Path("/dev/fd"),
                 ):
-                    launch_path = descriptor_root / str(descriptor)
+                    launch_path = descriptor_root / str(snapshot_descriptor)
                     try:
                         launch_stat = launch_path.stat()
                     except OSError:
                         continue
                     if (
-                        launch_stat.st_dev == descriptor_stat.st_dev
-                        and launch_stat.st_ino == descriptor_stat.st_ino
+                        launch_stat.st_dev == snapshot_stat.st_dev
+                        and launch_stat.st_ino == snapshot_stat.st_ino
                     ):
                         return launch_path
                 raise ProcessExecutionError(
