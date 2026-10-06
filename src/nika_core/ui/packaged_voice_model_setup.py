@@ -479,6 +479,7 @@ class PackagedVoiceModelSetup:
             return "missing"
         try:
             root_evidence = os.lstat(model_root)
+            self._require_no_reparse_ancestors(model_root)
         except OSError:
             return "partial"
         if (
@@ -487,18 +488,24 @@ class PackagedVoiceModelSetup:
             or _is_reparse(root_evidence)
         ):
             return "partial"
+        total = 0
         for name in _REQUIRED_FILES:
             path = model_root / name
             try:
                 evidence = os.lstat(path)
             except OSError:
                 return "partial"
+            limit = _TOKENS_FILE_LIMIT if name == "tokens.txt" else _ONNX_FILE_LIMIT
             if (
                 not stat.S_ISREG(evidence.st_mode)
                 or stat.S_ISLNK(evidence.st_mode)
                 or _is_reparse(evidence)
                 or evidence.st_size <= 0
+                or evidence.st_size > limit
             ):
+                return "partial"
+            total += evidence.st_size
+            if total > _TOTAL_LIMIT:
                 return "partial"
         return "installed"
 
