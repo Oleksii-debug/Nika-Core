@@ -1479,14 +1479,15 @@ def test_existing_candidate_replay_rejects_manifest_to_digest_mutation(
     expected_manifest = json.loads(
         carrier["metadata"]["nika_adapter_manifest"]
     )
-    original_manifest = peft.candidate_adapter_manifest
-
     def mutate_after_manifest(path: Path) -> dict[str, object]:
-        observed = original_manifest(path)
+        current = json.loads(path.read_bytes())
+        observed = json.loads(
+            current["metadata"]["nika_adapter_manifest"]
+        )
         try:
             with path.open("ab") as handle:
                 handle.write(b"mutation")
-        except PermissionError:
+        except OSError:
             pass
         return observed
 
