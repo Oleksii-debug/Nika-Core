@@ -23,6 +23,7 @@ from nika_core.security.standing_permission import (
     StandingPermissionBinding,
     StandingPermissionScope,
     StandingPermissionStore,
+    standing_permission_scope_fingerprint,
 )
 from nika_core.tools import ToolRisk
 from nika_core.v01_model_settings import ModelSelection, V01ModelSettings
@@ -32,6 +33,7 @@ _CLOUD_SUBJECT_ID = "nika.packaged.model"
 _LOCAL_USER_ID = "nika.local.user"
 _GRANT_TTL = timedelta(hours=24)
 _BINDING_SCHEMA_VERSION = 1
+_TASK_SELECTION_FIELD = "v01_model_selection"
 
 
 class CloudModelPermissionDenied(ValueError):
@@ -136,12 +138,34 @@ class V01CloudModelPermissionService:
             return
         previous_id = self._bound_permission_id(current.task_id, strict=True)
         now = self._utc_now()
-        if self._active_bound_permission(current.task_id, now=now) is not None:
+        if self._active_bound_permission(current, selection, now=now) is not None:
             return
         self._confirm_and_grant(
             current,
             selection,
-            now=now,
+            expected_previous_id=previous_id,
+        )
+
+    def admit_recovered_task(self, record: TaskRecord) -> None:
+        """Refresh cloud authority before a crash-left RUNNING task auto-resumes."""
+
+        current = self._queue.get(record.task_id)
+        if current != record or current.state is not TaskState.RUNNING:
+            raise CloudModelPermissionDenied(
+                "Неможливо безпечно підтвердити зовнішню модель для аварійного відновлення."
+            )
+        if _TASK_SELECTION_FIELD not in current.payload:
+            return
+        selection = self._cloud_selection(current.task_id)
+        if selection is None:
+            return
+        previous_id = self._bound_permission_id(current.task_id, strict=True)
+        now = self._utc_now()
+        if self._active_bound_permission(current, selection, now=now) is not None:
+            return
+        self._confirm_and_grant(
+            current,
+            selection,
             expected_previous_id=previous_id,
         )
 
@@ -158,13 +182,13 @@ class V01CloudModelPermissionService:
         if record.state is not TaskState.RUNNING:
             return None
         try:
-            selection = self._settings.for_task(task_id)
-        except Exception:  # noqa: BLE001 - corrupt durable route fails closed
+            selection = self._cloud_selection(task_id)
+        except Exception:  # noqa: BLE001 - corrupt or disallowed durable route fails closed
             return None
-        if selection.route_kind != "openai_compatible":
+        if selection is None:
             return None
         try:
-            permission = self._active_bound_permission(task_id, now=self._utc_now())
+            permission = self._active_bound_permission(record, selection, now=self._utc_now())
         except Exception:  # noqa: BLE001 - corrupt binding/clock fails closed
             return None
         if permission is None:
@@ -216,7 +240,6 @@ class V01CloudModelPermissionService:
         selection: ModelSelection,
         *,
         expected_previous_id: str | None,
-        now: datetime | None = None,
     ) -> None:
         request = self._grant_request(record, selection)
         confirmation_request = CloudModelGrantRequest(
@@ -242,19 +265,14 @@ class V01CloudModelPermissionService:
                 "Зовнішній API для цього завдання не дозволено; завдання не запущено."
             )
 
-        instant = self._utc_now() if now is None else now
+        instant = self._utc_now()
         permission_id = self._new_permission_id(record.task_id)
         try:
             with self._permissions.grant_transaction(
                 permission_id=permission_id,
-                scope=StandingPermissionScope(
-                    subject_id=_CLOUD_SUBJECT_ID,
-                    context=self._context(record),
-                    action_class=_CLOUD_ACTION_CLASS,
-                    targets=(request.provider_id,),
-                    sites=(request.network_host,),
-                    resources=(request.model,),
-                    risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+                scope=self._scope_for_request(
+                    record,
+                    request,
                     granted_at=instant,
                     expires_at=instant + _GRANT_TTL,
                 ),
@@ -265,6 +283,7 @@ class V01CloudModelPermissionService:
                     updated_at=instant,
                     expected_previous_id=expected_previous_id,
                     expected_record=record,
+                    expected_selection=selection,
                     connection=conn,
                 )
         except Exception:  # noqa: BLE001 - durable permission boundary fails closed
@@ -291,8 +310,14 @@ class V01CloudModelPermissionService:
         if authority.context != expected_context:
             return None
         try:
-            permission = self._active_bound_permission(record.task_id, now=self._utc_now())
-            selection = self._settings.for_task(record.task_id)
+            selection = self._cloud_selection(record.task_id)
+            if selection is None:
+                return None
+            permission = self._active_bound_permission(
+                record,
+                selection,
+                now=self._utc_now(),
+            )
             request = self._grant_request(record, selection)
         except Exception:  # noqa: BLE001 - durable authority reconstruction fails closed
             return None
@@ -547,14 +572,39 @@ class V01CloudModelPermissionService:
             return None
         return self._binding_id_from_row(task_id, row, strict=strict)
 
-    def _active_bound_permission(self, task_id: str, *, now: datetime):
-        permission_id = self._bound_permission_id(task_id, strict=False)
+    def _active_bound_permission(
+        self,
+        record: TaskRecord,
+        selection: ModelSelection,
+        *,
+        now: datetime,
+    ):
+        permission_id = self._bound_permission_id(record.task_id, strict=False)
         if permission_id is None:
             return None
-        permission = self._permissions.get(permission_id)
+        try:
+            permission = self._permissions.get(permission_id)
+        except Exception:  # noqa: BLE001 - corrupt durable authority must fail closed
+            raise CloudModelPermissionDenied(
+                "Збережений дозвіл зовнішньої моделі пошкоджено."
+            ) from None
         if permission is None or permission.revoked_at is not None:
             return None
         if now < permission.granted_at or now >= permission.expires_at:
+            return None
+        request = self._grant_request(record, selection)
+        expected_scope = self._scope_for_request(
+            record,
+            request,
+            granted_at=permission.granted_at,
+            expires_at=permission.expires_at,
+        )
+        if permission.parent_permission_id is not None:
+            return None
+        if (
+            permission.scope_fingerprint
+            != standing_permission_scope_fingerprint(expected_scope)
+        ):
             return None
         return permission
 
@@ -566,6 +616,7 @@ class V01CloudModelPermissionService:
         updated_at: datetime,
         expected_previous_id: str | None,
         expected_record: TaskRecord,
+        expected_selection: ModelSelection,
         connection: _SQLExecutor | None = None,
     ) -> None:
         if connection is None:
@@ -577,6 +628,7 @@ class V01CloudModelPermissionService:
                     updated_at=updated_at,
                     expected_previous_id=expected_previous_id,
                     expected_record=expected_record,
+                    expected_selection=expected_selection,
                     connection=conn,
                 )
             return
@@ -586,6 +638,36 @@ class V01CloudModelPermissionService:
             ensure_ascii=False,
             sort_keys=True,
         )
+        expected_selection_json = expected_selection.canonical_json()
+        expected_selection_id = hashlib.sha256(
+            expected_selection_json.encode("utf-8")
+        ).hexdigest()
+        if expected_record.payload.get(_TASK_SELECTION_FIELD) != expected_selection_id:
+            raise RuntimeError("cloud model task selection changed concurrently")
+
+        selected_row = connection.execute(
+            "SELECT selection_json, typeof(selection_json) AS selection_json_type "
+            "FROM v01_model_selections WHERE selection_id = ?",
+            (expected_selection_id,),
+        ).fetchone()
+        bound_selection_row = connection.execute(
+            "SELECT selection_id, typeof(selection_id) AS selection_id_type, "
+            "selection_json, typeof(selection_json) AS selection_json_type "
+            "FROM v01_task_model_bindings WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if (
+            selected_row is None
+            or selected_row["selection_json_type"] != "text"
+            or selected_row["selection_json"] != expected_selection_json
+            or bound_selection_row is None
+            or bound_selection_row["selection_id_type"] != "text"
+            or bound_selection_row["selection_id"] != expected_selection_id
+            or bound_selection_row["selection_json_type"] != "text"
+            or bound_selection_row["selection_json"] != expected_selection_json
+        ):
+            raise RuntimeError("cloud model selection changed concurrently")
+
         task_row = connection.execute(
             "SELECT workspace_id, agent_id, state, payload_json FROM tasks "
             "WHERE task_id = ?",
@@ -637,6 +719,26 @@ class V01CloudModelPermissionService:
     @classmethod
     def _new_permission_id(cls, task_id: str) -> str:
         return f"{cls._permission_prefix(task_id)}{uuid4().hex}"
+
+    @staticmethod
+    def _scope_for_request(
+        record: TaskRecord,
+        request: CloudModelGrantRequest,
+        *,
+        granted_at: datetime,
+        expires_at: datetime,
+    ) -> StandingPermissionScope:
+        return StandingPermissionScope(
+            subject_id=_CLOUD_SUBJECT_ID,
+            context=V01CloudModelPermissionService._context(record),
+            action_class=_CLOUD_ACTION_CLASS,
+            targets=(request.provider_id,),
+            sites=(request.network_host,),
+            resources=(request.model,),
+            risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            granted_at=granted_at,
+            expires_at=expires_at,
+        )
 
     @staticmethod
     def _grant_request(

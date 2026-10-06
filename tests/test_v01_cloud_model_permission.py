@@ -18,7 +18,7 @@ from nika_core.model_gateway.contracts import (
     ProviderCapabilities,
     ProviderKind,
 )
-from nika_core.security.standing_permission import StandingPermissionScope
+from nika_core.security.standing_permission import PermissionContext, StandingPermissionScope
 from nika_core.v01_cloud_model_permission import (
     CloudModelGrantRequest,
     CloudModelPermissionDenied,
@@ -1104,3 +1104,393 @@ def test_cloud_permission_clock_rejects_datetime_subclass(tmp_path: Path) -> Non
         assert conn.execute(
             "SELECT COUNT(*) FROM standing_permissions"
         ).fetchone()[0] == 0
+
+
+def test_recovered_running_task_with_live_grant_does_not_reprompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    service.admit_recovered_task(queue.get(record.task_id))
+
+    assert len(prompts) == 1
+    assert service.execution_authority_for_task(record.task_id) is not None
+
+
+def test_recovered_running_task_with_expired_grant_requires_new_consent(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    instant = [NOW]
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: instant[0],
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    first_id = service._bound_permission_id(record.task_id, strict=True)
+    instant[0] = NOW + timedelta(hours=25)
+
+    service.admit_recovered_task(queue.get(record.task_id))
+
+    assert len(prompts) == 2
+    second_id = service._bound_permission_id(record.task_id, strict=True)
+    assert first_id is not None
+    assert second_id is not None
+    assert second_id != first_id
+    assert service.execution_authority_for_task(record.task_id) is not None
+
+
+def test_recovered_legacy_task_without_frozen_model_selection_never_prompts(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    queue = TaskQueue(store)
+    record = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "legacy deterministic crash-left work"},
+    )
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+
+    service.admit_recovered_task(queue.get(record.task_id))
+
+    assert prompts == []
+    assert service.execution_authority_for_task(record.task_id) is None
+
+
+def test_recovered_running_task_with_corrupt_bound_selection_fails_before_reprompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    instant = [NOW]
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: instant[0],
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT selection_json FROM v01_task_model_bindings WHERE task_id = ?",
+            (record.task_id,),
+        ).fetchone()
+        assert row is not None
+        body = row["selection_json"]
+        assert '"model":"api-model"' in body
+        corrupt = body.replace(
+            '"model":"api-model"',
+            '"model":"shadow-model","model":"api-model"',
+            1,
+        )
+        conn.execute(
+            "UPDATE v01_task_model_bindings SET selection_json = ? WHERE task_id = ?",
+            (corrupt, record.task_id),
+        )
+
+    instant[0] = NOW + timedelta(hours=25)
+    with pytest.raises(CloudModelPermissionDenied, match="збережений маршрут"):
+        service.admit_recovered_task(queue.get(record.task_id))
+
+    assert len(prompts) == 1
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ("context", "action", "provider", "host", "model"),
+)
+def test_recovered_running_task_reconsents_when_live_grant_scope_mismatches(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    authority = service.execution_authority_for_task(record.task_id)
+    assert authority is not None
+    selection = settings.for_task(record.task_id)
+    request = service._grant_request(record, selection)
+
+    context = authority.context
+    action_class = "model.cloud.complete"
+    provider_id = request.provider_id
+    network_host = request.network_host
+    model = request.model
+    if mismatch == "context":
+        context = PermissionContext(
+            user_id=context.user_id,
+            project_id=context.project_id,
+            task_id=f"{context.task_id}-other",
+        )
+    elif mismatch == "action":
+        action_class = "model.cloud.other"
+    elif mismatch == "provider":
+        provider_id = "other-provider"
+    elif mismatch == "host":
+        network_host = "other.example.test"
+    elif mismatch == "model":
+        model = "other-model"
+    else:  # pragma: no cover - parametrization is closed above
+        raise AssertionError(f"unexpected mismatch: {mismatch}")
+
+    wrong_permission_id = service._new_permission_id(record.task_id)
+    service._permissions.grant(
+        permission_id=wrong_permission_id,
+        scope=StandingPermissionScope(
+            subject_id=authority.subject_id,
+            context=context,
+            action_class=action_class,
+            targets=(provider_id,),
+            sites=(network_host,),
+            resources=(model,),
+            risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            granted_at=NOW,
+            expires_at=NOW + timedelta(hours=24),
+        ),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE v01_cloud_model_permission_bindings "
+            "SET permission_id = ?, updated_at = ? WHERE task_id = ?",
+            (wrong_permission_id, NOW.isoformat(), record.task_id),
+        )
+
+    assert service.execution_authority_for_task(record.task_id) is None
+
+    service.admit_recovered_task(queue.get(record.task_id))
+
+    assert len(prompts) == 2
+    assert prompts[1] == prompts[0]
+    assert service._bound_permission_id(record.task_id, strict=True) != wrong_permission_id
+    assert service.execution_authority_for_task(record.task_id) is not None
+    _authorize(service, record.task_id)
+
+
+def test_recovered_reconsent_rolls_back_if_model_binding_changes_during_prompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    instant = [NOW]
+
+    def confirm(request: CloudModelGrantRequest) -> bool:
+        prompts.append(request)
+        if len(prompts) == 2:
+            with store.connection() as conn:
+                row = conn.execute(
+                    "SELECT selection_json FROM v01_task_model_bindings WHERE task_id = ?",
+                    (record.task_id,),
+                ).fetchone()
+                assert row is not None
+                body = row["selection_json"]
+                assert '"model":"api-model"' in body
+                conn.execute(
+                    "UPDATE v01_task_model_bindings SET selection_json = ? "
+                    "WHERE task_id = ?",
+                    (
+                        body.replace(
+                            '"model":"api-model"',
+                            '"model":"shadow-model","model":"api-model"',
+                            1,
+                        ),
+                        record.task_id,
+                    ),
+                )
+        return True
+
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=confirm,
+        clock=lambda: instant[0],
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    first_id = service._bound_permission_id(record.task_id, strict=True)
+    assert first_id is not None
+    instant[0] = NOW + timedelta(hours=25)
+
+    with pytest.raises(CloudModelPermissionDenied, match="зберегти дозвіл"):
+        service.admit_recovered_task(queue.get(record.task_id))
+
+    assert len(prompts) == 2
+    assert service._bound_permission_id(record.task_id, strict=True) == first_id
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0] == 1
+
+
+def test_injected_live_grant_cannot_bypass_private_data_setting(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store, private_data_allowed=False)
+    record = _task(store, settings)
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: NOW,
+    )
+
+    selection = settings.for_task(record.task_id)
+    request = service._grant_request(record, selection)
+    permission_id = service._new_permission_id(record.task_id)
+    service._permissions.grant(
+        permission_id=permission_id,
+        scope=service._scope_for_request(
+            record,
+            request,
+            granted_at=NOW,
+            expires_at=NOW + timedelta(hours=24),
+        ),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_bindings"
+            "(task_id, permission_id, updated_at) VALUES (?, ?, ?)",
+            (record.task_id, permission_id, NOW.isoformat()),
+        )
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+
+    assert service.execution_authority_for_task(record.task_id) is None
+
+
+def test_recovered_reconsent_dates_new_grant_after_confirmation(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    instant = [NOW]
+
+    def confirm(request: CloudModelGrantRequest) -> bool:
+        prompts.append(request)
+        if len(prompts) == 2:
+            instant[0] += timedelta(hours=25)
+        return True
+
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=confirm,
+        clock=lambda: instant[0],
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    instant[0] = NOW + timedelta(hours=25)
+
+    service.admit_recovered_task(queue.get(record.task_id))
+
+    assert instant[0] == NOW + timedelta(hours=50)
+    assert len(prompts) == 2
+    permission_id = service._bound_permission_id(record.task_id, strict=True)
+    assert permission_id is not None
+    permission = service._permissions.get(permission_id)
+    assert permission is not None
+    assert permission.granted_at == instant[0]
+    assert permission.expires_at == instant[0] + timedelta(hours=24)
+    assert service.execution_authority_for_task(record.task_id) is not None
+
+
+def test_corrupt_standing_permission_fails_resume_without_reprompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    queue.transition(record.task_id, TaskState.PAUSED)
+    permission_id = service._bound_permission_id(record.task_id, strict=True)
+    assert permission_id is not None
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE standing_permissions SET scope_fingerprint = ? "
+            "WHERE permission_id = ?",
+            ("0" * 64, permission_id),
+        )
+
+    with pytest.raises(CloudModelPermissionDenied, match="дозвіл.*пошкоджено"):
+        service.admit_resumed_task(queue.get(record.task_id))
+
+    assert len(prompts) == 1
+    assert queue.get(record.task_id).state is TaskState.PAUSED
+    assert service.execution_authority_for_task(record.task_id) is None
