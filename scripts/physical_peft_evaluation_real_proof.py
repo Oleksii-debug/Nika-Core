@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import re
-import shutil
+import stat
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -32,6 +32,14 @@ _EVALUATION_CONFIG_FILE = "physical-evaluation.json"
 _EVALUATION_REPORT_FILE = "physical-old-new-evaluation-report.json"
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_JSON_BYTES = 1024 * 1024
+_MAX_EVIDENCE_REPORT_BYTES = 64 * 1024
+_MAX_EVIDENCE_CANDIDATE_BYTES = 128 * 1024 * 1024
+_MAX_EVIDENCE_MANIFEST_BYTES = 1024 * 1024
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 
 class ProofError(RuntimeError):
@@ -55,10 +63,9 @@ def _reject_constant(value: str) -> NoReturn:
     raise ValueError(f"non-finite JSON constant: {value}")
 
 
-def _load_object(path: Path) -> dict[str, object]:
-    raw = path.read_bytes()
+def _load_object_bytes(raw: bytes, *, name: str) -> dict[str, object]:
     if not raw or len(raw) > _MAX_JSON_BYTES:
-        _fail(f"JSON authority has invalid size: {path.name}")
+        _fail(f"JSON authority has invalid size: {name}")
     try:
         value = json.loads(
             raw.decode("utf-8", errors="strict"),
@@ -66,10 +73,14 @@ def _load_object(path: Path) -> dict[str, object]:
             parse_constant=_reject_constant,
         )
     except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
-        raise ProofError(f"invalid JSON authority: {path.name}") from exc
+        raise ProofError(f"invalid JSON authority: {name}") from exc
     if type(value) is not dict:
-        _fail(f"JSON authority must be an object: {path.name}")
+        _fail(f"JSON authority must be an object: {name}")
     return value
+
+
+def _load_object(path: Path) -> dict[str, object]:
+    return _load_object_bytes(path.read_bytes(), name=path.name)
 
 
 def _canonical_json(payload: object) -> str:
@@ -98,6 +109,10 @@ def _atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
 def _sha256_file(path: Path) -> tuple[str, int]:
     digest = hashlib.sha256()
     total = 0
@@ -106,6 +121,138 @@ def _sha256_file(path: Path) -> tuple[str, int]:
             total += len(chunk)
             digest.update(chunk)
     return digest.hexdigest(), total
+
+
+def _is_reparse(value: os.stat_result) -> bool:
+    attributes = int(getattr(value, "st_file_attributes", 0))
+    flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return bool(attributes & flag)
+
+
+def _open_readonly_snapshot(path: Path) -> int:
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows evidence snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(getattr(os, "O_NONBLOCK", 0))
+    return os.open(path, flags)
+
+
+def _stable_file_bytes(path: Path, *, max_bytes: int, name: str) -> bytes:
+    descriptor: int | None = None
+    try:
+        before = os.lstat(path)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > max_bytes
+        ):
+            _fail(f"{name} size or file type is invalid")
+        descriptor = _open_readonly_snapshot(path)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            _fail(f"{name} changed before it was opened")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            remaining = max_bytes + 1 - total
+            if remaining <= 0:
+                _fail(f"{name} size is invalid")
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                _fail(f"{name} size is invalid")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+    except ProofError:
+        raise
+    except OSError as exc:
+        raise ProofError(f"{name} could not be read") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    identities = (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+        (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+    )
+    if (
+        len(set(identities)) != 1
+        or total != before.st_size
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+    ):
+        _fail(f"{name} changed while it was being snapshotted")
+    if total <= 0 or total > max_bytes:
+        _fail(f"{name} size is invalid")
+    return b"".join(chunks)
+
+
+def _write_new_file(path: Path, payload: bytes) -> None:
+    if type(payload) is not bytes or not payload:
+        _fail("physical evaluation evidence payload is invalid")
+    try:
+        with path.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise ProofError("physical evaluation evidence could not be published") from exc
 
 
 def _evaluation_set() -> tuple[EvaluationSet, dict[str, object]]:
@@ -352,10 +499,24 @@ def verify(root: Path) -> None:
     root = root.resolve(strict=True)
     pilot_report_path = root / "run" / "physical-pilot-report.json"
     evaluation_report_path = root / "run" / _EVALUATION_REPORT_FILE
-    report = PhysicalTrainingPilotReport.from_json(
-        pilot_report_path.read_text(encoding="utf-8", errors="strict")
+
+    pilot_report_bytes = _stable_file_bytes(
+        pilot_report_path,
+        max_bytes=_MAX_EVIDENCE_REPORT_BYTES,
+        name="physical pilot report",
     )
-    evaluation_report = _load_object(evaluation_report_path)
+    report = PhysicalTrainingPilotReport.from_json(
+        pilot_report_bytes.decode("utf-8", errors="strict")
+    )
+    evaluation_report_bytes = _stable_file_bytes(
+        evaluation_report_path,
+        max_bytes=_MAX_EVIDENCE_REPORT_BYTES,
+        name="physical evaluation report",
+    )
+    evaluation_report = _load_object_bytes(
+        evaluation_report_bytes,
+        name=evaluation_report_path.name,
+    )
     evaluation, _ = _evaluation_set()
 
     required = {
@@ -396,16 +557,25 @@ def verify(root: Path) -> None:
 
     candidate = candidate_artifact_path(root / "run", report.candidate_artifact_ref)
     candidate = candidate.resolve(strict=True)
-    candidate_sha256, candidate_size = _sha256_file(candidate)
+    candidate_bytes = _stable_file_bytes(
+        candidate,
+        max_bytes=_MAX_EVIDENCE_CANDIDATE_BYTES,
+        name="physical evaluation candidate",
+    )
+    candidate_sha256 = _sha256_bytes(candidate_bytes)
+    candidate_size = len(candidate_bytes)
     if (
         candidate_sha256 != report.candidate_sha256
         or candidate_size != report.candidate_byte_count
     ):
         _fail("candidate bytes changed after old-vs-new evaluation")
 
-    report_sha256, report_size = _sha256_file(evaluation_report_path)
-    if report_size <= 0:
-        _fail("physical evaluation report is empty")
+    staged_assets_bytes = _stable_file_bytes(
+        root / "staged-assets.json",
+        max_bytes=_MAX_EVIDENCE_MANIFEST_BYTES,
+        name="physical proof asset manifest",
+    )
+    report_sha256 = _sha256_bytes(evaluation_report_bytes)
     source_sha = os.environ.get("NIKA_CANDIDATE_SHA", "")
     if _SHA_RE.fullmatch(source_sha) is None:
         _fail("NIKA_CANDIDATE_SHA must identify the exact proof source head")
@@ -426,13 +596,27 @@ def verify(root: Path) -> None:
     }
 
     evidence_dir = root / "evaluation-evidence"
-    evidence_dir.mkdir()
-    shutil.copyfile(pilot_report_path, evidence_dir / "physical-pilot-report.json")
-    shutil.copyfile(evaluation_report_path, evidence_dir / _EVALUATION_REPORT_FILE)
-    shutil.copyfile(candidate, evidence_dir / "adapter_model.safetensors")
-    shutil.copyfile(
-        root / "staged-assets.json",
+    try:
+        evidence_dir.mkdir()
+    except OSError as exc:
+        raise ProofError(
+            "physical evaluation evidence directory could not be created"
+        ) from exc
+    _write_new_file(
+        evidence_dir / "physical-pilot-report.json",
+        pilot_report_bytes,
+    )
+    _write_new_file(
+        evidence_dir / _EVALUATION_REPORT_FILE,
+        evaluation_report_bytes,
+    )
+    _write_new_file(
+        evidence_dir / "adapter_model.safetensors",
+        candidate_bytes,
+    )
+    _write_new_file(
         evidence_dir / "staged-assets.json",
+        staged_assets_bytes,
     )
     _atomic_write(
         evidence_dir / "physical-old-new-proof-summary.json",

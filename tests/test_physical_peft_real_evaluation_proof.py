@@ -4,7 +4,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -46,6 +46,68 @@ def proof() -> ModuleType:
 
 def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def test_proof_stable_file_bytes_round_trip(
+    proof: ModuleType,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "evidence.bin"
+    target.write_bytes(b"evidence-bytes")
+
+    assert proof._stable_file_bytes(
+        target,
+        max_bytes=1024,
+        name="evidence",
+    ) == b"evidence-bytes"
+
+
+def test_proof_stable_file_bytes_rejects_bound(
+    proof: ModuleType,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "evidence.bin"
+    target.write_bytes(b"evidence-bytes")
+
+    with pytest.raises(proof.ProofError, match="size or file type is invalid"):
+        proof._stable_file_bytes(target, max_bytes=4, name="evidence")
+
+
+def test_proof_stable_file_bytes_rejects_post_read_identity_change(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "evidence.bin"
+    target.write_bytes(b"evidence-bytes")
+    original_lstat = proof.os.lstat
+    initial = original_lstat(target)
+    calls = 0
+
+    def changed_lstat(path: object):
+        nonlocal calls
+        value = original_lstat(path)
+        if Path(path) != target:
+            return value
+        calls += 1
+        if calls == 1:
+            return value
+        return SimpleNamespace(
+            st_mode=initial.st_mode,
+            st_dev=initial.st_dev,
+            st_ino=initial.st_ino,
+            st_size=initial.st_size,
+            st_mtime_ns=initial.st_mtime_ns + 1,
+            st_file_attributes=getattr(initial, "st_file_attributes", 0),
+        )
+
+    monkeypatch.setattr(proof.os, "lstat", changed_lstat)
+
+    with pytest.raises(
+        proof.ProofError,
+        match="changed while it was being snapshotted",
+    ):
+        proof._stable_file_bytes(target, max_bytes=1024, name="evidence")
 
 
 def _request(candidate_path: Path, candidate_body: bytes) -> bytes:
