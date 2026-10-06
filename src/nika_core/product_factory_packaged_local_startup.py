@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -86,6 +87,8 @@ class PackagedLocalProductFactoryProgram:
 @dataclass(frozen=True, slots=True)
 class PackagedLocalOllamaAuthority:
     revision: int
+    selection_sha256: str
+    artifact_pin_sha256: str | None
     model: str
     base_url: str
     timeout_seconds: float
@@ -347,6 +350,12 @@ def resolve_packaged_local_ollama_authority(
 
     return PackagedLocalOllamaAuthority(
         revision=revision,
+        selection_sha256=hashlib.sha256(
+            selection.canonical_json().encode("utf-8")
+        ).hexdigest(),
+        artifact_pin_sha256=(
+            artifact_pin.pin_sha256 if artifact_pin is not None else None
+        ),
         model=model,
         base_url=base_url,
         timeout_seconds=selection.timeout_seconds,
