@@ -183,6 +183,60 @@ def test_state_refresh_uses_bounded_decision_summary_not_full_list(
     assert project["current_decision"] is None
 
 
+def test_bounded_state_refresh_preserves_mixed_counts_and_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "bounded mixed restart.db"
+    service, repository, _router, provider = _build(database)
+    for suffix in ("pending", "approved", "rejected"):
+        _add_pending(
+            service,
+            repository,
+            package_id=f"research-mixed-{suffix}",
+            option_id=f"option-mixed-{suffix}",
+            decision_id=f"decision-mixed-{suffix}",
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+        )
+
+    for suffix, state in (
+        ("approved", ProductDecisionState.APPROVED),
+        ("rejected", ProductDecisionState.REJECTED),
+    ):
+        service.record_decision(
+            _PROJECT_ID,
+            ProductDecision(
+                decision_id=f"decision-mixed-{suffix}",
+                option_id=f"option-mixed-{suffix}",
+                state=state,
+                rationale=f"Owner finalized {suffix}",
+                decided_by_ref="user://owner",
+            ),
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+            idempotency_key=f"decision:mixed:{suffix}:final",
+        )
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("packaged state refresh must not materialize decision list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
+
+    first = provider()["product_project"]
+    assert first is not None
+    assert first["decision_count"] == 3
+    assert first["decision_state_counts"] == {
+        "approved": 1,
+        "pending": 1,
+        "rejected": 1,
+    }
+    assert first["current_decision"] is not None
+    assert first["current_decision"]["decision_id"] == "decision-mixed-pending"
+
+    _service, _repository, _router, restarted_provider = _build(database)
+    restarted = restarted_provider()["product_project"]
+    assert restarted == first
+
+
 def test_bounded_state_refresh_validates_hidden_corrupt_decision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
