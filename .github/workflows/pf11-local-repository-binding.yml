@@ -62,6 +62,7 @@ jobs:
           python -m ruff check
           src/nika_core/product_project_schema.py
           src/nika_core/product_factory_local_repository_binding.py
+          src/nika_core/product_factory_local_repository_operator.py
           src/nika_core/product_factory_local_coding.py
           src/nika_core/toolsmith/local_worker.py
           src/nika_core/product_factory_packaged_local_startup.py
