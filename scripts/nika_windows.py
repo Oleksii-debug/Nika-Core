@@ -317,6 +317,7 @@ def build_windows_bridge(
         },
         state_provider=source_state,
     )
+
     def start_recovery() -> None:
         try:
             backend.start_startup_recovery()

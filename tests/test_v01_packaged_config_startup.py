@@ -106,7 +106,6 @@ def test_storage_startup_failure_is_accessible_private_and_does_not_launch_shell
     assert not config.database_path.exists()
 
 
-
 def test_build_windows_bridge_can_disable_startup_recovery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -288,7 +287,6 @@ def test_shell_preflight_imports_pywebview_after_complete_assets(
     assert imported == ["webview"]
 
 
-
 def test_shell_deferred_startup_runs_before_hidden_window_is_shown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -395,9 +393,15 @@ def test_shell_launch_failure_is_accessible_private_and_returns_error(
     messages: list[str] = []
     monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
 
-    def fail_shell(actual_bridge: object, *, title: str) -> None:
+    def fail_shell(
+        actual_bridge: object,
+        *,
+        title: str,
+        on_gui_started=None,
+    ) -> None:
         assert actual_bridge is bridge
         assert title == f"Nika Core {config.app_version}"
+        assert on_gui_started is not None
         raise failure
 
     monkeypatch.setattr(nika_windows, "launch_windows_shell", fail_shell)
@@ -408,6 +412,46 @@ def test_shell_launch_failure_is_accessible_private_and_returns_error(
     assert "PRIVATE_" not in messages[0]
     assert "PRIVATE_" not in caplog.text
     assert f"exception_type={type(failure).__name__}" in caplog.text
+
+
+
+def test_deferred_recovery_failure_uses_recovery_error_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+    monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
+    messages: list[str] = []
+    monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
+
+    def build(
+        _config: AppConfig,
+        *,
+        defer_startup_recovery,
+        **_kwargs: object,
+    ) -> tuple[object, object]:
+        def fail_recovery() -> None:
+            raise nika_windows._StartupRecoveryInventoryError("PRIVATE_RECOVERY_CANARY")
+
+        defer_startup_recovery(fail_recovery)
+        return object(), object()
+
+    def launch(
+        _bridge: object,
+        *,
+        title: str,
+        on_gui_started,
+    ) -> None:
+        assert title == f"Nika Core {config.app_version}"
+        on_gui_started()
+
+    monkeypatch.setattr(nika_windows, "build_windows_bridge", build)
+    monkeypatch.setattr(nika_windows, "launch_windows_shell", launch)
+
+    assert nika_windows.main([]) == 1
+    assert len(messages) == 1
+    assert "не може безпечно перевірити незавершену роботу" in messages[0]
+    assert "PRIVATE_RECOVERY_CANARY" not in messages[0]
 
 
 def test_shell_launch_boundary_does_not_swallow_process_exit(
