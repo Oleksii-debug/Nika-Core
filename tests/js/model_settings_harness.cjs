@@ -73,6 +73,9 @@ const tags = {
   "autostart-enabled": "INPUT",
   "autostart-save": "BUTTON",
   "command-input": "TEXTAREA",
+  "speech-text": "TEXTAREA",
+  "speech-start": "BUTTON",
+  "speech-cancel": "BUTTON",
   "source-root": "INPUT",
   "source-a": "INPUT",
   "source-b": "INPUT",
@@ -87,7 +90,21 @@ element("model-save").dataset.actionId = "settings.model.configure";
 element("model-reload").dataset.actionId = "settings.model.refresh";
 element("model-reload").dataset.errorFocusTarget = "model-settings-heading";
 element("autostart-save").dataset.actionId = "settings.autostart.configure";
+element("speech-start").dataset.actionId = "speech.start";
+element("speech-cancel").dataset.actionId = "speech.cancel";
 
+let currentSpeech = {
+  schema: "nika.packaged-speech-state:v1",
+  available: true,
+  status: "idle",
+  generation: 0,
+  active: false,
+  message: "Локальне озвучення Windows готове.",
+  accepted_characters: 0,
+  spoken_characters: 0,
+  chunk_count: 0,
+  pending_characters: 0,
+};
 let currentModel = { status: "missing", revision: 0 };
 let currentRecovery = {
   schema_version: 1,
@@ -140,6 +157,7 @@ function snapshot() {
       startup_recovery: currentRecovery,
       v01_sources: { status: "missing", revision: 0, root: "", source_a: "", source_b: "" },
       v01_model_settings: currentModel,
+      speech: currentSpeech,
       product_project: null,
       v01_team_task: null,
     },
@@ -175,6 +193,22 @@ global.pywebview = { api: {
   dispatch: async (command) => {
     calls.push(command);
     if (dispatchMode === "disconnect") throw new Error("PRIVATE_MODEL_CANARY");
+    if (command.action_id === "speech.start") {
+      currentSpeech = {
+        schema: "nika.packaged-speech-state:v1", available: true,
+        status: "completed", generation: currentSpeech.generation + 1,
+        active: false, message: "Озвучення завершено.",
+        accepted_characters: command.payload.text.length,
+        spoken_characters: command.payload.text.length,
+        chunk_count: 1, pending_characters: 0,
+      };
+      return ack(command, { status: "completed", message: "Озвучення розпочато.", focus_id: "speech-cancel" });
+    }
+    if (command.action_id === "speech.cancel") {
+      currentSpeech = { ...currentSpeech, status: "cancelled", active: false,
+        message: "Озвучення скасовано.", pending_characters: 0 };
+      return ack(command, { status: "completed", message: "Скасування озвучення запитано.", focus_id: "speech-heading" });
+    }
     if (command.action_id === "settings.model.refresh") {
       return ack(command, {
         status: "completed",
@@ -227,6 +261,9 @@ const timeout = element("model-timeout");
 const save = element("model-save");
 const reload = element("model-reload");
 const status = element("model-settings-status");
+const speechText = element("speech-text");
+const speechStart = element("speech-start");
+const speechCancel = element("speech-cancel");
 
 (async () => {
   await tick(); await tick(); await tick();
@@ -242,6 +279,35 @@ const status = element("model-settings-status");
   assert.equal(element("recovery-summary").hidden, false);
   assert.equal(element("recovery-auto-count").textContent, "0");
   assert.equal(element("recovery-uncertain-count").textContent, "0");
+
+  assert.equal(speechStart.disabled, false);
+  assert.equal(speechCancel.disabled, true);
+  speechText.value = "Озвучити цей явний тест.";
+  const speechCallCount = calls.length;
+  click(speechStart);
+  await tick(); await tick(); await tick();
+  assert.equal(calls.length, speechCallCount + 1);
+  assert.equal(calls.at(-1).action_id, "speech.start");
+  assert.deepEqual(calls.at(-1).payload, { text: "Озвучити цей явний тест." });
+  assert.equal(element("speech-status").textContent, "Озвучення завершено.");
+  assert.match(element("app-status").textContent, /Озвучення завершено/);
+  assert.equal(speechStart.disabled, false);
+  assert.equal(speechCancel.disabled, true);
+
+  currentSpeech = { ...currentSpeech, status: "running",
+    generation: currentSpeech.generation + 1, active: true,
+    message: "Озвучення виконується.", accepted_characters: 12,
+    spoken_characters: 0, pending_characters: 12 };
+  await poll();
+  assert.equal(speechStart.disabled, true);
+  assert.equal(speechCancel.disabled, false);
+  click(speechCancel);
+  await tick(); await tick(); await tick();
+  assert.equal(calls.at(-1).action_id, "speech.cancel");
+  assert.deepEqual(calls.at(-1).payload, {});
+  assert.equal(element("speech-status").textContent, "Озвучення скасовано.");
+  assert.equal(speechStart.disabled, false);
+  assert.equal(speechCancel.disabled, true);
 
   model.focus();
   const recoveryFocus = document.activeElement;
