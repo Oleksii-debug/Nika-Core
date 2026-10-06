@@ -9,6 +9,7 @@ import sys
 
 import pytest
 
+from nika_core.toolsmith import local_worker as local_worker_module
 from nika_core.toolsmith.contracts import (
     AcceptanceCommand,
     AllowedPathPolicy,
@@ -150,6 +151,38 @@ def _job(
 
 def _run(coroutine):
     return asyncio.run(coroutine)
+
+
+def test_worker_uses_detached_git_plan_after_prepare(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, base_sha = _repository(tmp_path)
+    planner = _Planner(LocalFileEdit("src/value.py", b"VALUE = 2\n"))
+    worker = _worker(tmp_path, repository, planner)
+    job = _job(worker, base_sha)
+    real_prepare = local_worker_module.prepare_private_git_workspace
+    observed: dict[str, object] = {}
+
+    def prepare_then_mutate_original(plan, **kwargs):
+        prepared = real_prepare(plan, **kwargs)
+        observed["original"] = plan
+        observed["detached"] = prepared.plan
+        object.__setattr__(plan, "config_args", ("--help",))
+        object.__setattr__(plan, "base_sha", "0" * 40)
+        return prepared
+
+    monkeypatch.setattr(
+        local_worker_module,
+        "prepare_private_git_workspace",
+        prepare_then_mutate_original,
+    )
+
+    result = _run(worker.execute(job))
+
+    assert result.failure is None
+    assert observed["original"] is not observed["detached"]
+    assert worker.execution_evidence(job.job_id).result_sha != base_sha
 
 
 def test_worker_creates_private_candidate_commit_and_preserves_production_repo(
