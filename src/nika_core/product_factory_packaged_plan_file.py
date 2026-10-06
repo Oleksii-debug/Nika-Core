@@ -24,7 +24,7 @@ _READ_CHUNK_BYTES = 64 * 1024
 
 
 class PackagedExecutionPlanFileError(RuntimeError):
-    """Raised when an operator-supplied execution-plan file is not a stable authority."""
+    """Raised when an operator-supplied plan file is not a stable authority."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +106,7 @@ class PackagedExecutionPlanFileResolver:
             raise PackagedExecutionPlanFileError(
                 "Product Factory execution-plan directory changed"
             ) from exc
-        if resolved != self._directory or _directory_identity(current) != self._directory_identity:
+        current_identity = _directory_identity(current)\n        if resolved != self._directory or current_identity != self._directory_identity:
             raise PackagedExecutionPlanFileError(
                 "Product Factory execution-plan directory identity changed"
             )
@@ -206,7 +206,7 @@ def _read_stable_plan_file(path: pathlib.Path) -> tuple[bytes, _FileIdentity]:
         chunks: list[bytes] = []
         total = 0
         while True:
-            chunk = os.read(descriptor, min(_READ_CHUNK_BYTES, _MAX_PLAN_BYTES + 1 - total))
+            remaining = _MAX_PLAN_BYTES + 1 - total\n            chunk = os.read(descriptor, min(_READ_CHUNK_BYTES, remaining))
             if not chunk:
                 break
             chunks.append(chunk)
