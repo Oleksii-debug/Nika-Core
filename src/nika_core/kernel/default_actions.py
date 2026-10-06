@@ -32,6 +32,18 @@ def build_default_action_registry() -> ActionRegistry:
             None,
         ),
         ActionDefinition(
+            "settings.product_factory_local.configure",
+            "Зберегти локальний Product Factory",
+            "Product Factory",
+            None,
+        ),
+        ActionDefinition(
+            "settings.product_factory_local.refresh",
+            "Перечитати локальний Product Factory",
+            "Product Factory",
+            None,
+        ),
+        ActionDefinition(
             "settings.model.configure", "Зберегти модель", "Налаштування", None
         ),
         ActionDefinition(

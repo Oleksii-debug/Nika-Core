@@ -279,6 +279,49 @@
         <dt>Рішення</dt>
         <dd id="product-project-decision-count">—</dd>
       </dl>
+      <div aria-labelledby="product-factory-local-startup-heading">
+        <h3 id="product-factory-local-startup-heading" tabindex="-1">
+          Локальний backend Product Factory
+        </h3>
+        <p id="product-factory-local-startup-help">
+          Тут зберігається лише локальна host-конфігурація: абсолютні шляхи
+          репозиторіїв і робочої папки, дозволені виконувані файли та ресурсні межі.
+          Не вставляйте паролі, токени, API-ключі або інші секрети. Зміни backend
+          застосовуються лише після перезапуску Nika.
+        </p>
+        <label for="product-factory-local-startup-json">
+          JSON конфігурації локального Product Factory
+        </label>
+        <textarea
+          id="product-factory-local-startup-json"
+          rows="12"
+          maxlength="65536"
+          spellcheck="false"
+          autocomplete="off"
+          aria-describedby="product-factory-local-startup-help product-factory-local-startup-status"
+        ></textarea>
+        <p id="product-factory-local-startup-status">
+          Перевірка збереженої конфігурації локального Product Factory.
+        </p>
+        <div class="actions">
+          <button
+            type="button"
+            id="product-factory-local-startup-save"
+            data-action-id="settings.product_factory_local.configure"
+            data-error-focus-target="product-factory-local-startup-json"
+          >
+            Зберегти локальний Product Factory
+          </button>
+          <button
+            type="button"
+            id="product-factory-local-startup-reload"
+            data-action-id="settings.product_factory_local.refresh"
+            data-error-focus-target="product-factory-local-startup-json"
+          >
+            Перечитати локальний Product Factory
+          </button>
+        </div>
+      </div>
       <div aria-labelledby="product-factory-execution-plan-heading">
         <h3 id="product-factory-execution-plan-heading" tabindex="-1">
           План виконання Product Factory

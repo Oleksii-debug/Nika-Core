@@ -1167,6 +1167,42 @@ class V01ModelSettings:
         except (sqlite3.Error, ModelSetupError, ValidationError):
             return {"status": "invalid"}
 
+    def current_binding(
+        self,
+    ) -> tuple[ModelSelection, TaskModelArtifactPin | None]:
+        """Read one consistent current route and its exact promotion artifact pin.
+
+        This runtime-facing authority preserves promoted-model identity that the
+        intentionally UI-safe snapshot projection omits. It creates no task binding
+        and exposes no credential material outside the persisted selection.
+        """
+
+        try:
+            with self._store.connection() as conn:
+                conn.execute("BEGIN")
+                row = conn.execute(
+                    "SELECT * FROM v01_model_settings WHERE singleton = 1"
+                ).fetchone()
+                revision = self._revision(row)
+                if row is None:
+                    raise ModelSetupError(
+                        "Спочатку виберіть режим та, якщо потрібно, модель."
+                    )
+                selection = ModelSelection.from_stored(row["selection_json"])
+                selection_id, _ = self._selection_id(selection)
+                pin = self._promotion_pin_for_revision(
+                    conn,
+                    selection_id=selection_id,
+                    revision=revision,
+                )
+                return selection, pin
+        except ModelSetupError:
+            raise
+        except (sqlite3.Error, TypeError, ValueError) as exc:
+            raise ModelSetupError(
+                "Не вдалося надійно прочитати поточну модель."
+            ) from exc
+
     def prepare_task_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Freeze the current route and any exact promoted artifact authority."""
 

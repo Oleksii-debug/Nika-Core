@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sqlite3
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
@@ -39,6 +40,15 @@ from nika_core.product_factory_packaged_execution import (
 )
 from nika_core.product_factory_packaged_execution_plan_file import (
     PackagedProductFactoryExecutionPlanFileSource,
+)
+from nika_core.product_factory_packaged_local_settings import (
+    PackagedLocalProductFactorySettings,
+    PackagedLocalProductFactorySettingsError,
+)
+from nika_core.product_factory_packaged_local_startup import (
+    PackagedLocalProductFactoryStartupError,
+    build_packaged_local_product_factory_program,
+    decode_packaged_local_product_factory_startup,
 )
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
@@ -278,6 +288,14 @@ def build_windows_bridge(
     product_factory_execution_plan_resolver: ProductFactoryExecutionPlanResolver | None = None,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
     if (
+        product_factory_execution_host is not None
+        and config.product_factory_local_startup_json is not None
+    ):
+        raise ValueError(
+            "explicit Product Factory execution host conflicts with "
+            "packaged local startup authority"
+        )
+    if (
         product_factory_execution_host is None
         and product_factory_execution_plan_resolver is not None
     ):
@@ -295,6 +313,169 @@ def build_windows_bridge(
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
     model_settings = V01ModelSettings(store)
+    local_product_factory_settings = PackagedLocalProductFactorySettings(store)
+    local_product_factory_environment_override = (
+        config.product_factory_local_startup_json is not None
+    )
+    local_product_factory_settings_invalid = False
+    if local_product_factory_environment_override:
+        local_product_factory_startup_json = config.product_factory_local_startup_json
+    else:
+        try:
+            local_product_factory_startup_json = (
+                local_product_factory_settings.saved_json()
+            )
+        except PackagedLocalProductFactorySettingsError:
+            local_product_factory_startup_json = None
+            local_product_factory_settings_invalid = True
+
+    local_product_factory_startup = None
+    if local_product_factory_startup_json is not None:
+        try:
+            local_product_factory_startup = (
+                decode_packaged_local_product_factory_startup(
+                    local_product_factory_startup_json
+                )
+            )
+        except PackagedLocalProductFactoryStartupError:
+            local_product_factory_settings_invalid = True
+
+    if (
+        product_factory_execution_host is not None
+        and local_product_factory_startup_json is not None
+    ):
+        raise ValueError(
+            "explicit Product Factory execution host conflicts with "
+            "packaged local startup authority"
+        )
+
+    local_product_factory_runtime_active = False
+    local_product_factory_launch_model_revision: int | None = None
+    local_product_factory_launch_settings_revision: int | None = None
+    if (
+        product_factory_execution_host is None
+        and local_product_factory_startup is not None
+        and not local_product_factory_settings_invalid
+    ):
+        try:
+            # Both persisted authorities use BEGIN IMMEDIATE for mutation. Hold the
+            # matching reservation through snapshot, composition and activation so a
+            # second window/process cannot install a mixed startup/model authority.
+            with store.connection() as local_factory_authority_guard:
+                local_factory_authority_guard.execute("BEGIN IMMEDIATE")
+                startup_settings_revision: int | None = None
+                if not local_product_factory_environment_override:
+                    startup_settings_snapshot = local_product_factory_settings.snapshot(
+                        environment_override=False,
+                        runtime_status="not_configured",
+                    )
+                    raw_settings_revision = startup_settings_snapshot.get("revision")
+                    if (
+                        startup_settings_snapshot.get("status") != "ready"
+                        or startup_settings_snapshot.get("config_json")
+                        != local_product_factory_startup_json
+                        or type(raw_settings_revision) is not int
+                        or raw_settings_revision < 1
+                    ):
+                        local_product_factory_settings_invalid = True
+                    else:
+                        startup_settings_revision = raw_settings_revision
+
+                model_snapshot = model_settings.snapshot()
+                model_revision = model_snapshot.get("revision")
+                local_product_factory_model_ready = (
+                    not local_product_factory_settings_invalid
+                    and model_snapshot.get("status") == "ready"
+                    and model_snapshot.get("route_kind") == "ollama"
+                    and model_snapshot.get("provider_id") == "ollama"
+                    and model_snapshot.get("provider_kind") == "local"
+                    and type(model_revision) is int
+                    and model_revision >= 1
+                )
+                if local_product_factory_model_ready:
+                    try:
+                        local_product_factory_program = (
+                            build_packaged_local_product_factory_program(
+                                store,
+                                settings=model_settings,
+                                startup=local_product_factory_startup,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001 - optional backend must fail closed
+                        logging.getLogger(__name__).error(
+                            "Local Product Factory startup failed: exception_type=%s",
+                            type(exc).__name__,
+                        )
+                        local_product_factory_settings_invalid = True
+                    else:
+                        model_after_build = model_settings.snapshot()
+                        startup_settings_stable = True
+                        if not local_product_factory_environment_override:
+                            startup_settings_after = (
+                                local_product_factory_settings.snapshot(
+                                    environment_override=False,
+                                    runtime_status="not_configured",
+                                )
+                            )
+                            startup_settings_stable = (
+                                startup_settings_after.get("status") == "ready"
+                                and startup_settings_after.get("config_json")
+                                == local_product_factory_startup_json
+                                and startup_settings_after.get("revision")
+                                == startup_settings_revision
+                            )
+                        if (
+                            model_after_build.get("status") != "ready"
+                            or model_after_build.get("revision") != model_revision
+                            or not startup_settings_stable
+                        ):
+                            logging.getLogger(__name__).warning(
+                                "Local Product Factory authority changed during startup; "
+                                "restart is required before execution"
+                            )
+                            local_product_factory_settings_invalid = True
+                        else:
+                            product_factory_execution_host = (
+                                local_product_factory_program.multi_repository_host
+                            )
+                            local_product_factory_runtime_active = True
+                            local_product_factory_launch_model_revision = model_revision
+                            local_product_factory_launch_settings_revision = (
+                                startup_settings_revision
+                            )
+        except sqlite3.Error as exc:
+            logging.getLogger(__name__).error(
+                "Local Product Factory authority fence failed: exception_type=%s",
+                type(exc).__name__,
+            )
+            local_product_factory_settings_invalid = True
+
+    local_product_factory_launch_json = local_product_factory_startup_json
+
+    def local_product_factory_restart_focus() -> str | None:
+        if not local_product_factory_runtime_active:
+            return None
+        if not local_product_factory_environment_override:
+            settings_snapshot = local_product_factory_settings.snapshot(
+                environment_override=False,
+                runtime_status="not_configured",
+            )
+            if (
+                settings_snapshot.get("status") != "ready"
+                or settings_snapshot.get("config_json")
+                != local_product_factory_launch_json
+                or settings_snapshot.get("revision")
+                != local_product_factory_launch_settings_revision
+            ):
+                return "product-factory-local-startup-json"
+        model_snapshot = model_settings.snapshot()
+        if (
+            model_snapshot.get("status") != "ready"
+            or model_snapshot.get("revision")
+            != local_product_factory_launch_model_revision
+        ):
+            return "model-route-kind"
+        return None
     intelligence_mode_commands = PackagedIntelligenceModeCommandAdapter(model_settings)
     cloud_permissions = V01CloudModelPermissionService(
         store=store,
@@ -305,6 +486,31 @@ def build_windows_bridge(
             else cloud_permission_confirm
         ),
     )
+
+    def local_product_factory_runtime_status() -> str:
+        if local_product_factory_settings_invalid:
+            return "invalid"
+        if local_product_factory_runtime_active:
+            if local_product_factory_restart_focus() is not None:
+                return "restart_required"
+            return "active"
+        if local_product_factory_environment_override:
+            if local_product_factory_startup is not None:
+                return "model_required"
+            return "invalid"
+
+        settings_snapshot = local_product_factory_settings.snapshot(
+            environment_override=False,
+            runtime_status="not_configured",
+        )
+        if settings_snapshot.get("status") != "ready":
+            return "invalid"
+        current_saved_json = settings_snapshot.get("config_json")
+        if current_saved_json != local_product_factory_launch_json:
+            return "restart_required"
+        if current_saved_json is None:
+            return "not_configured"
+        return "model_required"
 
     def prepare_task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         source_bound = source_settings.prepare_task_payload(payload)
@@ -382,7 +588,25 @@ def build_windows_bridge(
             resolve_plan=execution_plan_resolver,
             submit=backend.submit_packaged_coroutine,
         )
-        product_factory_execution_handler = product_factory_execution.start
+        def start_product_factory_execution(project_id: str) -> UIResult:
+            restart_focus = local_product_factory_restart_focus()
+            if (
+                local_product_factory_runtime_active
+                and restart_focus is not None
+            ):
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="rejected",
+                    message=(
+                        "Налаштування локального Product Factory або моделі "
+                        "змінилися після запуску Nika. Перезапустіть Nika перед "
+                        "новим запуском Product Factory."
+                    ),
+                    focus_id=restart_focus,
+                )
+            return product_factory_execution.start(project_id)
+
+        product_factory_execution_handler = start_product_factory_execution
     agent_definitions = AgentDefinitionRepository(store)
 
     def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
@@ -451,6 +675,12 @@ def build_windows_bridge(
     def source_state() -> Mapping[str, Any]:
         state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
         state["v01_model_settings"] = model_settings.snapshot()
+        state["product_factory_local_startup"] = (
+            local_product_factory_settings.snapshot(
+                environment_override=local_product_factory_environment_override,
+                runtime_status=local_product_factory_runtime_status(),
+            )
+        )
         state["speech"] = speech.snapshot()
         state["voice"] = voice.snapshot()
         state["voice_model_setup"] = voice_model_setup.snapshot()
@@ -460,6 +690,23 @@ def build_windows_bridge(
             else None
         )
         return agent_builder_state.decorate(state)
+
+    def refresh_local_product_factory_settings(
+        payload: Mapping[str, Any],
+    ) -> UIResult:
+        if payload:
+            return UIResult(
+                request_id="product-factory-local-startup-settings",
+                status="rejected",
+                message="Перечитування Product Factory не приймає параметрів.",
+                focus_id="product-factory-local-startup-json",
+            )
+        return UIResult(
+            request_id="product-factory-local-startup-settings",
+            status="completed",
+            message="Збережені налаштування Product Factory перечитано.",
+            focus_id="product-factory-local-startup-json",
+        )
 
     def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
         if payload:
@@ -512,6 +759,12 @@ def build_windows_bridge(
             "voice.model.import": voice_model_setup.start,
             "voice.model.cancel": voice_model_setup.cancel,
             "product.factory.execution_plan.load": load_product_factory_execution_plan,
+            "settings.product_factory_local.configure": (
+                local_product_factory_settings.configure
+            ),
+            "settings.product_factory_local.refresh": (
+                refresh_local_product_factory_settings
+            ),
             "speech.start": speech.speak,
             "speech.cancel": speech.cancel,
             "team.sources.configure": source_settings.configure,

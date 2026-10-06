@@ -1,0 +1,379 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
+
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.audit import AuditLog
+from nika_core.model_gateway.contracts import ProviderKind
+from nika_core.model_gateway.gateway import ModelGateway
+from nika_core.model_gateway.providers import OllamaProvider
+from nika_core.product_factory_local_coding import (
+    ContainedLocalCodingPolicy,
+    ContainedLocalCodingProgram,
+)
+from nika_core.product_factory_local_model_program import (
+    build_modelgateway_contained_local_coding_program,
+)
+from nika_core.toolsmith.contracts import ResourceBudget
+from nika_core.training_ollama_manifest import (
+    OllamaPromotionManifestStore,
+    OllamaPromotionManifestStoreError,
+)
+from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
+
+_SCHEMA = "nika.product-factory.local-startup.v1"
+_MAX_CONFIG_BYTES = 64 * 1024
+_MAX_REPOSITORIES = 32
+_MAX_EXECUTABLES = 32
+_MAX_IDENTITY_BYTES = 256
+_MAX_JSON_INTEGER_DIGITS = 20
+
+
+class PackagedLocalProductFactoryStartupError(ValueError):
+    """Trusted packaged local Product Factory composition is invalid or unavailable."""
+
+
+@dataclass(frozen=True, slots=True)
+class PackagedLocalProductFactoryStartup:
+    """Explicit trusted-host authority for contained-local Product Factory startup.
+
+    This carrier deliberately contains no ProductProject execution plan, credentials,
+    network grants or model choice. Repository roots and process/resource ceilings are
+    host authority; ProductProject graph/base-SHA/permission authority remains in the
+    separately admitted execution plan. Model authority remains V01ModelSettings.
+    """
+
+    workspace_parent: Path
+    repositories: Mapping[str, Path]
+    policy: ContainedLocalCodingPolicy
+    git_executable: Path
+
+    def __post_init__(self) -> None:
+        workspace_parent = _absolute_path(self.workspace_parent, "workspace_parent")
+        git_executable = _absolute_path(self.git_executable, "git_executable")
+        copied: dict[str, Path] = {}
+        if not isinstance(self.repositories, Mapping):
+            raise PackagedLocalProductFactoryStartupError(
+                "repositories must be a mapping"
+            )
+        if not self.repositories or len(self.repositories) > _MAX_REPOSITORIES:
+            raise PackagedLocalProductFactoryStartupError(
+                "repositories must contain 1..32 entries"
+            )
+        for repository_id, path in self.repositories.items():
+            identity = _identity(repository_id, "repository_id")
+            if identity in copied:
+                raise PackagedLocalProductFactoryStartupError(
+                    "repository identities must be unique"
+                )
+            copied[identity] = _absolute_path(path, f"repository {identity}")
+        if type(self.policy) is not ContainedLocalCodingPolicy:
+            raise PackagedLocalProductFactoryStartupError(
+                "contained-local policy carrier is invalid"
+            )
+        self.policy.__post_init__()
+        object.__setattr__(self, "workspace_parent", workspace_parent)
+        object.__setattr__(self, "repositories", MappingProxyType(copied))
+        object.__setattr__(self, "git_executable", git_executable)
+
+
+def decode_packaged_local_product_factory_startup(
+    raw: str | None,
+) -> PackagedLocalProductFactoryStartup | None:
+    """Decode one bounded strict JSON startup authority from AppConfig.
+
+    The input is trusted process configuration, not ProductProject/task/model output.
+    Duplicate keys, extra fields, ambiguous scalar types and unbounded values fail
+    closed before any repository or model effect.
+    """
+
+    if raw is None:
+        return None
+    if type(raw) is not str:
+        raise PackagedLocalProductFactoryStartupError(
+            "local Product Factory startup configuration must be text"
+        )
+    if not raw or raw != raw.strip() or "\x00" in raw:
+        raise PackagedLocalProductFactoryStartupError(
+            "local Product Factory startup configuration is not canonical text"
+        )
+    try:
+        encoded = raw.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise PackagedLocalProductFactoryStartupError(
+            "local Product Factory startup configuration must be UTF-8"
+        ) from exc
+    if len(encoded) > _MAX_CONFIG_BYTES:
+        raise PackagedLocalProductFactoryStartupError(
+            "local Product Factory startup configuration exceeds the size limit"
+        )
+
+    try:
+        payload = json.loads(
+            raw,
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_json_constant,
+            parse_int=_bounded_json_int,
+        )
+    except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
+        raise PackagedLocalProductFactoryStartupError(
+            "local Product Factory startup configuration is invalid JSON"
+        ) from exc
+    if type(payload) is not dict:
+        raise PackagedLocalProductFactoryStartupError(
+            "local Product Factory startup configuration must be an object"
+        )
+    expected = {
+        "schema",
+        "workspace_parent",
+        "repositories",
+        "allowed_executables",
+        "resource_budget",
+        "lease_seconds",
+        "git_executable",
+    }
+    if set(payload) != expected or payload.get("schema") != _SCHEMA:
+        raise PackagedLocalProductFactoryStartupError(
+            "local Product Factory startup schema does not match"
+        )
+
+    repositories_raw = payload["repositories"]
+    if type(repositories_raw) is not dict:
+        raise PackagedLocalProductFactoryStartupError(
+            "repositories must be an exact object"
+        )
+    if not repositories_raw or len(repositories_raw) > _MAX_REPOSITORIES:
+        raise PackagedLocalProductFactoryStartupError(
+            "repositories must contain 1..32 entries"
+        )
+    repositories: dict[str, Path] = {}
+    for repository_id, raw_path in repositories_raw.items():
+        identity = _identity(repository_id, "repository_id")
+        repositories[identity] = _json_absolute_path(
+            raw_path, f"repository {identity}"
+        )
+
+    executables_raw = payload["allowed_executables"]
+    if (
+        type(executables_raw) is not list
+        or not executables_raw
+        or len(executables_raw) > _MAX_EXECUTABLES
+    ):
+        raise PackagedLocalProductFactoryStartupError(
+            "allowed_executables must contain 1..32 paths"
+        )
+    allowed_executables = tuple(
+        str(_json_absolute_path(value, "allowed executable"))
+        for value in executables_raw
+    )
+
+    budget_raw = payload["resource_budget"]
+    if type(budget_raw) is not dict or set(budget_raw) != {
+        "timeout_seconds",
+        "max_output_bytes",
+        "max_changed_files",
+    }:
+        raise PackagedLocalProductFactoryStartupError(
+            "resource_budget has an invalid schema"
+        )
+    try:
+        budget = ResourceBudget(
+            timeout_seconds=_exact_int(
+                budget_raw["timeout_seconds"], "resource timeout"
+            ),
+            max_output_bytes=_exact_int(
+                budget_raw["max_output_bytes"], "resource output limit"
+            ),
+            max_changed_files=_exact_int(
+                budget_raw["max_changed_files"], "resource file limit"
+            ),
+        )
+        policy = ContainedLocalCodingPolicy(
+            allowed_executables=allowed_executables,
+            resource_budget=budget,
+            lease_seconds=_exact_int(payload["lease_seconds"], "lease_seconds"),
+        )
+    except (TypeError, ValueError) as exc:
+        raise PackagedLocalProductFactoryStartupError(
+            "contained-local execution policy is invalid"
+        ) from exc
+
+    return PackagedLocalProductFactoryStartup(
+        workspace_parent=_json_absolute_path(
+            payload["workspace_parent"], "workspace_parent"
+        ),
+        repositories=repositories,
+        policy=policy,
+        git_executable=_json_absolute_path(
+            payload["git_executable"], "git_executable"
+        ),
+    )
+
+
+def build_packaged_local_product_factory_program(
+    store: SQLiteStore,
+    *,
+    settings: V01ModelSettings,
+    startup: PackagedLocalProductFactoryStartup,
+) -> ContainedLocalCodingProgram:
+    """Compose the packaged contained-local backend from incumbent authorities.
+
+    Only a persisted Ollama LOCAL route is admitted here. CLOUD requires a separate
+    task-scoped cloud-effect authorization composition, and deterministic/no-LLM
+    requires an explicit deterministic LocalCodingPlanPort. Neither is silently
+    upgraded to model/repository authority by this startup adapter.
+    """
+
+    if type(store) is not SQLiteStore:
+        raise TypeError("store must be SQLiteStore")
+    if type(settings) is not V01ModelSettings:
+        raise TypeError("settings must be V01ModelSettings")
+    if type(startup) is not PackagedLocalProductFactoryStartup:
+        raise TypeError("startup carrier is invalid")
+
+    try:
+        selection, artifact_pin = settings.current_binding()
+    except ModelSetupError as exc:
+        raise PackagedLocalProductFactoryStartupError(
+            "select a local Ollama model before enabling contained-local Product Factory"
+        ) from exc
+    if (
+        selection.route_kind != "ollama"
+        or selection.provider_id != "ollama"
+        or selection.provider_kind is not ProviderKind.LOCAL
+    ):
+        raise PackagedLocalProductFactoryStartupError(
+            "contained-local Product Factory startup requires the persisted Ollama LOCAL route"
+        )
+
+    model = _required_route_text(selection.model, "model")
+    base_url = _required_route_text(selection.base_url, "base_url")
+    timeout_seconds = selection.timeout_seconds
+
+    expected_manifest_sha256: str | None = None
+    if artifact_pin is not None:
+        try:
+            prepared = OllamaPromotionManifestStore(store).resolve(
+                decision_sha256=artifact_pin.decision_sha256,
+                binding_sha256=artifact_pin.binding_sha256,
+                role=artifact_pin.role,
+                artifact_sha256=artifact_pin.artifact_sha256,
+                descriptor_digest=artifact_pin.descriptor_digest,
+                route_model_id=model,
+                base_url=base_url,
+            )
+            expected_manifest_sha256 = prepared.provider_manifest_sha256
+        except (
+            TypeError,
+            ValueError,
+            OllamaPromotionManifestStoreError,
+        ) as exc:
+            raise PackagedLocalProductFactoryStartupError(
+                "persisted promoted Ollama artifact provider manifest could not be verified"
+            ) from exc
+
+    gateway = ModelGateway(audit_log=AuditLog(store))
+    gateway.register(
+        OllamaProvider(
+            default_model=model,
+            base_url=base_url,
+            think=False,
+            expected_manifest_sha256=expected_manifest_sha256,
+        ),
+        default=True,
+    )
+    return build_modelgateway_contained_local_coding_program(
+        store,
+        workspace_parent=startup.workspace_parent,
+        repositories=startup.repositories,
+        gateway=gateway,
+        provider_id="ollama",
+        provider_kind=ProviderKind.LOCAL,
+        model=model,
+        policy=startup.policy,
+        model_timeout_seconds=timeout_seconds,
+        git_executable=str(startup.git_executable),
+    )
+
+
+def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(raw: str) -> None:
+    raise ValueError(f"non-finite JSON constant is forbidden: {raw}")
+
+
+def _bounded_json_int(raw: str) -> int:
+    digits = raw[1:] if raw.startswith("-") else raw
+    if len(digits) > _MAX_JSON_INTEGER_DIGITS:
+        raise ValueError("JSON integer exceeds digit limit")
+    return int(raw)
+
+
+def _exact_int(value: object, label: str) -> int:
+    if type(value) is not int:
+        raise PackagedLocalProductFactoryStartupError(
+            f"{label} must be an exact integer"
+        )
+    return value
+
+
+def _identity(value: object, label: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise PackagedLocalProductFactoryStartupError(
+            f"{label} must be canonical non-empty text"
+        )
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise PackagedLocalProductFactoryStartupError(
+            f"{label} must be UTF-8 text"
+        ) from exc
+    if len(encoded) > _MAX_IDENTITY_BYTES:
+        raise PackagedLocalProductFactoryStartupError(
+            f"{label} exceeds the UTF-8 byte limit"
+        )
+    return value
+
+
+def _json_absolute_path(value: object, label: str) -> Path:
+    if type(value) is not str:
+        raise PackagedLocalProductFactoryStartupError(
+            f"{label} path must be exact text"
+        )
+    return _absolute_path(Path(_identity(value, f"{label} path")), label)
+
+
+def _absolute_path(value: object, label: str) -> Path:
+    if type(value) is not Path:
+        try:
+            value = Path(value)
+        except (TypeError, ValueError) as exc:
+            raise PackagedLocalProductFactoryStartupError(
+                f"{label} path is invalid"
+            ) from exc
+    if not value.is_absolute():
+        raise PackagedLocalProductFactoryStartupError(
+            f"{label} path must be absolute"
+        )
+    return value
+
+
+def _required_route_text(value: object, label: str) -> str:
+    return _identity(value, f"persisted {label}")
