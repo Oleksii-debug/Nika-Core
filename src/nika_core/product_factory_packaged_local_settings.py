@@ -55,7 +55,7 @@ class PackagedLocalProductFactorySettings:
                         "CREATE TABLE IF NOT EXISTS product_factory_local_startup_settings ("
                         "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), "
                         "revision INTEGER NOT NULL CHECK(revision > 0), "
-                        "config_json TEXT NOT NULL)"
+                        "config_json TEXT)"
                     )
                     conn.execute(
                         "INSERT INTO product_factory_local_startup_schema VALUES (?, ?)",
@@ -136,19 +136,13 @@ class PackagedLocalProductFactorySettings:
                         "Лічильник версії налаштувань Product Factory вичерпано."
                     )
                 next_revision = revision + 1
-                if config_json is None:
-                    conn.execute(
-                        "DELETE FROM product_factory_local_startup_settings "
-                        "WHERE singleton = 1"
-                    )
-                else:
-                    conn.execute(
-                        "INSERT INTO product_factory_local_startup_settings "
-                        "(singleton, revision, config_json) VALUES (1, ?, ?) "
-                        "ON CONFLICT(singleton) DO UPDATE SET "
-                        "revision=excluded.revision, config_json=excluded.config_json",
-                        (next_revision, config_json),
-                    )
+                conn.execute(
+                    "INSERT INTO product_factory_local_startup_settings "
+                    "(singleton, revision, config_json) VALUES (1, ?, ?) "
+                    "ON CONFLICT(singleton) DO UPDATE SET "
+                    "revision=excluded.revision, config_json=excluded.config_json",
+                    (next_revision, config_json),
+                )
                 self._audit.append_with_connection(
                     conn,
                     event_type="product_factory.local_startup.configured",
@@ -196,6 +190,8 @@ class PackagedLocalProductFactorySettings:
                 return None
             self._revision(row)
             config_json = row["config_json"]
+            if config_json is None:
+                return None
             if type(config_json) is not str:
                 raise PackagedLocalProductFactorySettingsError(
                     "Збережена конфігурація Product Factory пошкоджена."
@@ -232,11 +228,12 @@ class PackagedLocalProductFactorySettings:
             config_json = None
             if row is not None:
                 raw = row["config_json"]
-                if type(raw) is not str:
-                    raise PackagedLocalProductFactorySettingsError(
-                        "Збережена конфігурація Product Factory пошкоджена."
-                    )
-                config_json = self._validate_config(raw)
+                if raw is not None:
+                    if type(raw) is not str:
+                        raise PackagedLocalProductFactorySettingsError(
+                            "Збережена конфігурація Product Factory пошкоджена."
+                        )
+                    config_json = self._validate_config(raw)
             return {
                 "status": "ready",
                 "revision": revision,
