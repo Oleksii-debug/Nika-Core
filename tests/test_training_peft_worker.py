@@ -1411,6 +1411,108 @@ def test_completed_final_step_replays_existing_candidate_without_overwrite(
     assert candidate.read_bytes() == candidate_bytes
 
 
+def test_existing_candidate_replay_holds_authority_during_manifest_and_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    _, expected_sha256 = peft._train_one_step(request, config, consumed)
+    assert expected_sha256 is not None
+
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    carrier = json.loads(candidate.read_bytes())
+    expected_manifest = json.loads(
+        carrier["metadata"]["nika_adapter_manifest"]
+    )
+    real_open = peft._open_readonly_snapshot
+    events: list[str] = []
+
+    def tracked_open(path: Path) -> int:
+        if path == candidate:
+            events.append("open")
+        return real_open(path)
+
+    def manifest_from_fake_candidate(path: Path) -> dict[str, object]:
+        assert path == candidate
+        events.append("manifest")
+        current = json.loads(path.read_bytes())
+        return json.loads(current["metadata"]["nika_adapter_manifest"])
+
+    monkeypatch.setattr(peft, "_open_readonly_snapshot", tracked_open)
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        manifest_from_fake_candidate,
+    )
+
+    observed_sha256 = peft._existing_candidate_sha256(
+        candidate,
+        expected_manifest=expected_manifest,
+    )
+
+    assert observed_sha256 == expected_sha256
+    assert events == ["open", "manifest", "open"]
+
+
+def test_existing_candidate_replay_rejects_manifest_to_digest_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    _, expected_sha256 = peft._train_one_step(request, config, consumed)
+    assert expected_sha256 is not None
+
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    carrier = json.loads(candidate.read_bytes())
+    expected_manifest = json.loads(
+        carrier["metadata"]["nika_adapter_manifest"]
+    )
+    original_manifest = peft.candidate_adapter_manifest
+
+    def mutate_after_manifest(path: Path) -> dict[str, object]:
+        observed = original_manifest(path)
+        try:
+            with path.open("ab") as handle:
+                handle.write(b"mutation")
+        except PermissionError:
+            pass
+        return observed
+
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        mutate_after_manifest,
+    )
+
+    if peft.os.name == "nt":
+        observed_sha256 = peft._existing_candidate_sha256(
+            candidate,
+            expected_manifest=expected_manifest,
+        )
+        assert observed_sha256 == expected_sha256
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="candidate_replay_changed",
+        ):
+            peft._existing_candidate_sha256(
+                candidate,
+                expected_manifest=expected_manifest,
+            )
+
+
 def test_incomplete_target_checkpoint_fails_closed_before_retry_training(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
