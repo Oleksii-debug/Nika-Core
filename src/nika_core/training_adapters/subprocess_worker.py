@@ -1007,10 +1007,38 @@ class SubprocessTrainingWorker:
             max_request_bytes=self._max_request_bytes,
             max_response_bytes=self._max_response_bytes,
         )
+        self._last_accepted_consumed_materials_sha256: str | None = None
 
     @property
     def execution_plan_sha256(self) -> str:
         return self._execution_plan_sha256
+
+    @property
+    def last_accepted_consumed_materials_sha256(self) -> str | None:
+        """Return the consumed-byte attestation from the most recent accepted step."""
+
+        return self._last_accepted_consumed_materials_sha256
+
+    def protocol_job_fingerprint(self, spec: TrainingJobSpec) -> str:
+        """Return the exact trainer-protocol job identity used for subprocess effects."""
+
+        canonical_spec = _snapshot_spec(spec)
+        return _job_fingerprint(
+            canonical_spec,
+            command_sha256=self._command_sha256,
+            execution_plan_sha256=self._execution_plan_sha256,
+        )
+
+    def verified_trainer_deployment_identity(self) -> ArtifactIdentity:
+        """Return Registry-verified trainer deployment identity at the call boundary."""
+
+        command_records = self._get_command_records()
+        self._verify_command_artifacts(command_records)
+        trainer_record = command_records[0]
+        return ArtifactIdentity(
+            trainer_record.artifact_id,
+            trainer_record.sha256,
+        )
 
     def step(
         self,
@@ -1074,11 +1102,7 @@ class SubprocessTrainingWorker:
             )
         trainer_record = command_records[0]
         trainer_sha256 = trainer_record.sha256
-        job_fingerprint = _job_fingerprint(
-            canonical_spec,
-            command_sha256=self._command_sha256,
-            execution_plan_sha256=self._execution_plan_sha256,
-        )
+        job_fingerprint = self.protocol_job_fingerprint(canonical_spec)
         required_consumed_materials_sha256 = _consumed_materials_sha256(
             canonical_materials
         )
@@ -1169,7 +1193,7 @@ class SubprocessTrainingWorker:
             effect=TrainingWorkerFailureEffect.UNKNOWN,
         )
         try:
-            return TrainingStepResult(
+            result = TrainingStepResult(
                 resume_state=wrapped_resume_state,
                 completed=completed,
                 candidate_sha256=candidate_sha256,
@@ -1179,6 +1203,8 @@ class SubprocessTrainingWorker:
                 "training_subprocess_invalid_result_evidence",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             ) from exc
+        self._last_accepted_consumed_materials_sha256 = consumed_materials_sha256
+        return result
 
     def _get_command_records(self) -> dict[int, ArtifactRecord]:
         records: dict[int, ArtifactRecord] = {}

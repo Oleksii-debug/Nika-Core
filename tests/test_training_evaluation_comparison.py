@@ -52,7 +52,10 @@ from nika_core.training_evaluation_attestation import (
     LoadedModelArtifactAttestation,
 )
 from nika_core.training_evaluation_binding import TrainingEvaluationBinding
-from nika_core.training_evaluation_comparison import run_attested_old_vs_new_comparison
+from nika_core.training_evaluation_comparison import (
+    attested_training_comparison_evidence_sha256,
+    run_attested_old_vs_new_comparison,
+)
 from nika_core.training_evaluation_execution import run_attested_challenger_benchmark
 from nika_core.training_materials import TrainingMaterialEvidence, TrainingMaterialSetEvidence
 from nika_core.training_model_activation import (
@@ -467,6 +470,21 @@ async def test_attested_old_vs_new_comparison_promotes_only_from_both_attested_r
     assert payload["attestor_id"] == _CHAMPION_ATTESTOR_ID
     assert payload["attestor_sha256"] == _CHAMPION_ATTESTOR_SHA256
     assert len(result.evidence_sha256) == 64
+    assert (
+        attested_training_comparison_evidence_sha256(payload)
+        == result.evidence_sha256
+    )
+    noncanonical = dict(payload)
+    noncanonical["champion_provider_manifest_sha256"] = None
+    with pytest.raises(
+        ValueError,
+        match="must be omitted or a lowercase SHA-256 digest",
+    ):
+        attested_training_comparison_evidence_sha256(noncanonical)
+    unexpected = dict(payload)
+    unexpected["unexpected"] = True
+    with pytest.raises(ValueError, match="strict schema"):
+        attested_training_comparison_evidence_sha256(unexpected)
     assert result.champion_provider_manifest_sha256 is None
     assert result.challenger_provider_manifest_sha256 is None
 
