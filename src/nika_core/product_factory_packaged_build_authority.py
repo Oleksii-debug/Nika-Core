@@ -122,10 +122,10 @@ class PackagedBuildAuthorityTemplate:
         object.__setattr__(self, "output_paths", output_policy.roots)
         if (
             type(self.max_changed_files) is not int
-            or not 0 <= self.max_changed_files <= 10_000
+            or not 1 <= self.max_changed_files <= 10_000
         ):
             raise PackagedBuildAuthorityError(
-                "build authority max_changed_files must be 0..10000"
+                "build authority max_changed_files must be 1..10000"
             )
         if type(self.lease_seconds) is not int or self.lease_seconds <= 0:
             raise PackagedBuildAuthorityError(
