@@ -13,8 +13,8 @@ from nika_core.memory.service import MemoryService
 SELF_MODEL_NAMESPACE = "nika.self-model.v1"
 _TARGET_SCHEMA = "nika-loop-b-self-model-target:v1"
 _REVISION_SCHEMA = "nika-loop-b-self-model-revision:v1"
-_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}\\Z")
-_SHA256_RE = re.compile(r"[0-9a-f]{64}\\Z")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}")
+_SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
 
 def _require_token(value: object, *, field: str) -> str:
