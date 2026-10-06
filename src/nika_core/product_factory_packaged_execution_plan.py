@@ -141,7 +141,7 @@ def decode_packaged_product_factory_execution_plan(
 
     try:
         graph = ProductRepositoryGraph(
-            project_id=_canonical_text(root["project_id"], "project_id"),
+            project_id=_identity_text(root["project_id"], "project_id"),
             repositories=repositories,
             components=components,
         )
@@ -193,13 +193,13 @@ def _decode_repository(value: object, index: int) -> RepositoryRef:
 
     try:
         return RepositoryRef(
-            repository_id=_canonical_text(
+            repository_id=_identity_text(
                 item["repository_id"],
                 f"{label}.repository_id",
             ),
-            provider=_canonical_text(item["provider"], f"{label}.provider"),
+            provider=_identity_text(item["provider"], f"{label}.provider"),
             locator=_repository_locator(item["locator"], f"{label}.locator"),
-            default_branch=_canonical_text(
+            default_branch=_identity_text(
                 item["default_branch"],
                 f"{label}.default_branch",
             ),
@@ -213,11 +213,7 @@ def _decode_repository(value: object, index: int) -> RepositoryRef:
 
 
 def _repository_locator(value: object, label: str) -> str:
-    locator = _canonical_text(value, label)
-    if any(ord(character) < 32 or ord(character) == 127 for character in locator):
-        raise PackagedExecutionPlanAdmissionError(
-            f"{label} must be an opaque single-line locator"
-        )
+    locator = _identity_text(value, label, kind="locator")
     normalized = locator.casefold()
     for _round in range(_MAX_LOCATOR_DECODE_ROUNDS):
         _require_safe_repository_locator_view(normalized, label)
@@ -278,11 +274,11 @@ def _decode_component(value: object, index: int) -> ProductComponent:
     )
     try:
         return ProductComponent(
-            component_id=_canonical_text(
+            component_id=_identity_text(
                 item["component_id"],
                 f"{label}.component_id",
             ),
-            repository_id=_canonical_text(
+            repository_id=_identity_text(
                 item["repository_id"],
                 f"{label}.repository_id",
             ),
@@ -520,6 +516,20 @@ def _canonical_text(value: object, label: str) -> str:
             f"{label} exceeds the text byte limit"
         )
     return value
+
+
+def _identity_text(
+    value: object,
+    label: str,
+    *,
+    kind: str = "identity",
+) -> str:
+    text = _canonical_text(value, label)
+    if any(ord(character) < 32 or ord(character) == 127 for character in text):
+        raise PackagedExecutionPlanAdmissionError(
+            f"{label} must be opaque single-line {kind} text"
+        )
+    return text
 
 
 def _positive_int(value: object, label: str) -> int:
