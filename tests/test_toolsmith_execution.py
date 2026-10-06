@@ -59,6 +59,16 @@ def _make_source_repository(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
     return repository, _git(repository, "rev-parse", "HEAD")
 
 
+@pytest.mark.parametrize("separator", ("\u0085", "\u2028", "\u2029"))
+def test_branch_name_rejects_unicode_line_boundaries(separator: str) -> None:
+    with pytest.raises(WorkspaceSecurityError, match="control data"):
+        execution_module._validate_branch_name(f"toolsmith{separator}branch")
+
+
+def test_branch_name_preserves_safe_unicode_identity() -> None:
+    execution_module._validate_branch_name("toolsmith/гілка")
+
+
 def test_prepare_private_git_workspace_has_no_remote_or_visible_dot_git(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -1011,6 +1021,33 @@ def test_typed_runner_uses_final_executable_launch_guard(
     assert result.stdout.strip() == "guarded"
     assert len(observed) == 1
     assert observed[0] == pathlib.Path(sys.executable).resolve(strict=True)
+
+
+def test_prepared_git_workspace_rejects_behavioral_head_sha() -> None:
+    class HeadSha(str):
+        pass
+
+    plan = execution_module.SterileGitPlan(
+        repository_root=pathlib.Path("production"),
+        private_git_dir=pathlib.Path("jobs") / "_nika_private_git",
+        worktree_root=pathlib.Path("jobs") / "worktree",
+        branch_name="toolsmith/job",
+        base_sha="a" * 40,
+        environment={},
+        config_args=(),
+    )
+
+    with pytest.raises(WorkspaceSecurityError, match="private workspace HEAD"):
+        execution_module.PreparedGitWorkspace(
+            plan=plan,
+            head_sha=HeadSha("a" * 40),
+            remotes=(),
+            tree_evidence=execution_module.TreeEvidence(
+                files=(),
+                digest="b" * 64,
+                total_bytes=0,
+            ),
+        )
 
 
 def test_private_git_workspace_refuses_ambiguous_reuse(tmp_path: pathlib.Path) -> None:
