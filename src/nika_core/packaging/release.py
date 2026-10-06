@@ -755,7 +755,7 @@ def _finite_json_float(raw: str) -> float:
 
 
 def _bounded_json_int(raw: str) -> int:
-    digits = raw[1:] if raw.startswith("-") else raw
+    digits = raw.removeprefix("-")
     if len(digits) > _MAX_RELEASE_JSON_INTEGER_DECIMAL_CHARS:
         raise ValueError("release JSON integer exceeds the digit limit")
     value = int(raw)
