@@ -16,9 +16,13 @@ from nika_core.product_factory_coding_worker_adapter import (
     RepositoryPathIdentity,
 )
 from nika_core.product_factory_coordinator import ComponentWorkRequest
-from nika_core.product_factory_orchestration import OwnershipLease
+from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
+from nika_core.product_factory_orchestration import OwnershipLease, TeamPlan
 from nika_core.product_factory_program_host import ProductFactoryProgramHost
-from nika_core.product_factory_review_authority import ProductFactoryReviewAuthorityPort
+from nika_core.product_factory_review_authority import (
+    ProductFactoryReviewAuthorityPort,
+    ReviewerPrincipalBindings,
+)
 from nika_core.runtime.idempotency import IdempotencyLedger
 from nika_core.toolsmith.contracts import (
     IsolationClass,
@@ -153,6 +157,7 @@ class ContainedLocalCodingProgram:
     """Production composition retaining access to worker candidate evidence."""
 
     host: ProductFactoryProgramHost
+    multi_repository_host: MultiRepositoryProductFactoryHost
     worker: ContainedLocalCodingWorker
     ports: ContainedLocalProductFactoryPorts
 
@@ -166,6 +171,8 @@ def build_contained_local_coding_program(
     policy: ContainedLocalCodingPolicy,
     idempotency: IdempotencyLedger | None = None,
     review_evidence_authority: ProductFactoryReviewAuthorityPort | None = None,
+    team_plan: TeamPlan | None = None,
+    reviewer_principals: ReviewerPrincipalBindings = (),
     git_executable: str = "git",
 ) -> ContainedLocalCodingProgram:
     """Compose Product Factory with the contained local CodingWorker.
