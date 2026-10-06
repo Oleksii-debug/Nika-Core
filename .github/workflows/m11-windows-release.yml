@@ -86,6 +86,7 @@ on:
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
       - "src/nika_core/model_gateway/**"
+      - "src/nika_core/multi_agent/model_gateway_runtime.py"
       - "src/nika_core/security/model_cloud_authority.py"
       - "src/nika_core/security/standing_permission.py"
       - "src/nika_core/v01_cloud_model_permission.py"
@@ -98,6 +99,7 @@ on:
       - "src/nika_core/runtime/recovery.py"
       - "src/nika_core/runtime/retry.py"
       - "tests/test_model_gateway_cloud_authority.py"
+      - "tests/test_model_gateway_crash_recovery_marker.py"
       - "tests/test_standing_permission_transaction.py"
       - "tests/test_tool_risk_exact_authority.py"
       - "tests/test_v01_cloud_model_permission.py"
@@ -203,6 +205,7 @@ on:
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
       - "src/nika_core/model_gateway/**"
+      - "src/nika_core/multi_agent/model_gateway_runtime.py"
       - "src/nika_core/security/model_cloud_authority.py"
       - "src/nika_core/security/standing_permission.py"
       - "src/nika_core/v01_cloud_model_permission.py"
@@ -215,6 +218,7 @@ on:
       - "src/nika_core/runtime/recovery.py"
       - "src/nika_core/runtime/retry.py"
       - "tests/test_model_gateway_cloud_authority.py"
+      - "tests/test_model_gateway_crash_recovery_marker.py"
       - "tests/test_standing_permission_transaction.py"
       - "tests/test_tool_risk_exact_authority.py"
       - "tests/test_v01_cloud_model_permission.py"
@@ -334,6 +338,7 @@ jobs:
           tests/test_release_provenance_workflow.py
           tests/test_qa_workflow_lineage.py
           tests/test_model_gateway_cloud_authority.py
+          tests/test_model_gateway_crash_recovery_marker.py
           tests/test_standing_permission_transaction.py
           tests/test_tool_risk_exact_authority.py
           tests/test_v01_cloud_model_permission.py
