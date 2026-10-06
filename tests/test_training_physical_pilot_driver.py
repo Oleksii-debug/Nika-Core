@@ -442,6 +442,10 @@ def test_physical_step_budget_rejects_oversized_tier_before_execution() -> None:
         max_steps=driver.PHYSICAL_TRAINING_MAX_STEPS + 1,
     )
 
+    assert driver._physical_training_max_steps(
+        tier_index=0,
+        tier=tier,
+    ) == 2
     with pytest.raises(
         driver.PhysicalPilotDriverError,
         match="max_steps exceeds the physical execution ceiling",
