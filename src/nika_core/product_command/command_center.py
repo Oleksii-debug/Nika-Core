@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from nika_core.product_command.build_adapter import (
+    BuildStatusProjectionError,
+    build_status_entries,
+)
 from nika_core.product_command.contracts import (
     ProductProjectDetail,
     ProductStatusEntry,
@@ -21,6 +25,9 @@ from nika_core.product_command.factory_status_adapter import (
 )
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_decisions import ProductDecisionSetSummary
+from nika_core.product_factory_build_execution_persistence import (
+    DurableBuildExecutionSnapshot,
+)
 from nika_core.product_factory_coordinator import CoordinatorSnapshot, WorkState
 from nika_core.product_factory_credentials import CredentialBrokerSnapshot
 from nika_core.product_factory_deployment import (
@@ -57,6 +64,7 @@ class ProductCommandCenter:
         project_id: str,
         *,
         coordinator: CoordinatorSnapshot | None = None,
+        build_execution: DurableBuildExecutionSnapshot | None = None,
     ) -> tuple[ProductProjectDetail, ProductDecisionSetSummary]:
         """Compose the bounded packaged read model with optional trusted PF2 status."""
 
@@ -67,6 +75,13 @@ class ProductCommandCenter:
         if coordinator is not None:
             _validate_coordinator_scope(project_id, coordinator)
             statuses.extend(coordinator_status_entries(coordinator))
+        if build_execution is not None:
+            try:
+                statuses.extend(build_status_entries(project_id, build_execution))
+            except BuildStatusProjectionError as exc:
+                raise ProductCommandCenterScopeError(
+                    "PF5 build snapshot failed project-scoped status validation"
+                ) from exc
         return _finalize_statuses(detail, statuses), decision_summary
 
     def inspect_project(
@@ -74,6 +89,7 @@ class ProductCommandCenter:
         project_id: str,
         *,
         coordinator: CoordinatorSnapshot | None = None,
+        build_execution: DurableBuildExecutionSnapshot | None = None,
         execution: ExecutionRegistrySnapshot | None = None,
         deployment: DeploymentFabricSnapshot | None = None,
         credentials: CredentialBrokerSnapshot | None = None,
@@ -88,6 +104,13 @@ class ProductCommandCenter:
         if coordinator is not None:
             _validate_coordinator_scope(project_id, coordinator)
             statuses.extend(coordinator_status_entries(coordinator))
+        if build_execution is not None:
+            try:
+                statuses.extend(build_status_entries(project_id, build_execution))
+            except BuildStatusProjectionError as exc:
+                raise ProductCommandCenterScopeError(
+                    "PF5 build snapshot failed project-scoped status validation"
+                ) from exc
         if execution is not None:
             _validate_execution_snapshot(execution)
             statuses.extend(execution_status_entries(_scope_execution(project_id, execution)))
