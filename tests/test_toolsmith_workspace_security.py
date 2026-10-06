@@ -126,6 +126,67 @@ def test_private_git_plan_separates_production_metadata(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "base_sha",
+    (
+        "a" * 39,
+        "a" * 41,
+        "g" * 40,
+        ("a" * 39) + " ",
+    ),
+)
+def test_sterile_git_plan_rejects_invalid_base_sha(
+    tmp_path: Path,
+    base_sha: str,
+) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-invalid-base"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="40-character hexadecimal SHA"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name="toolsmith/job",
+            base_sha=base_sha,
+        )
+
+
+def test_sterile_git_plan_rejects_behavioral_base_sha(tmp_path: Path) -> None:
+    class BaseSha(str):
+        pass
+
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-behavioral-base"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="40-character hexadecimal SHA"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name="toolsmith/job",
+            base_sha=BaseSha("a" * 40),
+        )
+
+
+def test_sterile_git_plan_preserves_uppercase_hex_base_sha(tmp_path: Path) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-uppercase-base"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    plan = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
+        branch_name="toolsmith/job",
+        base_sha="A" * 40,
+    )
+
+    assert plan.base_sha == "A" * 40
+
+
+@pytest.mark.parametrize(
     "branch_name",
     (
         " toolsmith/job",
