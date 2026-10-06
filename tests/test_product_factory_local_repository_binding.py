@@ -607,6 +607,7 @@ def test_unbind_expected_project_versions_reject_stale_plan_without_mutation(
         repository.repository_id,
     ) == bound.binding_version
 
+
 def test_binding_rejects_inline_repository_credentials(
     tmp_path: pathlib.Path,
 ) -> None:

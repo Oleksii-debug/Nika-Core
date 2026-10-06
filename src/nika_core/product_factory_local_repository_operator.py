@@ -208,7 +208,6 @@ class PackagedLocalRepositoryOperator:
                 "message": "Стан локальних прив’язок Product Factory недоступний.",
             }
 
-
     @staticmethod
     def _repository_from_plan(
         plan: PackagedProductFactoryExecutionPlan,

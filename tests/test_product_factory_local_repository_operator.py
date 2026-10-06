@@ -226,6 +226,7 @@ def test_unbind_rejects_product_project_change_after_plan_validation(
         repository.repository_id,
     ) == 1
 
+
 def test_binding_projection_survives_restart_without_exposing_root(
     tmp_path: pathlib.Path,
 ) -> None:
