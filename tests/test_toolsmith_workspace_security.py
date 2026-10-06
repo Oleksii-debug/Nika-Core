@@ -125,6 +125,52 @@ def test_private_git_plan_separates_production_metadata(tmp_path: Path) -> None:
     assert "GITHUB_TOKEN" not in plan.environment
 
 
+@pytest.mark.parametrize(
+    "branch_name",
+    (
+        " toolsmith/job",
+        "toolsmith/job ",
+        "-toolsmith/job",
+        "toolsmith\njob",
+        "toolsmith\x7fjob",
+    ),
+)
+def test_sterile_git_plan_rejects_ambiguous_branch_identity(
+    tmp_path: Path,
+    branch_name: str,
+) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-ambiguous-branch"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="control data"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name=branch_name,
+            base_sha="a" * 40,
+        )
+
+
+def test_sterile_git_plan_rejects_behavioral_string_branch_name(tmp_path: Path) -> None:
+    class BranchName(str):
+        pass
+
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-behavioral-branch"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="control data"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name=BranchName("toolsmith/job"),
+            base_sha="a" * 40,
+        )
+
+
 @pytest.mark.parametrize("separator", ("\u0085", "\u2028", "\u2029"))
 def test_sterile_git_plan_rejects_unicode_branch_line_boundaries(
     tmp_path: Path,
