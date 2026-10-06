@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,34 @@ def test_runtime_evidence_rejects_ambiguous_or_invalid_json(
 ) -> None:
     path = tmp_path / "evidence.json"
     path.write_bytes(raw)
+
+    with pytest.raises(RuntimeError, match="invalid or oversized JSON"):
+        _read_runtime_evidence_json(path, label="runtime evidence")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_runtime_evidence_refuses_preexisting_writer_then_recovers(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "evidence.json"
+    payload = {"value": "stable"}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with path.open("r+b"):
+        with pytest.raises(RuntimeError, match="invalid or oversized JSON"):
+            _read_runtime_evidence_json(path, label="runtime evidence")
+
+    assert _read_runtime_evidence_json(path, label="runtime evidence") == payload
+
+
+def test_runtime_evidence_rejects_symlink_source(tmp_path: Path) -> None:
+    target = tmp_path / "target.json"
+    target.write_text('{"value":"target"}', encoding="utf-8")
+    path = tmp_path / "evidence.json"
+    try:
+        path.symlink_to(target)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
 
     with pytest.raises(RuntimeError, match="invalid or oversized JSON"):
         _read_runtime_evidence_json(path, label="runtime evidence")
