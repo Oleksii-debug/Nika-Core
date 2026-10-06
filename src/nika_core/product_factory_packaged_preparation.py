@@ -182,8 +182,7 @@ class PackagedProductFactoryPreparationService:
         self,
         plan: PackagedProductFactoryExecutionPlan,
     ) -> PreparedProductFactory:
-        if type(plan) is not PackagedProductFactoryExecutionPlan:
-            raise TypeError("plan must be PackagedProductFactoryExecutionPlan")
+        plan = _snapshot_execution_plan(plan)
         project = self._repository.get(plan.project_id)
         self._require_plan_version(project, plan)
         task_id = product_factory_host_task_identity(
@@ -243,6 +242,48 @@ class PackagedProductFactoryPreparationService:
             )
         return prepared.host_task_id, record.request
 
+    def preview_repair(
+        self,
+        prepared: PreparedProductFactory,
+        *,
+        component_id: str,
+        reason: str,
+    ) -> ComponentWorkRequest:
+        """Preview one exact repair without changing coordinator or durable state."""
+
+        if type(prepared) is not PreparedProductFactory:
+            raise TypeError("prepared must be PreparedProductFactory")
+        return self._host.preview_repair(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            component_id=_plain_text(component_id, "component_id"),
+            reason=_plain_text(reason, "reason"),
+        )
+
+    def commit_repair(
+        self,
+        prepared: PreparedProductFactory,
+        *,
+        component_id: str,
+        reason: str,
+        expected_next_work_id: str,
+    ) -> ComponentWorkRequest:
+        """Persist lineage and checkpoint only for the exact prior preview identity."""
+
+        if type(prepared) is not PreparedProductFactory:
+            raise TypeError("prepared must be PreparedProductFactory")
+        request, _intent = self._host.commit_repair_and_checkpoint(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            component_id=_plain_text(component_id, "component_id"),
+            reason=_plain_text(reason, "reason"),
+            expected_next_work_id=_plain_text(
+                expected_next_work_id,
+                "expected_next_work_id",
+            ),
+        )
+        return request
+
     @staticmethod
     def _require_plan_version(
         project: ProductProject,
@@ -294,6 +335,30 @@ class PackagedProductFactoryPreparationService:
             raise PackagedProductFactoryPreparationError(
                 "deterministic Product Factory host task conflicts with existing authority"
             )
+
+
+def _snapshot_execution_plan(
+    plan: object,
+) -> PackagedProductFactoryExecutionPlan:
+    """Re-admit current fields before any trusted Product Factory preparation effect."""
+
+    if type(plan) is not PackagedProductFactoryExecutionPlan:
+        raise TypeError("plan must be PackagedProductFactoryExecutionPlan")
+    try:
+        return PackagedProductFactoryExecutionPlan(
+            project_id=plan.project_id,
+            expected_spec_version=plan.expected_spec_version,
+            expected_row_version=plan.expected_row_version,
+            graph=plan.graph,
+            graph_version=plan.graph_version,
+            base_shas=plan.base_shas,
+            component_goals=plan.component_goals,
+            permission_ceiling=plan.permission_ceiling,
+        )
+    except (AttributeError, TypeError) as exc:
+        raise PackagedProductFactoryPreparationError(
+            "execution plan is structurally invalid"
+        ) from exc
 
 
 def _snapshot_graph(graph: ProductRepositoryGraph) -> ProductRepositoryGraph:

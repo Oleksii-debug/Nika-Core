@@ -8,6 +8,7 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_multi_repository import (
+    MultiRepositoryExecutionError,
     MultiRepositoryProductFactoryHost,
     RepositoryGraphIntegrityError,
 )
@@ -111,6 +112,21 @@ def _fixture(tmp_path: Path):
 def _task_count(store: SQLiteStore) -> int:
     with store.connection() as conn:
         return int(conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0])
+
+
+def _checkpoint_stage_count(
+    store: SQLiteStore,
+    *,
+    task_id: str,
+    stage: str,
+) -> int:
+    with store.connection() as conn:
+        return int(
+            conn.execute(
+                "SELECT COUNT(*) FROM checkpoints WHERE task_id = ? AND stage = ?",
+                (task_id, stage),
+            ).fetchone()[0]
+        )
 
 
 def test_prepare_is_exact_idempotent_and_restart_restores_same_authority(
@@ -233,6 +249,125 @@ def test_stale_trusted_plan_fails_before_host_task_creation(tmp_path: Path) -> N
     assert _task_count(store) == 0
 
 
+def test_concurrent_project_revision_after_host_task_creation_blocks_graph_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, repository, _tasks, service, project, _graph, plan, _bases, _goals = _fixture(
+        tmp_path
+    )
+    original_ensure = service._ensure_host_task
+
+    def ensure_then_revise(current_project, *, task_id: str, create: bool) -> None:
+        original_ensure(current_project, task_id=task_id, create=create)
+        latest = repository.get(current_project.project_id)
+        repository.update_spec(
+            latest.project_id,
+            replace(
+                latest.spec,
+                desired_outcome="Concurrent revision before graph authority publication",
+            ),
+            expected_row_version=latest.row_version,
+            change_reason="regression: revise after exact host task creation",
+        )
+
+    monkeypatch.setattr(service, "_ensure_host_task", ensure_then_revise)
+
+    task_id = product_factory_host_task_identity(
+        project.project_id,
+        spec_version=project.spec_version,
+        row_version=project.row_version,
+    )
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        service.prepare(plan)
+
+    assert _task_count(store) == 1
+    assert (
+        _checkpoint_stage_count(
+            store,
+            task_id=task_id,
+            stage="product_factory.repository_graph.v1",
+        )
+        == 0
+    )
+    assert (
+        _checkpoint_stage_count(
+            store,
+            task_id=task_id,
+            stage="product_factory.coordinator.v1",
+        )
+        == 0
+    )
+
+
+def test_concurrent_project_revision_after_graph_binding_blocks_initial_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, repository, _tasks, service, project, _graph, plan, _bases, _goals = _fixture(
+        tmp_path
+    )
+    original_bind_graph = service._host._bind_graph
+
+    def bind_then_revise(
+        *,
+        host_task_id: str,
+        project,
+        graph,
+        graph_version: int,
+    ):
+        authority = original_bind_graph(
+            host_task_id=host_task_id,
+            project=project,
+            graph=graph,
+            graph_version=graph_version,
+        )
+        latest = repository.get(project.project_id)
+        repository.update_spec(
+            latest.project_id,
+            replace(
+                latest.spec,
+                desired_outcome="Concurrent revision before initial coordinator checkpoint",
+            ),
+            expected_row_version=latest.row_version,
+            change_reason="regression: revise after graph authority publication",
+        )
+        return authority
+
+    monkeypatch.setattr(service._host, "_bind_graph", bind_then_revise)
+
+    task_id = product_factory_host_task_identity(
+        project.project_id,
+        spec_version=project.spec_version,
+        row_version=project.row_version,
+    )
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        service.prepare(plan)
+
+    assert (
+        _checkpoint_stage_count(
+            store,
+            task_id=task_id,
+            stage="product_factory.repository_graph.v1",
+        )
+        == 1
+    )
+    assert (
+        _checkpoint_stage_count(
+            store,
+            task_id=task_id,
+            stage="product_factory.coordinator.v1",
+        )
+        == 0
+    )
+
+
 def test_execution_plan_snapshots_mutable_graph_and_mapping_inputs(tmp_path: Path) -> None:
     (
         _store,
@@ -262,6 +397,85 @@ def test_execution_plan_snapshots_mutable_graph_and_mapping_inputs(tmp_path: Pat
     assert request.base_sha == "a" * 40
     assert request.goal == "Implement the exact accepted ProductProject work"
     assert request.allowed_paths == ("src/nika_core",)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("expected_spec_version", True, "positive integer"),
+        ("expected_row_version", False, "non-negative integer"),
+        ("base_shas", ["repo-core", "a" * 40], "must be a mapping"),
+        ("permission_ceiling", {"read_source"}, "non-empty frozenset"),
+    ),
+)
+def test_prepare_revalidates_tampered_frozen_execution_plan_before_effect(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
+        _fixture(tmp_path)
+    )
+    object.__setattr__(plan, field, value)
+
+    with pytest.raises(PackagedProductFactoryPreparationError, match=message):
+        service.prepare(plan)
+
+    assert _task_count(store) == 0
+
+
+def test_prepare_rejects_structurally_deleted_execution_plan_before_effect(
+    tmp_path: Path,
+) -> None:
+    store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
+        _fixture(tmp_path)
+    )
+    object.__delattr__(plan, "graph")
+
+    with pytest.raises(
+        PackagedProductFactoryPreparationError,
+        match="execution plan is structurally invalid",
+    ):
+        service.prepare(plan)
+
+    assert _task_count(store) == 0
+
+
+def test_prepare_uses_detached_snapshot_if_original_plan_mutates_mid_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        _store,
+        repository,
+        _tasks,
+        service,
+        _project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    original_get = ProductProjectRepository.get
+
+    def get_then_mutate(self, project_id: str):
+        current = original_get(self, project_id)
+        object.__setattr__(plan, "base_shas", {"repo-core": "b" * 40})
+        object.__setattr__(plan, "component_goals", {"core": "mutated caller goal"})
+        object.__setattr__(plan, "permission_ceiling", frozenset({"read_source"}))
+        return current
+
+    monkeypatch.setattr(ProductProjectRepository, "get", get_then_mutate)
+
+    prepared = service.prepare(plan)
+
+    request = prepared.state.coordinator.snapshot().records[0].request
+    assert request.base_sha == "a" * 40
+    assert request.goal == "Implement the exact accepted ProductProject work"
+    assert request.permission_ceiling == frozenset(
+        {"read_source", "write_source", "run_tests"}
+    )
 
 
 def test_deterministic_host_task_collision_fails_closed(tmp_path: Path) -> None:

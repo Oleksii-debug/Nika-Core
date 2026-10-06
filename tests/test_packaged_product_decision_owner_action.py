@@ -152,6 +152,46 @@ def test_pf1_rejects_unpresentable_decision_identity_before_mutation(
     assert count == 1
 
 
+def test_packaged_reject_write_does_not_materialize_decision_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _repository, _service, router = _build(tmp_path / "bounded reject.db")
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("packaged decision write must not materialize decision list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
+
+    result = router.create({"command": "reject product decision decision-owner"})
+
+    assert result.status == "completed"
+    stored = ProductDecisionRepository(store).get(_PROJECT_ID, "decision-owner")
+    assert stored.decision.state is ProductDecisionState.REJECTED
+
+
+def test_packaged_confirm_approval_does_not_materialize_decision_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _repository, _service, router = _build(tmp_path / "bounded approval.db")
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("packaged decision write must not materialize decision list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
+
+    requested = router.create({"command": "approve product decision decision-owner"})
+    request_id = _approval_request_id(requested.message)
+    confirmed = router.create(
+        {"command": f"confirm product decision approval {request_id}"}
+    )
+
+    assert confirmed.status == "completed"
+    stored = ProductDecisionRepository(store).get(_PROJECT_ID, "decision-owner")
+    assert stored.decision.state is ProductDecisionState.APPROVED
+
+
 def test_pf1_corrupt_unpresentable_persisted_decision_id_fails_closed(
     tmp_path: Path,
 ) -> None:

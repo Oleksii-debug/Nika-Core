@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 import uuid
-from collections.abc import Awaitable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -432,6 +432,7 @@ class ProductFactoryProgramHost:
         component_id: str,
         base_sha: str,
         reason: str,
+        read_only_precondition: Callable[[object], None] | None = None,
     ) -> ComponentWorkRequest:
         self._require_host_owned_review_authority(binding)
         prior_request = _request_for_component(coordinator, component_id)
@@ -446,6 +447,7 @@ class ProductFactoryProgramHost:
                 coordinator=coordinator,
                 lease=lease,
                 prior_record=prior_record,
+                read_only_precondition=read_only_precondition,
             )
         except Exception:
             coordinator.restore(before)
@@ -1237,6 +1239,7 @@ class ProductFactoryProgramHost:
         coordinator: ProductFactoryCoordinator,
         lease: WorkOwnershipLease,
         prior_record: WorkRecord,
+        read_only_precondition: Callable[[object], None] | None = None,
     ) -> None:
         if prior_record.result is None:
             raise ProductFactoryProgramError(
@@ -1267,6 +1270,7 @@ class ProductFactoryProgramHost:
                 host_task_id=host_task_id,
                 binding=binding,
                 coordinator=coordinator,
+                read_only_precondition=read_only_precondition,
             )
 
     def _save_and_mark_uncertain(
@@ -1307,11 +1311,13 @@ class ProductFactoryProgramHost:
         host_task_id: str,
         binding: ProductProjectCoordinatorBinding,
         coordinator: ProductFactoryCoordinator,
+        read_only_precondition: Callable[[object], None] | None = None,
     ) -> None:
         borrowed = _BorrowedSQLiteStore(self.store, connection)
         ProductFactoryCheckpointHost(borrowed).save(
             host_task_id=host_task_id,
             checkpoint=binding.checkpoint(coordinator),
+            read_only_precondition=read_only_precondition,
         )
 
     def _require_checkpointed_result(
