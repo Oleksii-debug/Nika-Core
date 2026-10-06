@@ -208,6 +208,21 @@ def test_prepare_tier0_upgrades_canonical_preparation_once(
 
 
 
+def test_read_object_snapshot_preserves_exact_evidence_bytes(
+    proof: ModuleType,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "authority.json"
+    raw = b'{\n  "b": 2,\n  "a": 1\n}\n'
+    path.write_bytes(raw)
+
+    value, snapshot = proof._read_object_snapshot(path)
+
+    assert value == {"a": 1, "b": 2}
+    assert snapshot == raw
+    assert hashlib.sha256(snapshot).hexdigest() == _sha(raw)
+
+
 def test_read_object_rejects_duplicate_and_nonfinite_json(
     proof: ModuleType,
     tmp_path: Path,
