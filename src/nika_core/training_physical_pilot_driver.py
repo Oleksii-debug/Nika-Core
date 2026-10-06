@@ -1300,6 +1300,36 @@ def _read_config(path: Path) -> PhysicalPilotConfig:
     return PhysicalPilotConfig.from_json(raw)
 
 
+def _trusted_progression_proof_for_cli(
+    config: PhysicalPilotConfig,
+    evidence_root: Path | None,
+) -> TrainingScaleProgressionProof | None:
+    if config.scale_tier_id is None:
+        if evidence_root is not None:
+            _fail(
+                "--trusted-progression-output-root is only valid for higher-tier configs"
+            )
+        return None
+    if evidence_root is None:
+        _fail("higher-tier CLI execution requires --trusted-progression-output-root")
+    claim = config.progression_proof_payload
+    if claim is None:
+        _fail("higher-tier config is missing progression proof claim")
+
+    root = evidence_root
+    if not root.is_absolute():
+        root = root.resolve(strict=True)
+    from nika_core.training_physical_evaluation_driver import (
+        load_trusted_scale_progression_proof,
+    )
+
+    return load_trusted_scale_progression_proof(
+        root,
+        workspace_id=config.workspace_id,
+        expected_claim=claim,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the canonical Windows physical PEFT pause/reopen/resume pilot."
@@ -1308,6 +1338,15 @@ def build_parser() -> argparse.ArgumentParser:
         "config",
         type=Path,
         help="Path to the local UTF-8 physical-pilot JSON manifest.",
+    )
+    parser.add_argument(
+        "--trusted-progression-output-root",
+        type=Path,
+        default=None,
+        help=(
+            "Canonical output root of the completed prior physical tier whose "
+            "durable promoted evaluation authorizes this higher-tier run."
+        ),
     )
     return parser
 
@@ -1320,7 +1359,14 @@ def main(argv: list[str] | None = None) -> int:
         if not config_path.is_absolute():
             config_path = config_path.resolve(strict=True)
         config = _read_config(config_path)
-        report = run_physical_pilot_from_config(config)
+        trusted_progression_proof = _trusted_progression_proof_for_cli(
+            config,
+            args.trusted_progression_output_root,
+        )
+        report = run_physical_pilot_from_config(
+            config,
+            trusted_progression_proof=trusted_progression_proof,
+        )
     except (
         KeyError,
         OSError,
