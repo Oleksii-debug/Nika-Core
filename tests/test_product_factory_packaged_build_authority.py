@@ -9,7 +9,11 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
-from nika_core.product_factory_build_execution import BuildExecutionState
+from nika_core.product_factory_build_execution import (
+    BuildExecutionError,
+    BuildExecutionPortError,
+    BuildExecutionState,
+)
 from nika_core.product_factory_coordinator import (
     ProductFactoryCoordinator,
     ReviewDecision,
@@ -406,14 +410,19 @@ def test_repeat_bind_rejects_resource_scope_drift_for_same_work(
         )
 
 
-def test_template_drift_invalidates_already_bound_work(
+def test_template_drift_invalidates_new_effect_but_preserves_recovery_authority(
     tmp_path: Path,
 ) -> None:
     _store, _startup_value, _node_value, runtime = _runtime(tmp_path)
     spec = _admit(runtime)
+    original_execution = runtime.trusted_execution.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+    )
 
     runtime.authorities.configure(
-        _template(argv_suffix=("--wheel",)),
+        _template(argv_suffix=("--wheel",), max_changed_files=7),
         expected_revision=1,
     )
 
@@ -426,11 +435,140 @@ def test_template_drift_invalidates_already_bound_work(
             repository_id=REPOSITORY_ID,
             work_id=spec.request.work_id,
         )
+
+    recovery_execution = runtime.recovery_execution.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+    )
+    historical_output = runtime.output_policies.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+    )
+    assert recovery_execution == original_execution
+    assert recovery_execution.commands[0].argv[-1] == "build"
+    assert historical_output.max_changed_files == 8
+
     with pytest.raises(
         PackagedBuildAuthorityError,
         match="different packaged authority",
     ):
         _admit(runtime)
+
+
+def test_v1_migration_seeds_current_template_for_later_historical_recovery(
+    tmp_path: Path,
+) -> None:
+    store, startup, node, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+
+    with store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM product_factory_build_authority_schema WHERE version = 2"
+        )
+        conn.execute("DROP TABLE product_factory_build_authority_history")
+
+    migrated = PackagedBuildAuthorityRuntime(
+        PackagedBuildAuthorityStore(
+            store,
+            node=node,
+            startup=startup,
+        )
+    )
+    migrated.authorities.configure(
+        _template(argv_suffix=("--wheel",), max_changed_files=7),
+        expected_revision=1,
+    )
+
+    recovered = migrated.recovery_execution.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+    )
+    output = migrated.output_policies.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+    )
+    assert recovered.commands[0].argv[-1] == "build"
+    assert output.max_changed_files == 8
+
+
+def test_reconfigured_restart_restores_uncertain_effect_for_inspection_only(
+    tmp_path: Path,
+) -> None:
+    store, startup, node, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={
+            "kind": "product_factory",
+            "product_project_id": PROJECT_ID,
+        },
+    )
+    host = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task.task_id,
+        project_id=PROJECT_ID,
+        node=node,
+        startup=startup,
+        trusted_authority=runtime.trusted_execution,
+        output_policies=runtime.output_policies,
+        recovery_authority=runtime.recovery_execution,
+    )
+    host.submit(spec)
+    host.prepare(spec.request.work_id)
+    host.begin_dispatch(spec.request.work_id)
+
+    class LostAcknowledgementPort:
+        def run(self, _dispatch):
+            raise BuildExecutionPortError("simulated acknowledgement loss")
+
+        def inspect(self, _dispatch):
+            return None
+
+    host.node_port = LostAcknowledgementPort()
+    uncertain = host.execute(spec.request.work_id)
+    assert uncertain.state is BuildExecutionState.RECONCILE_REQUIRED
+
+    runtime.authorities.configure(
+        _template(argv_suffix=("--wheel",), max_changed_files=7),
+        expected_revision=1,
+    )
+    restarted_runtime = PackagedBuildAuthorityRuntime(
+        PackagedBuildAuthorityStore(
+            store,
+            node=node,
+            startup=startup,
+        )
+    )
+    restarted = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task.task_id,
+        project_id=PROJECT_ID,
+        node=node,
+        startup=startup,
+        trusted_authority=restarted_runtime.trusted_execution,
+        output_policies=restarted_runtime.output_policies,
+        recovery_authority=restarted_runtime.recovery_execution,
+    )
+
+    restored = restarted.snapshot().coordinator.records[0]
+    assert restored.state is BuildExecutionState.RECONCILE_REQUIRED
+    inspected = restarted.reconcile(spec.request.work_id)
+    assert inspected.state is BuildExecutionState.RECONCILE_REQUIRED
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="changed after PF5 work admission",
+    ):
+        restarted_runtime.trusted_execution.resolve(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            work_id=spec.request.work_id,
+        )
 
 
 def test_stale_configure_revision_is_fail_closed(tmp_path: Path) -> None:
