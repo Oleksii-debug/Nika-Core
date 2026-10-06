@@ -482,6 +482,36 @@ def test_historical_bound_output_policy_fails_closed_on_history_tamper(
         )
 
 
+def test_missing_bound_template_history_fails_closed_after_drift(
+    tmp_path: Path,
+) -> None:
+    store, _startup_value, _node_value, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    runtime.authorities.configure(
+        _template(argv_suffix=("--wheel",)),
+        expected_revision=1,
+    )
+
+    with store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "DELETE FROM product_factory_build_authority_template_history "
+            "WHERE project_id = ? AND repository_id = ? AND component_id = ? "
+            "AND revision = ?",
+            (PROJECT_ID, REPOSITORY_ID, COMPONENT_ID, 1),
+        )
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="historical packaged build authority is unavailable",
+    ):
+        runtime.output_policies.resolve(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            work_id=spec.request.work_id,
+        )
+
+
 def test_schema_v1_migration_backfills_current_template_history(
     tmp_path: Path,
 ) -> None:
