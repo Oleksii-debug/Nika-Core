@@ -210,6 +210,10 @@ class MultiRepositoryProductFactoryHost:
         self._coordinator_checkpoints.save(
             host_task_id=host_task_id,
             checkpoint=binding.checkpoint(coordinator),
+            read_only_precondition=lambda conn: self._require_current_project_version(
+                conn,
+                project,
+            ),
         )
         state = MultiRepositoryExecutionState(authority, binding, coordinator)
         self._assert_state(host_task_id=host_task_id, state=state)
@@ -444,6 +448,7 @@ class MultiRepositoryProductFactoryHost:
 
         with self.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._require_current_project_version(conn, project)
             host_payload = self._require_host_task(
                 conn,
                 host_task_id=host_task_id,
@@ -1017,6 +1022,38 @@ class MultiRepositoryProductFactoryHost:
         if host_payload.get(_GRAPH_AUTHORITY_KEY) != expected_host_authority:
             raise MultiRepositoryExecutionError(
                 "host task repository graph authority is missing or mismatched"
+            )
+
+    @staticmethod
+    def _require_current_project_version(
+        conn: Any,
+        project: ProductProject,
+    ) -> None:
+        row = conn.execute(
+            "SELECT typeof(current_spec_version) AS spec_type, "
+            "current_spec_version, typeof(row_version) AS row_type, row_version "
+            "FROM product_projects WHERE project_id = ?",
+            (project.project_id,),
+        ).fetchone()
+        if row is None:
+            raise MultiRepositoryExecutionError(
+                "ProductProject disappeared before durable Product Factory authority publication"
+            )
+        if (
+            row["spec_type"] != "integer"
+            or row["row_type"] != "integer"
+            or type(row["current_spec_version"]) is not int
+            or type(row["row_version"]) is not int
+        ):
+            raise MultiRepositoryExecutionError(
+                "current ProductProject version authority is invalid"
+            )
+        if (
+            row["current_spec_version"] != project.spec_version
+            or row["row_version"] != project.row_version
+        ):
+            raise MultiRepositoryExecutionError(
+                "ProductProject changed before durable Product Factory authority publication"
             )
 
     @staticmethod

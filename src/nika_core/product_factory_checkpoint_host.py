@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import Any, Callable
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskPayloadCorruptionError, decode_task_payload
@@ -99,6 +99,7 @@ class ProductFactoryCheckpointHost:
         *,
         host_task_id: str,
         checkpoint: ProductProjectCoordinatorCheckpoint,
+        read_only_precondition: Callable[[sqlite3.Connection], None] | None = None,
     ) -> PersistedProductFactoryCheckpoint:
         payload = _encode_checkpoint(checkpoint)
         canonical = _canonical(payload)
@@ -116,6 +117,8 @@ class ProductFactoryCheckpointHost:
             # starting a second transaction here would reject the real dispatch path.
             if not conn.in_transaction:
                 conn.execute("BEGIN IMMEDIATE")
+            if read_only_precondition is not None:
+                read_only_precondition(conn)
             host_payload = self._require_host_task(
                 conn,
                 host_task_id=host_task_id,
