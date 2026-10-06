@@ -299,31 +299,28 @@ class MultiRepositoryProductFactoryHost:
             decision=decision,
         )
 
-    def prepare_repair_and_checkpoint(
+    def preview_repair(
         self,
         *,
         host_task_id: str,
         state: MultiRepositoryExecutionState,
         component_id: str,
         reason: str,
-    ) -> tuple[ComponentWorkRequest, RepairLineageIntent]:
-        """Advance repair from exact prior result SHA through a durable lineage intent.
-
-        The caller cannot nominate a new base. The next request is previewed through the
-        canonical coordinator, restored in-memory, then its exact transition is persisted
-        before ProductFactoryProgramHost durably creates the next READY generation.
-        """
+    ) -> ComponentWorkRequest:
+        """Return the exact next repair request without mutating durable or live state."""
 
         self._assert_state(host_task_id=host_task_id, state=state)
-        if not reason.strip():
+        if type(reason) is not str or not reason.strip():
             raise RepairLineageError("repair reason must not be empty")
         record = _record_for_component(state.coordinator, component_id)
         if record.state is not WorkState.REPAIR_REQUIRED or record.result is None:
-            raise RepairLineageError("component is not awaiting repair with exact result evidence")
+            raise RepairLineageError(
+                "component is not awaiting repair with exact result evidence"
+            )
 
         before = state.coordinator.snapshot()
         try:
-            preview = state.coordinator.prepare_repair(
+            return state.coordinator.prepare_repair(
                 component_id,
                 base_sha=record.result.result_sha,
                 reason=reason,
@@ -331,6 +328,37 @@ class MultiRepositoryProductFactoryHost:
         finally:
             state.coordinator.restore(before)
 
+    def commit_repair_and_checkpoint(
+        self,
+        *,
+        host_task_id: str,
+        state: MultiRepositoryExecutionState,
+        component_id: str,
+        reason: str,
+        expected_next_work_id: str,
+    ) -> tuple[ComponentWorkRequest, RepairLineageIntent]:
+        """Commit only the exact repair request previously derived from current authority."""
+
+        if (
+            type(expected_next_work_id) is not str
+            or not expected_next_work_id
+            or expected_next_work_id != expected_next_work_id.strip()
+        ):
+            raise RepairLineageError(
+                "expected_next_work_id must be normalized non-empty text"
+            )
+        preview = self.preview_repair(
+            host_task_id=host_task_id,
+            state=state,
+            component_id=component_id,
+            reason=reason,
+        )
+        if preview.work_id != expected_next_work_id:
+            raise RepairLineageError(
+                "current repair preview differs from the expected next work identity"
+            )
+
+        record = _record_for_component(state.coordinator, component_id)
         intent = self._lineage_intent(
             state=state,
             previous=record,
@@ -350,17 +378,41 @@ class MultiRepositoryProductFactoryHost:
             component_id=component_id,
             base_sha=intent.to_base_sha,
             reason=reason,
+            read_only_precondition=lambda conn: self._require_current_project_version(
+                conn,
+                state.binding.project,
+            ),
         )
-        if (
-            request.work_id != intent.to_work_id
-            or request.base_sha != intent.to_base_sha
-            or request.attempt != intent.to_attempt
-        ):
+        if request != preview:
             raise RepairLineageError(
-                "canonical repair request disagrees with durable lineage intent"
+                "canonical repair commit disagrees with its exact preview"
             )
         self._validate_repair_lineage(host_task_id=host_task_id, state=state)
         return request, intent
+
+    def prepare_repair_and_checkpoint(
+        self,
+        *,
+        host_task_id: str,
+        state: MultiRepositoryExecutionState,
+        component_id: str,
+        reason: str,
+    ) -> tuple[ComponentWorkRequest, RepairLineageIntent]:
+        """Advance repair through the same preview/lineage/checkpoint authority."""
+
+        preview = self.preview_repair(
+            host_task_id=host_task_id,
+            state=state,
+            component_id=component_id,
+            reason=reason,
+        )
+        return self.commit_repair_and_checkpoint(
+            host_task_id=host_task_id,
+            state=state,
+            component_id=component_id,
+            reason=reason,
+            expected_next_work_id=preview.work_id,
+        )
 
     def running_ownership_leases(
         self,
@@ -694,6 +746,7 @@ class MultiRepositoryProductFactoryHost:
                 host_task_id=host_task_id,
                 project_id=state.authority.project_id,
             )
+            self._require_current_project_version(conn, state.binding.project)
             rows = conn.execute(
                 """
                 SELECT checkpoint_id, payload_json, checksum_sha256
