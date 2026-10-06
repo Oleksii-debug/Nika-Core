@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
@@ -101,6 +102,9 @@ class RuntimeRecoveryService:
         ACTIVE/RUNNING candidates are provisional until ``resume_safe_crash_sessions`` performs
         the runtime-specific async checkpoint preflight. ACTIVE/RETRYING candidates remain
         fail-closed until canonical durable retry attempt + not-before authority exists.
+        Crash-left fresh retries without a runtime session are still surfaced when their latest
+        durable retry schedule/start event binds an exact runtime/thread route; they are never
+        auto-replayed.
         The sync inventory deliberately never touches third-party checkpoint objects.
 
         Generic external-effect reservations left PENDING across process recreation have unknown
@@ -109,8 +113,16 @@ class RuntimeRecoveryService:
         or must remain fail-closed.
         """
         records = self._sessions.list_resumable()
+        orphan_retry_routes = self._orphan_retry_routes()
+        inventory_task_ids = dict.fromkeys(
+            [record.task_id for record in records]
+            + [
+                task_id
+                for task_id, _task_state, _runtime_id, _thread_id in orphan_retry_routes
+            ]
+        )
         promoted_operation_keys: list[str] = []
-        for task_id in dict.fromkeys(record.task_id for record in records):
+        for task_id in inventory_task_ids:
             pending = self._idempotency.list_for_task(
                 task_id,
                 status=IdempotencyStatus.PENDING,
@@ -121,7 +133,15 @@ class RuntimeRecoveryService:
                 self._idempotency.mark_uncertain(operation.operation_key)
                 promoted_operation_keys.append(operation.operation_key)
 
-        candidates = tuple(self._classify(record) for record in records)
+        candidates = tuple(self._classify(record) for record in records) + tuple(
+            self._classify_orphan_retry(
+                task_id=task_id,
+                task_state=task_state,
+                runtime_id=runtime_id,
+                thread_id=thread_id,
+            )
+            for task_id, task_state, runtime_id, thread_id in orphan_retry_routes
+        )
         self._audit.append(
             event_type="runtime.recovery_inventory",
             entity_type="runtime_recovery",
@@ -147,6 +167,7 @@ class RuntimeRecoveryService:
                     for item in candidates
                 ),
                 "pending_promoted_count": len(promoted_operation_keys),
+                "orphan_retry_count": len(orphan_retry_routes),
             },
         )
         return candidates
@@ -304,6 +325,113 @@ class RuntimeRecoveryService:
                 probe,
             )
         return candidate, probe
+
+    def _orphan_retry_routes(self) -> tuple[tuple[str, TaskState, str, str], ...]:
+        """Return exact durable routes for crash-left fresh retries without a runtime session.
+
+        Fresh retries deliberately do not fabricate a runtime resume cursor. A crash can leave the
+        task RETRYING after runtime.retry_scheduled or RUNNING after runtime.retry_started.
+        Recovery inventory surfaces either durable route without converting it into replay
+        authority.
+        """
+        routes: list[tuple[str, TaskState, str, str]] = []
+        with self._queue.store.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT tasks.task_id, tasks.state
+                FROM tasks
+                LEFT JOIN runtime_sessions
+                    ON runtime_sessions.task_id = tasks.task_id
+                WHERE tasks.state IN (?, ?)
+                  AND runtime_sessions.task_id IS NULL
+                ORDER BY tasks.task_id
+                """,
+                (TaskState.RETRYING.value, TaskState.RUNNING.value),
+            ).fetchall()
+            for task_row in rows:
+                task_id = task_row["task_id"]
+                if type(task_id) is not str or not task_id.strip():
+                    continue
+                try:
+                    task_state = TaskState(task_row["state"])
+                except ValueError:
+                    continue
+                expected_event = (
+                    "runtime.retry_scheduled"
+                    if task_state is TaskState.RETRYING
+                    else "runtime.retry_started"
+                )
+                route_row = conn.execute(
+                    "SELECT event_type, payload_json FROM audit_events "
+                    "WHERE entity_type = ? AND entity_id = ? "
+                    "AND event_type IN (?, ?) ORDER BY event_id DESC LIMIT 1",
+                    (
+                        "task",
+                        task_id,
+                        "runtime.retry_scheduled",
+                        "runtime.retry_started",
+                    ),
+                ).fetchone()
+                if route_row is None or route_row["event_type"] != expected_event:
+                    continue
+                try:
+                    payload = json.loads(route_row["payload_json"])
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if type(payload) is not dict:
+                    continue
+                runtime_id = payload.get("runtime_id")
+                thread_id = payload.get("thread_id")
+                retry_number = payload.get("retry_number")
+                if (
+                    type(runtime_id) is not str
+                    or not runtime_id.strip()
+                    or type(thread_id) is not str
+                    or not thread_id.strip()
+                    or type(retry_number) is not int
+                    or retry_number < 1
+                ):
+                    continue
+                routes.append((task_id, task_state, runtime_id, thread_id))
+        return tuple(routes)
+
+    def _classify_orphan_retry(
+        self,
+        *,
+        task_id: str,
+        task_state: TaskState,
+        runtime_id: str,
+        thread_id: str,
+    ) -> RecoveryCandidate:
+        unresolved_records = tuple(
+            item
+            for item in self._idempotency.list_for_task(task_id)
+            if item.status in {IdempotencyStatus.PENDING, IdempotencyStatus.UNCERTAIN}
+        )
+        unresolved = tuple(item.operation_key for item in unresolved_records)
+        if unresolved:
+            return RecoveryCandidate(
+                task_id=task_id,
+                runtime_id=runtime_id,
+                thread_id=thread_id,
+                task_state=task_state,
+                stored_outcome=None,
+                disposition=RecoveryDisposition.RECONCILE_SIDE_EFFECTS,
+                reason="external side effect is pending or uncertain and must be reconciled first",
+                unresolved_operation_keys=unresolved,
+            )
+        return RecoveryCandidate(
+            task_id=task_id,
+            runtime_id=runtime_id,
+            thread_id=thread_id,
+            task_state=task_state,
+            stored_outcome=None,
+            disposition=RecoveryDisposition.INCONSISTENT_STATE,
+            reason=(
+                "crash-left fresh retry has durable route evidence but no runtime "
+                "session or persisted request/retry-budget authority; automatic replay is unsafe"
+            ),
+        )
 
     def _classify(self, record: RuntimeSessionRecord) -> RecoveryCandidate:
         task_state = self._task_state(record.task_id)
