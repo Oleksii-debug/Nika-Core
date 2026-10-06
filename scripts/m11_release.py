@@ -33,6 +33,11 @@ _PACKAGED_INSTALLER_NAME = "install_nika_core.ps1"
 _DATA_ADOPTION_EVIDENCE_NAME = "packaged-data-adoption-proof.json"
 _RECOVERY_DIALOG_TITLE = "Nika Core — відновлення даних"
 _PF11_MAX_EVIDENCE_BYTES = 64 * 1024
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 
 def _require_release_version_text(value: object, *, authority: str) -> str:
@@ -223,6 +228,60 @@ def _read_pf11_evidence(path: Path) -> dict[str, object]:
     return payload
 
 
+def _open_canonical_installer_source(path: Path) -> int:
+    """Open installer source bytes without following a mutable Windows reparse point."""
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows installer snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY
+                | int(getattr(os, "O_BINARY", 0))
+                | int(getattr(os, "O_NOINHERIT", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    flags = os.O_RDONLY
+    for flag_name in ("O_BINARY", "O_CLOEXEC", "O_NOINHERIT", "O_NOFOLLOW", "O_NONBLOCK"):
+        flags |= int(getattr(os, flag_name, 0))
+    return os.open(path, flags)
+
+
 def _stage_canonical_installer(project_root: Path, bundle_dir: Path) -> Path:
     """Stage one stable regular installer without following a mutable target."""
     source = project_root / "scripts" / _PACKAGED_INSTALLER_NAME
@@ -244,12 +303,7 @@ def _stage_canonical_installer(project_root: Path, bundle_dir: Path) -> Path:
     descriptor = -1
     temporary: Path | None = None
     try:
-        flags = os.O_RDONLY
-        flags |= getattr(os, "O_BINARY", 0)
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        flags |= getattr(os, "O_NONBLOCK", 0)
-        descriptor = os.open(source, flags)
+        descriptor = _open_canonical_installer_source(source)
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
