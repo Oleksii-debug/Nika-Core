@@ -145,6 +145,21 @@ def test_file_source_rejects_relative_path_before_read(tmp_path: Path) -> None:
     assert source.snapshot()["status"] == "missing"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow contract")
+def test_file_source_fails_closed_without_posix_nofollow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_plan(tmp_path / "plan.json")
+    monkeypatch.delattr(plan_file_module.os, "O_NOFOLLOW", raising=False)
+    source = PackagedProductFactoryExecutionPlanFileSource()
+
+    result = source.load({"path": str(path.resolve())})
+
+    assert result.status == "failed"
+    assert source.snapshot()["status"] == "missing"
+
+
 def test_file_source_rejects_hardlinked_plan(tmp_path: Path) -> None:
     path = _write_plan(tmp_path / "plan.json")
     alias = tmp_path / "plan-alias.json"
