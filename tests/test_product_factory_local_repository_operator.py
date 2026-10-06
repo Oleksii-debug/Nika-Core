@@ -113,6 +113,59 @@ def test_snapshot_lists_only_plan_repositories_without_root_path(
     assert "root" not in repr(snapshot).casefold()
 
 
+def test_snapshot_rejects_project_change_during_projection(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    operator = PackagedLocalRepositoryOperator(
+        bindings=bindings,
+        resolve_plan=lambda project_id: plan
+        if project_id == plan.project_id
+        else (_ for _ in ()).throw(KeyError(project_id)),
+    )
+    projects = ProductProjectRepository(store)
+    original_current_binding_version = bindings.current_binding_version
+    advanced = False
+
+    def version_then_advance(project_id: str, repository_id: str) -> int | None:
+        nonlocal advanced
+        version = original_current_binding_version(project_id, repository_id)
+        if not advanced:
+            projects.update_spec(
+                project.project_id,
+                ProductProjectSpec(
+                    goal="Changed while repository projection was being built",
+                    desired_outcome=project.spec.desired_outcome,
+                    repository_refs=project.spec.repository_refs,
+                ),
+                expected_row_version=project.row_version,
+                change_reason="operator snapshot TOCTOU regression",
+                idempotency_key="update:product-1:snapshot-toctou",
+            )
+            advanced = True
+        return version
+
+    monkeypatch.setattr(
+        bindings,
+        "current_binding_version",
+        version_then_advance,
+    )
+
+    snapshot = operator.snapshot(project.project_id)
+
+    assert snapshot == {
+        "status": "invalid",
+        "project_id": None,
+        "repositories": [],
+        "message": "Стан локальних прив’язок Product Factory недоступний.",
+    }
+
+
 def test_explicit_bind_and_version_fenced_unbind_round_trip(
     tmp_path: pathlib.Path,
 ) -> None:
