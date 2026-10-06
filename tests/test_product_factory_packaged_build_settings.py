@@ -113,6 +113,29 @@ def test_decode_rejects_duplicate_json_key() -> None:
         decode_packaged_build_runtime_config(raw)
 
 
+@pytest.mark.parametrize("separator", ("\u0085", "\u2028", "\u2029"))
+def test_decode_rejects_unicode_line_separators_across_runtime_authority(
+    separator: str,
+) -> None:
+    node_payload = _payload()
+    node = dict(cast(dict[str, object], node_payload["node"]))
+    node["architecture"] = f"x86{separator}64"
+    node_payload["node"] = node
+
+    with pytest.raises(PackagedBuildRuntimeSettingsError, match="node або component"):
+        decode_packaged_build_runtime_config(_json(node_payload))
+
+    feature_payload = _payload()
+    templates = feature_payload["templates"]
+    assert isinstance(templates, list)
+    template = dict(templates[0])
+    template["required_features"] = ["build", f"gpu{separator}scope"]
+    feature_payload["templates"] = [template]
+
+    with pytest.raises(PackagedBuildRuntimeSettingsError, match="node або component"):
+        decode_packaged_build_runtime_config(_json(feature_payload))
+
+
 def test_decode_rejects_template_for_another_node() -> None:
     payload = _payload()
     templates = payload["templates"]
