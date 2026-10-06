@@ -161,9 +161,24 @@ def test_sterile_git_environment_rejects_behavioral_allowed_value() -> None:
         sterile_git_environment({"PATH": EnvironmentValue("trusted")})
 
 
-def test_sterile_git_environment_rejects_conflicting_case_aliases() -> None:
-    with pytest.raises(WorkspaceSecurityError, match="conflicting environment"):
-        sterile_git_environment({"PATH": "trusted", "Path": "attacker"})
+def test_sterile_git_environment_handles_case_aliases_by_platform() -> None:
+    source = {"PATH": "trusted", "Path": "attacker"}
+    if os.name == "nt":
+        with pytest.raises(WorkspaceSecurityError, match="conflicting environment"):
+            sterile_git_environment(source)
+        return
+
+    environment = sterile_git_environment(source)
+    assert environment["PATH"] == "trusted"
+    assert "Path" not in environment
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX environment names are case-sensitive")
+def test_posix_environment_does_not_promote_case_variant() -> None:
+    environment = sterile_git_environment({"Path": "/attacker/bin"})
+
+    assert "PATH" not in environment
+    assert "Path" not in environment
 
 
 def test_sterile_git_environment_canonicalizes_equivalent_case_aliases() -> None:
