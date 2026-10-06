@@ -1354,7 +1354,7 @@ def _env_float(name: str, default: float, minimum: float, maximum: float) -> flo
     return value
 
 
-def _absolute_env_path(name: str, *, file: bool) -> Path:
+def _absolute_env_location(name: str) -> Path:
     raw = os.environ.get(name)
     if raw is None:
         _fail(f"{name.lower()}_missing")
@@ -1362,15 +1362,6 @@ def _absolute_env_path(name: str, *, file: bool) -> Path:
     path = Path(text)
     if not path.is_absolute():
         _fail(f"{name.lower()}_not_absolute")
-    if file:
-        _require_regular_unlinked(path, code=f"{name.lower()}_invalid")
-    else:
-        try:
-            value = os.lstat(path)
-        except OSError:
-            _fail(f"{name.lower()}_invalid")
-        if stat.S_ISLNK(value.st_mode) or _is_reparse(value) or not stat.S_ISDIR(value.st_mode):
-            _fail(f"{name.lower()}_invalid")
     return path
 
 
@@ -1382,19 +1373,13 @@ def _read_config() -> TrainerConfig:
     )
     if trainer_implementation_sha256() != expected_implementation_sha256:
         _fail("nika_trainer_implementation_mismatch")
-    base_gguf = _absolute_env_path("NIKA_TRAINER_BASE_GGUF", file=True)
+    base_gguf = _absolute_env_location("NIKA_TRAINER_BASE_GGUF")
     if base_gguf.suffix.casefold() != ".gguf":
         _fail("nika_trainer_base_gguf_invalid")
     base_gguf_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_BASE_GGUF_SHA256"),
         field="nika_trainer_base_gguf_sha256",
     )
-    observed_base_gguf_sha256, _ = _hash_regular_snapshot(
-        base_gguf,
-        code="nika_trainer_base_gguf_changed",
-    )
-    if observed_base_gguf_sha256 != base_gguf_sha256:
-        _fail("nika_trainer_base_gguf_digest_mismatch")
     initial_adapter_raw = os.environ.get("NIKA_TRAINER_INITIAL_ADAPTER_PATH")
     initial_adapter_sha256_raw = os.environ.get(
         "NIKA_TRAINER_INITIAL_ADAPTER_SHA256"
@@ -1404,9 +1389,8 @@ def _read_config() -> TrainerConfig:
     initial_adapter: Path | None = None
     initial_adapter_sha256: str | None = None
     if initial_adapter_raw is not None:
-        initial_adapter = _absolute_env_path(
-            "NIKA_TRAINER_INITIAL_ADAPTER_PATH",
-            file=True,
+        initial_adapter = _absolute_env_location(
+            "NIKA_TRAINER_INITIAL_ADAPTER_PATH"
         )
         if initial_adapter.suffix.casefold() != ".safetensors":
             _fail("nika_trainer_initial_adapter_invalid")
@@ -1414,23 +1398,11 @@ def _read_config() -> TrainerConfig:
             initial_adapter_sha256_raw,
             field="nika_trainer_initial_adapter_sha256",
         )
-        observed_initial_adapter_sha256, _ = _hash_regular_snapshot(
-            initial_adapter,
-            code="nika_trainer_initial_adapter_changed",
-        )
-        if observed_initial_adapter_sha256 != initial_adapter_sha256:
-            _fail("nika_trainer_initial_adapter_digest_mismatch")
-    model_dir = _absolute_env_path("NIKA_TRAINER_MODEL_DIR", file=False)
+    model_dir = _absolute_env_location("NIKA_TRAINER_MODEL_DIR")
     model_dir_manifest_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256"),
         field="nika_trainer_model_dir_manifest_sha256",
     )
-    try:
-        live_model_dir_manifest = model_directory_manifest_sha256(model_dir)
-    except ValueError:
-        _fail("nika_trainer_model_dir_manifest_invalid")
-    if live_model_dir_manifest != model_dir_manifest_sha256:
-        _fail("nika_trainer_model_dir_manifest_mismatch")
     output_root_raw = os.environ.get("NIKA_TRAINER_OUTPUT_ROOT")
     if output_root_raw is None:
         _fail("nika_trainer_output_root_missing")
