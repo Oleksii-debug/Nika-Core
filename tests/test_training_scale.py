@@ -184,6 +184,103 @@ def test_pilot_authorization_is_deterministic_and_material_bound() -> None:
     assert first.progression_proof is None
 
 
+
+def test_scale_authorization_canonical_payload_round_trip_preserves_digest() -> None:
+    evidence = _material_evidence()
+    authorization = _pilot_authorization(evidence)
+
+    restored = scale.TrainingScaleAuthorization.from_canonical_payload(
+        authorization.canonical_payload()
+    )
+
+    assert restored.canonical_payload() == authorization.canonical_payload()
+    assert restored.authorization_sha256 == authorization.authorization_sha256
+
+
+def test_higher_scale_authorization_restore_requires_trusted_previous_proof() -> None:
+    candidate_sha256 = _sha(b"candidate")
+    evidence = _material_evidence(base_sha256=candidate_sha256)
+    plan = _plan(evidence)
+    trusted = _trusted_progression_proof(plan)
+    authorization = authorize_training_scale(
+        plan=plan,
+        tier_id="small",
+        job_id="small-job",
+        base_artifact=ArtifactIdentity(
+            "models/pilot-candidate",
+            trusted.candidate_sha256,
+        ),
+        candidate_artifact_ref="models/small-candidate",
+        material_evidence=evidence,
+        execution_plan_sha256=_sha(b"small-plan"),
+        max_steps=4,
+        progression_proof=trusted,
+    )
+    payload = authorization.canonical_payload()
+
+    with pytest.raises(
+        TrainingScaleError,
+        match="requires trusted progression authority",
+    ):
+        scale.TrainingScaleAuthorization.from_canonical_payload(payload)
+
+    restored = scale.TrainingScaleAuthorization.from_canonical_payload(
+        payload,
+        trusted_progression_proof=trusted,
+    )
+
+    assert restored.authorization_sha256 == authorization.authorization_sha256
+    assert restored.progression_proof is trusted
+
+
+def test_higher_scale_authorization_restore_rejects_mismatched_trusted_proof() -> None:
+    candidate_sha256 = _sha(b"candidate")
+    evidence = _material_evidence(base_sha256=candidate_sha256)
+    plan = _plan(evidence)
+    trusted = _trusted_progression_proof(plan)
+    authorization = authorize_training_scale(
+        plan=plan,
+        tier_id="small",
+        job_id="small-job",
+        base_artifact=ArtifactIdentity(
+            "models/pilot-candidate",
+            trusted.candidate_sha256,
+        ),
+        candidate_artifact_ref="models/small-candidate",
+        material_evidence=evidence,
+        execution_plan_sha256=_sha(b"small-plan"),
+        max_steps=4,
+        progression_proof=trusted,
+    )
+    forged_payload = dict(trusted.canonical_payload())
+    forged_payload["comparison_evidence_sha256"] = _sha(b"other-comparison")
+    forged = scale._build_progression_proof(
+        plan_sha256=forged_payload["plan_sha256"],
+        tier_index=forged_payload["tier_index"],
+        authorization_sha256=forged_payload["authorization_sha256"],
+        job_id=forged_payload["job_id"],
+        job_fingerprint=forged_payload["job_fingerprint"],
+        base_artifact_ref=forged_payload["base_artifact_ref"],
+        base_sha256=forged_payload["base_sha256"],
+        candidate_artifact_ref=forged_payload["candidate_artifact_ref"],
+        candidate_sha256=forged_payload["candidate_sha256"],
+        frozen_package_sha256=forged_payload["frozen_package_sha256"],
+        training_material_sha256=forged_payload["training_material_sha256"],
+        execution_plan_sha256=forged_payload["execution_plan_sha256"],
+        comparison_evidence_sha256=forged_payload["comparison_evidence_sha256"],
+        evaluation_set_sha256=forged_payload["evaluation_set_sha256"],
+    )
+
+    with pytest.raises(
+        TrainingScaleError,
+        match="does not match trusted authority",
+    ):
+        scale.TrainingScaleAuthorization.from_canonical_payload(
+            authorization.canonical_payload(),
+            trusted_progression_proof=forged,
+        )
+
+
 def test_scale_authorization_rejects_package_above_tier_bound() -> None:
     evidence = _material_evidence(training_records=2)
     validation = next(

@@ -412,6 +412,39 @@ class TrainingMaterialEvidence:
         }
 
 
+    @classmethod
+    def from_canonical_payload(cls, value: object) -> TrainingMaterialEvidence:
+        if type(value) is not dict:
+            raise ValueError("training material evidence payload must be an exact object")
+        expected = {
+            "artifact_sha256",
+            "byte_count",
+            "license_evidence_sha256",
+            "provenance_sha256",
+            "record_count",
+            "split",
+        }
+        if set(value) != expected:
+            raise ValueError(
+                "training material evidence payload fields do not match the strict schema"
+            )
+        try:
+            split = LearningDataSplit(value["split"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("training material evidence split is invalid") from exc
+        restored = cls(
+            split=split,
+            artifact_sha256=value["artifact_sha256"],
+            provenance_sha256=value["provenance_sha256"],
+            license_evidence_sha256=value["license_evidence_sha256"],
+            record_count=value["record_count"],
+            byte_count=value["byte_count"],
+        )
+        if restored.canonical_payload() != value:
+            raise ValueError("training material evidence payload is not canonical")
+        return restored
+
+
 @dataclass(frozen=True, slots=True)
 class TrainingMaterialSetEvidence:
     """Self-verifying durable evidence for exact bytes resolved toward one training job."""
@@ -498,6 +531,53 @@ class TrainingMaterialSetEvidence:
             "verification_sha256": self.verification_sha256,
             "workspace_sha256": self.workspace_sha256,
         }
+
+
+    @classmethod
+    def from_canonical_payload(cls, value: object) -> TrainingMaterialSetEvidence:
+        if type(value) is not dict:
+            raise ValueError("training material set payload must be an exact object")
+        expected = {
+            "base_artifact_sha256",
+            "candidate_dataset_sha256",
+            "evaluation_set_sha256",
+            "materials",
+            "package_id",
+            "package_manifest_sha256",
+            "package_schema_version",
+            "package_version",
+            "schema_version",
+            "selection_policy_sha256",
+            "verification_sha256",
+            "workspace_sha256",
+        }
+        if set(value) != expected:
+            raise ValueError(
+                "training material set payload fields do not match the strict schema"
+            )
+        raw_materials = value["materials"]
+        if type(raw_materials) is not list or not raw_materials:
+            raise ValueError("training material set materials must be a non-empty exact list")
+        restored = cls(
+            workspace_sha256=value["workspace_sha256"],
+            package_id=value["package_id"],
+            package_version=value["package_version"],
+            package_schema_version=value["package_schema_version"],
+            base_artifact_sha256=value["base_artifact_sha256"],
+            selection_policy_sha256=value["selection_policy_sha256"],
+            verification_sha256=value["verification_sha256"],
+            evaluation_set_sha256=value["evaluation_set_sha256"],
+            candidate_dataset_sha256=value["candidate_dataset_sha256"],
+            package_manifest_sha256=value["package_manifest_sha256"],
+            materials=tuple(
+                TrainingMaterialEvidence.from_canonical_payload(item)
+                for item in raw_materials
+            ),
+            schema_version=value["schema_version"],
+        )
+        if restored.canonical_payload() != value:
+            raise ValueError("training material set payload is not canonical")
+        return restored
 
     @property
     def training_material_sha256(self) -> str:

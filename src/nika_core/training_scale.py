@@ -611,6 +611,110 @@ class TrainingScaleAuthorization:
                 "training scale authorization fields are incomplete"
             ) from exc
 
+
+    def canonical_payload(self) -> dict[str, object]:
+        authorization = self.revalidated()
+        proof = authorization.progression_proof
+        return {
+            "base_artifact": {
+                "artifact_ref": authorization.base_artifact.artifact_ref,
+                "sha256": authorization.base_artifact.sha256,
+            },
+            "candidate_artifact_ref": authorization.candidate_artifact_ref,
+            "execution_plan_sha256": authorization.execution_plan_sha256,
+            "job_id": authorization.job_id,
+            "material_evidence": authorization.material_evidence.canonical_payload(),
+            "max_steps": authorization.max_steps,
+            "plan": authorization.plan.canonical_payload(),
+            "progression_proof": None if proof is None else proof.canonical_payload(),
+            "resource_scope": authorization.resource_scope,
+            "schema_version": authorization.schema_version,
+            "tier_index": authorization.tier_index,
+        }
+
+    @classmethod
+    def from_canonical_payload(
+        cls,
+        value: object,
+        *,
+        trusted_progression_proof: TrainingScaleProgressionProof | None = None,
+    ) -> TrainingScaleAuthorization:
+        if type(value) is not dict:
+            raise TrainingScaleError(
+                "training scale authorization payload must be an exact object"
+            )
+        expected = {
+            "base_artifact",
+            "candidate_artifact_ref",
+            "execution_plan_sha256",
+            "job_id",
+            "material_evidence",
+            "max_steps",
+            "plan",
+            "progression_proof",
+            "resource_scope",
+            "schema_version",
+            "tier_index",
+        }
+        if set(value) != expected:
+            raise TrainingScaleError(
+                "training scale authorization payload fields do not match the strict schema"
+            )
+        raw_base = value["base_artifact"]
+        if type(raw_base) is not dict or set(raw_base) != {"artifact_ref", "sha256"}:
+            raise TrainingScaleError(
+                "training scale authorization base artifact payload is invalid"
+            )
+        raw_proof = value["progression_proof"]
+        if raw_proof is None:
+            if trusted_progression_proof is not None:
+                raise TrainingScaleError(
+                    "pilot authorization must not receive trusted progression authority"
+                )
+            progression_proof = None
+        else:
+            if type(raw_proof) is not dict:
+                raise TrainingScaleError(
+                    "training scale authorization progression payload must be an exact object"
+                )
+            if type(trusted_progression_proof) is not TrainingScaleProgressionProof:
+                raise TrainingScaleError(
+                    "higher-tier authorization restore requires trusted progression authority"
+                )
+            progression_proof = trusted_progression_proof.revalidated()
+            if raw_proof != progression_proof.canonical_payload():
+                raise TrainingScaleError(
+                    "authorization progression payload does not match trusted authority"
+                )
+        try:
+            restored = cls(
+                plan=TrainingScalePlan.from_canonical_payload(value["plan"]),
+                tier_index=value["tier_index"],
+                job_id=value["job_id"],
+                base_artifact=ArtifactIdentity(
+                    artifact_ref=raw_base["artifact_ref"],
+                    sha256=raw_base["sha256"],
+                ),
+                candidate_artifact_ref=value["candidate_artifact_ref"],
+                material_evidence=TrainingMaterialSetEvidence.from_canonical_payload(
+                    value["material_evidence"]
+                ),
+                execution_plan_sha256=value["execution_plan_sha256"],
+                max_steps=value["max_steps"],
+                resource_scope=value["resource_scope"],
+                progression_proof=progression_proof,
+                schema_version=value["schema_version"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise TrainingScaleError(
+                "training scale authorization payload is not canonical"
+            ) from exc
+        if restored.canonical_payload() != value:
+            raise TrainingScaleError(
+                "training scale authorization payload is not canonical"
+            )
+        return restored
+
     def _payload_unchecked(self) -> dict[str, object]:
         proof = self.progression_proof
         return {

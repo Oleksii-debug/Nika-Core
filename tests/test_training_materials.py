@@ -515,3 +515,64 @@ def test_resolved_material_requires_absolute_path() -> None:
 
     with pytest.raises(ValueError, match="absolute canonical platform Path"):
         ResolvedTrainingMaterial(evidence=material, path=Path("relative.bin"))
+
+def test_material_evidence_canonical_payload_round_trip() -> None:
+    evidence = _material(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_sha256(b"training"),
+    )
+
+    restored = TrainingMaterialEvidence.from_canonical_payload(
+        evidence.canonical_payload()
+    )
+
+    assert restored == evidence
+    assert restored.canonical_payload() == evidence.canonical_payload()
+
+
+def test_material_set_canonical_payload_round_trip_preserves_digest() -> None:
+    training = _material(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_sha256(b"training"),
+    )
+    validation = _material(
+        split=LearningDataSplit.VALIDATION,
+        artifact_sha256=_sha256(b"validation"),
+    )
+    evidence = _material_set(training, validation)
+
+    restored = TrainingMaterialSetEvidence.from_canonical_payload(
+        evidence.canonical_payload()
+    )
+
+    assert restored == evidence
+    assert restored.training_material_sha256 == evidence.training_material_sha256
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda value: value.update({"unexpected": "field"}),
+        lambda value: value.pop("workspace_sha256"),
+        lambda value: value.update({"materials": tuple(value["materials"])}),
+        lambda value: value["materials"][0].update({"record_count": True}),
+        lambda value: value.update({"candidate_dataset_sha256": "0" * 64}),
+    ),
+)
+def test_material_set_rehydration_rejects_noncanonical_or_forged_payload(
+    mutate: object,
+) -> None:
+    training = _material(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_sha256(b"training"),
+    )
+    validation = _material(
+        split=LearningDataSplit.VALIDATION,
+        artifact_sha256=_sha256(b"validation"),
+    )
+    payload = _material_set(training, validation).canonical_payload()
+    mutate(payload)  # type: ignore[operator]
+
+    with pytest.raises((TypeError, ValueError)):
+        TrainingMaterialSetEvidence.from_canonical_payload(payload)
+
