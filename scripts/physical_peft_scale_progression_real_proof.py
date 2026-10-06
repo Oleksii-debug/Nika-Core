@@ -17,6 +17,7 @@ from nika_core.training_peft_worker import (
     candidate_artifact_path,
 )
 from nika_core.training_physical_evaluation_driver import (
+    _SCALE_PROGRESSION_OPERATION_TYPE,
     _find_pilot_task,
     _iter_task_idempotency_records,
     load_trusted_scale_progression_proof,
@@ -252,7 +253,10 @@ def _trusted_progression(
         ledger,
         task_id=task.task_id,
     ):
-        if record.status is not IdempotencyStatus.COMPLETED:
+        if (
+            record.status is not IdempotencyStatus.COMPLETED
+            or record.operation_type != _SCALE_PROGRESSION_OPERATION_TYPE
+        ):
             continue
         result = record.result
         if (
