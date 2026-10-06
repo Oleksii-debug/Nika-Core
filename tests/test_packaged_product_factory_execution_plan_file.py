@@ -335,6 +335,7 @@ def test_accessible_execution_plan_file_controls_and_bridge_contract() -> None:
         in script
     )
 
+
 class _UnusedProgramWorker:
     async def dispatch(self, request):
         raise AssertionError(f"unexpected dispatch: {request.work_id}")
