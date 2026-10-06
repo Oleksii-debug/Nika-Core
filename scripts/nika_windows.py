@@ -33,6 +33,12 @@ from nika_core.packaged_agent_builder import (
 from nika_core.packaged_intelligence_mode import PackagedIntelligenceModeCommandAdapter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
+from nika_core.product_factory_local_repository_binding import (
+    ProductFactoryLocalRepositoryBindings,
+)
+from nika_core.product_factory_local_repository_operator import (
+    PackagedLocalRepositoryOperator,
+)
 from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
 from nika_core.product_factory_packaged_execution import (
     PackagedProductFactoryExecutionController,
@@ -571,6 +577,14 @@ def build_windows_bridge(
         product_repository,
         approval_verifier=decision_approval_authority.verifier(),
     )
+    product_factory_local_repository_operator = (
+        PackagedLocalRepositoryOperator(
+            bindings=ProductFactoryLocalRepositoryBindings(store),
+            resolve_plan=product_factory_execution_plan_files.resolve,
+        )
+        if product_factory_execution_plan_files is not None
+        else None
+    )
     product_factory_execution_handler = None
     if product_factory_execution_host is not None:
         execution_plan_resolver = product_factory_execution_plan_resolver
@@ -672,6 +686,29 @@ def build_windows_bridge(
         store=store,
     )
 
+    def local_repository_binding_state() -> dict[str, object]:
+        operator = product_factory_local_repository_operator
+        if operator is None:
+            return {
+                "status": "unavailable",
+                "project_id": None,
+                "repositories": [],
+                "message": (
+                    "Локальні прив’язки репозиторіїв недоступні "
+                    "в поточній конфігурації виконання."
+                ),
+            }
+        assert product_factory_execution_plan_files is not None
+        plan_snapshot = product_factory_execution_plan_files.snapshot()
+        project_id = (
+            plan_snapshot.get("project_id")
+            if plan_snapshot.get("loaded") is True
+            else None
+        )
+        return operator.snapshot(
+            project_id if isinstance(project_id, str) else None
+        )
+
     def source_state() -> Mapping[str, Any]:
         state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
         state["v01_model_settings"] = model_settings.snapshot()
@@ -689,6 +726,7 @@ def build_windows_bridge(
             if product_factory_execution_plan_files is not None
             else None
         )
+        state["product_factory_local_repositories"] = local_repository_binding_state()
         return agent_builder_state.decorate(state)
 
     def refresh_local_product_factory_settings(
@@ -731,6 +769,36 @@ def build_windows_bridge(
             focus_id="model-route-kind",
         )
 
+    def bind_product_factory_local_repository(
+        payload: Mapping[str, Any],
+    ) -> UIResult:
+        if product_factory_local_repository_operator is None:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=(
+                    "Локальна прив’язка репозиторію недоступна "
+                    "в поточній конфігурації виконання."
+                ),
+                focus_id="product-factory-local-repository-select",
+            )
+        return product_factory_local_repository_operator.bind(payload)
+
+    def unbind_product_factory_local_repository(
+        payload: Mapping[str, Any],
+    ) -> UIResult:
+        if product_factory_local_repository_operator is None:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=(
+                    "Скасування локальної прив’язки недоступне "
+                    "в поточній конфігурації виконання."
+                ),
+                focus_id="product-factory-local-repository-select",
+            )
+        return product_factory_local_repository_operator.unbind(payload)
+
     def load_product_factory_execution_plan(payload: Mapping[str, Any]) -> UIResult:
         if product_factory_execution_plan_files is None:
             return UIResult(
@@ -759,6 +827,12 @@ def build_windows_bridge(
             "voice.model.import": voice_model_setup.start,
             "voice.model.cancel": voice_model_setup.cancel,
             "product.factory.execution_plan.load": load_product_factory_execution_plan,
+            "product.factory.local_repository.bind": (
+                bind_product_factory_local_repository
+            ),
+            "product.factory.local_repository.unbind": (
+                unbind_product_factory_local_repository
+            ),
             "settings.product_factory_local.configure": (
                 local_product_factory_settings.configure
             ),
