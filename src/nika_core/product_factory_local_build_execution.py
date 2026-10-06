@@ -253,6 +253,26 @@ class PackagedLocalBuildExecutionNode:
         except (ProcessExecutionError, OSError, RuntimeError, ValueError) as exc:
             process_error = exc
 
+        # A build effect is admissible only while the same execution, repository and
+        # output authorities still own it. Authority drift after launch is not a
+        # definite success/failure: persist uncertainty and never replay blindly.
+        try:
+            current_root = self._admit_dispatch(dispatch)
+            current_policy = self._output_policy(dispatch)
+            if current_root != repository_root or current_policy != output_policy:
+                raise BuildExecutionPortError(
+                    "local build authority changed after the process effect"
+                )
+        except Exception:
+            result = _uncertain_result(
+                dispatch,
+                dispatch_digest,
+                reason_code="authority_changed_after_effect",
+            )
+            self._write_receipt(dispatch, dispatch_digest, result, ())
+            self._cleanup_after_receipt(plan, job_root, dispatch)
+            return result
+
         # Process containment is not a filesystem sandbox. Re-admit the production
         # repository after every attempted effect so an absolute-path escape or a
         # concurrent source mutation can never be reported as a successful build.
@@ -376,6 +396,10 @@ class PackagedLocalBuildExecutionNode:
         if receipt is None or receipt.result != result:
             raise BuildExecutionPortError(
                 "local build changed-file evidence lacks the exact durable receipt"
+            )
+        if result.uncertain:
+            raise BuildExecutionPortError(
+                "uncertain local build result cannot publish changed-file evidence"
             )
         return receipt.changed_files
 
@@ -789,6 +813,22 @@ def _failure_digest(dispatch_digest: str, reason_code: str) -> str:
     ).hexdigest()
 
 
+def _uncertain_result(
+    dispatch: BuildExecutionDispatch,
+    dispatch_digest: str,
+    *,
+    reason_code: str,
+) -> BuildExecutionResult:
+    return BuildExecutionResult(
+        source_sha=dispatch.source_sha,
+        artifact_digest=_failure_digest(dispatch_digest, reason_code),
+        succeeded=False,
+        uncertain=True,
+        evidence_refs=(_receipt_ref(dispatch),),
+        completed_at=datetime.now(UTC),
+    )
+
+
 def _failed_result(
     dispatch: BuildExecutionDispatch,
     dispatch_digest: str,
@@ -857,7 +897,7 @@ def _decode_receipt(
         or type(payload["artifact_digest"]) is not str
         or type(payload["succeeded"]) is not bool
         or type(payload["uncertain"]) is not bool
-        or payload["uncertain"]
+        or (payload["uncertain"] and payload["succeeded"])
     ):
         raise ValueError("local build receipt identity/result fields are invalid")
     evidence_refs_raw = payload["evidence_refs"]
@@ -893,11 +933,13 @@ def _decode_receipt(
                 item["size_bytes"],
             )
         )
+    if payload["uncertain"] and changed:
+        raise ValueError("uncertain local build receipt cannot publish changed files")
     result = BuildExecutionResult(
         source_sha=dispatch.source_sha,
         artifact_digest=payload["artifact_digest"],
         succeeded=payload["succeeded"],
-        uncertain=False,
+        uncertain=payload["uncertain"],
         evidence_refs=(_receipt_ref(dispatch),),
         completed_at=completed,
     )
