@@ -802,8 +802,12 @@ def _dispatch_digest(dispatch: BuildExecutionDispatch) -> str:
         "platform": dispatch.platform.value,
         "source_sha": dispatch.source_sha,
         "workspace_relpath": dispatch.grant.workspace_relpath,
+        "allowed_node_ids": list(dispatch.grant.allowed_node_ids),
+        "network_scopes": list(dispatch.grant.network_scopes),
+        "credential_refs": list(dispatch.grant.credential_refs),
         "command_id": dispatch.grant.command_id,
         "command_sha256": command_digest,
+        "authority_evidence_refs": list(dispatch.grant.authority_evidence_refs),
         "attempt": dispatch.attempt,
     }
     return hashlib.sha256(
