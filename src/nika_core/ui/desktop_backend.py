@@ -6,6 +6,7 @@ import threading
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from typing import Any
+from uuid import UUID
 
 from nika_core.kernel.agent_registry import AgentDefinition, AgentRegistry
 from nika_core.kernel.audit import AuditLog
@@ -35,6 +36,7 @@ _DEFAULT_WORKSPACE_ID = "default"
 _TERMINAL_STATES = frozenset(
     {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED, TaskState.ARCHIVED}
 )
+_NONTERMINAL_STATES = tuple(state for state in TaskState if state not in _TERMINAL_STATES)
 _LOCAL_CANCEL_STATES = frozenset(
     {TaskState.CREATED, TaskState.READY, TaskState.PAUSED, TaskState.BLOCKED}
 )
@@ -165,8 +167,10 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def pause_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_controllable(action="призупинення")
+    def pause_task(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._explicit_task(payload)
+        if record is None:
+            record = self._only_controllable(action="призупинення")
         if record is None:
             raise ValueError("Немає активного завдання, яке можна призупинити.")
         if record.state == TaskState.RUNNING:
@@ -192,10 +196,16 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def resume_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_with_state(TaskState.PAUSED, action="продовження")
+    def resume_task(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._explicit_task(payload)
+        if record is None:
+            record = self._only_with_state(TaskState.PAUSED, action="продовження")
         if record is None:
             raise ValueError("Немає призупиненого завдання для продовження.")
+        if record.state is not TaskState.PAUSED:
+            raise ValueError(
+                f"Завдання у стані {record.state.value} не можна продовжити."
+            )
 
         if self._admit_resumed_task is not None:
             self._admit_resumed_task(record)
@@ -239,21 +249,34 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def stop_agent(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_controllable(action="зупинки")
+    def stop_agent(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._explicit_task(payload)
         if record is None:
-            cancelled = self._only_with_state(
-                TaskState.CANCELLED,
-                action="повторної зупинки",
-            )
-            if cancelled is not None:
-                return UIResult(
-                    request_id="desktop-handler",
-                    status="completed",
-                    message="Завдання вже скасовано; додаткових дій не виконано.",
-                    focus_id="tasks-heading",
+            record = self._only_controllable(action="зупинки")
+            if record is None:
+                cancelled = self._only_with_state(
+                    TaskState.CANCELLED,
+                    action="повторної зупинки",
                 )
-            raise ValueError("Немає активного завдання агента для зупинки.")
+                if cancelled is not None:
+                    return UIResult(
+                        request_id="desktop-handler",
+                        status="completed",
+                        message="Завдання вже скасовано; додаткових дій не виконано.",
+                        focus_id="tasks-heading",
+                    )
+                raise ValueError("Немає активного завдання агента для зупинки.")
+        if record.state is TaskState.CANCELLED:
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message="Завдання вже скасовано; додаткових дій не виконано.",
+                focus_id="tasks-heading",
+            )
+        if record.state in _TERMINAL_STATES:
+            raise ValueError(
+                f"Завдання у стані {record.state.value} не можна зупинити."
+            )
 
         cancel_future: Future[bool] | None = None
         with self._active_lock:
@@ -391,7 +414,7 @@ class DesktopBackend:
         return {
             "autostart": self.autostart_settings.snapshot(),
             "startup_recovery": self.startup_recovery_snapshot(),
-            "tasks": [self._task_view(record) for record in self._queue.list_recent(limit=50)],
+            "tasks": [self._task_view(record) for record in self._snapshot_task_records()],
             "agents": [
                 {
                     "agent_id": item.agent_id,
@@ -720,19 +743,42 @@ class DesktopBackend:
                 )
             )
 
+    def _explicit_task(self, payload: Mapping[str, Any]) -> TaskRecord | None:
+        if "task_id" not in payload:
+            return None
+        task_id = payload["task_id"]
+        if type(task_id) is not str or not task_id or task_id != task_id.strip():
+            raise ValueError("task_id має бути канонічним UUID.")
+        try:
+            parsed = UUID(task_id)
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("task_id має бути канонічним UUID.") from exc
+        if str(parsed) != task_id:
+            raise ValueError("task_id має бути канонічним UUID.")
+        try:
+            return self._queue.get(task_id)
+        except KeyError as exc:
+            raise ValueError(f"Завдання не знайдено: {task_id}.") from exc
+
     def _only_controllable(self, *, action: str) -> TaskRecord | None:
-        records = [
-            record
-            for record in self._queue.list_recent(limit=50)
-            if record.state not in _TERMINAL_STATES
-        ]
+        records = list(self._queue.list_by_states(_NONTERMINAL_STATES, limit=2))
         return self._require_unambiguous(records, action=action)
 
     def _only_with_state(self, state: TaskState, *, action: str) -> TaskRecord | None:
-        records = [
-            record for record in self._queue.list_recent(limit=50) if record.state == state
-        ]
+        records = list(self._queue.list_by_states((state,), limit=2))
         return self._require_unambiguous(records, action=action)
+
+    def _snapshot_task_records(self) -> tuple[TaskRecord, ...]:
+        unfinished = self._queue.list_by_states(_NONTERMINAL_STATES, limit=50)
+        if len(unfinished) >= 50:
+            return unfinished
+        terminal = tuple(
+            record
+            for record in self._queue.list_recent(limit=50)
+            if record.state in _TERMINAL_STATES
+        )
+        remaining = 50 - len(unfinished)
+        return (*unfinished, *terminal[:remaining])
 
     @staticmethod
     def _require_unambiguous(
