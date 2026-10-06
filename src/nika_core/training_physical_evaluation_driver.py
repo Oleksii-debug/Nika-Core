@@ -325,7 +325,11 @@ def _is_reparse(value: os.stat_result) -> bool:
     return bool(attributes & flag)
 
 
-def _canonical_directory(path: Path, *, name: str) -> Path:
+def _canonical_directory_snapshot(
+    path: Path,
+    *,
+    name: str,
+) -> tuple[Path, os.stat_result]:
     try:
         resolved = path.resolve(strict=True)
         snapshot = os.lstat(path)
@@ -338,7 +342,32 @@ def _canonical_directory(path: Path, *, name: str) -> Path:
         or not stat.S_ISDIR(snapshot.st_mode)
     ):
         _fail(f"{name} must be a canonical non-linked directory")
+    return resolved, snapshot
+
+
+def _canonical_directory(path: Path, *, name: str) -> Path:
+    resolved, _ = _canonical_directory_snapshot(path, name=name)
     return resolved
+
+
+def _require_directory_identity(
+    path: Path,
+    expected_snapshot: os.stat_result,
+    *,
+    name: str,
+) -> None:
+    try:
+        current = os.lstat(path)
+    except OSError as exc:
+        raise PhysicalEvaluationDriverError(f"{name} is unavailable") from exc
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino)
+        != (expected_snapshot.st_dev, expected_snapshot.st_ino)
+    ):
+        _fail(f"{name} changed during authority use")
 
 
 def _canonical_file(path: Path, *, name: str) -> os.stat_result:
@@ -1447,10 +1476,42 @@ def load_trusted_scale_progression_proof(
 ) -> TrainingScaleProgressionProof:
     """Restore one proof only from completed Nika-owned durable evaluation state."""
 
-    root = _canonical_directory(
+    root, root_snapshot = _canonical_directory_snapshot(
         output_root,
         name="trusted progression output root",
     )
+    root_lock = _open_windows_directory_stability_lock(
+        root,
+        root_snapshot,
+        name="trusted progression output root",
+    )
+    try:
+        _require_directory_identity(
+            root,
+            root_snapshot,
+            name="trusted progression output root",
+        )
+        restored = _load_trusted_scale_progression_proof_from_root(
+            root,
+            workspace_id=workspace_id,
+            expected_claim=expected_claim,
+        )
+        _require_directory_identity(
+            root,
+            root_snapshot,
+            name="trusted progression output root",
+        )
+        return restored
+    finally:
+        _close_windows_stability_lock(root_lock)
+
+
+def _load_trusted_scale_progression_proof_from_root(
+    root: Path,
+    *,
+    workspace_id: str,
+    expected_claim: dict[str, object],
+) -> TrainingScaleProgressionProof:
     claim = _scale_progression_claim(expected_claim)
     pilot = _physical_report(root)
     database_path = root / "physical-pilot.sqlite3"
@@ -2041,6 +2102,62 @@ def _close_windows_stability_lock(handle: int | None) -> None:
         pass
 
 
+def _open_windows_directory_stability_lock(
+    path: Path,
+    expected_snapshot: os.stat_result,
+    *,
+    name: str,
+) -> int | None:
+    """Deny directory rename/delete while durable authority is consumed."""
+
+    if os.name != "nt":
+        return None
+    handle_value: int | None = None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            0,
+            _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS
+            | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        handle_value = int(handle)
+        _require_directory_identity(
+            path,
+            expected_snapshot,
+            name=name,
+        )
+        return handle_value
+    except PhysicalEvaluationDriverError:
+        _close_windows_stability_lock(handle_value)
+        raise
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        _close_windows_stability_lock(handle_value)
+        raise PhysicalEvaluationDriverError(
+            f"{name} could not be locked for stable authority use"
+        ) from exc
+
+
 def _open_windows_parent_stability_lock(
     path: Path,
     expected_snapshot: os.stat_result,
@@ -2520,10 +2637,40 @@ def run_physical_evaluation_from_config(
     if not _is_windows():
         _fail("physical old-vs-new evaluation driver must execute on Windows")
 
-    output_root = _canonical_directory(
+    output_root, root_snapshot = _canonical_directory_snapshot(
         config.physical_pilot_output_root,
         name="physical_pilot_output_root",
     )
+    root_lock = _open_windows_directory_stability_lock(
+        output_root,
+        root_snapshot,
+        name="physical_pilot_output_root",
+    )
+    try:
+        _require_directory_identity(
+            output_root,
+            root_snapshot,
+            name="physical_pilot_output_root",
+        )
+        payload = _run_physical_evaluation_from_stable_root(
+            config,
+            output_root=output_root,
+        )
+        _require_directory_identity(
+            output_root,
+            root_snapshot,
+            name="physical_pilot_output_root",
+        )
+        return payload
+    finally:
+        _close_windows_stability_lock(root_lock)
+
+
+def _run_physical_evaluation_from_stable_root(
+    config: PhysicalEvaluationConfig,
+    *,
+    output_root: Path,
+) -> dict[str, object]:
     report_path = output_root / "physical-old-new-evaluation-report.json"
     _canonical_report_output_path(report_path)
 
