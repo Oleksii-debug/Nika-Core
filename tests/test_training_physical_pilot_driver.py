@@ -1281,3 +1281,208 @@ def test_duplicate_json_field_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(driver.PhysicalPilotDriverError, match="invalid JSON"):
         driver.PhysicalPilotConfig.from_json(duplicate)
+
+
+
+def test_static_storage_preflight_counts_exact_mandatory_staging_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_parent = tmp_path / "output-volume"
+    output_parent.mkdir()
+    output_root = output_parent / "pilot-output"
+    output_root, parent_snapshot = driver._preflight_output_root(output_root)
+    base = tmp_path / "base.gguf"
+    base.write_bytes(b"base-gguf")
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "tokenizer.json").write_bytes(b"tokens")
+    nested = model_dir / "config"
+    nested.mkdir()
+    (nested / "config.json").write_bytes(b"cfg")
+    adapter = tmp_path / "promoted.safetensors"
+    adapter.write_bytes(b"adapter")
+    manifest_sha256 = driver.model_directory_manifest_sha256(model_dir)
+    expected = (
+        len(b"base-gguf")
+        + len(b"tokens")
+        + len(b"cfg")
+        + len(b"adapter")
+    )
+    observed_paths: list[Path] = []
+
+    def disk_usage(path: object) -> SimpleNamespace:
+        observed_paths.append(Path(path))
+        return SimpleNamespace(free=expected)
+
+    monkeypatch.setattr(driver.shutil, "disk_usage", disk_usage)
+
+    required = driver._preflight_static_storage(
+        output_root=output_root,
+        expected_parent=parent_snapshot,
+        base_gguf_path=base,
+        model_dir=model_dir,
+        model_dir_manifest_sha256=manifest_sha256,
+        initial_adapter_path=adapter,
+    )
+
+    assert required == expected
+    assert observed_paths == [output_parent]
+    assert not output_root.exists()
+
+
+def test_static_storage_preflight_rejects_known_insufficient_space(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root, parent_snapshot = driver._preflight_output_root(
+        tmp_path / "pilot-output"
+    )
+    base = tmp_path / "base.gguf"
+    base.write_bytes(b"0123456789")
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "tokenizer.json").write_bytes(b"abcd")
+    manifest_sha256 = driver.model_directory_manifest_sha256(model_dir)
+    monkeypatch.setattr(
+        driver.shutil,
+        "disk_usage",
+        lambda _: SimpleNamespace(free=13),
+    )
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="lacks free space for mandatory PEFT static staging",
+    ):
+        driver._preflight_static_storage(
+            output_root=output_root,
+            expected_parent=parent_snapshot,
+            base_gguf_path=base,
+            model_dir=model_dir,
+            model_dir_manifest_sha256=manifest_sha256,
+            initial_adapter_path=None,
+        )
+
+    assert not output_root.exists()
+
+
+def test_static_storage_preflight_rejects_model_directory_manifest_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root, parent_snapshot = driver._preflight_output_root(
+        tmp_path / "pilot-output"
+    )
+    base = tmp_path / "base.gguf"
+    base.write_bytes(b"GGUF")
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "tokenizer.json").write_bytes(b"{}")
+    expected_manifest = driver.model_directory_manifest_sha256(model_dir)
+    calls = 0
+
+    def drifting_manifest(path: Path) -> str:
+        nonlocal calls
+        assert path == model_dir
+        calls += 1
+        return expected_manifest if calls == 1 else "f" * 64
+
+    monkeypatch.setattr(
+        driver,
+        "model_directory_manifest_sha256",
+        drifting_manifest,
+    )
+    monkeypatch.setattr(
+        driver.shutil,
+        "disk_usage",
+        lambda _: SimpleNamespace(free=1_000_000),
+    )
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="model_dir changed during storage preflight",
+    ):
+        driver._preflight_static_storage(
+            output_root=output_root,
+            expected_parent=parent_snapshot,
+            base_gguf_path=base,
+            model_dir=model_dir,
+            model_dir_manifest_sha256=expected_manifest,
+            initial_adapter_path=None,
+        )
+
+    assert calls == 2
+    assert not output_root.exists()
+
+
+def test_static_storage_preflight_rejects_output_volume_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_parent = tmp_path / "output-volume"
+    output_parent.mkdir()
+    output_root, parent_snapshot = driver._preflight_output_root(
+        output_parent / "pilot-output"
+    )
+    base = tmp_path / "base.gguf"
+    base.write_bytes(b"GGUF")
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "tokenizer.json").write_bytes(b"{}")
+    manifest_sha256 = driver.model_directory_manifest_sha256(model_dir)
+    displaced = tmp_path / "displaced-output-volume"
+
+    def replacing_disk_usage(path: object) -> SimpleNamespace:
+        assert Path(path) == output_parent
+        output_parent.rename(displaced)
+        output_parent.mkdir()
+        return SimpleNamespace(free=1_000_000)
+
+    monkeypatch.setattr(
+        driver.shutil,
+        "disk_usage",
+        replacing_disk_usage,
+    )
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="output_root parent changed during storage preflight",
+    ):
+        driver._preflight_static_storage(
+            output_root=output_root,
+            expected_parent=parent_snapshot,
+            base_gguf_path=base,
+            model_dir=model_dir,
+            model_dir_manifest_sha256=manifest_sha256,
+            initial_adapter_path=None,
+        )
+
+    assert not output_root.exists()
+    assert displaced.is_dir()
+
+
+def test_insufficient_static_storage_fails_before_durable_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(driver, "_is_windows", lambda: True)
+    config.blob_store_root.mkdir()
+    config.frozen_package_path.write_text("{}", encoding="utf-8")
+    _write_minimal_pe(config.trainer_executable)
+    config.base_gguf_path.write_bytes(b"GGUF")
+    config.model_dir.mkdir()
+    (config.model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        driver.shutil,
+        "disk_usage",
+        lambda _: SimpleNamespace(free=1),
+    )
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="lacks free space for mandatory PEFT static staging",
+    ):
+        driver.run_physical_pilot_from_config(config)
+
+    assert not config.output_root.exists()
