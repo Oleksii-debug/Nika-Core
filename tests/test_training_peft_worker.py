@@ -893,16 +893,12 @@ def test_resumed_training_loads_from_verified_checkpoint_snapshot(
 
     job_root = config.output_root / peft._candidate_key(request.candidate_artifact_ref)
     prior_adapter = (
-        job_root / "trainer" / "checkpoint-1" / peft._CANDIDATE_FILE
+        job_root
+        / "trainer"
+        / "checkpoint-1"
+        / "adapter"
+        / peft._CANDIDATE_FILE
     )
-    if not prior_adapter.is_file():
-        prior_adapter = (
-            job_root
-            / "trainer"
-            / "checkpoint-1"
-            / "adapter"
-            / peft._CANDIDATE_FILE
-        )
     original_bytes = prior_adapter.read_bytes()
     forged_bytes = b"forged-prior-adapter-before-load"
     expected_previous_sha256 = _sha256(
