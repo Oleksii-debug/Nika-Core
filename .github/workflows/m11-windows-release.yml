@@ -52,6 +52,7 @@ on:
       - "tests/test_product_factory_packaged_journey.py"
       - "tests/test_packaged_product_factory_preparation.py"
       - "tests/test_product_factory_openhands_runtime_api.py"
+      - "tests/test_product_factory_openhands_runtime_program.py"
       - "tests/test_packaged_product_factory_team_plan.py"
       - "tests/test_packaged_product_factory_status.py"
       - "tests/test_m5_product_project_semantic_status.py"
@@ -150,6 +151,7 @@ on:
       - "tests/test_product_factory_packaged_journey.py"
       - "tests/test_packaged_product_factory_preparation.py"
       - "tests/test_product_factory_openhands_runtime_api.py"
+      - "tests/test_product_factory_openhands_runtime_program.py"
       - "tests/test_packaged_product_factory_team_plan.py"
       - "tests/test_packaged_product_factory_status.py"
       - "tests/test_m5_product_project_semantic_status.py"
@@ -269,6 +271,7 @@ jobs:
           tests/test_product_factory_packaged_journey.py
           tests/test_packaged_product_factory_preparation.py
           tests/test_product_factory_openhands_runtime_api.py
+          tests/test_product_factory_openhands_runtime_program.py
           tests/test_packaged_product_factory_team_plan.py
           tests/test_packaged_product_factory_status.py
           tests/test_m5_product_project_semantic_status.py
