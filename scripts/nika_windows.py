@@ -336,6 +336,10 @@ def build_windows_bridge(
         approval_verifier=decision_approval_authority.verifier(),
     )
     agent_definitions = AgentDefinitionRepository(store)
+    command_center = PackagedProductCommandCenter(
+        products=products,
+        status_reader=PackagedProductFactoryStatusReader(store),
+    )
 
     def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
         try:
@@ -382,12 +386,9 @@ def build_windows_bridge(
         selection_store=PackagedProductSelectionStore(store),
         decision_approval_authority=decision_approval_authority,
         team_planner=PackagedProductFactoryTeamPlanner(product_repository),
+        factory_status_reader=command_center.inspect_project,
     )
     agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
-    command_center = PackagedProductCommandCenter(
-        products=products,
-        status_reader=PackagedProductFactoryStatusReader(store),
-    )
     product_state = PackagedProductStateProvider(
         base_state=backend.snapshot,
         router=product_router,
