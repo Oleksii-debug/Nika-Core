@@ -71,6 +71,156 @@ def _package() -> FrozenLearningPackage:
     )
 
 
+def test_read_object_snapshot_is_bounded_and_stable(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "authority.json"
+    payload = b'{"value":1}'
+    target.write_bytes(payload)
+
+    value, raw = proof._read_object_snapshot(target)
+
+    assert value == {"value": 1}
+    assert raw == payload
+
+    monkeypatch.setattr(proof, "_MAX_JSON_BYTES", 4)
+    with pytest.raises(proof.ProofError, match="size or file type is invalid"):
+        proof._read_object_snapshot(target)
+
+
+def test_read_object_snapshot_rejects_wrong_held_identity(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "authority.json"
+    decoy = tmp_path / "decoy.json"
+    payload = b'{"value":1}'
+    target.write_bytes(payload)
+    decoy.write_bytes(payload)
+    monkeypatch.setattr(
+        proof,
+        "_open_readonly_snapshot",
+        lambda _path: proof.os.open(decoy, proof.os.O_RDONLY),
+    )
+
+    with pytest.raises(proof.ProofError, match="identity changed"):
+        proof._read_object_snapshot(target)
+
+
+def test_frozen_package_snapshot_uses_held_file_authority(
+    proof: ModuleType,
+    tmp_path: Path,
+) -> None:
+    package = _package()
+    path = tmp_path / "frozen-package.json"
+    path.write_bytes(package.to_json().encode("utf-8"))
+
+    loaded = proof._load_frozen_package_snapshot(
+        path,
+        expected_manifest_sha256=package.manifest_sha256,
+    )
+
+    assert loaded.manifest_sha256 == package.manifest_sha256
+    assert loaded.evaluation_set_sha256 == package.evaluation_set_sha256
+
+
+def test_frozen_package_snapshot_rejects_wrong_held_identity(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = _package()
+    payload = package.to_json().encode("utf-8")
+    path = tmp_path / "frozen-package.json"
+    decoy = tmp_path / "same-bytes-different-package.json"
+    path.write_bytes(payload)
+    decoy.write_bytes(payload)
+    monkeypatch.setattr(
+        proof,
+        "_open_readonly_snapshot",
+        lambda _path: proof.os.open(decoy, proof.os.O_RDONLY),
+    )
+
+    with pytest.raises(proof.ProofError, match="identity changed"):
+        proof._load_frozen_package_snapshot(
+            path,
+            expected_manifest_sha256=package.manifest_sha256,
+        )
+
+
+def test_candidate_file_authority_binds_digest_and_manifest(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate.safetensors"
+    payload = b"candidate-authority-bytes"
+    candidate.write_bytes(payload)
+    manifest = {"schema": "candidate-test"}
+    monkeypatch.setattr(
+        proof,
+        "candidate_adapter_manifest",
+        lambda path: dict(manifest),
+    )
+
+    digest, size, observed_manifest = proof._candidate_file_authority(
+        candidate,
+        name="candidate",
+    )
+
+    assert digest == _sha(payload)
+    assert size == len(payload)
+    assert observed_manifest == manifest
+
+
+def test_candidate_file_authority_rejects_held_identity_drift(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate.safetensors"
+    decoy = tmp_path / "same-bytes-different-file.safetensors"
+    payload = b"candidate-authority-bytes"
+    candidate.write_bytes(payload)
+    decoy.write_bytes(payload)
+    monkeypatch.setattr(
+        proof,
+        "_open_readonly_snapshot",
+        lambda _path: proof.os.open(decoy, proof.os.O_RDONLY),
+    )
+
+    def unexpected_manifest_parse(_path: Path) -> dict[str, object]:
+        raise AssertionError(
+            "manifest parser must not run for a mismatched held identity"
+        )
+
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", unexpected_manifest_parse)
+
+    with pytest.raises(proof.ProofError, match="identity changed"):
+        proof._candidate_file_authority(candidate, name="candidate")
+
+
+def test_candidate_file_authority_rejects_manifest_time_mutation(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate.safetensors"
+    candidate.write_bytes(b"candidate-authority-bytes")
+
+    def mutating_manifest(path: Path) -> dict[str, object]:
+        Path(path).write_bytes(b"mutated-candidate-authority")
+        return {"schema": "candidate-test"}
+
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", mutating_manifest)
+
+    with pytest.raises(proof.ProofError):
+        proof._candidate_file_authority(candidate, name="candidate")
+
+
 def test_candidate_manifest_digest_uses_physical_canonical_json(
     proof: ModuleType,
 ) -> None:

@@ -536,6 +536,112 @@ def _verified_asset_manifest(root: Path, raw: bytes) -> dict[str, object]:
     return value
 
 
+def _require_open_snapshot_identity(
+    path: Path,
+    descriptor: int,
+    *,
+    name: str,
+) -> None:
+    """Require one held descriptor to remain the exact regular pathname authority."""
+
+    try:
+        opened = os.fstat(descriptor)
+        current = os.lstat(path)
+    except OSError as exc:
+        raise ProofError(f"{name} identity could not be verified") from exc
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        _fail(f"{name} identity changed")
+
+
+def _verified_candidate_evidence_from_snapshot(
+    path: Path,
+    candidate_bytes: bytes,
+) -> tuple[dict[str, object], int, int]:
+    """Bind manifest and tensor evidence to one exact admitted candidate snapshot."""
+
+    if type(candidate_bytes) is not bytes or not candidate_bytes:
+        _fail("physical proof candidate snapshot is invalid")
+    descriptor: int | None = None
+    try:
+        descriptor = _open_readonly_snapshot(path)
+        _require_open_snapshot_identity(
+            path,
+            descriptor,
+            name="physical proof candidate verification snapshot",
+        )
+        if (
+            _stable_file_bytes(
+                path,
+                max_bytes=_MAX_EVIDENCE_CANDIDATE_BYTES,
+                name="physical proof candidate verification snapshot",
+            )
+            != candidate_bytes
+        ):
+            _fail("physical proof candidate changed before manifest verification")
+        resolved = path.resolve(strict=True)
+        manifest = candidate_adapter_manifest(resolved)
+        _require_open_snapshot_identity(
+            path,
+            descriptor,
+            name="physical proof candidate verification snapshot",
+        )
+        if (
+            _stable_file_bytes(
+                path,
+                max_bytes=_MAX_EVIDENCE_CANDIDATE_BYTES,
+                name="physical proof candidate verification snapshot",
+            )
+            != candidate_bytes
+        ):
+            _fail("physical proof candidate changed during manifest verification")
+
+        from safetensors.torch import load as load_safetensors
+
+        tensors = load_safetensors(candidate_bytes)
+        tensor_names = sorted(tensors)
+        if not tensor_names:
+            _fail("physical proof candidate contains no safetensors tensors")
+        total_elements = 0
+        for name in tensor_names:
+            tensor = tensors[name]
+            total_elements += int(tensor.numel())
+        if total_elements <= 0:
+            _fail("physical proof candidate tensors are empty")
+        _require_open_snapshot_identity(
+            path,
+            descriptor,
+            name="physical proof candidate verification snapshot",
+        )
+        if (
+            _stable_file_bytes(
+                path,
+                max_bytes=_MAX_EVIDENCE_CANDIDATE_BYTES,
+                name="physical proof candidate verification snapshot",
+            )
+            != candidate_bytes
+        ):
+            _fail("physical proof candidate changed during tensor verification")
+    except ProofError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ProofError(
+            "physical proof candidate evidence could not be verified"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    return manifest, len(tensor_names), total_elements
+
+
 def verify(root: Path) -> None:
     root = root.resolve(strict=True)
     report_path = root / "run" / "physical-pilot-report.json"
@@ -579,7 +685,12 @@ def verify(root: Path) -> None:
     _write_new_file(evidence_dir / "physical-pilot-report.json", report_bytes)
     _write_new_file(evidence_candidate, candidate_bytes)
 
-    manifest = candidate_adapter_manifest(evidence_candidate)
+    manifest, candidate_tensor_count, total_elements = (
+        _verified_candidate_evidence_from_snapshot(
+            evidence_candidate,
+            candidate_bytes,
+        )
+    )
     if manifest.get("schema") != "nika-peft-candidate-v2":
         _fail("pilot proof requires a candidate-v2 tensor-evidence manifest")
     tokenization_sha256 = _require_candidate_tokenization_sha256(manifest)
@@ -596,19 +707,6 @@ def verify(root: Path) -> None:
     ):
         _fail("candidate trained tensor digest does not match report")
 
-    from safetensors import safe_open
-
-    with safe_open(os.fspath(evidence_candidate), framework="pt", device="cpu") as source:
-        tensor_names = sorted(source.keys())
-        if not tensor_names:
-            _fail("physical proof candidate contains no safetensors tensors")
-        total_elements = 0
-        for name in tensor_names:
-            tensor = source.get_tensor(name)
-            total_elements += int(tensor.numel())
-        if total_elements <= 0:
-            _fail("physical proof candidate tensors are empty")
-
     assets_bytes = _stable_file_bytes(
         root / "staged-assets.json",
         max_bytes=_MAX_EVIDENCE_MANIFEST_BYTES,
@@ -620,7 +718,7 @@ def verify(root: Path) -> None:
         "asset_repository": assets["repository"],
         "candidate_byte_count": candidate_size,
         "candidate_sha256": candidate_sha256,
-        "candidate_tensor_count": len(tensor_names),
+        "candidate_tensor_count": candidate_tensor_count,
         "candidate_tensor_elements": total_elements,
         "completed_steps": report.completed_steps,
         "evidence_sha256": report.evidence_sha256,
@@ -632,10 +730,9 @@ def verify(root: Path) -> None:
         "trained_adapter_tensors_sha256": report.trained_adapter_tensors_sha256,
         "tokenization_sha256": tokenization_sha256,
     }
-    (evidence_dir / "physical-proof-summary.json").write_text(
-        _canonical_json(summary) + "\n",
-        encoding="utf-8",
-        newline="",
+    _write_new_file(
+        evidence_dir / "physical-proof-summary.json",
+        (_canonical_json(summary) + "\n").encode("utf-8"),
     )
     print(report.evidence_sha256)
 
