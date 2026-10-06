@@ -27,7 +27,7 @@ from nika_core.product_factory_packaged_local_startup import (
 )
 from nika_core.toolsmith.contracts import AllowedPathPolicy, normalize_relative_path
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _MAX_REVISION = (1 << 63) - 1
 _SCHEMA = "nika.product-factory.packaged-build-authority.v1"
 _SENSITIVE_ARG_MARKERS = (
@@ -229,6 +229,7 @@ class PackagedBuildAuthorityStore:
         self._validate_runtime(template)
         payload = _encode_template(template)
         digest = _digest_payload(payload)
+        configured_at = datetime.now(UTC).isoformat()
         try:
             with self._store.connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
@@ -266,7 +267,21 @@ class PackagedBuildAuthorityStore:
                         revision,
                         payload,
                         digest,
-                        datetime.now(UTC).isoformat(),
+                        configured_at,
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO product_factory_build_authority_template_history "
+                    "(project_id, repository_id, component_id, revision, template_json, "
+                    "template_digest, configured_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        template.project_id,
+                        template.repository_id,
+                        template.component_id,
+                        revision,
+                        payload,
+                        digest,
+                        configured_at,
                     ),
                 )
                 self._audit.append_with_connection(
@@ -480,6 +495,99 @@ class PackagedBuildAuthorityStore:
         repository_id: str,
         work_id: str,
     ) -> tuple[_BoundBuildAuthority, PackagedBuildAuthoritySnapshot]:
+        bound = self._read_bound(
+            project_id=project_id,
+            repository_id=repository_id,
+            work_id=work_id,
+        )
+        current = self.snapshot(
+            project_id=bound.project_id,
+            repository_id=bound.repository_id,
+            component_id=bound.component_id,
+        )
+        if (
+            current.revision != bound.template_revision
+            or current.digest != bound.template_digest
+        ):
+            raise PackagedBuildAuthorityError(
+                "packaged build authority changed after PF5 work admission"
+            )
+        return bound, current
+
+    def bound_historical_snapshot(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        work_id: str,
+    ) -> tuple[_BoundBuildAuthority, PackagedBuildAuthoritySnapshot]:
+        """Resolve the immutable template bound to work without granting new execution.
+
+        This path exists for receipt/output inspection after configuration drift. New
+        process effects must continue to use bound_snapshot(), which requires the bound
+        authority to remain current.
+        """
+
+        bound = self._read_bound(
+            project_id=project_id,
+            repository_id=repository_id,
+            work_id=work_id,
+        )
+        try:
+            with self._store.connection() as conn:
+                row = conn.execute(
+                    "SELECT revision, template_json, template_digest "
+                    "FROM product_factory_build_authority_template_history "
+                    "WHERE project_id = ? AND repository_id = ? AND component_id = ? "
+                    "AND revision = ?",
+                    (
+                        bound.project_id,
+                        bound.repository_id,
+                        bound.component_id,
+                        bound.template_revision,
+                    ),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise PackagedBuildAuthorityError(
+                "historical packaged build authority could not be read"
+            ) from exc
+        if row is None:
+            raise PackagedBuildAuthorityError(
+                "historical packaged build authority is unavailable"
+            )
+        revision = _revision(row["revision"])
+        payload = row["template_json"]
+        digest = row["template_digest"]
+        if type(payload) is not str or type(digest) is not str:
+            raise PackagedBuildAuthorityError(
+                "stored historical packaged build authority is corrupt"
+            )
+        if (
+            revision != bound.template_revision
+            or digest != bound.template_digest
+            or _digest_payload(payload) != digest
+        ):
+            raise PackagedBuildAuthorityError(
+                "stored historical packaged build authority does not match binding"
+            )
+        template = _decode_template(payload)
+        if (
+            template.project_id != bound.project_id
+            or template.repository_id != bound.repository_id
+            or template.component_id != bound.component_id
+        ):
+            raise PackagedBuildAuthorityError(
+                "stored historical packaged build authority identity does not match binding"
+            )
+        return bound, PackagedBuildAuthoritySnapshot(template, revision, digest)
+
+    def _read_bound(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        work_id: str,
+    ) -> _BoundBuildAuthority:
         for label, value in (
             ("project_id", project_id),
             ("repository_id", repository_id),
@@ -506,19 +614,7 @@ class PackagedBuildAuthorityStore:
             raise PackagedBuildAuthorityError(
                 "PF5 packaged authority binding identity does not match request"
             )
-        current = self.snapshot(
-            project_id=bound.project_id,
-            repository_id=bound.repository_id,
-            component_id=bound.component_id,
-        )
-        if (
-            current.revision != bound.template_revision
-            or current.digest != bound.template_digest
-        ):
-            raise PackagedBuildAuthorityError(
-                "packaged build authority changed after PF5 work admission"
-            )
-        return bound, current
+        return bound
 
     def _initialize(self) -> None:
         try:
@@ -566,6 +662,29 @@ class PackagedBuildAuthorityStore:
                     conn.execute(
                         "INSERT INTO product_factory_build_authority_schema VALUES (?, ?)",
                         (1, datetime.now(UTC).isoformat()),
+                    )
+                if current < 2:
+                    conn.execute(
+                        "CREATE TABLE IF NOT EXISTS "
+                        "product_factory_build_authority_template_history ("
+                        "project_id TEXT NOT NULL, repository_id TEXT NOT NULL, "
+                        "component_id TEXT NOT NULL, revision INTEGER NOT NULL "
+                        "CHECK(revision > 0), template_json TEXT NOT NULL, "
+                        "template_digest TEXT NOT NULL, configured_at TEXT NOT NULL, "
+                        "PRIMARY KEY(project_id, repository_id, component_id, revision))"
+                    )
+                    conn.execute(
+                        "INSERT OR IGNORE INTO "
+                        "product_factory_build_authority_template_history "
+                        "(project_id, repository_id, component_id, revision, template_json, "
+                        "template_digest, configured_at) "
+                        "SELECT project_id, repository_id, component_id, revision, "
+                        "template_json, template_digest, configured_at "
+                        "FROM product_factory_build_authority_templates"
+                    )
+                    conn.execute(
+                        "INSERT INTO product_factory_build_authority_schema VALUES (?, ?)",
+                        (2, datetime.now(UTC).isoformat()),
                     )
         except sqlite3.Error as exc:
             raise PackagedBuildAuthorityError(
@@ -736,7 +855,7 @@ class PackagedTrustedBuildOutputPolicyPort:
         repository_id: str,
         work_id: str,
     ) -> BuildOutputPolicy:
-        _bound, snapshot = self.authorities.bound_snapshot(
+        _bound, snapshot = self.authorities.bound_historical_snapshot(
             project_id=project_id,
             repository_id=repository_id,
             work_id=work_id,
