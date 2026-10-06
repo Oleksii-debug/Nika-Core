@@ -15,11 +15,11 @@ from nika_core.product_factory_local_repository_binding import (
 from nika_core.product_factory_multi_repository import MultiRepositoryExecutionState
 from nika_core.product_factory_orchestration import ProductRepositoryGraph
 from nika_core.product_factory_packaged_local_startup import (
-    PackagedLocalModelAuthority,
+    _PackagedLocalModelAuthority,
     PackagedLocalProductFactoryStartup,
     PackagedLocalProductFactoryStartupError,
-    build_repository_bound_packaged_local_product_factory_program,
-    resolve_packaged_local_model_authority,
+    _build_repository_bound_packaged_local_product_factory_program_with_authority,
+    _resolve_packaged_local_model_authority,
 )
 from nika_core.product_factory_packaged_preparation import (
     PackagedProductFactoryExecutionPlan,
@@ -122,7 +122,7 @@ class PackagedBoundLocalProductFactoryHost:
         settings: V01ModelSettings,
         startup: PackagedLocalProductFactoryStartup,
         bindings: ProductFactoryLocalRepositoryBindings | None = None,
-        model_authority: PackagedLocalModelAuthority | None = None,
+        model_authority: _PackagedLocalModelAuthority | None = None,
     ) -> None:
         if type(store) is not SQLiteStore:
             raise TypeError("store must be SQLiteStore")
@@ -134,11 +134,11 @@ class PackagedBoundLocalProductFactoryHost:
         self._settings = settings
         self._startup = startup
         if model_authority is None:
-            self._model_authority = resolve_packaged_local_model_authority(
+            self._model_authority = _resolve_packaged_local_model_authority(
                 store,
                 settings,
             )
-        elif type(model_authority) is not PackagedLocalModelAuthority:
+        elif type(model_authority) is not _PackagedLocalModelAuthority:
             raise TypeError("model authority carrier is invalid")
         else:
             self._model_authority = model_authority
@@ -408,7 +408,7 @@ class PackagedBoundLocalProductFactoryHost:
             repository_id: snapshot.root
             for repository_id, snapshot in snapshots.items()
         }
-        program = build_repository_bound_packaged_local_product_factory_program(
+        program = _build_repository_bound_packaged_local_product_factory_program_with_authority(
             self.store,
             settings=self._settings,
             startup=self._startup,
@@ -429,7 +429,7 @@ class PackagedBoundLocalProductFactoryHost:
 
     def _require_model_authority_current(self) -> None:
         try:
-            current = resolve_packaged_local_model_authority(
+            current = _resolve_packaged_local_model_authority(
                 self.store,
                 self._settings,
             )

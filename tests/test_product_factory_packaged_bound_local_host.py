@@ -269,9 +269,9 @@ def test_admitted_entry_keeps_frozen_model_authority_after_post_check_change(
         _graph(project.project_id, repository),
     )
     original_builder = (
-        host_module.build_repository_bound_packaged_local_product_factory_program
+        host_module._build_repository_bound_packaged_local_product_factory_program_with_authority
     )
-    original_resolver = startup_module.resolve_packaged_local_model_authority
+    original_resolver = startup_module._resolve_packaged_local_model_authority
     observed = {"changed": False}
 
     def build_after_admission(
@@ -306,7 +306,7 @@ def test_admitted_entry_keeps_frozen_model_authority_after_post_check_change(
 
         monkeypatch.setattr(
             startup_module,
-            "resolve_packaged_local_model_authority",
+            "_resolve_packaged_local_model_authority",
             unexpected_reresolve,
         )
         try:
@@ -320,7 +320,7 @@ def test_admitted_entry_keeps_frozen_model_authority_after_post_check_change(
         finally:
             monkeypatch.setattr(
                 startup_module,
-                "resolve_packaged_local_model_authority",
+                "_resolve_packaged_local_model_authority",
                 original_resolver,
             )
 

@@ -84,7 +84,7 @@ class PackagedLocalProductFactoryProgram:
 
 
 @dataclass(frozen=True, slots=True)
-class PackagedLocalModelAuthority:
+class _PackagedLocalModelAuthority:
     """Exact launch-time model authority for delayed contained-local workers."""
 
     revision: int
@@ -249,22 +249,31 @@ def build_repository_bound_packaged_local_product_factory_program(
     settings: V01ModelSettings,
     startup: PackagedLocalProductFactoryStartup,
     repositories: Mapping[str, Path],
-    model_authority: PackagedLocalModelAuthority | None = None,
 ) -> ContainedLocalCodingProgram:
-    """Build the incumbent local worker for one already-authorized repository set.
+    """Build one worker from the current canonical model authority."""
 
-    Callers must resolve repository roots from ProductFactoryLocalRepositoryBindings
-    before crossing this boundary. This helper revalidates shape/path bounds but never
-    reads ProductProject or infers repository authority.
-    """
+    return _build_repository_bound_packaged_local_product_factory_program_with_authority(
+        store,
+        settings=settings,
+        startup=startup,
+        repositories=repositories,
+        model_authority=_resolve_ollama_binding(store, settings),
+    )
+
+
+def _build_repository_bound_packaged_local_product_factory_program_with_authority(
+    store: SQLiteStore,
+    *,
+    settings: V01ModelSettings,
+    startup: PackagedLocalProductFactoryStartup,
+    repositories: Mapping[str, Path],
+    model_authority: _PackagedLocalModelAuthority,
+) -> ContainedLocalCodingProgram:
+    """Build one delayed worker from launch-frozen internal model authority."""
 
     _validate_composition_inputs(store, settings, startup)
     copied = _repository_paths(repositories)
-    binding = (
-        _resolve_ollama_binding(store, settings)
-        if model_authority is None
-        else _require_model_authority(model_authority)
-    )
+    binding = _require_model_authority(model_authority)
 
     gateway = ModelGateway(audit_log=AuditLog(store))
     gateway.register(
@@ -303,10 +312,10 @@ def _validate_composition_inputs(
         raise TypeError("startup carrier is invalid")
 
 
-def resolve_packaged_local_model_authority(
+def _resolve_packaged_local_model_authority(
     store: SQLiteStore,
     settings: V01ModelSettings,
-) -> PackagedLocalModelAuthority:
+) -> _PackagedLocalModelAuthority:
     revision_before = _model_revision(settings)
     try:
         selection, artifact_pin = settings.current_binding()
@@ -359,7 +368,7 @@ def resolve_packaged_local_model_authority(
                 "could not be verified"
             ) from exc
 
-    return PackagedLocalModelAuthority(
+    return _PackagedLocalModelAuthority(
         revision=revision_after,
         selection_sha256=hashlib.sha256(
             selection.canonical_json().encode("utf-8")
@@ -377,8 +386,8 @@ def resolve_packaged_local_model_authority(
 def _resolve_ollama_binding(
     store: SQLiteStore,
     settings: V01ModelSettings,
-) -> PackagedLocalModelAuthority:
-    return resolve_packaged_local_model_authority(store, settings)
+) -> _PackagedLocalModelAuthority:
+    return _resolve_packaged_local_model_authority(store, settings)
 
 
 def _model_revision(settings: V01ModelSettings) -> int:
@@ -396,9 +405,9 @@ def _model_revision(settings: V01ModelSettings) -> int:
 
 
 def _require_model_authority(
-    authority: PackagedLocalModelAuthority,
-) -> PackagedLocalModelAuthority:
-    if type(authority) is not PackagedLocalModelAuthority:
+    authority: _PackagedLocalModelAuthority,
+) -> _PackagedLocalModelAuthority:
+    if type(authority) is not _PackagedLocalModelAuthority:
         raise TypeError("model authority carrier is invalid")
     return authority
 
