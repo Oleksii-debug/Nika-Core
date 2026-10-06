@@ -68,8 +68,10 @@ def launch_windows_shell(
             window.show()
         except Exception as exc:  # noqa: BLE001 - relay worker-thread startup failure
             callback_failure.append(exc)
-            if window.events.shown.is_set():
-                window.destroy()
+            # The host stays hidden until recovery succeeds, so the shown
+            # event cannot be a destruction precondition on this path.
+            # Always close it so webview.start() can return the failure.
+            window.destroy()
 
     if on_gui_started is None:
         webview.start(gui="edgechromium")
