@@ -383,7 +383,11 @@ def test_packaged_assets_expose_task_ids_and_keyboard_command_help() -> None:
     html = (ROOT / "src/nika_core/ui/web/index.html").read_text(encoding="utf-8")
     app = (ROOT / "src/nika_core/ui/web/app.js").read_text(encoding="utf-8")
 
-    assert 'aria-describedby="execution-mode task-control-help"' in html
+    assert (
+        'aria-describedby="execution-mode command-intelligence-help '
+        'task-control-help product-decision-help"'
+        in html
+    )
     assert 'id="task-control-help"' in html
     assert "pause task &lt;task_id&gt;" in html
     assert "статус завдання &lt;task_id&gt;" in html

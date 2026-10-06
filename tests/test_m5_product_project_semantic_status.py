@@ -33,6 +33,12 @@ def test_product_project_surface_uses_native_semantic_structure() -> None:
         "product-project-blocker-count",
         "product-project-status-count",
         "product-project-decision-count",
+        "product-project-decision-heading",
+        "product-project-decision-id",
+        "product-project-decision-title",
+        "product-project-decision-question",
+        "product-project-decision-risk",
+        "product-project-decision-state",
     ):
         assert f'id="{field_id}"' in html
 
@@ -49,6 +55,9 @@ def test_product_project_renderer_tracks_bounded_bridge_projection() -> None:
     assert "productProjectEmpty.hidden = true;" in render_block
     assert "productProjectSummary.hidden = false;" in render_block
     assert "node.textContent = String(project[field]);" in render_block
+    assert "productProjectDecisionFields.question.textContent = decision.question;" in render_block
+    assert 'productProjectDecisionFields.state.textContent = "Очікує рішення";' in render_block
+    assert "productProjectDecision.hidden = false;" in render_block
     assert "innerHTML" not in render_block
     assert "renderProductProject(state.product_project ?? null);" in source
 
@@ -65,6 +74,15 @@ def test_product_project_renderer_rejects_malformed_snapshot_fail_closed() -> No
     assert "!Number.isInteger(project.spec_version) || project.spec_version < 1" in validator
     assert 'const countFields = ["blocker_count", "status_count", "decision_count"];' in validator
     assert "Number.isInteger(project[field]) && project[field] >= 0" in validator
+    assert 'hasOwnProperty.call(project, "current_decision")' in validator
+    decision_validator = _between(
+        source,
+        "function validProductDecision(decision) {",
+        "function validProductProject(project) {",
+    )
+    assert 'decision.state !== "pending"' in decision_validator
+    assert "decision.risk_level >= 0" in decision_validator
+    assert "decision.risk_level <= 4" in decision_validator
 
     renderer = _between(
         source,
@@ -103,6 +121,15 @@ def test_product_project_renderer_does_not_expand_authority_or_secret_fields() -
         "protected_store_handle",
     ):
         assert forbidden not in field_block
+
+    html = _source("index.html")
+    decision_block = _between(
+        html,
+        '<div id="product-project-decision" hidden>',
+        "</section>",
+    )
+    assert '<dl aria-label="Поточне рішення ProductProject">' in decision_block
+    assert "<button" not in decision_block
 
 
 def test_product_project_refresh_preserves_backend_focus_precedence() -> None:
