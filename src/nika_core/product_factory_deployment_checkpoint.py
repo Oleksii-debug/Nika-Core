@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import replace
 from datetime import datetime
-from typing import Any, NoReturn
+from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskPayloadCorruptionError, decode_task_payload
@@ -41,47 +39,6 @@ def _require_exact_identity(value: object, label: str) -> str:
     return value
 
 
-def _canonical_json(payload: dict[str, object]) -> str:
-    return json.dumps(
-        payload,
-        allow_nan=False,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-
-
-def _reject_non_finite(_value: str) -> NoReturn:
-    raise ValueError("deployment checkpoint payload contains a non-finite number")
-
-
-def _decode_checkpoint_payload(payload_json: object, checksum_sha256: object) -> dict[str, object]:
-    if not isinstance(payload_json, str) or not isinstance(checksum_sha256, str):
-        raise ProductFactoryDeploymentCheckpointError(
-            "deployment checkpoint durable fields must be text"
-        )
-    checksum = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-    if checksum != checksum_sha256:
-        raise ProductFactoryDeploymentCheckpointError(
-            "deployment checkpoint checksum mismatch"
-        )
-    try:
-        payload = json.loads(payload_json, parse_constant=_reject_non_finite)
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise ProductFactoryDeploymentCheckpointError(
-            "deployment checkpoint payload is not valid finite JSON"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise ProductFactoryDeploymentCheckpointError(
-            "deployment checkpoint payload must be a JSON object"
-        )
-    if _canonical_json(payload) != payload_json:
-        raise ProductFactoryDeploymentCheckpointError(
-            "deployment checkpoint payload is not canonical JSON"
-        )
-    return payload
-
-
 class ProductFactoryDeploymentCheckpointHost:
     """Thin PF6 adapter over Nika's canonical task/checkpoint SQLite authority."""
 
@@ -96,17 +53,26 @@ class ProductFactoryDeploymentCheckpointHost:
         project_id: str,
         snapshot: DeploymentFabricSnapshot,
     ) -> str:
-        self._require_host_task(host_task_id=host_task_id, project_id=project_id)
+        host_task_id = _require_exact_identity(host_task_id, "host_task_id")
+        project_id = _require_exact_identity(project_id, "project_id")
         _validate_snapshot_project(snapshot, project_id)
-        checkpoint = self._checkpoints.save(
-            task_id=host_task_id,
-            stage=_STAGE,
-            payload={
-                "schema": _SCHEMA,
-                "project_id": project_id,
-                "snapshot": _encode_snapshot(snapshot),
-            },
-        )
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._require_host_task_on_connection(
+                conn,
+                host_task_id=host_task_id,
+                project_id=project_id,
+            )
+            checkpoint = self._checkpoints.save_with_connection(
+                conn,
+                task_id=host_task_id,
+                stage=_STAGE,
+                payload={
+                    "schema": _SCHEMA,
+                    "project_id": project_id,
+                    "snapshot": _encode_snapshot(snapshot),
+                },
+            )
         return checkpoint.checkpoint_id
 
     def latest_snapshot(
@@ -115,24 +81,28 @@ class ProductFactoryDeploymentCheckpointHost:
         host_task_id: str,
         project_id: str,
     ) -> DeploymentFabricSnapshot | None:
-        self._require_host_task(host_task_id=host_task_id, project_id=project_id)
+        host_task_id = _require_exact_identity(host_task_id, "host_task_id")
+        project_id = _require_exact_identity(project_id, "project_id")
         with self._store.connection() as conn:
-            row = conn.execute(
-                """
-                SELECT payload_json, checksum_sha256
-                FROM checkpoints
-                WHERE task_id = ? AND stage = ?
-                ORDER BY rowid DESC
-                LIMIT 1
-                """,
-                (host_task_id, _STAGE),
-            ).fetchone()
-        if row is None:
+            conn.execute("BEGIN")
+            self._require_host_task_on_connection(
+                conn,
+                host_task_id=host_task_id,
+                project_id=project_id,
+            )
+            try:
+                checkpoint = self._checkpoints.latest_for_stage_with_connection(
+                    conn,
+                    task_id=host_task_id,
+                    stage=_STAGE,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ProductFactoryDeploymentCheckpointError(
+                    f"deployment checkpoint durable record is invalid: {exc}"
+                ) from exc
+        if checkpoint is None:
             return None
-        payload = _decode_checkpoint_payload(
-            row["payload_json"],
-            row["checksum_sha256"],
-        )
+        payload = checkpoint.payload
         if payload.get("schema") != _SCHEMA:
             raise ProductFactoryDeploymentCheckpointError(
                 "unsupported Product Factory deployment checkpoint schema"
@@ -170,10 +140,23 @@ class ProductFactoryDeploymentCheckpointHost:
         host_task_id = _require_exact_identity(host_task_id, "host_task_id")
         project_id = _require_exact_identity(project_id, "project_id")
         with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM tasks WHERE task_id = ?",
-                (host_task_id,),
-            ).fetchone()
+            self._require_host_task_on_connection(
+                conn,
+                host_task_id=host_task_id,
+                project_id=project_id,
+            )
+
+    @staticmethod
+    def _require_host_task_on_connection(
+        conn: Any,
+        *,
+        host_task_id: str,
+        project_id: str,
+    ) -> None:
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            (host_task_id,),
+        ).fetchone()
         if row is None:
             raise ProductFactoryDeploymentCheckpointError(
                 "Product Factory host task does not exist"

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.task_queue import TaskPayloadCorruptionError, TaskQueue
+from nika_core.product_factory_deployment import DeploymentFabricSnapshot
 from nika_core.product_factory_checkpoint_host import (
     ProductFactoryCheckpointError,
     ProductFactoryCheckpointHost,
@@ -64,3 +68,137 @@ def test_pf6_deployment_host_rejects_task_payload_rejected_by_task_queue(
         match="payload is invalid",
     ):
         host.latest_snapshot(host_task_id=task_id, project_id="p1")
+
+
+class _CountingSQLiteStore(SQLiteStore):
+    def __init__(self, path) -> None:
+        super().__init__(path)
+        self.connection_count = 0
+
+    @contextmanager
+    def connection(self):
+        self.connection_count += 1
+        with super().connection() as conn:
+            yield conn
+
+
+def _empty_deployment_snapshot() -> DeploymentFabricSnapshot:
+    return DeploymentFabricSnapshot((), (), ())
+
+
+def test_connection_bound_checkpoint_save_obeys_caller_rollback(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "p1"},
+    )
+    service = CheckpointService(store)
+
+    with pytest.raises(RuntimeError, match="rollback probe"):
+        with store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            service.save_with_connection(
+                conn,
+                task_id=task.task_id,
+                stage="test.atomic",
+                payload={"schema": "test"},
+            )
+            raise RuntimeError("rollback probe")
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+            (task.task_id,),
+        ).fetchone()[0]
+    assert count == 0
+
+
+def test_pf6_save_and_read_use_one_sqlite_authority_interval(tmp_path) -> None:
+    store = _CountingSQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "p1"},
+    )
+    host = ProductFactoryDeploymentCheckpointHost(store)
+    snapshot = _empty_deployment_snapshot()
+
+    store.connection_count = 0
+    checkpoint_id = host.save(
+        host_task_id=task.task_id,
+        project_id="p1",
+        snapshot=snapshot,
+    )
+    assert checkpoint_id
+    assert store.connection_count == 1
+
+    store.connection_count = 0
+    restored = host.latest_snapshot(
+        host_task_id=task.task_id,
+        project_id="p1",
+    )
+    assert restored == snapshot
+    assert store.connection_count == 1
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement", "message"),
+    (
+        (
+            "stage",
+            b"product_factory.deployment.v1",
+            "stage storage must be SQLite TEXT",
+        ),
+        (
+            "checkpoint_id",
+            b"pf6-blob-checkpoint-id",
+            "checkpoint_id storage must be SQLite TEXT",
+        ),
+    ),
+)
+def test_pf6_latest_rejects_checkpoint_identity_storage_alias(
+    tmp_path,
+    field,
+    replacement,
+    message,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "p1"},
+    )
+    host = ProductFactoryDeploymentCheckpointHost(store)
+    snapshot = _empty_deployment_snapshot()
+    host.save(
+        host_task_id=task.task_id,
+        project_id="p1",
+        snapshot=snapshot,
+    )
+    newest_id = host.save(
+        host_task_id=task.task_id,
+        project_id="p1",
+        snapshot=snapshot,
+    )
+
+    with store.connection() as conn:
+        if field == "stage":
+            statement = (
+                "UPDATE checkpoints SET stage = ? WHERE checkpoint_id = ?"
+            )
+        else:
+            assert field == "checkpoint_id"
+            statement = (
+                "UPDATE checkpoints SET checkpoint_id = ? WHERE checkpoint_id = ?"
+            )
+        conn.execute(statement, (replacement, newest_id))
+
+    with pytest.raises(ProductFactoryDeploymentCheckpointError, match=message):
+        host.latest_snapshot(
+            host_task_id=task.task_id,
+            project_id="p1",
+        )
