@@ -23,6 +23,7 @@ from nika_core.speech_to_text import (
 )
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_voice import DesktopVoiceTurnController, VoiceSubmitter
+from nika_core.ui.packaged_voice_model_setup import PackagedVoiceModelSetup
 from nika_core.voice_turn import OneShotVoiceTurnService, VoiceTurnRequest
 from nika_core.wake_activation import MAX_TRANSCRIPT_CHARS, WakeActivationDetector
 from nika_core.windows_microphone_capture import WindowsWasapiMicrophoneCaptureAdapter
@@ -222,18 +223,20 @@ def build_packaged_voice(
             unavailable_message="Голосовий ввід доступний лише у застосунку Windows.",
         )
 
+    installation = PackagedVoiceModelSetup(root).snapshot()
+    if installation.get("status") != "installed":
+        return PackagedVoiceFeature(
+            controller=None,
+            unavailable_message=(
+                "Локальна голосова модель не встановлена безпечно. "
+                "Скористайтеся розділом імпорту локальної голосової моделі."
+            ),
+        )
+
     model_root = root / _MODEL_DIR
     encoder = model_root / "encoder.onnx"
     decoder = model_root / "decoder.onnx"
     tokens = model_root / "tokens.txt"
-    if not all(path.is_file() for path in (encoder, decoder, tokens)):
-        return PackagedVoiceFeature(
-            controller=None,
-            unavailable_message=(
-                "Локальна голосова модель не встановлена. Додайте encoder.onnx, "
-                "decoder.onnx і tokens.txt до папки NikaCore\\voice\\whisper."
-            ),
-        )
 
     if submit is None or not callable(submit):
         raise TypeError("available packaged voice requires a callable desktop submitter")
