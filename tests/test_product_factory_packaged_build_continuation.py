@@ -216,7 +216,6 @@ def test_continuation_advances_each_accepted_component_in_snapshot_order(
     assert all(state is prepared.state for state, _component_id in calls)
 
 
-
 def test_continuation_rejects_accepted_batch_over_bound_before_pf5(
     tmp_path,
     monkeypatch,
@@ -334,6 +333,7 @@ def test_continuation_reconciles_uncertain_pf5_once_without_replay(
         ("advance", "component-a"),
         ("reconcile", "pf5-component-a"),
     ]
+
 
 def test_continuation_defers_cancellation_until_pf5_worker_settles(
     tmp_path,
