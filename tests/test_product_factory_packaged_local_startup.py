@@ -13,12 +13,16 @@ import pytest
 import nika_core.product_factory_packaged_local_startup as startup_module
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.product_factory_packaged_bound_local_host import (
+    PackagedBoundLocalProductFactoryHost,
+)
 from nika_core.product_factory_packaged_local_settings import (
     PackagedLocalProductFactorySettings,
 )
 from nika_core.product_factory_packaged_local_startup import (
     PackagedLocalProductFactoryStartupError,
     build_packaged_local_product_factory_program,
+    build_repository_bound_packaged_local_product_factory_program,
     decode_packaged_local_product_factory_startup,
 )
 from nika_core.v01_model_settings import V01ModelSettings
@@ -60,13 +64,15 @@ def _startup_json(
     *,
     executable: str,
 ) -> str:
+    # Repository roots are deliberately not startup authority. Keep this helper
+    # signature so existing Windows/startup race oracles remain unchanged.
+    _ = repository
     workspace = tmp_path / "factory jobs"
     workspace.mkdir()
     return json.dumps(
         {
-            "schema": "nika.product-factory.local-startup.v1",
+            "schema": "nika.product-factory.local-startup.v2",
             "workspace_parent": str(workspace.resolve()),
-            "repositories": {"repo-1": str(repository.resolve())},
             "allowed_executables": [executable],
             "resource_budget": {
                 "timeout_seconds": 30,
@@ -145,19 +151,23 @@ def _seed_current_ollama_promotion(
     return digests
 
 
-def test_startup_decoder_binds_only_explicit_local_host_authority(
+def test_startup_decoder_binds_only_process_and_resource_authority(
     tmp_path: pathlib.Path,
 ) -> None:
     executable = shutil.which("git")
     if executable is None:
         pytest.skip("Git CLI unavailable")
     repository = _repository(tmp_path)
-    raw = _startup_json(tmp_path, repository, executable=str(pathlib.Path(executable).resolve()))
+    raw = _startup_json(
+        tmp_path,
+        repository,
+        executable=str(pathlib.Path(executable).resolve()),
+    )
 
     startup = decode_packaged_local_product_factory_startup(raw)
 
     assert startup is not None
-    assert startup.repositories == {"repo-1": repository}
+    assert not hasattr(startup, "repositories")
     assert startup.workspace_parent.name == "factory jobs"
     assert startup.policy.lease_seconds == 300
     assert startup.policy.resource_budget.max_changed_files == 20
@@ -167,8 +177,8 @@ def test_startup_decoder_binds_only_explicit_local_host_authority(
 @pytest.mark.parametrize(
     "raw",
     [
-        '{"schema":"nika.product-factory.local-startup.v1","schema":"duplicate"}',
-        '{"schema":"nika.product-factory.local-startup.v1"}',
+        '{"schema":"nika.product-factory.local-startup.v2","schema":"duplicate"}',
+        '{"schema":"nika.product-factory.local-startup.v2"}',
         " []",
         '{"schema":NaN}',
     ],
@@ -178,7 +188,7 @@ def test_startup_decoder_rejects_ambiguous_or_incomplete_json(raw: str) -> None:
         decode_packaged_local_product_factory_startup(raw)
 
 
-def test_startup_decoder_rejects_relative_repository_authority(
+def test_startup_decoder_rejects_repository_path_authority(
     tmp_path: pathlib.Path,
 ) -> None:
     executable = shutil.which("git")
@@ -192,30 +202,31 @@ def test_startup_decoder_rejects_relative_repository_authority(
             executable=str(pathlib.Path(executable).resolve()),
         )
     )
-    raw["repositories"]["repo-1"] = "relative/repository"
+    raw["repositories"] = {"repo-1": str(repository)}
 
     with pytest.raises(
         PackagedLocalProductFactoryStartupError,
-        match="repository repo-1 path must be absolute",
+        match="schema does not match",
     ):
         decode_packaged_local_product_factory_startup(
             json.dumps(raw, ensure_ascii=False, separators=(",", ":"))
         )
 
 
-def test_program_composition_reuses_persisted_ollama_and_canonical_local_worker(
+def test_program_composition_uses_plan_scoped_dynamic_host(
     tmp_path: pathlib.Path,
 ) -> None:
     executable = shutil.which("git")
     if executable is None:
         pytest.skip("Git CLI unavailable")
     repository = _repository(tmp_path)
-    raw = _startup_json(
-        tmp_path,
-        repository,
-        executable=str(pathlib.Path(executable).resolve()),
+    startup = decode_packaged_local_product_factory_startup(
+        _startup_json(
+            tmp_path,
+            repository,
+            executable=str(pathlib.Path(executable).resolve()),
+        )
     )
-    startup = decode_packaged_local_product_factory_startup(raw)
     assert startup is not None
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
@@ -228,15 +239,11 @@ def test_program_composition_reuses_persisted_ollama_and_canonical_local_worker(
         startup=startup,
     )
 
+    assert type(program.multi_repository_host) is (
+        PackagedBoundLocalProductFactoryHost
+    )
     assert program.multi_repository_host.store is store
-    assert program.multi_repository_host._program is program.host
-    assert program.host.worker.worker is program.worker
-    assert program.worker.repositories == {"repo-1": repository}
-    assert program.worker.planner is not None
-    assert program.worker.planner.provider_id == "ollama"
-    assert program.worker.planner.provider_kind.value == "local"
-    assert program.worker.planner.model == "qwen3:8b"
-    assert program.worker.planner.gateway.providers() == ("ollama",)
+    assert program.multi_repository_host._entries == {}
 
 
 def test_program_composition_fails_closed_for_deterministic_route_before_worker(
@@ -463,10 +470,11 @@ def test_program_composition_preserves_promoted_ollama_manifest_pin(
         CapturingOllamaProvider,
     )
 
-    program = build_packaged_local_product_factory_program(
+    program = build_repository_bound_packaged_local_product_factory_program(
         store,
         settings=settings,
         startup=startup,
+        repositories={"repo-1": repository},
     )
 
     assert program.worker.planner is not None

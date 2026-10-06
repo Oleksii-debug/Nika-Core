@@ -1,0 +1,374 @@
+from __future__ import annotations
+
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from threading import RLock
+
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.product_factory_local_coding import ContainedLocalCodingProgram
+from nika_core.product_factory_local_repository_binding import (
+    ProductFactoryLocalRepositoryBinding,
+    ProductFactoryLocalRepositoryBindings,
+)
+from nika_core.product_factory_multi_repository import MultiRepositoryExecutionState
+from nika_core.product_factory_orchestration import ProductRepositoryGraph
+from nika_core.product_factory_packaged_local_startup import (
+    PackagedLocalProductFactoryStartup,
+    build_repository_bound_packaged_local_product_factory_program,
+)
+from nika_core.product_factory_packaged_preparation import (
+    PackagedProductFactoryExecutionPlan,
+)
+from nika_core.product_project import ProductProject, ProductProjectRepository
+from nika_core.v01_model_settings import V01ModelSettings
+
+
+class PackagedBoundLocalProductFactoryHostError(RuntimeError):
+    """Durable local repository authority changed across packaged execution."""
+
+
+@dataclass(frozen=True, slots=True)
+class _BindingSnapshot:
+    repository_id: str
+    provider: str
+    locator: str
+    root: Path
+    binding_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ProgramEntry:
+    program: ContainedLocalCodingProgram
+    bindings: Mapping[str, _BindingSnapshot]
+
+
+class PackagedBoundLocalProductFactoryHost:
+    """Plan-scoped local execution host backed by durable repository bindings.
+
+    ProductProject / ProductRepositoryGraph remain repository identity authority.
+    ProductFactoryLocalRepositoryBindings is the only local filesystem authority.
+    Startup configuration contributes only workspace/process/resource policy and model
+    settings remain the model-route authority. Existing Product Factory hosts, workers,
+    recovery/checkpoints and ModelGateway composition are reused without replacement.
+    """
+
+    def __init__(
+        self,
+        store: SQLiteStore,
+        *,
+        settings: V01ModelSettings,
+        startup: PackagedLocalProductFactoryStartup,
+        bindings: ProductFactoryLocalRepositoryBindings | None = None,
+    ) -> None:
+        if type(store) is not SQLiteStore:
+            raise TypeError("store must be SQLiteStore")
+        if type(settings) is not V01ModelSettings:
+            raise TypeError("settings must be V01ModelSettings")
+        if type(startup) is not PackagedLocalProductFactoryStartup:
+            raise TypeError("startup carrier is invalid")
+        self.store = store
+        self._settings = settings
+        self._startup = startup
+        self._bindings = bindings or ProductFactoryLocalRepositoryBindings(store)
+        self._projects = ProductProjectRepository(store)
+        self._entries: dict[str, _ProgramEntry] = {}
+        self._lock = RLock()
+
+    def initialize(
+        self,
+        *,
+        host_task_id: str,
+        project: ProductProject,
+        graph: ProductRepositoryGraph,
+        graph_version: int,
+        base_shas: Mapping[str, str],
+        component_goals: Mapping[str, str],
+        permission_ceiling: frozenset[str],
+    ) -> MultiRepositoryExecutionState:
+        plan = PackagedProductFactoryExecutionPlan(
+            project_id=project.project_id,
+            expected_spec_version=project.spec_version,
+            expected_row_version=project.row_version,
+            graph=graph,
+            graph_version=graph_version,
+            base_shas=base_shas,
+            component_goals=component_goals,
+            permission_ceiling=permission_ceiling,
+        )
+        self._bindings.resolve_for_plan(plan)
+        bindings = self._bindings_for_graph(project, graph)
+        entry = self._entry_for(host_task_id, bindings)
+        state = entry.program.multi_repository_host.initialize(
+            host_task_id=host_task_id,
+            project=project,
+            graph=graph,
+            graph_version=graph_version,
+            base_shas=dict(base_shas),
+            component_goals=dict(component_goals),
+            permission_ceiling=permission_ceiling,
+        )
+        self._require_state_bindings(host_task_id, state)
+        return state
+
+    def restore(
+        self,
+        *,
+        host_task_id: str,
+        project: ProductProject,
+    ) -> MultiRepositoryExecutionState:
+        current = self._bindings_for_project(project)
+        if not current:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "ProductProject has no durable local repository bindings"
+            )
+        temporary = self._build_entry(current.values())
+        state = temporary.program.multi_repository_host.restore(
+            host_task_id=host_task_id,
+            project=project,
+        )
+        exact = self._bindings_for_graph(
+            state.binding.project,
+            state.authority.graph,
+        )
+        with self._lock:
+            self._entries[host_task_id] = self._build_entry(exact.values())
+        self._require_state_bindings(host_task_id, state)
+        return state
+
+    async def recover_running(
+        self,
+        *,
+        host_task_id: str,
+        state: MultiRepositoryExecutionState,
+        max_parallel: int = 4,
+    ):
+        entry = self._require_state_bindings(host_task_id, state)
+        return await entry.program.multi_repository_host.recover_running(
+            host_task_id=host_task_id,
+            state=state,
+            max_parallel=max_parallel,
+        )
+
+    async def dispatch_ready(
+        self,
+        *,
+        host_task_id: str,
+        state: MultiRepositoryExecutionState,
+        max_parallel: int = 4,
+        max_count: int = 32,
+    ):
+        entry = self._require_state_bindings(host_task_id, state)
+        return await entry.program.multi_repository_host.dispatch_ready(
+            host_task_id=host_task_id,
+            state=state,
+            max_parallel=max_parallel,
+            max_count=max_count,
+        )
+
+    def preview_repair(
+        self,
+        *,
+        host_task_id: str,
+        state: MultiRepositoryExecutionState,
+        component_id: str,
+        reason: str,
+    ):
+        entry = self._require_state_bindings(host_task_id, state)
+        return entry.program.multi_repository_host.preview_repair(
+            host_task_id=host_task_id,
+            state=state,
+            component_id=component_id,
+            reason=reason,
+        )
+
+    def commit_repair_and_checkpoint(
+        self,
+        *,
+        host_task_id: str,
+        state: MultiRepositoryExecutionState,
+        component_id: str,
+        reason: str,
+        expected_next_work_id: str,
+    ):
+        entry = self._require_state_bindings(host_task_id, state)
+        return entry.program.multi_repository_host.commit_repair_and_checkpoint(
+            host_task_id=host_task_id,
+            state=state,
+            component_id=component_id,
+            reason=reason,
+            expected_next_work_id=expected_next_work_id,
+        )
+
+    def _bindings_for_project(
+        self,
+        project: ProductProject,
+    ) -> dict[str, ProductFactoryLocalRepositoryBinding]:
+        current = self._projects.get(project.project_id)
+        if (
+            current.spec_version != project.spec_version
+            or current.row_version != project.row_version
+            or current.status != "active"
+        ):
+            raise PackagedBoundLocalProductFactoryHostError(
+                "ProductProject changed before local repository binding resolution"
+            )
+        with self.store.connection() as conn:
+            rows = conn.execute(
+                "SELECT repository_id FROM product_factory_local_repository_bindings "
+                "WHERE project_id=? ORDER BY repository_id",
+                (project.project_id,),
+            ).fetchall()
+        result: dict[str, ProductFactoryLocalRepositoryBinding] = {}
+        for row in rows:
+            repository_id = row["repository_id"]
+            if type(repository_id) is not str:
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "persisted repository binding identity is invalid"
+                )
+            binding = self._bindings.require(
+                project.project_id,
+                repository_id,
+            )
+            if binding.locator not in current.spec.repository_refs:
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "durable local repository binding is outside current ProductProject"
+                )
+            result[repository_id] = binding
+        current_after = self._projects.get(project.project_id)
+        if (
+            current_after.spec_version != current.spec_version
+            or current_after.row_version != current.row_version
+            or current_after.status != "active"
+        ):
+            raise PackagedBoundLocalProductFactoryHostError(
+                "ProductProject changed during local repository binding resolution"
+            )
+        return result
+
+    def _bindings_for_graph(
+        self,
+        project: ProductProject,
+        graph: ProductRepositoryGraph,
+    ) -> dict[str, ProductFactoryLocalRepositoryBinding]:
+        current = self._projects.get(project.project_id)
+        if (
+            current.spec_version != project.spec_version
+            or current.row_version != project.row_version
+            or current.status != "active"
+            or graph.project_id != project.project_id
+        ):
+            raise PackagedBoundLocalProductFactoryHostError(
+                "ProductProject or repository graph changed before local execution"
+            )
+        result: dict[str, ProductFactoryLocalRepositoryBinding] = {}
+        for repository in graph.repositories:
+            binding = self._bindings.require(
+                project.project_id,
+                repository.repository_id,
+            )
+            if (
+                binding.provider != repository.provider
+                or binding.locator != repository.locator
+                or binding.locator not in current.spec.repository_refs
+            ):
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "durable local repository binding does not match repository graph"
+                )
+            result[repository.repository_id] = binding
+        current_after = self._projects.get(project.project_id)
+        if (
+            current_after.spec_version != current.spec_version
+            or current_after.row_version != current.row_version
+            or current_after.status != "active"
+        ):
+            raise PackagedBoundLocalProductFactoryHostError(
+                "ProductProject changed during local repository binding resolution"
+            )
+        return result
+
+    def _entry_for(
+        self,
+        host_task_id: str,
+        bindings: Mapping[str, ProductFactoryLocalRepositoryBinding],
+    ) -> _ProgramEntry:
+        expected = _snapshot_map(bindings.values())
+        with self._lock:
+            current = self._entries.get(host_task_id)
+            if current is not None:
+                if dict(current.bindings) != expected:
+                    raise PackagedBoundLocalProductFactoryHostError(
+                        "local repository bindings changed after host composition"
+                    )
+                return current
+            entry = self._build_entry(bindings.values())
+            self._entries[host_task_id] = entry
+            return entry
+
+    def _build_entry(
+        self,
+        bindings: Iterable[ProductFactoryLocalRepositoryBinding],
+    ) -> _ProgramEntry:
+        snapshots = _snapshot_map(bindings)
+        if not snapshots:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "ProductProject has no durable local repository bindings"
+            )
+        repositories = {
+            repository_id: snapshot.root
+            for repository_id, snapshot in snapshots.items()
+        }
+        program = build_repository_bound_packaged_local_product_factory_program(
+            self.store,
+            settings=self._settings,
+            startup=self._startup,
+            repositories=repositories,
+        )
+        return _ProgramEntry(program=program, bindings=snapshots)
+
+    def _require_state_bindings(
+        self,
+        host_task_id: str,
+        state: MultiRepositoryExecutionState,
+    ) -> _ProgramEntry:
+        if type(state) is not MultiRepositoryExecutionState:
+            raise TypeError("state must be MultiRepositoryExecutionState")
+        current = self._bindings_for_graph(
+            state.binding.project,
+            state.authority.graph,
+        )
+        expected = _snapshot_map(current.values())
+        with self._lock:
+            entry = self._entries.get(host_task_id)
+        if entry is None:
+            entry = self._entry_for(host_task_id, current)
+        selected = {
+            repository_id: entry.bindings.get(repository_id)
+            for repository_id in expected
+        }
+        if selected != expected:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "local repository bindings changed after Product Factory preparation"
+            )
+        return entry
+
+
+def _snapshot_map(
+    bindings: Iterable[ProductFactoryLocalRepositoryBinding],
+) -> dict[str, _BindingSnapshot]:
+    result: dict[str, _BindingSnapshot] = {}
+    for binding in bindings:
+        if type(binding) is not ProductFactoryLocalRepositoryBinding:
+            raise TypeError("binding carrier is invalid")
+        if binding.repository_id in result:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "duplicate local repository binding identity"
+            )
+        result[binding.repository_id] = _BindingSnapshot(
+            repository_id=binding.repository_id,
+            provider=binding.provider,
+            locator=binding.locator,
+            root=binding.root,
+            binding_version=binding.binding_version,
+        )
+    return result

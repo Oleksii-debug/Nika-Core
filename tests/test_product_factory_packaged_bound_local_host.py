@@ -1,0 +1,334 @@
+from __future__ import annotations
+
+import json
+import pathlib
+import shutil
+import subprocess
+
+import pytest
+
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.product_factory_local_repository_binding import (
+    ProductFactoryLocalRepositoryBindingError,
+    ProductFactoryLocalRepositoryBindings,
+)
+from nika_core.product_factory_orchestration import (
+    ProductComponent,
+    ProductRepositoryGraph,
+    RepositoryRef,
+)
+from nika_core.product_factory_packaged_bound_local_host import (
+    PackagedBoundLocalProductFactoryHost,
+    PackagedBoundLocalProductFactoryHostError,
+)
+from nika_core.product_factory_packaged_local_startup import (
+    build_packaged_local_product_factory_program,
+    decode_packaged_local_product_factory_startup,
+)
+from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
+from nika_core.v01_model_settings import V01ModelSettings
+
+
+def _git(root: pathlib.Path, *args: str) -> str:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    result = subprocess.run(
+        (executable, *args),
+        cwd=root,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise AssertionError(result.stderr or result.stdout)
+    return result.stdout.strip()
+
+
+def _repository(tmp_path: pathlib.Path, name: str) -> pathlib.Path:
+    root = tmp_path / name
+    root.mkdir()
+    _git(root, "init")
+    _git(root, "config", "user.name", "Nika Test")
+    _git(root, "config", "user.email", "nika@example.invalid")
+    (root / "app.py").write_text("print('base')\n", encoding="utf-8")
+    _git(root, "add", "app.py")
+    _git(root, "commit", "-m", "base")
+    return root.resolve()
+
+
+def _store(tmp_path: pathlib.Path) -> SQLiteStore:
+    store = SQLiteStore(tmp_path / "стан Ніки" / "nika.db")
+    store.initialize()
+    return store
+
+
+def _repository_ref() -> RepositoryRef:
+    return RepositoryRef(
+        repository_id="repo-1",
+        provider="github",
+        locator="Oleksii-debug/example",
+        default_branch="main",
+    )
+
+
+def _project(store: SQLiteStore, repository: RepositoryRef):
+    return ProductProjectRepository(store).create(
+        project_id="product-1",
+        name="Product 1",
+        spec=ProductProjectSpec(
+            goal="Build the product",
+            desired_outcome="Verified package",
+            repository_refs=(repository.locator,),
+        ),
+        idempotency_key="create:product-1",
+    )
+
+
+def _graph(
+    project_id: str,
+    repository: RepositoryRef,
+) -> ProductRepositoryGraph:
+    return ProductRepositoryGraph(
+        project_id=project_id,
+        repositories=(repository,),
+        components=(
+            ProductComponent(
+                component_id="core",
+                repository_id=repository.repository_id,
+                paths=("src",),
+            ),
+        ),
+    )
+
+
+def _startup(tmp_path: pathlib.Path):
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    workspace = tmp_path / "factory jobs"
+    workspace.mkdir(exist_ok=True)
+    raw = json.dumps(
+        {
+            "schema": "nika.product-factory.local-startup.v2",
+            "workspace_parent": str(workspace.resolve()),
+            "allowed_executables": [
+                str(pathlib.Path(executable).resolve())
+            ],
+            "resource_budget": {
+                "timeout_seconds": 30,
+                "max_output_bytes": 1024 * 1024,
+                "max_changed_files": 20,
+            },
+            "lease_seconds": 300,
+            "git_executable": str(pathlib.Path(executable).resolve()),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    startup = decode_packaged_local_product_factory_startup(raw)
+    assert startup is not None
+    return startup
+
+
+def _settings(store: SQLiteStore) -> V01ModelSettings:
+    settings = V01ModelSettings(store)
+    result = settings.configure(
+        {
+            "schema_version": 1,
+            "revision": 0,
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": "qwen3:8b",
+            "base_url": "http://localhost:11434",
+            "credential_ref": None,
+            "private_data_allowed": False,
+            "timeout_seconds": 60.0,
+        }
+    )
+    assert result.status == "completed"
+    return settings
+
+
+def test_dynamic_host_builds_worker_only_from_durable_repository_binding(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    durable_root = _repository(tmp_path, "durable repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=durable_root,
+        expected_binding_version=None,
+    )
+    program = build_packaged_local_product_factory_program(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+    )
+    host = program.multi_repository_host
+
+    resolved = host._bindings_for_graph(
+        project,
+        _graph(project.project_id, repository),
+    )
+    entry = host._entry_for("host-task", resolved)
+
+    assert resolved == {repository.repository_id: bound}
+    assert entry.bindings[repository.repository_id].binding_version == 1
+    assert entry.program.worker.repositories == {
+        repository.repository_id: durable_root,
+    }
+
+
+def test_rebind_after_host_composition_fails_closed_before_worker_reuse(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    first_root = _repository(tmp_path, "first repository")
+    second_root = _repository(tmp_path, "second repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    initial = host._bindings_for_graph(
+        project,
+        _graph(project.project_id, repository),
+    )
+    host._entry_for("host-task", initial)
+
+    second = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=second_root,
+        expected_binding_version=first.binding_version,
+    )
+    changed = host._bindings_for_graph(
+        project,
+        _graph(project.project_id, repository),
+    )
+
+    assert second.binding_version == 2
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="changed after host composition",
+    ):
+        host._entry_for("host-task", changed)
+
+
+def test_fresh_host_after_restart_uses_latest_durable_binding(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    first_root = _repository(tmp_path, "first repository")
+    second_root = _repository(tmp_path, "second repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    second = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=second_root,
+        expected_binding_version=first.binding_version,
+    )
+
+    reopened_store = SQLiteStore(store.path)
+    reopened_store.initialize()
+    reopened_settings = V01ModelSettings(reopened_store)
+    host = PackagedBoundLocalProductFactoryHost(
+        reopened_store,
+        settings=reopened_settings,
+        startup=_startup(tmp_path),
+    )
+    reopened_project = ProductProjectRepository(reopened_store).get(
+        project.project_id
+    )
+    current = host._bindings_for_project(reopened_project)
+    entry = host._entry_for("restarted-host-task", current)
+
+    assert (
+        current[repository.repository_id].binding_version
+        == second.binding_version
+    )
+    assert current[repository.repository_id].root == second_root
+    assert entry.program.worker.repositories == {
+        repository.repository_id: second_root,
+    }
+
+
+def test_dynamic_host_refuses_repository_graph_locator_substitution(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=_repository(tmp_path, "durable repository"),
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    substituted = RepositoryRef(
+        repository_id=repository.repository_id,
+        provider=repository.provider,
+        locator="Oleksii-debug/substituted",
+        default_branch="main",
+    )
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="does not match repository graph",
+    ):
+        host._bindings_for_graph(
+            project,
+            _graph(project.project_id, substituted),
+        )
+
+
+def test_dynamic_host_does_not_infer_missing_local_binding(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+    )
+
+    assert host._bindings_for_project(project) == {}
+    with pytest.raises(ProductFactoryLocalRepositoryBindingError):
+        host._bindings_for_graph(
+            project,
+            _graph(project.project_id, repository),
+        )
