@@ -113,6 +113,62 @@ def _approval_request_id(message: str) -> str:
     return match.group(0)
 
 
+@pytest.mark.parametrize(
+    "decision_id",
+    [
+        " decision-leading-space",
+        "decision-control\nline",
+        "decision-zero-width\u200bformat",
+        "d" * 161,
+    ],
+)
+def test_pf1_rejects_unpresentable_decision_identity_before_mutation(
+    tmp_path: Path,
+    decision_id: str,
+) -> None:
+    store, repository, _service, _router = _build(tmp_path / "unsafe-id.db")
+    decisions = ProductDecisionRepository(store)
+
+    with pytest.raises(ValueError, match="safe presentation identity"):
+        decisions.record(
+            _PROJECT_ID,
+            ProductDecision(
+                decision_id=decision_id,
+                option_id="option-owner",
+                state=ProductDecisionState.PROPOSED,
+                rationale="Must fail before a durable write",
+                decided_by_ref="user://owner",
+            ),
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+            idempotency_key="decision:unsafe-id",
+        )
+
+    assert repository.get(_PROJECT_ID).row_version == 1
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM product_decisions WHERE project_id=?",
+            (_PROJECT_ID,),
+        ).fetchone()["count"]
+    assert count == 1
+
+
+def test_pf1_corrupt_unpresentable_persisted_decision_id_fails_closed(
+    tmp_path: Path,
+) -> None:
+    store, repository, service, _router = _build(tmp_path / "corrupt-id.db")
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_decisions SET decision_id=? "
+            "WHERE project_id=? AND decision_id=?",
+            ("decision-corrupt\ncontrol", _PROJECT_ID, "decision-owner"),
+        )
+
+    with pytest.raises(ValueError, match="safe presentation identity"):
+        service.inspect_project(_PROJECT_ID)
+
+    assert repository.get(_PROJECT_ID).row_version == 1
+
+
 def test_multiple_pending_decisions_are_discoverable_by_bounded_pages_and_exact_read(
     tmp_path: Path,
 ) -> None:
