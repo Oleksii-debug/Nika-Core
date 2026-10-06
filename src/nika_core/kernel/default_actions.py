@@ -32,6 +32,18 @@ def build_default_action_registry() -> ActionRegistry:
             None,
         ),
         ActionDefinition(
+            "product.factory.local_repository.bind",
+            "Прив’язати локальний репозиторій Product Factory",
+            "Product Factory",
+            None,
+        ),
+        ActionDefinition(
+            "product.factory.local_repository.unbind",
+            "Скасувати локальну прив’язку Product Factory",
+            "Product Factory",
+            None,
+        ),
+        ActionDefinition(
             "settings.product_factory_local.configure",
             "Зберегти локальний Product Factory",
             "Product Factory",
