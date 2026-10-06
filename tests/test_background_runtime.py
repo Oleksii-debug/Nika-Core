@@ -1253,6 +1253,67 @@ def test_duplicate_stored_presence_sequence_fails_closed_before_effect(
     assert rejected[-1].payload["error_type"] == "AuditIntegrityError"
 
 
+def test_corrupt_stored_presence_row_timestamp_fails_closed_before_effect(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    audit = AuditLog(store)
+    event_id = audit.append(
+        event_type="background.owner_presence_observed",
+        entity_type="owner_presence_source",
+        entity_id="win32-owner-presence",
+        payload={
+            "task_id": "historical",
+            "phase": "preflight",
+            "sequence": 0,
+            "presence": OwnerPresence.AWAY.value,
+            "observed_at": now.isoformat(),
+        },
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = ? WHERE event_id = ?",
+            ("not-a-canonical-timestamp", event_id),
+        )
+
+    guard, queue, audit, _resources = _guard(
+        store=store,
+        observations=[
+            _obs(sequence, OwnerPresence.AWAY, now=now)
+            for sequence in range(1, 6)
+        ],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+    calls = 0
+
+    async def effect() -> object:
+        nonlocal calls
+        calls += 1
+        return "must-not-run"
+
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            effect=effect,
+        )
+    )
+
+    assert result.action is BackgroundAction.PAUSE
+    assert result.reason == "owner_presence_untrusted"
+    assert result.executed is False
+    assert calls == 0
+    assert queue.get(task_id).state is TaskState.PAUSED
+    rejected = [
+        event
+        for event in audit.list_for(entity_type="task", entity_id=task_id)
+        if event.event_type == "background.owner_presence_rejected"
+    ]
+    assert rejected[-1].payload["error_type"] == "AuditIntegrityError"
+
+
 class WrongOwnerStatusResourceManager(ResourceManager):
     def status(self, *, scope: str, owner_id: str):
         status = super().status(scope=scope, owner_id=owner_id)
