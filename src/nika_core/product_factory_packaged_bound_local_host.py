@@ -444,88 +444,97 @@ class PackagedBoundLocalProductFactoryHost:
         self,
         project: ProductProject,
     ) -> dict[str, ProductFactoryLocalRepositoryBinding]:
-        current = self._projects.get(project.project_id)
-        if (
-            current.spec_version != project.spec_version
-            or current.row_version != project.row_version
-            or current.status != "active"
-        ):
-            raise PackagedBoundLocalProductFactoryHostError(
-                "ProductProject changed before local repository binding resolution"
-            )
-        with self.store.connection() as conn:
-            rows = conn.execute(
+        # Binding rows, ProductProject versions and per-root filesystem validation must
+        # form one coherent admission snapshot. A writer fence prevents bind/rebind/
+        # unbind/spec mutations from committing between individual repository reads;
+        # effect-boundary authority still revalidates any change after this snapshot.
+        with self.store.connection() as fence:
+            fence.execute("BEGIN IMMEDIATE")
+            current = self._projects.get(project.project_id)
+            if (
+                current.spec_version != project.spec_version
+                or current.row_version != project.row_version
+                or current.status != "active"
+            ):
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "ProductProject changed before local repository binding resolution"
+                )
+            rows = fence.execute(
                 "SELECT repository_id FROM product_factory_local_repository_bindings "
                 "WHERE project_id=? ORDER BY repository_id",
                 (project.project_id,),
             ).fetchall()
-        result: dict[str, ProductFactoryLocalRepositoryBinding] = {}
-        for row in rows:
-            repository_id = row["repository_id"]
-            if type(repository_id) is not str:
-                raise PackagedBoundLocalProductFactoryHostError(
-                    "persisted repository binding identity is invalid"
+            result: dict[str, ProductFactoryLocalRepositoryBinding] = {}
+            for row in rows:
+                repository_id = row["repository_id"]
+                if type(repository_id) is not str:
+                    raise PackagedBoundLocalProductFactoryHostError(
+                        "persisted repository binding identity is invalid"
+                    )
+                binding = self._bindings.require(
+                    project.project_id,
+                    repository_id,
                 )
-            binding = self._bindings.require(
-                project.project_id,
-                repository_id,
-            )
-            if binding.locator not in current.spec.repository_refs:
+                if binding.locator not in current.spec.repository_refs:
+                    raise PackagedBoundLocalProductFactoryHostError(
+                        "durable local repository binding is outside current ProductProject"
+                    )
+                result[repository_id] = binding
+            current_after = self._projects.get(project.project_id)
+            if (
+                current_after.spec_version != current.spec_version
+                or current_after.row_version != current.row_version
+                or current_after.status != "active"
+            ):
                 raise PackagedBoundLocalProductFactoryHostError(
-                    "durable local repository binding is outside current ProductProject"
+                    "ProductProject changed during local repository binding resolution"
                 )
-            result[repository_id] = binding
-        current_after = self._projects.get(project.project_id)
-        if (
-            current_after.spec_version != current.spec_version
-            or current_after.row_version != current.row_version
-            or current_after.status != "active"
-        ):
-            raise PackagedBoundLocalProductFactoryHostError(
-                "ProductProject changed during local repository binding resolution"
-            )
-        return result
+            return result
 
     def _bindings_for_graph(
         self,
         project: ProductProject,
         graph: ProductRepositoryGraph,
     ) -> dict[str, ProductFactoryLocalRepositoryBinding]:
-        current = self._projects.get(project.project_id)
-        if (
-            current.spec_version != project.spec_version
-            or current.row_version != project.row_version
-            or current.status != "active"
-            or graph.project_id != project.project_id
-        ):
-            raise PackagedBoundLocalProductFactoryHostError(
-                "ProductProject or repository graph changed before local execution"
-            )
-        result: dict[str, ProductFactoryLocalRepositoryBinding] = {}
-        for repository in graph.repositories:
-            binding = self._bindings.require(
-                project.project_id,
-                repository.repository_id,
-            )
+        # Keep the whole graph projection under the same SQLite writer fence so a
+        # concurrent durable binding mutation cannot create a mixed-generation set.
+        with self.store.connection() as fence:
+            fence.execute("BEGIN IMMEDIATE")
+            current = self._projects.get(project.project_id)
             if (
-                binding.provider != repository.provider
-                or binding.locator != repository.locator
-                or binding.locator not in current.spec.repository_refs
+                current.spec_version != project.spec_version
+                or current.row_version != project.row_version
+                or current.status != "active"
+                or graph.project_id != project.project_id
             ):
                 raise PackagedBoundLocalProductFactoryHostError(
-                    "durable local repository binding does not match repository graph"
+                    "ProductProject or repository graph changed before local execution"
                 )
-            result[repository.repository_id] = binding
-        current_after = self._projects.get(project.project_id)
-        if (
-            current_after.spec_version != current.spec_version
-            or current_after.row_version != current.row_version
-            or current_after.status != "active"
-        ):
-            raise PackagedBoundLocalProductFactoryHostError(
-                "ProductProject changed during local repository binding resolution"
-            )
-        return result
+            result: dict[str, ProductFactoryLocalRepositoryBinding] = {}
+            for repository in graph.repositories:
+                binding = self._bindings.require(
+                    project.project_id,
+                    repository.repository_id,
+                )
+                if (
+                    binding.provider != repository.provider
+                    or binding.locator != repository.locator
+                    or binding.locator not in current.spec.repository_refs
+                ):
+                    raise PackagedBoundLocalProductFactoryHostError(
+                        "durable local repository binding does not match repository graph"
+                    )
+                result[repository.repository_id] = binding
+            current_after = self._projects.get(project.project_id)
+            if (
+                current_after.spec_version != current.spec_version
+                or current_after.row_version != current.row_version
+                or current_after.status != "active"
+            ):
+                raise PackagedBoundLocalProductFactoryHostError(
+                    "ProductProject changed during local repository binding resolution"
+                )
+            return result
 
     def _entry_for(
         self,
