@@ -28,12 +28,19 @@ from nika_core.product_factory_orchestration import (
     ProjectScale,
     RepositoryRef,
     TeamCompositionRequest,
+    TeamPlan,
 )
 from nika_core.product_factory_program_host import (
     ProductFactoryProgramHost,
     ProgramWorkDisposition,
 )
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
+from nika_core.product_factory_review_authority import (
+    ProductFactoryReviewSubject,
+    ReviewerPrincipalBindings,
+    reviewer_principal_bindings_ref,
+    team_plan_fingerprint_ref,
+)
 from nika_core.product_project import (
     EvidenceRef,
     ProductAcceptanceCriterion,
@@ -61,10 +68,52 @@ _BASE_SHA = "0" * 40
 _MAX_FACTORY_CYCLES = 32
 _WORKER_COMMAND_TIMEOUT_SECONDS = 30
 _FACTORY_DISPATCH_TIMEOUT_SECONDS = 45
+_C1_PERMISSION_CEILING = frozenset(
+    {
+        "read_source",
+        "write_source",
+        "run_tests",
+        "read_project",
+        "update_project",
+        "build_release",
+    }
+)
 
 
 class C1MediumAppAcceptanceError(RuntimeError):
     """Raised when the deterministic C1 Product Factory proof cannot continue safely."""
+
+
+class C1ReviewEvidenceAuthority:
+    """Fixture-owned exact review evidence authority for the C1 acceptance journey."""
+
+    def __init__(self) -> None:
+        self._authorized_fingerprints: set[str] = set()
+
+    @property
+    def issued_count(self) -> int:
+        return len(self._authorized_fingerprints)
+
+    def authorize(self, subject: ProductFactoryReviewSubject) -> str:
+        if type(subject) is not ProductFactoryReviewSubject:
+            raise C1MediumAppAcceptanceError("C1 review authority requires exact review subject")
+        fingerprint = subject.fingerprint
+        self._authorized_fingerprints.add(fingerprint)
+        return f"c1-review-authority:{fingerprint}"
+
+    def verify(
+        self,
+        subject: ProductFactoryReviewSubject,
+        evidence_refs: tuple[str, ...],
+    ) -> bool:
+        if type(subject) is not ProductFactoryReviewSubject or type(evidence_refs) is not tuple:
+            return False
+        fingerprint = subject.fingerprint
+        expected = f"c1-review-authority:{fingerprint}"
+        return (
+            fingerprint in self._authorized_fingerprints
+            and evidence_refs == (expected,)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,7 +183,20 @@ class SandboxMediumAppWorker:
     """Bounded deterministic worker that may write only its component lease."""
 
     workspace: Path
+    producer_actor_ids: tuple[tuple[str, str], ...]
     fail_storage_attempt_one: bool = True
+
+    def _producer_actor_id(self, component_id: str) -> str:
+        matches = tuple(
+            actor_id
+            for bound_component_id, actor_id in self.producer_actor_ids
+            if bound_component_id == component_id
+        )
+        if len(matches) != 1:
+            raise C1MediumAppAcceptanceError(
+                f"C1 producer actor binding is not exact for component: {component_id}"
+            )
+        return matches[0]
 
     async def dispatch(self, request: ComponentWorkRequest) -> WorkerResultEnvelope:
         return self._execute(request)
@@ -173,6 +235,7 @@ class SandboxMediumAppWorker:
                 result_sha=hashlib.sha1(digest.encode("ascii")).hexdigest(),
                 diff_digest=digest,
                 coding_result=CodingResult(job_id=request.work_id, failure=failure),
+                producer_actor_id=self._producer_actor_id(request.component_id),
             )
 
         changed_files = self._write_component(request)
@@ -200,6 +263,7 @@ class SandboxMediumAppWorker:
                 test_evidence=evidence,
                 failure=failure,
             ),
+            producer_actor_id=self._producer_actor_id(request.component_id),
         )
 
     def _write_component(self, request: ComponentWorkRequest) -> tuple[ChangedFile, ...]:
@@ -289,37 +353,50 @@ class C1MediumAppAcceptanceRunner:
         research_package, options = _research_handoff()
         projects.record_research_handoff(project.project_id, research_package, options)
         selected_option = options[0]
-        project = projects.update_spec(
-            _C1_PROJECT_ID,
-            _revised_spec(selected_option.option_id),
-            expected_row_version=project.row_version,
-            change_reason=(
-                "Select local Windows desktop option; require upgrade-safe data and "
-                "keyboard-operable controls"
-            ),
-        )
-        if project.spec_version != 2:
-            raise C1MediumAppAcceptanceError("controlled ProductProject spec revision was not durable")
-
         graph = _repository_graph()
         team = DynamicTeamComposer().compose(_team_request())
         qa_roles = tuple(role.role_id for role in team.roles if role.independent_review)
         if not qa_roles:
             raise C1MediumAppAcceptanceError("medium team did not include independent QA")
-        lease_ids = _prove_ownership(graph, team)
+        reviewer_principals = _reviewer_principals(team)
+        producer_actor_ids = _producer_actor_ids(team, graph)
+        review_authority = C1ReviewEvidenceAuthority()
+        project = projects.update_spec(
+            _C1_PROJECT_ID,
+            _revised_spec(
+                selected_option.option_id,
+                team=team,
+                reviewer_principals=reviewer_principals,
+            ),
+            expected_row_version=project.row_version,
+            change_reason=(
+                "Select local Windows desktop option; bind exact Product Factory team, "
+                "review principals, upgrade-safe data and keyboard-operable controls"
+            ),
+        )
+        if project.spec_version != 2:
+            raise C1MediumAppAcceptanceError(
+                "controlled ProductProject spec revision was not durable"
+            )
 
-        binding = ProductProjectCoordinatorBinding(project=project, graph=graph)
+        lease_ids = _prove_ownership(graph, team)
+        binding = ProductProjectCoordinatorBinding(
+            project=project,
+            graph=graph,
+            team_plan=team,
+            review_evidence_authority=review_authority,
+            reviewer_principals=reviewer_principals,
+        )
         coordinator = binding.plan(
             base_shas={_C1_REPOSITORY_ID: _BASE_SHA},
             component_goals=_component_goals(),
-            permission_ceiling=frozenset(
-                {"read_source", "write_source", "run_tests", "build_release"}
-            ),
+            permission_ceiling=team.permission_ceiling,
         )
         _ensure_host_task(store, project_id=project.project_id)
         host = ProductFactoryProgramHost(
             store=store,
-            worker=SandboxMediumAppWorker(self.workspace),
+            worker=SandboxMediumAppWorker(self.workspace, producer_actor_ids),
+            review_evidence_authority=review_authority,
         )
 
         rejected_qa_component = "04-desktop-ui"
@@ -357,7 +434,9 @@ class C1MediumAppAcceptanceRunner:
                 host=host,
                 binding=binding,
                 coordinator=coordinator,
-                qa_role_id=qa_roles[0],
+                team=team,
+                reviewer_principals=reviewer_principals,
+                review_authority=review_authority,
                 workspace=self.workspace,
             )
 
@@ -370,13 +449,18 @@ class C1MediumAppAcceptanceRunner:
                 reopened_binding = ProductProjectCoordinatorBinding(
                     project=reopened_project,
                     graph=graph,
+                    team_plan=team,
+                    review_evidence_authority=review_authority,
+                    reviewer_principals=reviewer_principals,
                 )
                 reopened_host = ProductFactoryProgramHost(
                     store=reopened_store,
                     worker=SandboxMediumAppWorker(
                         self.workspace,
+                        producer_actor_ids,
                         fail_storage_attempt_one=False,
                     ),
+                    review_evidence_authority=review_authority,
                 )
                 restored = reopened_host.restore_latest(
                     host_task_id=_C1_HOST_TASK_ID,
@@ -416,6 +500,11 @@ class C1MediumAppAcceptanceRunner:
             raise C1MediumAppAcceptanceError("rejected QA candidate was not repaired")
         if not restart_recovery_proven:
             raise C1MediumAppAcceptanceError("controlled Product Factory restart was not proven")
+        expected_review_decisions = len(graph.components) + 1
+        if review_authority.issued_count != expected_review_decisions:
+            raise C1MediumAppAcceptanceError(
+                "C1 trusted review authority did not authorize every deterministic review decision"
+            )
 
         generated_test_digest = _run_generated_suite(self.workspace)
         upgrade_safe = _run_named_generated_test(self.workspace, "test_storage_upgrade.py")
@@ -498,7 +587,9 @@ def _advance_review_or_repair(
     host: ProductFactoryProgramHost,
     binding: ProductProjectCoordinatorBinding,
     coordinator,
-    qa_role_id: str,
+    team: TeamPlan,
+    reviewer_principals: ReviewerPrincipalBindings,
+    review_authority: C1ReviewEvidenceAuthority,
     workspace: Path,
 ) -> bool:
     for record in coordinator.snapshot().records:
@@ -516,18 +607,39 @@ def _advance_review_or_repair(
             return True
         if record.state is WorkState.REVIEW_REQUIRED:
             accepted, reason = _qa_decision(record.request, workspace)
+            if record.result is None or record.result.producer_actor_id is None:
+                raise C1MediumAppAcceptanceError(
+                    "trusted C1 review requires exact producer actor evidence"
+                )
+            reviewer_id = _reviewer_actor_for_component(
+                team,
+                reviewer_principals,
+                record.request.component_id,
+            )
+            subject = ProductFactoryReviewSubject(
+                project_id=record.request.project_id,
+                component_id=record.request.component_id,
+                work_id=record.request.work_id,
+                repository_id=record.request.repository_id,
+                base_sha=record.request.base_sha,
+                result_sha=record.result.result_sha,
+                diff_digest=record.result.diff_digest,
+                attempt=record.request.attempt,
+                producer_actor_id=record.result.producer_actor_id,
+                reviewer_id=reviewer_id,
+                accepted=accepted,
+            )
+            evidence_ref = review_authority.authorize(subject)
             host.review_and_checkpoint(
                 host_task_id=_C1_HOST_TASK_ID,
                 binding=binding,
                 coordinator=coordinator,
                 component_id=record.request.component_id,
                 decision=ReviewDecision(
-                    reviewer_id=qa_role_id,
+                    reviewer_id=reviewer_id,
                     accepted=accepted,
                     reason=reason,
-                    evidence_refs=(
-                        f"c1-qa:{record.request.component_id}:attempt-{record.request.attempt}",
-                    ),
+                    evidence_refs=(evidence_ref,),
                 ),
             )
             return True
@@ -616,7 +728,12 @@ def _research_handoff() -> tuple[ResearchEvidencePackage, tuple[ProductOption, .
     return package, options
 
 
-def _revised_spec(selected_option_id: str) -> ProductProjectSpec:
+def _revised_spec(
+    selected_option_id: str,
+    *,
+    team: TeamPlan,
+    reviewer_principals: ReviewerPrincipalBindings,
+) -> ProductProjectSpec:
     criteria = (
         ProductAcceptanceCriterion(
             criterion_id="upgrade-preserves-data",
@@ -638,6 +755,11 @@ def _revised_spec(selected_option_id: str) -> ProductProjectSpec:
         ),
         hypothesis=f"Selected product option: {selected_option_id}",
         repository_refs=(_C1_REPOSITORY_LOCATOR,),
+        team_refs=(
+            team.plan_id,
+            team_plan_fingerprint_ref(team),
+            reviewer_principal_bindings_ref(team, reviewer_principals),
+        ),
         requirements=(
             ProductRequirement(
                 requirement_id="expense-domain",
@@ -750,19 +872,63 @@ def _team_request() -> TeamCompositionRequest:
             "accessible keyboard-operable Windows desktop UI",
             "package release and non-admin install",
         ),
-        permission_ceiling=frozenset(
-            {
-                "read_source",
-                "write_source",
-                "run_tests",
-                "read_project",
-                "update_project",
-                "build_release",
-            }
-        ),
+        permission_ceiling=_C1_PERMISSION_CEILING,
         scale=ProjectScale.MEDIUM,
         evidence_refs=("pf11:c1:acceptance-spec-v2",),
     )
+
+
+def _reviewer_principals(team: TeamPlan) -> ReviewerPrincipalBindings:
+    bindings = tuple(
+        (role.role_id, f"c1-reviewer:{role.role_id}")
+        for role in team.roles
+        if role.independent_review
+    )
+    if not bindings:
+        raise C1MediumAppAcceptanceError("C1 team has no independent reviewer principals")
+    return bindings
+
+
+def _producer_actor_ids(
+    team: TeamPlan,
+    graph: ProductRepositoryGraph,
+) -> tuple[tuple[str, str], ...]:
+    bindings: list[tuple[str, str]] = []
+    for component in graph.components:
+        owners = tuple(
+            role.role_id
+            for role in team.roles
+            if not role.independent_review and component.component_id in role.component_ids
+        )
+        if not owners:
+            raise C1MediumAppAcceptanceError(
+                f"C1 component has no implementation actor: {component.component_id}"
+            )
+        bindings.append((component.component_id, f"c1-producer:{owners[0]}"))
+    return tuple(bindings)
+
+
+def _reviewer_actor_for_component(
+    team: TeamPlan,
+    reviewer_principals: ReviewerPrincipalBindings,
+    component_id: str,
+) -> str:
+    principals = dict(reviewer_principals)
+    reviewer_roles = tuple(
+        role.role_id
+        for role in team.roles
+        if role.independent_review and component_id in role.component_ids
+    )
+    if not reviewer_roles:
+        raise C1MediumAppAcceptanceError(
+            f"C1 component has no independent reviewer role: {component_id}"
+        )
+    reviewer_id = principals.get(reviewer_roles[0])
+    if reviewer_id is None:
+        raise C1MediumAppAcceptanceError(
+            f"C1 reviewer role lacks actor principal: {reviewer_roles[0]}"
+        )
+    return reviewer_id
 
 
 def _component_goals() -> dict[str, str]:

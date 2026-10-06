@@ -253,6 +253,11 @@ class MultiRepositoryProductFactoryHost:
         """Dispatch only work whose graph ownership can be granted without overlap."""
 
         self._assert_state(host_task_id=host_task_id, state=state)
+        expected_project_version = (
+            state.authority.project_id,
+            state.authority.spec_version,
+            state.authority.row_version,
+        )
         self._validate_dispatch_ownership(
             state=state,
             active_leases=tuple(active_leases),
@@ -265,9 +270,11 @@ class MultiRepositoryProductFactoryHost:
             max_parallel=max_parallel,
             max_count=max_count,
             effect_admission_precondition=lambda connection: (
-                self._require_current_project_version(
+                self._require_exact_project_version(
                     connection,
-                    state.binding.project,
+                    project_id=expected_project_version[0],
+                    spec_version=expected_project_version[1],
+                    row_version=expected_project_version[2],
                 )
             ),
         )
@@ -280,6 +287,11 @@ class MultiRepositoryProductFactoryHost:
         max_parallel: int = 4,
     ) -> tuple[ProgramWorkOutcome, ...]:
         self._assert_state(host_task_id=host_task_id, state=state)
+        expected_project_version = (
+            state.authority.project_id,
+            state.authority.spec_version,
+            state.authority.row_version,
+        )
         self._validate_running_ownership(state)
         return await self._program.recover_running(
             host_task_id=host_task_id,
@@ -287,9 +299,11 @@ class MultiRepositoryProductFactoryHost:
             coordinator=state.coordinator,
             max_parallel=max_parallel,
             effect_admission_precondition=lambda connection: (
-                self._require_current_project_version(
+                self._require_exact_project_version(
                     connection,
-                    state.binding.project,
+                    project_id=expected_project_version[0],
+                    spec_version=expected_project_version[1],
+                    row_version=expected_project_version[2],
                 )
             ),
         )
@@ -1094,11 +1108,38 @@ class MultiRepositoryProductFactoryHost:
         conn: Any,
         project: ProductProject,
     ) -> None:
+        MultiRepositoryProductFactoryHost._require_exact_project_version(
+            conn,
+            project_id=project.project_id,
+            spec_version=project.spec_version,
+            row_version=project.row_version,
+        )
+
+    @staticmethod
+    def _require_exact_project_version(
+        conn: Any,
+        *,
+        project_id: str,
+        spec_version: int,
+        row_version: int,
+    ) -> None:
+        if type(project_id) is not str or not project_id.strip():
+            raise MultiRepositoryExecutionError(
+                "ProductProject identity authority is invalid"
+            )
+        if type(spec_version) is not int or spec_version < 1:
+            raise MultiRepositoryExecutionError(
+                "ProductProject spec-version authority is invalid"
+            )
+        if type(row_version) is not int or row_version < 0:
+            raise MultiRepositoryExecutionError(
+                "ProductProject row-version authority is invalid"
+            )
         row = conn.execute(
             "SELECT typeof(current_spec_version) AS spec_type, "
             "current_spec_version, typeof(row_version) AS row_type, row_version "
             "FROM product_projects WHERE project_id = ?",
-            (project.project_id,),
+            (project_id,),
         ).fetchone()
         if row is None:
             raise MultiRepositoryExecutionError(
@@ -1114,8 +1155,8 @@ class MultiRepositoryProductFactoryHost:
                 "current ProductProject version authority is invalid"
             )
         if (
-            row["current_spec_version"] != project.spec_version
-            or row["row_version"] != project.row_version
+            row["current_spec_version"] != spec_version
+            or row["row_version"] != row_version
         ):
             raise MultiRepositoryExecutionError(
                 "ProductProject changed before durable Product Factory authority publication"

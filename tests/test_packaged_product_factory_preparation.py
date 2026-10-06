@@ -8,6 +8,7 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
+from nika_core.product_factory_coordinator import WorkerResultEnvelope
 from nika_core.product_factory_multi_repository import (
     MultiRepositoryExecutionError,
     MultiRepositoryProductFactoryHost,
@@ -34,7 +35,7 @@ from nika_core.product_factory_packaged_preparation import (
     product_factory_host_task_identity,
 )
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
-from nika_core.toolsmith.contracts import RecoveryState
+from nika_core.toolsmith.contracts import CodingResult, RecoveryState, TestEvidence
 
 
 class AllowReviewAuthority:
@@ -59,6 +60,74 @@ class NeverDispatchWorker:
     async def recover(self, request, state):
         self.recover_calls += 1
         raise AssertionError(f"unexpected recover: {request.work_id}:{state}")
+
+
+class VersionAdvancingResultWorker:
+    def __init__(
+        self,
+        repository: ProductProjectRepository,
+        project_id: str,
+        *,
+        advance_on: str,
+    ) -> None:
+        self.repository = repository
+        self.project_id = project_id
+        self.advance_on = advance_on
+        self.dispatch_calls = 0
+        self.inspect_calls = 0
+        self.recover_calls = 0
+
+    def _advance_project(self) -> None:
+        latest = self.repository.get(self.project_id)
+        self.repository.update_spec(
+            latest.project_id,
+            replace(
+                latest.spec,
+                desired_outcome=(
+                    f"Concurrent ProductProject revision during worker {self.advance_on}"
+                ),
+            ),
+            expected_row_version=latest.row_version,
+            change_reason=f"regression: revise during worker {self.advance_on}",
+        )
+
+    @staticmethod
+    def _result(request) -> WorkerResultEnvelope:
+        return WorkerResultEnvelope(
+            work_id=request.work_id,
+            component_id=request.component_id,
+            repository_id=request.repository_id,
+            base_sha=request.base_sha,
+            result_sha="b" * 40,
+            diff_digest="d" * 64,
+            coding_result=CodingResult(
+                job_id=request.work_id,
+                test_evidence=tuple(
+                    TestEvidence(
+                        command=command,
+                        exit_code=0,
+                        output_digest="e" * 64,
+                    )
+                    for command in request.acceptance_commands
+                ),
+            ),
+        )
+
+    async def dispatch(self, request):
+        self.dispatch_calls += 1
+        if self.advance_on == "dispatch":
+            self._advance_project()
+        return self._result(request)
+
+    async def inspect(self, work_id: str) -> RecoveryState | None:
+        self.inspect_calls += 1
+        return RecoveryState(phase="running", opaque_token=f"resume:{work_id}")
+
+    async def recover(self, request, state):
+        self.recover_calls += 1
+        if self.advance_on == "recover":
+            self._advance_project()
+        return self._result(request)
 
 
 def _fixture(tmp_path: Path):
@@ -509,6 +578,166 @@ def test_stale_running_project_version_blocks_recovery_effect(
     assert worker.dispatch_calls == 0
     assert worker.inspect_calls == 0
     assert worker.recover_calls == 0
+
+
+@pytest.mark.parametrize("operation", ("dispatch_ready", "recover_running"))
+def test_effect_admission_uses_pre_wait_project_version_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    (
+        store,
+        repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    prepared = service.prepare(plan)
+    program_type = type(service._host._program)
+
+    async def tamper_after_outer_assert(program, **kwargs):
+        latest = repository.get(project.project_id)
+        current = repository.update_spec(
+            latest.project_id,
+            replace(
+                latest.spec,
+                desired_outcome="Concurrent revision during async effect admission",
+            ),
+            expected_row_version=latest.row_version,
+            change_reason="regression: mutate bound carrier after outer state assertion",
+        )
+        object.__setattr__(
+            prepared.state.binding.project,
+            "spec_version",
+            current.spec_version,
+        )
+        object.__setattr__(
+            prepared.state.binding.project,
+            "row_version",
+            current.row_version,
+        )
+        object.__setattr__(prepared.state.binding.project, "spec", current.spec)
+        precondition = kwargs["effect_admission_precondition"]
+        with store.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            precondition(connection)
+        return ()
+
+    monkeypatch.setattr(program_type, operation, tamper_after_outer_assert)
+    call = getattr(service._host, operation)
+    kwargs = {
+        "host_task_id": prepared.host_task_id,
+        "state": prepared.state,
+        "max_parallel": 1,
+    }
+    if operation == "dispatch_ready":
+        kwargs["max_count"] = 1
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        asyncio.run(call(**kwargs))
+
+
+def test_project_revision_during_worker_dispatch_blocks_stale_result_publication(
+    tmp_path: Path,
+) -> None:
+    (
+        _store,
+        repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    prepared = service.prepare(plan)
+    worker = VersionAdvancingResultWorker(
+        repository,
+        project.project_id,
+        advance_on="dispatch",
+    )
+    service._host.worker = worker
+    service._host._program.worker = worker
+
+    outcomes = asyncio.run(
+        service._host.dispatch_ready(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            max_parallel=1,
+            max_count=1,
+        )
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].disposition.value == "uncertain"
+    record = prepared.state.coordinator.snapshot().records[0]
+    assert record.state.value == "running"
+    assert record.result is None
+    assert worker.dispatch_calls == 1
+    assert repository.get(project.project_id).row_version > project.row_version
+
+
+def test_project_revision_during_worker_recovery_blocks_stale_result_publication(
+    tmp_path: Path,
+) -> None:
+    (
+        _store,
+        repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    prepared = service.prepare(plan)
+
+    initial = asyncio.run(
+        service._host.dispatch_ready(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            max_parallel=1,
+            max_count=1,
+        )
+    )
+    assert len(initial) == 1
+    assert initial[0].disposition.value == "uncertain"
+    assert prepared.state.coordinator.snapshot().records[0].state.value == "running"
+
+    worker = VersionAdvancingResultWorker(
+        repository,
+        project.project_id,
+        advance_on="recover",
+    )
+    service._host.worker = worker
+    service._host._program.worker = worker
+
+    outcomes = asyncio.run(
+        service._host.recover_running(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            max_parallel=1,
+        )
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].disposition.value == "uncertain"
+    record = prepared.state.coordinator.snapshot().records[0]
+    assert record.state.value == "running"
+    assert record.result is None
+    assert worker.inspect_calls == 1
+    assert worker.recover_calls == 1
+    assert repository.get(project.project_id).row_version > project.row_version
 
 
 def test_execution_plan_snapshots_mutable_graph_and_mapping_inputs(tmp_path: Path) -> None:
