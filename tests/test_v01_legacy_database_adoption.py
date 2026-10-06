@@ -338,10 +338,30 @@ def test_pending_record_snapshot_reads_exact_valid_record(tmp_path):
     source = tmp_path / "Дані" / "old.db"
     payload = _valid_pending_payload(source)
     pending.write_bytes(payload)
-    record = adoption._read_pending_record(pending)
+    snapshot = adoption._read_pending_record(pending)
+    assert snapshot is not None
+    record, identity = snapshot
     assert isinstance(record, dict)
     assert record["source_path"] == str(source.resolve())
     assert record["target_was_absent"] is True
+    assert identity == adoption._snapshot_identity(adoption.os.lstat(pending))
+
+
+def test_pending_record_cleanup_rejects_replacement_identity(tmp_path):
+    pending = tmp_path / ".nika.db.legacy-adoption.json"
+    pending.write_bytes(_valid_pending_payload(tmp_path / "old.db"))
+    snapshot = adoption._read_pending_record(pending)
+    assert snapshot is not None
+    _record, identity = snapshot
+    replacement = tmp_path / "replacement.json"
+    replacement_payload = _valid_pending_payload(tmp_path / "other.db")
+    replacement.write_bytes(replacement_payload)
+    replacement.replace(pending)
+
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._remove_pending_record(pending, expected_identity=identity)
+
+    assert pending.read_bytes() == replacement_payload
 
 
 def test_startup_lock_rejects_inode_swap_after_open(tmp_path, monkeypatch):
