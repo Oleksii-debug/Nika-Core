@@ -9,6 +9,9 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+from pydantic_settings import SettingsError
+
 from nika_core.activity_report import DailyActivityReportService
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
@@ -467,6 +470,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     except LegacyDatabaseConflict as exc:
         show_recovery_error(str(exc))
         return 1
+    except (ValidationError, SettingsError):
+        # Validation errors can embed private paths or environment values.
+        show_recovery_error(
+            "Некоректні налаштування Nika (NIKA_*). Перевірте конфігурацію "
+            "та перезапустіть програму. Дані не змінено."
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001 - redact configuration failures
+        logging.getLogger(__name__).error(
+            "Packaged configuration failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося прочитати налаштування Nika. Збережіть наявні дані, "
+            "перевірте конфігурацію та повторіть запуск."
+        )
+        return 1
     if args.pf11_proof:
         return _run_pf11_proof(
             config,
@@ -479,6 +498,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         show_recovery_error(
             "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
             "Запуск зупинено без автоматичного повторення дій."
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001 - redact startup failures
+        logging.getLogger(__name__).error(
+            "Packaged startup failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося відкрити дані або підготувати запуск Nika. "
+            "Перевірте доступність папки даних; наявну базу не видаляйте."
         )
         return 1
     launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
