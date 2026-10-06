@@ -47,11 +47,14 @@ class PackagedProductFactoryExecutionPlanFileSource:
     def __init__(self) -> None:
         self._lock = Lock()
         self._plan: PackagedProductFactoryExecutionPlan | None = None
+        self._load_generation = 0
 
     def load(self, payload: Mapping[str, Any]) -> UIResult:
         """Replace the in-memory plan with one explicitly selected safe file."""
 
         with self._lock:
+            self._load_generation += 1
+            load_generation = self._load_generation
             self._plan = None
 
         try:
@@ -82,6 +85,11 @@ class PackagedProductFactoryExecutionPlanFileSource:
             )
 
         with self._lock:
+            if load_generation != self._load_generation:
+                return _result(
+                    "rejected",
+                    "Завантаження плану Product Factory замінено новішим запитом.",
+                )
             self._plan = plan
         return _result(
             "completed",
