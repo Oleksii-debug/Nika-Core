@@ -1131,12 +1131,16 @@ def test_output_root_creation_preserves_preflight_parent_identity(
     output = parent / "pilot-output"
 
     target, parent_snapshot = driver._preflight_output_root(output)
-
-    assert driver._create_output_root(
+    created, root_snapshot, root_lock = driver._create_output_root(
         target,
         expected_parent=parent_snapshot,
-    ) == output
-    assert output.is_dir()
+    )
+    try:
+        assert created == output
+        assert output.is_dir()
+        driver._require_output_root_identity(output, root_snapshot)
+    finally:
+        driver._close_windows_output_root_stability_lock(root_lock)
 
 
 def test_output_root_rejects_parent_replacement_after_preflight(
@@ -1159,6 +1163,56 @@ def test_output_root_rejects_parent_replacement_after_preflight(
 
     assert not output.exists()
     assert not (displaced / "pilot-output").exists()
+
+
+def test_stable_output_root_rejects_coherent_replacement_before_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "trusted-parent"
+    parent.mkdir()
+    output = parent / "pilot-output"
+    target, parent_snapshot = driver._preflight_output_root(output)
+    displaced = parent / "displaced-output"
+
+    monkeypatch.setattr(
+        driver,
+        "_open_windows_output_root_stability_lock",
+        lambda *args, **kwargs: None,
+    )
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="output_root changed during durable execution",
+    ):
+        with driver._stable_created_output_root(
+            target,
+            expected_parent=parent_snapshot,
+        ) as stable_root:
+            stable_root.rename(displaced)
+            stable_root.mkdir()
+
+    assert output.is_dir()
+    assert displaced.is_dir()
+
+
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows directory-share semantics")
+def test_output_root_lock_denies_rename_until_context_exit(tmp_path: Path) -> None:
+    parent = tmp_path / "trusted-parent"
+    parent.mkdir()
+    output = parent / "pilot-output"
+    target, parent_snapshot = driver._preflight_output_root(output)
+    moved = parent / "moved-output"
+
+    with driver._stable_created_output_root(
+        target,
+        expected_parent=parent_snapshot,
+    ) as stable_root:
+        with pytest.raises(OSError):
+            stable_root.rename(moved)
+
+    output.rename(moved)
+    assert moved.is_dir()
 
 
 @pytest.mark.skipif(driver.os.name != "nt", reason="Windows directory-share semantics")
