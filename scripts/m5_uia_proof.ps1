@@ -787,7 +787,7 @@ with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
         'model': 'uia-proof-model',
         'base_url': 'http://localhost:11434',
         'credential_ref': None,
-        'private_data_allowed': False,
+        'private_data_allowed': True,
         'timeout_seconds': 60.0,
     }
     for key, value in expected.items():
