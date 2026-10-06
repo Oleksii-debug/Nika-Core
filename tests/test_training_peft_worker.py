@@ -420,6 +420,19 @@ def test_base_gguf_copy_is_digest_bound(tmp_path: Path) -> None:
         peft._copy_verified_base(config, request, tmp_path / "other-job")
 
 
+def test_staged_base_is_durable_after_source_loss(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._job_root(config, request)
+    staged = peft._copy_verified_base(config, request, job_root)
+    config.base_gguf.unlink()
+
+    replayed = peft._copy_verified_base(config, request, job_root)
+
+    assert replayed == staged
+    assert replayed.read_bytes() == base
+
+
 def test_base_gguf_copy_rejects_logical_base_divergence_without_warm_start(
     tmp_path: Path,
 ) -> None:
@@ -1094,6 +1107,33 @@ def test_completed_intermediate_checkpoint_replays_without_optimizer_effect(
     assert replay_state == first_state
     assert replay_candidate is None
     assert after == before
+
+
+def test_completed_checkpoint_replay_uses_staged_base_after_source_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    first_state, first_candidate = peft._train_one_step(request, config, consumed)
+    assert first_candidate is None
+
+    config.base_gguf.unlink()
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _must_not_train_fake_stack,
+    )
+    replay_state, replay_candidate = peft._train_one_step(
+        request,
+        config,
+        consumed,
+    )
+
+    assert replay_state == first_state
+    assert replay_candidate is None
 
 
 def test_completed_checkpoint_replay_rejects_step_id_drift(
