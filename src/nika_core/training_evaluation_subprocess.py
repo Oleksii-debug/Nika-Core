@@ -59,6 +59,11 @@ _MAX_ENVIRONMENT_FIELD_BYTES = 16 * 1024
 _MAX_JSON_DEPTH = 12
 _MAX_JSON_NODES = 4096
 _READ_CHUNK_BYTES = 64 * 1024
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _HEX_DIGITS = frozenset("0123456789abcdef")
 _FORBIDDEN_ENVIRONMENT_KEYS = frozenset(
     {
@@ -416,12 +421,110 @@ def _usage_value(value: object, *, name: str) -> int | None:
     return value
 
 
+def _open_windows_command_artifact_lock(path: str) -> int:
+    """Open one evaluator command file while denying write/delete replacement."""
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            path,
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        return int(handle)
+    except OSError:
+        raise
+    except (AttributeError, ImportError, TypeError, ValueError) as exc:
+        raise OSError("Windows command-artifact launch locking is unavailable") from exc
+
+
+def _close_windows_command_artifact_lock(handle: int) -> None:
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        close_handle(ctypes.c_void_p(handle))
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        return
+
+
+class _CommandArtifactLaunchGuard:
+    """Hold Registry-bound Windows evaluator command files immutable during execution."""
+
+    def __init__(
+        self,
+        command: tuple[str, ...],
+        expected_records: Mapping[int, ArtifactRecord],
+        *,
+        provider_id: str,
+    ) -> None:
+        self._command = command
+        self._indices = tuple(sorted(expected_records))
+        self._provider_id = provider_id
+        self._handles: list[int] = []
+
+    def __enter__(self) -> _CommandArtifactLaunchGuard:
+        if os.name != "nt":
+            return self
+        try:
+            for index in self._indices:
+                self._handles.append(
+                    _open_windows_command_artifact_lock(self._command[index])
+                )
+        except OSError as exc:
+            self._close()
+            raise _error(
+                ModelErrorCode.PROVIDER_ERROR,
+                "evaluation command artifact could not be locked for launch",
+                provider_id=self._provider_id,
+                effect=ModelFailureEffect.NO_EFFECT,
+            ) from exc
+        return self
+
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> None:
+        self._close()
+
+    def _close(self) -> None:
+        while self._handles:
+            _close_windows_command_artifact_lock(self._handles.pop())
+
+
 class RegistrySubprocessLoadedModelAttestor:
     """Registry-authorized local evaluator producing same-effect loaded-byte evidence.
 
     The external command is the trusted attestor implementation. Every executable or
     absolute command-file argument is bound through Artifact Registry and reverified
-    immediately before process creation. The candidate is independently verified
+    immediately before process creation. On Windows those command files are held with
+    write/delete sharing denied from the final verification through child completion,
+    closing the verify-to-spawn pathname replacement window. The candidate is independently verified
     against its canonical ModelArtifactDescriptor before launch; the subprocess must
     then report the digest and size it actually loaded in the same invocation that
     returns the model response.
@@ -772,6 +875,28 @@ class RegistrySubprocessLoadedModelAttestor:
         }
 
     async def _execute(
+        self,
+        request_bytes: bytes,
+        *,
+        provider_id: str,
+        timeout_seconds: float,
+    ) -> bytes:
+        with _CommandArtifactLaunchGuard(
+            self._command,
+            self._command_records,
+            provider_id=provider_id,
+        ):
+            await asyncio.to_thread(
+                self._verify_command_records,
+                self._command_records,
+            )
+            return await self._execute_locked(
+                request_bytes,
+                provider_id=provider_id,
+                timeout_seconds=timeout_seconds,
+            )
+
+    async def _execute_locked(
         self,
         request_bytes: bytes,
         *,
