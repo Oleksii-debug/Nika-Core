@@ -483,6 +483,42 @@ def test_posix_launch_snapshot_does_not_grant_execute_permission(
             raise AssertionError("non-executable source must not gain launch permission")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_execute_permission_check_stays_on_held_inode(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "runner"
+    replacement = tmp_path / "replacement"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o600)
+    replacement.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    replacement.chmod(0o700)
+    original_inode = executable.stat().st_ino
+    original_access = execution_module.os.access
+    replaced = False
+
+    def swapping_access(path: object, mode: int, *args: object, **kwargs: object) -> bool:
+        nonlocal replaced
+        if not replaced and mode == os.X_OK:
+            os.replace(replacement, executable)
+            replaced = True
+        return original_access(path, mode, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution_module.os, "access", swapping_access)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="pinned runtime executable is not executable",
+    ):
+        with guard:
+            raise AssertionError("replacement permissions must not authorize held bytes")
+
+    assert replaced is True
+    assert executable.stat().st_ino != original_inode
+
+
 def test_typed_runner_rejects_same_path_replacement_after_runtime_admission(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
