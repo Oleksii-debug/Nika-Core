@@ -108,6 +108,14 @@
   const workspacesEmpty = document.getElementById("workspaces-empty");
   const productProjectEmpty = document.getElementById("product-project-empty");
   const productProjectSummary = document.getElementById("product-project-summary");
+  const productProjectDecision = document.getElementById("product-project-decision");
+  const productProjectDecisionFields = Object.freeze({
+    decision_id: document.getElementById("product-project-decision-id"),
+    title: document.getElementById("product-project-decision-title"),
+    question: document.getElementById("product-project-decision-question"),
+    risk_level: document.getElementById("product-project-decision-risk"),
+    state: document.getElementById("product-project-decision-state"),
+  });
   const productProjectFields = Object.freeze({
     title: document.getElementById("product-project-title"),
     project_id: document.getElementById("product-project-id"),
@@ -375,6 +383,19 @@
       : unavailableStateLabel;
   }
 
+  function validProductDecision(decision) {
+    if (decision === null) return true;
+    if (!decision || typeof decision !== "object" || Array.isArray(decision)) return false;
+    const stringFields = ["decision_id", "title", "question", "state"];
+    if (stringFields.some((field) => typeof decision[field] !== "string" || !decision[field].trim())) {
+      return false;
+    }
+    if (decision.state !== "pending") return false;
+    return Number.isInteger(decision.risk_level)
+      && decision.risk_level >= 0
+      && decision.risk_level <= 4;
+  }
+
   function validProductProject(project) {
     if (!project || typeof project !== "object" || Array.isArray(project)) return false;
     const stringFields = ["title", "project_id", "goal", "state"];
@@ -383,11 +404,17 @@
     }
     if (!Number.isInteger(project.spec_version) || project.spec_version < 1) return false;
     const countFields = ["blocker_count", "status_count", "decision_count"];
-    return countFields.every((field) => Number.isInteger(project[field]) && project[field] >= 0);
+    if (!countFields.every((field) => Number.isInteger(project[field]) && project[field] >= 0)) {
+      return false;
+    }
+    return Object.prototype.hasOwnProperty.call(project, "current_decision")
+      && validProductDecision(project.current_decision);
   }
 
   function clearProductProjectFields() {
     for (const node of Object.values(productProjectFields)) node.textContent = "";
+    for (const node of Object.values(productProjectDecisionFields)) node.textContent = "";
+    productProjectDecision.hidden = true;
   }
 
   function renderProductProjectUnavailable(message) {
@@ -425,6 +452,17 @@
     }
     for (const [field, node] of Object.entries(productProjectFields)) {
       node.textContent = String(project[field]);
+    }
+    const decision = project.current_decision;
+    if (decision === null) {
+      productProjectDecision.hidden = true;
+    } else {
+      productProjectDecisionFields.decision_id.textContent = decision.decision_id;
+      productProjectDecisionFields.title.textContent = decision.title;
+      productProjectDecisionFields.question.textContent = decision.question;
+      productProjectDecisionFields.risk_level.textContent = `R${decision.risk_level}`;
+      productProjectDecisionFields.state.textContent = "Очікує рішення";
+      productProjectDecision.hidden = false;
     }
     productProjectEmpty.hidden = true;
     productProjectSummary.hidden = false;
