@@ -701,6 +701,11 @@ def _encode_model_authority(
     payload["authority_sha256"] = hashlib.sha256(
         _canonical_task_payload(payload).encode("utf-8")
     ).hexdigest()
+    decoded = _decode_model_authority(payload)
+    if decoded != authority:
+        raise PackagedBoundLocalProductFactoryHostError(
+            "packaged model authority is not canonically round-trip stable"
+        )
     return payload
 
 
