@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import nika_core.training_physical_evaluation_driver as driver
+import nika_core.training_scale as scale
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
     ExperimentStatus,
@@ -155,11 +156,32 @@ def _scale_task_payload(
             ),
         ),
     )
+    proof = scale._build_progression_proof(
+        plan_sha256=plan.plan_sha256,
+        tier_index=0,
+        authorization_sha256="1" * 64,
+        job_id="pilot-job",
+        job_fingerprint="2" * 64,
+        base_artifact_ref="models/base",
+        base_sha256="3" * 64,
+        candidate_artifact_ref="models/pilot-candidate",
+        candidate_sha256="4" * 64,
+        frozen_package_sha256="5" * 64,
+        training_material_sha256="6" * 64,
+        execution_plan_sha256="7" * 64,
+        comparison_evidence_sha256="8" * 64,
+        evaluation_set_sha256=plan.evaluation_set_sha256,
+    )
+    stored_proof_sha256 = (
+        proof.proof_sha256 if proof_sha256 == "VALID" else proof_sha256
+    )
     return {
         "job_id": "pilot-job",
         "kind": kind,
-        "progression_proof": None if proof_sha256 is None else {},
-        "progression_proof_sha256": proof_sha256,
+        "progression_proof": (
+            None if stored_proof_sha256 is None else proof.canonical_payload()
+        ),
+        "progression_proof_sha256": stored_proof_sha256,
         "scale_plan": plan.canonical_payload(),
         "scale_plan_sha256": plan.plan_sha256,
         "scale_tier_id": "pilot" if kind == "physical_peft_pilot" else "small",
@@ -343,7 +365,7 @@ def test_find_pilot_task_requires_exact_unique_identity(tmp_path: Path) -> None:
     ("kind", "proof_sha256"),
     (
         ("physical_peft_pilot", None),
-        ("physical_peft_scale_tier", "9" * 64),
+        ("physical_peft_scale_tier", "VALID"),
     ),
 )
 def test_find_pilot_task_accepts_scale_aware_training_identity(
