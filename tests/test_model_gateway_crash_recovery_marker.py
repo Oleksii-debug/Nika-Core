@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
+
 from nika_core.builder.compiler import AgentCompiler
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition
@@ -13,6 +15,7 @@ from nika_core.kernel.task_state import TaskState
 from nika_core.model_gateway.contracts import (
     ModelRequest,
     ModelResponse,
+    PrivacyClass,
     ProviderCapabilities,
     ProviderKind,
 )
@@ -313,3 +316,116 @@ def test_hard_cancellable_provider_is_advertised_and_can_cancel(tmp_path: Path) 
         assert result.outcome is RuntimeOutcome.CANCELLED
 
     asyncio.run(scenario())
+
+
+class _StickyRouteText(str):
+    """Text-shaped route identity whose strip() hides its actual whitespace."""
+
+    def strip(self, chars: str | None = None) -> str:
+        del chars
+        return self
+
+
+class _SpoofingRuntimeTimeout(float):
+    """Negative timeout that lies at the adapter's <= 0 admission check."""
+
+    def __le__(self, other: object) -> bool:
+        del other
+        return False
+
+
+class _BehavioralRuntimeTemperature(float):
+    """Numeric-looking temperature carrier that must not be retained as authority."""
+
+
+def test_runtime_route_admission_rejects_behavioral_text_carriers(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    definitions = _definitions(store)
+
+    provider_id = _StickyRouteText(" foundry-local ")
+    assert provider_id.strip() is provider_id
+    with pytest.raises(TypeError, match="provider_id must be exact text"):
+        ModelGatewayAgentRuntime(
+            gateway=ModelGateway(),
+            definitions=definitions,
+            provider_id=provider_id,
+            provider_kind=ProviderKind.LOCAL,
+            model="fixture-model",
+        )
+
+    model = _StickyRouteText(" fixture-model ")
+    assert model.strip() is model
+    with pytest.raises(TypeError, match="model must be exact text"):
+        ModelGatewayAgentRuntime(
+            gateway=ModelGateway(),
+            definitions=definitions,
+            provider_id="foundry-local",
+            provider_kind=ProviderKind.LOCAL,
+            model=model,
+        )
+
+
+def test_runtime_route_admission_rejects_behavioral_numeric_carriers(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    definitions = _definitions(store)
+
+    timeout = _SpoofingRuntimeTimeout(-1.0)
+    assert (timeout <= 0) is False
+    with pytest.raises(TypeError, match="timeout_seconds"):
+        ModelGatewayAgentRuntime(
+            gateway=ModelGateway(),
+            definitions=definitions,
+            provider_id="foundry-local",
+            provider_kind=ProviderKind.LOCAL,
+            model="fixture-model",
+            timeout_seconds=timeout,
+        )
+
+    with pytest.raises(TypeError, match="temperature"):
+        ModelGatewayAgentRuntime(
+            gateway=ModelGateway(),
+            definitions=definitions,
+            provider_id="foundry-local",
+            provider_kind=ProviderKind.LOCAL,
+            model="fixture-model",
+            temperature=_BehavioralRuntimeTemperature(0.5),
+        )
+
+
+def test_runtime_route_admission_rejects_noncanonical_privacy_carrier(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    definitions = _definitions(store)
+
+    with pytest.raises(TypeError, match="privacy must be PrivacyClass"):
+        ModelGatewayAgentRuntime(
+            gateway=ModelGateway(),
+            definitions=definitions,
+            provider_id="foundry-local",
+            provider_kind=ProviderKind.LOCAL,
+            model="fixture-model",
+            privacy="private",  # type: ignore[arg-type]
+        )
+
+    runtime = ModelGatewayAgentRuntime(
+        gateway=ModelGateway(),
+        definitions=definitions,
+        provider_id="foundry-local",
+        provider_kind=ProviderKind.LOCAL,
+        model="fixture-model",
+        timeout_seconds=3,
+        privacy=PrivacyClass.PRIVATE,
+        temperature=1,
+    )
+    request = runtime._build_model_request(_request("canonical-route"))
+    assert request.provider_id == "foundry-local"
+    assert request.provider_kind is ProviderKind.LOCAL
+    assert request.privacy is PrivacyClass.PRIVATE
+    assert request.timeout_seconds == 3
+    assert request.temperature == 1.0
