@@ -350,6 +350,32 @@ def test_progression_restoration_rejects_payload_not_matching_trusted_proof(
         )
 
 
+def test_durable_progression_restore_requires_independent_digest() -> None:
+    plan = _plan(_material_evidence())
+    trusted = _trusted_progression_proof(plan)
+
+    restored = scale.restore_scale_progression_proof_from_trusted_digest(
+        trusted.canonical_payload(),
+        trusted_proof_sha256=trusted.proof_sha256,
+    )
+
+    assert restored.canonical_payload() == trusted.canonical_payload()
+    assert restored.proof_sha256 == trusted.proof_sha256
+
+
+def test_durable_progression_restore_rejects_self_consistent_wrong_digest() -> None:
+    plan = _plan(_material_evidence())
+    trusted = _trusted_progression_proof(plan)
+    payload = trusted.canonical_payload()
+    payload["comparison_evidence_sha256"] = "0" * 64
+
+    with pytest.raises(TrainingScaleError, match="trusted digest authority"):
+        scale.restore_scale_progression_proof_from_trusted_digest(
+            payload,
+            trusted_proof_sha256=trusted.proof_sha256,
+        )
+
+
 def test_higher_scale_requires_non_forgeable_progression_proof() -> None:
     evidence = _material_evidence()
     plan = _plan(evidence)
