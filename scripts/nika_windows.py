@@ -37,6 +37,9 @@ from nika_core.product_factory_packaged_execution import (
     PackagedProductFactoryExecutionController,
     ProductFactoryExecutionPlanResolver,
 )
+from nika_core.product_factory_packaged_execution_plan_file import (
+    PackagedProductFactoryExecutionPlanFileSource,
+)
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductSelectionStore,
@@ -274,12 +277,12 @@ def build_windows_bridge(
     product_factory_execution_host: MultiRepositoryProductFactoryHost | None = None,
     product_factory_execution_plan_resolver: ProductFactoryExecutionPlanResolver | None = None,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
-    if (product_factory_execution_host is None) != (
-        product_factory_execution_plan_resolver is None
+    if (
+        product_factory_execution_host is None
+        and product_factory_execution_plan_resolver is not None
     ):
         raise ValueError(
-            "Product Factory execution host and execution-plan resolver "
-            "must be configured together"
+            "Product Factory execution-plan resolver requires an execution host"
         )
 
     store = SQLiteStore(config.database_path)
@@ -350,15 +353,13 @@ def build_windows_bridge(
         register_cleanup(speech.close)
     decision_approval_authority = ApprovalAuthority(audit_sink=audit_log)
     product_repository = ProductProjectRepository(store)
+    product_factory_execution_plan_files = PackagedProductFactoryExecutionPlanFileSource()
     products = ProductProjectCommandService(
         product_repository,
         approval_verifier=decision_approval_authority.verifier(),
     )
     product_factory_execution_handler = None
-    if (
-        product_factory_execution_host is not None
-        and product_factory_execution_plan_resolver is not None
-    ):
+    if product_factory_execution_host is not None:
         product_factory_execution = PackagedProductFactoryExecutionController(
             preparation=PackagedProductFactoryPreparationService(
                 repository=product_repository,
@@ -367,7 +368,11 @@ def build_windows_bridge(
                 workspace_id=PACKAGED_PRODUCT_FACTORY_WORKSPACE_ID,
             ),
             host=product_factory_execution_host,
-            resolve_plan=product_factory_execution_plan_resolver,
+            resolve_plan=(
+                product_factory_execution_plan_resolver
+                if product_factory_execution_plan_resolver is not None
+                else product_factory_execution_plan_files.resolve
+            ),
             submit=backend.submit_packaged_coroutine,
         )
         product_factory_execution_handler = product_factory_execution.start
@@ -442,6 +447,9 @@ def build_windows_bridge(
         state["speech"] = speech.snapshot()
         state["voice"] = voice.snapshot()
         state["voice_model_setup"] = voice_model_setup.snapshot()
+        state["product_factory_execution_plan"] = (
+            product_factory_execution_plan_files.snapshot()
+        )
         return agent_builder_state.decorate(state)
 
     def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
@@ -481,6 +489,7 @@ def build_windows_bridge(
             "voice.cancel": voice.cancel,
             "voice.model.import": voice_model_setup.start,
             "voice.model.cancel": voice_model_setup.cancel,
+            "product.factory.execution_plan.load": product_factory_execution_plan_files.load,
             "speech.start": speech.speak,
             "speech.cancel": speech.cancel,
             "team.sources.configure": source_settings.configure,

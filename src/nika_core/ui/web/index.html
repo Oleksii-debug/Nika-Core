@@ -185,7 +185,7 @@
       <p id="command-intelligence-help">Режим інтелекту можна перевірити командою «режим інтелекту» або змінити для нових завдань: «режим інтелекту deterministic», «режим інтелекту foundry &lt;model&gt;», «режим інтелекту ollama &lt;model&gt; &lt;loopback-url&gt;», «режим інтелекту api &lt;provider&gt; &lt;model&gt; &lt;https-url&gt; &lt;env:REF&gt; &lt;public|private&gt;». Уже прийняті завдання не перемикаються.</p>
       <p id="task-control-help">Для кількох завдань можна вибрати потрібне радіокнопкою у списку «Завдання» й скористатися кнопками керування вибраним завданням. Точні команди з task_id залишаються доступними: «pause task &lt;task_id&gt;», «resume task &lt;task_id&gt;», «stop task &lt;task_id&gt;» або «task status &lt;task_id&gt;». Українські відповідники: «призупини завдання &lt;task_id&gt;», «продовж завдання &lt;task_id&gt;», «зупини завдання &lt;task_id&gt;», «статус завдання &lt;task_id&gt;».</p>
       <p id="product-decision-help">Якщо ProductProject очікує рішення власника, спочатку введіть «покажи поточне рішення ProductProject» або «show current product decision». Якщо очікують кілька рішень, команда «list pending product decisions» покаже до восьми decision_id на сторінку; наступні сторінки відкриваються командою «list pending product decisions page &lt;номер&gt;», а повне питання конкретного рішення — «show product decision &lt;decision_id&gt;». Щоб відхилити точно вибране рішення, введіть «reject product decision &lt;decision_id&gt;». Щоб схвалити його, введіть «approve product decision &lt;decision_id&gt;»: Nika покаже одноразовий approval request_id. Лише після окремої команди «confirm product decision approval &lt;approval-request-id&gt;» trusted host запише схвалення. Українські відповідники: «відхили рішення ProductProject &lt;decision_id&gt;», «схвали рішення ProductProject &lt;decision_id&gt;» і «підтвердь схвалення рішення ProductProject &lt;approval-request-id&gt;».</p>
-      <p id="product-factory-help">Для поточного ProductProject доступні точні команди Product Factory: «сплануй поточний ProductProject», «покажи поточний план Product Factory» і «покажи поточний статус Product Factory». Команда статусу лише читає перевірений durable execution state, не запускає воркерів і показує не більш як вісім компонентів за один раз.</p>
+      <p id="product-factory-help">Для поточного ProductProject доступні точні команди Product Factory: «сплануй поточний ProductProject», «покажи поточний план Product Factory», «покажи поточний статус Product Factory» і «запусти поточний Product Factory». Перед запуском завантажте явний JSON-план у розділі ProductProject. Команда статусу лише читає перевірений durable execution state, не запускає воркерів і показує не більш як вісім компонентів за один раз.</p>
       <div class="actions">
         <button type="button" data-action-id="task.create" data-error-focus-target="command-input">Створити завдання</button>
         <button type="button" data-action-id="task.pause">Призупинити</button>
@@ -279,6 +279,38 @@
         <dt>Рішення</dt>
         <dd id="product-project-decision-count">—</dd>
       </dl>
+      <div aria-labelledby="product-factory-execution-plan-heading">
+        <h3 id="product-factory-execution-plan-heading" tabindex="-1">
+          План виконання Product Factory
+        </h3>
+        <p id="product-factory-execution-plan-help">
+          Вкажіть повний шлях до JSON-плану. Nika читає лише прямий звичайний файл,
+          не зберігає шлях і не приймає секрети замість посилань на облікові дані.
+        </p>
+        <label for="product-factory-execution-plan-path">
+          JSON-план виконання Product Factory — повний шлях
+        </label>
+        <input
+          id="product-factory-execution-plan-path"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          aria-describedby="product-factory-execution-plan-help product-factory-execution-plan-status"
+        >
+        <p id="product-factory-execution-plan-status">
+          JSON-план виконання Product Factory ще не завантажено.
+        </p>
+        <div class="actions">
+          <button
+            type="button"
+            id="product-factory-execution-plan-load"
+            data-action-id="product.factory.execution_plan.load"
+            data-error-focus-target="product-factory-execution-plan-path"
+          >
+            Завантажити план виконання
+          </button>
+        </div>
+      </div>
       <div id="product-project-statuses" hidden>
         <h3 id="product-project-statuses-heading" tabindex="-1">Статус ProductProject</h3>
         <p id="product-project-statuses-empty">Статусних записів немає.</p>
