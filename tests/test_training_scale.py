@@ -267,18 +267,6 @@ def test_progression_payload_cannot_restore_authority_without_trusted_inputs() -
         )
 
 
-def test_progression_serialized_claim_validation_is_shape_only() -> None:
-    plan = _plan(_material_evidence())
-    payload = _progression_payload(plan)
-
-    validated = TrainingScaleProgressionProof.validate_serialized_claim(payload)
-
-    assert validated == payload
-    assert validated is not payload
-    with pytest.raises(TypeError):
-        TrainingScaleProgressionProof.from_canonical_payload(validated)
-
-
 def test_progression_restoration_returns_only_independently_rebuilt_proof(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

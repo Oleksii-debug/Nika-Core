@@ -388,8 +388,16 @@ class TrainingScaleProgressionProof:
         }
 
     @classmethod
-    def validate_serialized_claim(cls, value: object) -> dict[str, object]:
-        """Validate persisted proof shape without granting progression authority."""
+    def from_canonical_payload(
+        cls,
+        value: object,
+        *,
+        plan: TrainingScalePlan,
+        authorization: TrainingScaleAuthorization,
+        run: TrainingRunEvidence,
+        comparison: AttestedTrainingComparisonResult,
+    ) -> TrainingScaleProgressionProof:
+        """Restore a persisted proof only through independently trusted authorities."""
 
         del cls
         if type(value) is not dict:
@@ -442,21 +450,6 @@ class TrainingScaleProgressionProof:
             raise TrainingScaleError(
                 "progression proof cannot overwrite the base artifact"
             )
-        return dict(value)
-
-    @classmethod
-    def from_canonical_payload(
-        cls,
-        value: object,
-        *,
-        plan: TrainingScalePlan,
-        authorization: TrainingScaleAuthorization,
-        run: TrainingRunEvidence,
-        comparison: AttestedTrainingComparisonResult,
-    ) -> TrainingScaleProgressionProof:
-        """Restore a persisted proof only through independently trusted authorities."""
-
-        payload = cls.validate_serialized_claim(value)
 
         trusted = build_scale_progression_proof(
             plan=plan,
@@ -464,7 +457,7 @@ class TrainingScaleProgressionProof:
             run=run,
             comparison=comparison,
         )
-        if payload != trusted.canonical_payload():
+        if value != trusted.canonical_payload():
             raise TrainingScaleError(
                 "training progression proof payload does not match trusted prior-run authority"
             )

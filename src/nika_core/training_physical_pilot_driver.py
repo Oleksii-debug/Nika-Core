@@ -438,6 +438,60 @@ class ScalePlanConfig:
         return cls(plan_id=canonical.plan_id, tiers=canonical.tiers)
 
 
+def _progression_claim_from_value(value: object) -> dict[str, object]:
+    if type(value) is not dict:
+        _fail("progression_proof must be an exact object")
+    expected = {
+        "authorization_sha256",
+        "base_artifact_ref",
+        "base_sha256",
+        "candidate_artifact_ref",
+        "candidate_sha256",
+        "comparison_evidence_sha256",
+        "evaluation_set_sha256",
+        "execution_plan_sha256",
+        "frozen_package_sha256",
+        "job_fingerprint",
+        "job_id",
+        "plan_sha256",
+        "tier_index",
+        "training_material_sha256",
+    }
+    if set(value) != expected:
+        _fail("progression_proof fields do not match the strict schema")
+    for field in (
+        "authorization_sha256",
+        "base_sha256",
+        "candidate_sha256",
+        "comparison_evidence_sha256",
+        "evaluation_set_sha256",
+        "execution_plan_sha256",
+        "frozen_package_sha256",
+        "job_fingerprint",
+        "plan_sha256",
+        "training_material_sha256",
+    ):
+        _require_sha256(value[field], name=f"progression_proof.{field}")
+    _require_text(value["job_id"], name="progression_proof.job_id")
+    base_ref = _require_logical_artifact_ref(
+        value["base_artifact_ref"],
+        name="progression_proof.base_artifact_ref",
+    )
+    candidate_ref = _require_logical_artifact_ref(
+        value["candidate_artifact_ref"],
+        name="progression_proof.candidate_artifact_ref",
+    )
+    _require_int(
+        value["tier_index"],
+        name="progression_proof.tier_index",
+        minimum=0,
+        maximum=_MAX_SCALE_VALUE,
+    )
+    if base_ref == candidate_ref:
+        _fail("progression_proof cannot overwrite the base artifact")
+    return dict(value)
+
+
 @dataclass(frozen=True, slots=True)
 class PhysicalPilotConfig:
     workspace_id: str
@@ -460,7 +514,7 @@ class PhysicalPilotConfig:
     scale_plan: ScalePlanConfig | None = None
     scale_tier_id: str | None = None
     initial_adapter_path: Path | None = None
-    progression_proof: TrainingScaleProgressionProof | None = None
+    progression_proof_payload: dict[str, object] | None = None
 
     @classmethod
     def from_json(cls, raw: str | bytes) -> PhysicalPilotConfig:
@@ -485,7 +539,7 @@ class PhysicalPilotConfig:
             _fail("unsupported physical pilot config schema")
         scale_tier_id: str | None = None
         initial_adapter_path: Path | None = None
-        progression_proof: TrainingScaleProgressionProof | None = None
+        progression_proof_payload: dict[str, object] | None = None
         if schema_version == _LEGACY_CONFIG_SCHEMA_VERSION:
             expected_keys = _TOP_LEVEL_KEYS_V1
             scale_plan = None
@@ -507,30 +561,8 @@ class PhysicalPilotConfig:
                 value["initial_adapter_path"],
                 name="initial_adapter_path",
             )
-            try:
-                progression_claim = (
-                    TrainingScaleProgressionProof.validate_serialized_claim(
-                        value["progression_proof"]
-                    )
-                )
-            except TrainingScaleError as exc:
-                raise PhysicalPilotDriverError(
-                    "progression_proof is not canonical"
-                ) from exc
-            matching = tuple(
-                index
-                for index, tier in enumerate(scale_plan.tiers)
-                if tier.tier_id == scale_tier_id
-            )
-            if len(matching) != 1 or matching[0] == 0:
-                _fail("scale_tier_id must select a declared higher tier")
-            if progression_claim["tier_index"] != matching[0] - 1:
-                _fail("progression_proof does not authorize the previous scale tier")
-            if progression_claim["candidate_artifact_ref"] != value["base_artifact_ref"]:
-                _fail("higher-tier base artifact must be the promoted candidate")
-            _fail(
-                "schema v3 requires independently trusted prior-run and comparison "
-                "authority; serialized config claims cannot authorize a higher tier"
+            progression_proof_payload = _progression_claim_from_value(
+                value["progression_proof"]
             )
         else:
             _fail("unsupported physical pilot config schema")
@@ -584,11 +616,12 @@ class PhysicalPilotConfig:
             scale_plan=scale_plan,
             scale_tier_id=scale_tier_id,
             initial_adapter_path=initial_adapter_path,
-            progression_proof=progression_proof,
+            progression_proof_payload=progression_proof_payload,
         )
         if config.scale_tier_id is not None:
-            if config.scale_plan is None or config.progression_proof is None:
-                _fail("higher-tier config is missing scale authority")
+            claim = config.progression_proof_payload
+            if config.scale_plan is None or claim is None:
+                _fail("higher-tier config is missing scale authority claim")
             matching = tuple(
                 index
                 for index, tier in enumerate(config.scale_plan.tiers)
@@ -596,12 +629,9 @@ class PhysicalPilotConfig:
             )
             if len(matching) != 1 or matching[0] == 0:
                 _fail("scale_tier_id must select a declared higher tier")
-            if config.progression_proof.tier_index != matching[0] - 1:
-                _fail("progression_proof does not authorize the previous scale tier")
-            if (
-                config.progression_proof.candidate_artifact_ref
-                != config.base_artifact_ref
-            ):
+            if claim["tier_index"] != matching[0] - 1:
+                _fail("progression_proof does not claim the previous scale tier")
+            if claim["candidate_artifact_ref"] != config.base_artifact_ref:
                 _fail("higher-tier base artifact must be the promoted candidate")
         try:
             TrainingJobSpec(
@@ -927,27 +957,40 @@ def _selected_scale_tier(
         _fail("configured scale tier is not declared by the scale plan")
     index = matching[0]
     if index == 0:
-        if config.progression_proof is not None or config.initial_adapter_path is not None:
+        if (
+            config.progression_proof_payload is not None
+            or config.initial_adapter_path is not None
+        ):
             _fail("pilot tier must not carry higher-tier continuation authority")
-    elif config.progression_proof is None or config.initial_adapter_path is None:
-        _fail("higher training scale requires progression proof and promoted adapter")
+    elif (
+        config.progression_proof_payload is None
+        or config.initial_adapter_path is None
+    ):
+        _fail("higher training scale requires progression claim and promoted adapter")
     return index, plan.tiers[index]
 
 
 def _preflight_higher_tier(
     config: PhysicalPilotConfig,
     *,
+    trusted_progression_proof: TrainingScaleProgressionProof | None,
     plan: TrainingScalePlan,
     tier_index: int,
     initial_adapter_path: Path | None,
     material_base_sha256: str,
 ) -> TrainingScaleProgressionProof | None:
     if tier_index == 0:
+        if trusted_progression_proof is not None:
+            _fail("pilot tier must not carry trusted progression authority")
         return None
-    proof = config.progression_proof
-    if proof is None or initial_adapter_path is None:
-        _fail("higher training scale authority is incomplete")
-    proof = proof.revalidated()
+    claim = config.progression_proof_payload
+    if claim is None or initial_adapter_path is None:
+        _fail("higher training scale authority claim is incomplete")
+    if type(trusted_progression_proof) is not TrainingScaleProgressionProof:
+        _fail("higher training scale requires independently trusted progression authority")
+    proof = trusted_progression_proof.revalidated()
+    if claim != proof.canonical_payload():
+        _fail("progression claim does not match trusted progression authority")
     if proof.plan_sha256 != plan.plan_sha256:
         _fail("progression_proof belongs to another scale plan")
     if proof.tier_index != tier_index - 1:
@@ -977,9 +1020,16 @@ def _preflight_higher_tier(
 
 def run_physical_pilot_from_config(
     config: PhysicalPilotConfig,
+    *,
+    trusted_progression_proof: TrainingScaleProgressionProof | None = None,
 ) -> PhysicalTrainingPilotReport:
     if type(config) is not PhysicalPilotConfig:
         raise TypeError("config must be exact PhysicalPilotConfig")
+    if config.scale_tier_id is None:
+        if trusted_progression_proof is not None:
+            _fail("pilot execution must not receive progression authority")
+    elif type(trusted_progression_proof) is not TrainingScaleProgressionProof:
+        _fail("higher-tier execution requires independently trusted progression authority")
     if not _is_windows():
         _fail("physical PEFT pilot driver must execute on Windows")
 
@@ -1059,6 +1109,7 @@ def run_physical_pilot_from_config(
     tier_index, scale_tier = _selected_scale_tier(config, scale_plan)
     progression_proof = _preflight_higher_tier(
         config,
+        trusted_progression_proof=trusted_progression_proof,
         plan=scale_plan,
         tier_index=tier_index,
         initial_adapter_path=initial_adapter_path,

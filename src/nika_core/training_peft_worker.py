@@ -7,6 +7,7 @@ import json
 import math
 import os
 import re
+import shutil
 import stat
 import sys
 import tempfile
@@ -1566,6 +1567,126 @@ def _ensure_job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
     )
 
 
+def _publish_initial_adapter_config(path: Path, payload: bytes) -> None:
+    if type(payload) is not bytes or not payload:
+        _fail("initial_adapter_config_write_failed")
+    expected_sha256 = hashlib.sha256(payload).hexdigest()
+    temporary = path.with_name(f".{path.name}.tmp")
+
+    if path.exists():
+        current = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_invalid",
+        )
+        observed_sha256, _ = _hash_regular_snapshot(
+            path,
+            code="initial_adapter_config_invalid",
+        )
+        if observed_sha256 != expected_sha256:
+            _fail("initial_adapter_config_mismatch")
+        if current.st_nlink == 1:
+            if temporary.exists():
+                stale = _require_regular_unlinked(
+                    temporary,
+                    code="initial_adapter_config_invalid",
+                )
+                if stale.st_nlink != 1:
+                    _fail("initial_adapter_config_invalid")
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    _fail("initial_adapter_config_write_failed")
+            return
+        if current.st_nlink != 2:
+            _fail("initial_adapter_config_invalid")
+        linked_temporary = _require_regular_unlinked(
+            temporary,
+            code="initial_adapter_config_invalid",
+        )
+        if (
+            linked_temporary.st_nlink != 2
+            or (linked_temporary.st_dev, linked_temporary.st_ino)
+            != (current.st_dev, current.st_ino)
+        ):
+            _fail("initial_adapter_config_invalid")
+        try:
+            os.unlink(temporary)
+        except OSError:
+            _fail("initial_adapter_config_write_failed")
+        recovered = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_invalid",
+        )
+        if (
+            recovered.st_nlink != 1
+            or (recovered.st_dev, recovered.st_ino)
+            != (current.st_dev, current.st_ino)
+        ):
+            _fail("initial_adapter_config_invalid")
+        return
+
+    if temporary.exists():
+        stale = _require_regular_unlinked(
+            temporary,
+            code="initial_adapter_config_invalid",
+        )
+        if stale.st_nlink != 1:
+            _fail("initial_adapter_config_invalid")
+        try:
+            os.unlink(temporary)
+        except OSError:
+            _fail("initial_adapter_config_write_failed")
+
+    temporary_identity: tuple[int, int] | None = None
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_stat = _require_regular_unlinked(
+            temporary,
+            code="initial_adapter_config_write_failed",
+        )
+        if temporary_stat.st_nlink != 1:
+            _fail("initial_adapter_config_invalid")
+        temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        observed_sha256, _ = _hash_regular_snapshot(
+            temporary,
+            code="initial_adapter_config_write_failed",
+        )
+        if observed_sha256 != expected_sha256:
+            _fail("initial_adapter_config_write_failed")
+        os.link(temporary, path)
+        published = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_write_failed",
+        )
+        if (
+            published.st_nlink != 2
+            or (published.st_dev, published.st_ino) != temporary_identity
+        ):
+            _fail("initial_adapter_config_invalid")
+        os.unlink(temporary)
+        final = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_write_failed",
+        )
+        if final.st_nlink != 1 or (final.st_dev, final.st_ino) != temporary_identity:
+            _fail("initial_adapter_config_invalid")
+    except FileExistsError:
+        _fail("initial_adapter_config_conflict")
+    except PeftTrainerError:
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(path, temporary_identity)
+            _best_effort_unlink_identity(temporary, temporary_identity)
+        raise
+    except OSError:
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(path, temporary_identity)
+            _best_effort_unlink_identity(temporary, temporary_identity)
+        _fail("initial_adapter_config_write_failed")
+
+
 def _stage_initial_adapter(
     config: TrainerConfig,
     request: ParsedRequest,
@@ -1611,21 +1732,7 @@ def _stage_initial_adapter(
         _fail("initial_adapter_manifest_invalid")
     adapter_config_payload = _canonical_json_bytes(adapter_config)
     adapter_config_path = target_dir / "adapter_config.json"
-    try:
-        with adapter_config_path.open("xb") as handle:
-            handle.write(adapter_config_payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except FileExistsError:
-        observed_sha256, _ = _hash_regular_snapshot(
-            adapter_config_path,
-            code="initial_adapter_config_invalid",
-        )
-        expected_sha256 = hashlib.sha256(adapter_config_payload).hexdigest()
-        if observed_sha256 != expected_sha256:
-            _fail("initial_adapter_config_mismatch")
-    except OSError:
-        _fail("initial_adapter_config_write_failed")
+    _publish_initial_adapter_config(adapter_config_path, adapter_config_payload)
     _adapter_config_snapshot(target_dir, request, config)
     return target_dir
 
@@ -1871,6 +1978,157 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
     if _checkpoint_payload_manifest_sha256(candidate) != expected_payload_sha256:
         _fail("resume_checkpoint_payload_mismatch")
     return candidate
+
+
+def _copy_checkpoint_snapshot_file(
+    source: Path,
+    destination: Path,
+    *,
+    expected_size: int,
+) -> None:
+    before = _require_regular_unlinked(source, code="resume_checkpoint_changed")
+    if before.st_size != expected_size:
+        _fail("resume_checkpoint_changed")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(source, flags)
+    except OSError:
+        _fail("resume_checkpoint_changed")
+    total = 0
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_size != expected_size
+        ):
+            _fail("resume_checkpoint_changed")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("xb") as target:
+            while True:
+                chunk = os.read(fd, _READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > expected_size or total > _MAX_CHECKPOINT_BYTES:
+                    _fail("resume_checkpoint_changed")
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        after = os.fstat(fd)
+    except PeftTrainerError:
+        raise
+    except OSError:
+        _fail("resume_checkpoint_snapshot_failed")
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    try:
+        current = os.lstat(source)
+    except OSError:
+        _fail("resume_checkpoint_changed")
+    identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    if (
+        total != expected_size
+        or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+    ):
+        _fail("resume_checkpoint_changed")
+
+
+def _snapshot_resume_checkpoint(
+    checkpoint: Path,
+    *,
+    expected_payload_sha256: str,
+    job_root: Path,
+) -> Path:
+    expected_digest = _require_sha256(
+        expected_payload_sha256,
+        field="resume_checkpoint_payload_sha256",
+    )
+    try:
+        root_before = _require_directory_unlinked(
+            checkpoint,
+            code="resume_checkpoint_changed",
+        )
+        paths = sorted(
+            checkpoint.rglob("*"),
+            key=lambda item: item.relative_to(checkpoint).as_posix(),
+        )
+        snapshot_root = Path(
+            tempfile.mkdtemp(
+                prefix=".resume-checkpoint-snapshot-",
+                dir=os.fspath(job_root),
+            )
+        )
+        target = snapshot_root / checkpoint.name
+        target.mkdir()
+    except PeftTrainerError:
+        raise
+    except OSError:
+        _fail("resume_checkpoint_snapshot_failed")
+
+    try:
+        seen_paths: set[str] = set()
+        file_count = 0
+        total_bytes = 0
+        for source in paths:
+            relative = source.relative_to(checkpoint)
+            normalized = relative.as_posix()
+            if normalized in {_CHECKPOINT_MARKER, f".{_CHECKPOINT_MARKER}.tmp"}:
+                continue
+            folded = normalized.casefold()
+            if folded in seen_paths:
+                _fail("resume_checkpoint_snapshot_path_collision")
+            seen_paths.add(folded)
+            try:
+                value = os.lstat(source)
+            except OSError:
+                _fail("resume_checkpoint_changed")
+            if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
+                _fail("resume_checkpoint_snapshot_link_forbidden")
+            destination = target / relative
+            if stat.S_ISDIR(value.st_mode):
+                destination.mkdir(parents=True, exist_ok=True)
+                continue
+            if not stat.S_ISREG(value.st_mode):
+                _fail("resume_checkpoint_snapshot_invalid")
+            file_count += 1
+            total_bytes += value.st_size
+            if file_count > _MAX_CHECKPOINT_FILES or total_bytes > _MAX_CHECKPOINT_BYTES:
+                _fail("resume_checkpoint_snapshot_bounds_exceeded")
+            _copy_checkpoint_snapshot_file(
+                source,
+                destination,
+                expected_size=value.st_size,
+            )
+        if file_count == 0:
+            _fail("resume_checkpoint_snapshot_empty")
+        root_after = _require_directory_unlinked(
+            checkpoint,
+            code="resume_checkpoint_changed",
+        )
+        if (
+            (root_before.st_dev, root_before.st_ino, root_before.st_mtime_ns)
+            != (root_after.st_dev, root_after.st_ino, root_after.st_mtime_ns)
+        ):
+            _fail("resume_checkpoint_changed")
+        if _checkpoint_payload_manifest_sha256(target) != expected_digest:
+            _fail("resume_checkpoint_snapshot_mismatch")
+        if _checkpoint_payload_manifest_sha256(checkpoint) != expected_digest:
+            _fail("resume_checkpoint_changed")
+        return target
+    except PeftTrainerError:
+        shutil.rmtree(snapshot_root, ignore_errors=True)
+        raise
+    except OSError:
+        shutil.rmtree(snapshot_root, ignore_errors=True)
+        _fail("resume_checkpoint_snapshot_failed")
 
 
 class _TokenizedDataset:
@@ -2130,6 +2388,18 @@ def _train_one_step(
     staged_base = _copy_verified_base(config, request, job_root)
     staged_model_dir = _model_directory_snapshot(config, job_root)
     previous_checkpoint = _resume_checkpoint(job_root, request)
+    resume_checkpoint = previous_checkpoint
+    resume_snapshot_root: Path | None = None
+    if previous_checkpoint is not None:
+        resume_checkpoint = _snapshot_resume_checkpoint(
+            previous_checkpoint,
+            expected_payload_sha256=_require_sha256(
+                request.resume_state.get("checkpoint_payload_sha256"),
+                field="resume_checkpoint_payload_sha256",
+            ),
+            job_root=job_root,
+        )
+        resume_snapshot_root = resume_checkpoint.parent
     initial_adapter_dir = (
         _stage_initial_adapter(config, request, job_root)
         if previous_checkpoint is None
@@ -2174,7 +2444,11 @@ def _train_one_step(
             adapter_dir = (
                 initial_adapter_dir
                 if previous_checkpoint is None
-                else previous_checkpoint / "adapter"
+                else (
+                    resume_checkpoint / "adapter"
+                    if resume_checkpoint is not None
+                    else None
+                )
             )
             if adapter_dir is None:
                 _fail("training_adapter_state_missing")
@@ -2248,7 +2522,7 @@ def _train_one_step(
         )
         trainer.train(
             resume_from_checkpoint=(
-                False if previous_checkpoint is None else os.fspath(previous_checkpoint)
+                False if resume_checkpoint is None else os.fspath(resume_checkpoint)
             )
         )
         checkpoint = _checkpoint_dir(job_root, request.step_index + 1)
@@ -2265,6 +2539,8 @@ def _train_one_step(
     finally:
         if "torch" in locals() and hasattr(torch, "cuda") and torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if resume_snapshot_root is not None:
+            shutil.rmtree(resume_snapshot_root, ignore_errors=True)
 
     adapter_file = adapter_dir / _CANDIDATE_FILE
     _validate_serialized_adapter_weights(
@@ -2288,16 +2564,16 @@ def _train_one_step(
         invalid_code="adapter_candidate_invalid",
         non_finite_code="adapter_candidate_non_finite",
     )
+    if hmac.compare_digest(
+        loaded_adapter_tensors_sha256,
+        trained_adapter_tensors_sha256,
+    ):
+        _fail("training_step_no_tensor_mutation")
     previous_adapter_tensors_sha256 = (
         loaded_adapter_tensors_sha256
         if previous_checkpoint is not None or initial_adapter_dir is not None
         else None
     )
-    if previous_adapter_tensors_sha256 is not None and hmac.compare_digest(
-        previous_adapter_tensors_sha256,
-        trained_adapter_tensors_sha256,
-    ):
-        _fail("training_step_no_tensor_mutation")
     checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
     marker_sha256 = _write_checkpoint_marker(
         checkpoint,

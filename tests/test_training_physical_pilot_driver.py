@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -119,16 +118,10 @@ def _payload_v3(tmp_path: Path) -> dict[str, object]:
     payload["progression_proof"] = _progression_payload()
     return payload
 
+
 def _trusted_progression_proof(
-    *,
-    plan: driver.TrainingScalePlan,
-    candidate_sha256: str,
-) -> driver.TrainingScaleProgressionProof:
-    payload = _progression_payload(
-        plan_sha256=plan.plan_sha256,
-        candidate_sha256=candidate_sha256,
-        evaluation_set_sha256=plan.evaluation_set_sha256,
-    )
+    payload: dict[str, object],
+) -> scale.TrainingScaleProgressionProof:
     return scale._build_progression_proof(
         plan_sha256=payload["plan_sha256"],
         tier_index=payload["tier_index"],
@@ -145,28 +138,6 @@ def _trusted_progression_proof(
         comparison_evidence_sha256=payload["comparison_evidence_sha256"],
         evaluation_set_sha256=payload["evaluation_set_sha256"],
     )
-
-
-def _trusted_v3_config(
-    tmp_path: Path,
-    *,
-    plan: driver.TrainingScalePlan,
-    candidate_sha256: str,
-) -> driver.PhysicalPilotConfig:
-    base = driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v2(tmp_path)))
-    return replace(
-        base,
-        job_id="small-job",
-        base_artifact_ref="models/pilot-candidate",
-        candidate_artifact_ref="models/small-candidate",
-        scale_tier_id="small",
-        initial_adapter_path=tmp_path / "promoted.safetensors",
-        progression_proof=_trusted_progression_proof(
-            plan=plan,
-            candidate_sha256=candidate_sha256,
-        ),
-    )
-
 
 def _write_minimal_pe(path: Path) -> None:
     payload = bytearray(132)
@@ -343,14 +314,21 @@ def test_legacy_scale_plan_uses_observed_pilot_bounds(tmp_path: Path) -> None:
     assert plan.tiers[0].max_steps == 2
 
 
-def test_config_v3_rejects_self_authenticated_progression_claim(
+def test_config_v3_parses_progression_claim_without_granting_authority(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(
-        driver.PhysicalPilotDriverError,
-        match="trusted prior-run and comparison authority",
-    ):
-        driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v3(tmp_path)))
+    payload = _payload_v3(tmp_path)
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+    assert config.scale_plan is not None
+    assert config.scale_tier_id == "small"
+    assert config.initial_adapter_path == tmp_path / "promoted.safetensors"
+    assert config.progression_proof_payload == payload["progression_proof"]
+    assert config.progression_proof_payload["tier_index"] == 0
+    assert (
+        config.progression_proof_payload["candidate_artifact_ref"]
+        == config.base_artifact_ref
+    )
 
 
 def test_config_v3_rejects_first_tier_as_progression_target(tmp_path: Path) -> None:
@@ -401,7 +379,7 @@ def test_higher_tier_preflight_binds_plan_package_and_adapter(
         name="test promoted adapter",
     )
     preliminary = driver.PhysicalPilotConfig.from_json(
-        json.dumps(_payload_v2(tmp_path))
+        json.dumps(_payload_v3(tmp_path))
     )
     plan = driver._scale_plan_for_physical_pilot(
         preliminary,
@@ -411,11 +389,13 @@ def test_higher_tier_preflight_binds_plan_package_and_adapter(
         validation_records=2,
         validation_bytes=512,
     )
-    config = _trusted_v3_config(
-        tmp_path,
-        plan=plan,
+    payload = _payload_v3(tmp_path)
+    payload["progression_proof"] = _progression_payload(
+        plan_sha256=plan.plan_sha256,
         candidate_sha256=adapter_sha256,
+        evaluation_set_sha256=plan.evaluation_set_sha256,
     )
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(payload))
     monkeypatch.setattr(
         driver,
         "candidate_adapter_manifest",
@@ -423,8 +403,12 @@ def test_higher_tier_preflight_binds_plan_package_and_adapter(
     )
 
     tier_index, tier = driver._selected_scale_tier(config, plan)
+    claim = config.progression_proof_payload
+    assert claim is not None
+    trusted = _trusted_progression_proof(claim)
     proof = driver._preflight_higher_tier(
         config,
+        trusted_progression_proof=trusted,
         plan=plan,
         tier_index=tier_index,
         initial_adapter_path=initial_adapter,
@@ -433,8 +417,8 @@ def test_higher_tier_preflight_binds_plan_package_and_adapter(
 
     assert tier_index == 1
     assert tier.tier_id == "small"
-    assert proof is not None
-    assert proof.proof_sha256 == config.progression_proof.proof_sha256
+    assert proof is trusted
+    assert proof.proof_sha256 == trusted.proof_sha256
 
 
 def test_higher_tier_preflight_rejects_adapter_package_digest_mismatch(
@@ -453,12 +437,17 @@ def test_higher_tier_preflight_rejects_adapter_package_digest_mismatch(
         validation_records=2,
         validation_bytes=512,
     )
-    config = _trusted_v3_config(
-        tmp_path,
-        plan=plan,
+    payload = _payload_v3(tmp_path)
+    payload["progression_proof"] = _progression_payload(
+        plan_sha256=plan.plan_sha256,
         candidate_sha256="d" * 64,
+        evaluation_set_sha256=plan.evaluation_set_sha256,
     )
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(payload))
     tier_index, _ = driver._selected_scale_tier(config, plan)
+    claim = config.progression_proof_payload
+    assert claim is not None
+    trusted = _trusted_progression_proof(claim)
 
     with pytest.raises(
         driver.PhysicalPilotDriverError,
@@ -466,11 +455,103 @@ def test_higher_tier_preflight_rejects_adapter_package_digest_mismatch(
     ):
         driver._preflight_higher_tier(
             config,
+            trusted_progression_proof=trusted,
             plan=plan,
             tier_index=tier_index,
             initial_adapter_path=initial_adapter,
             material_base_sha256="d" * 64,
         )
+
+
+def test_higher_tier_preflight_rejects_missing_trusted_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v3(tmp_path)))
+    plan = driver._scale_plan_for_physical_pilot(
+        config,
+        evaluation_set_sha256="e" * 64,
+        training_records=3,
+        training_bytes=1024,
+        validation_records=2,
+        validation_bytes=512,
+    )
+    tier_index, _ = driver._selected_scale_tier(config, plan)
+    adapter = tmp_path / "promoted.safetensors"
+    adapter.write_bytes(b"must-not-be-read")
+
+    monkeypatch.setattr(
+        driver,
+        "_stable_file_sha256",
+        lambda *_args, **_kwargs: pytest.fail("adapter read preceded trust gate"),
+    )
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="independently trusted progression authority",
+    ):
+        driver._preflight_higher_tier(
+            config,
+            trusted_progression_proof=None,
+            plan=plan,
+            tier_index=tier_index,
+            initial_adapter_path=adapter,
+            material_base_sha256="b" * 64,
+        )
+
+
+def test_higher_tier_preflight_rejects_claim_trusted_authority_mismatch(
+    tmp_path: Path,
+) -> None:
+    payload = _payload_v3(tmp_path)
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+    plan = driver._scale_plan_for_physical_pilot(
+        config,
+        evaluation_set_sha256="e" * 64,
+        training_records=3,
+        training_bytes=1024,
+        validation_records=2,
+        validation_bytes=512,
+    )
+    tier_index, _ = driver._selected_scale_tier(config, plan)
+    claim = config.progression_proof_payload
+    assert claim is not None
+    trusted_payload = dict(claim)
+    trusted_payload["comparison_evidence_sha256"] = "f" * 64
+    trusted = _trusted_progression_proof(trusted_payload)
+    adapter = tmp_path / "promoted.safetensors"
+    adapter.write_bytes(b"must-not-be-read")
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="does not match trusted progression authority",
+    ):
+        driver._preflight_higher_tier(
+            config,
+            trusted_progression_proof=trusted,
+            plan=plan,
+            tier_index=tier_index,
+            initial_adapter_path=adapter,
+            material_base_sha256="b" * 64,
+        )
+
+
+def test_higher_tier_run_fails_closed_without_trusted_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v3(tmp_path)))
+    monkeypatch.setattr(
+        driver,
+        "_is_windows",
+        lambda: pytest.fail("platform check preceded trust gate"),
+    )
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="independently trusted progression authority",
+    ):
+        driver.run_physical_pilot_from_config(config)
 
 
 def test_stable_file_sha256_rejects_mutation_during_read(
