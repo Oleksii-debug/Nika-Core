@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -220,6 +221,136 @@ class RuntimeResult:
             raise TypeError("error_code must be a RuntimeErrorCode when provided")
         if self.outcome != RuntimeOutcome.FAILED and self.error_code is not None:
             raise ValueError("error_code is only valid for failed outcomes")
+
+
+# Audit records below are authoritative Nika control/recovery events. Runtime adapters may
+# publish provider events, but may not impersonate these coordinator/recovery decisions.
+_NIKA_OWNED_RUNTIME_AUDIT_EVENTS = frozenset(
+    {
+        "runtime.approval_resumed",
+        "runtime.cancel_accepted",
+        "runtime.cancel_not_active",
+        "runtime.cancel_requested",
+        "runtime.cancel_uncertain",
+        "runtime.crash_recovery_started",
+        "runtime.finished",
+        "runtime.finished_after_cancel",
+        "runtime.pause_confirmed",
+        "runtime.pause_not_active",
+        "runtime.pause_not_applied",
+        "runtime.pause_reaffirmed",
+        "runtime.pause_requested",
+        "runtime.pause_uncertain",
+        "runtime.recovery_auto_resume_failed",
+        "runtime.recovery_auto_resume_requested",
+        "runtime.recovery_checkpoint_blocked",
+        "runtime.recovery_claim_acquired",
+        "runtime.recovery_claim_completed",
+        "runtime.recovery_claim_reclaimed",
+        "runtime.recovery_claim_released_before_effect",
+        "runtime.recovery_effect_started",
+        "runtime.recovery_inventory",
+        "runtime.retry_blocked_cancelled",
+        "runtime.retry_blocked_timeout_budget",
+        "runtime.retry_blocked_unsafe_fresh_replay",
+        "runtime.retry_scheduled",
+        "runtime.retry_started",
+        "runtime.saved_approval_resumed",
+        "runtime.saved_resume_started",
+        "runtime.session_bound",
+        "runtime.started",
+    }
+)
+
+
+def _snapshot_json_mapping(
+    value: Mapping[str, Any],
+    *,
+    field_name: str,
+) -> dict[str, Any]:
+    """Copy adapter output into detached JSON-safe Nika-owned values."""
+
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping")
+    copied = dict(value)
+    if any(type(key) is not str for key in copied):
+        raise TypeError(f"{field_name} keys must be exact strings")
+    encoded = json.dumps(copied, ensure_ascii=False, allow_nan=False, sort_keys=True)
+    encoded.encode("utf-8")
+    return json.loads(encoded)
+
+
+def canonical_runtime_result(value: object) -> RuntimeResult:
+    """Snapshot untrusted adapter evidence before it changes Nika durable state."""
+
+    if type(value) is not RuntimeResult:
+        raise TypeError("runtime adapter must return an exact RuntimeResult")
+    try:
+        outcome = object.__getattribute__(value, "outcome")
+        events = object.__getattribute__(value, "events")
+        output = object.__getattribute__(value, "output")
+        resume_token = object.__getattribute__(value, "resume_token")
+        error = object.__getattribute__(value, "error")
+        error_code = object.__getattribute__(value, "error_code")
+    except AttributeError:
+        raise ValueError("runtime adapter result is incomplete") from None
+
+    if type(events) is not tuple:
+        raise TypeError("runtime result events must be a tuple")
+    if not isinstance(output, Mapping):
+        raise TypeError("runtime result output must be a mapping")
+    if resume_token is not None and type(resume_token) is not str:
+        raise TypeError("runtime result resume token must be an exact string")
+    if error is not None and type(error) is not str:
+        raise TypeError("runtime result error must be an exact string")
+    if error_code is not None and type(error_code) is not RuntimeErrorCode:
+        raise TypeError("runtime result error code must be exact")
+    if resume_token is not None:
+        resume_token.encode("utf-8")
+    if error is not None:
+        error.encode("utf-8")
+
+    canonical_output = _snapshot_json_mapping(
+        output,
+        field_name="runtime result output",
+    )
+    canonical_events: list[RuntimeEvent] = []
+    for event in events:
+        if type(event) is not RuntimeEvent:
+            raise TypeError("runtime result contains an invalid event")
+        sequence = object.__getattribute__(event, "sequence")
+        event_type = object.__getattribute__(event, "event_type")
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError("runtime event sequence must be a non-negative integer")
+        if type(event_type) is not str or not event_type.strip():
+            raise ValueError("runtime event type must be an exact nonempty string")
+        event_type.encode("utf-8")
+        if event_type in _NIKA_OWNED_RUNTIME_AUDIT_EVENTS:
+            raise ValueError("runtime adapter cannot impersonate Nika-owned audit events")
+        event_payload = _snapshot_json_mapping(
+            object.__getattribute__(event, "payload"),
+            field_name="runtime event payload",
+        )
+        if "sequence" in event_payload:
+            raise ValueError(
+                "runtime event payload must not override the authoritative sequence"
+            )
+        canonical_events.append(
+            RuntimeEvent(
+                sequence=sequence,
+                event_type=event_type,
+                payload=event_payload,
+            )
+        )
+
+    return RuntimeResult(
+        outcome=outcome,
+        events=tuple(canonical_events),
+        output=canonical_output,
+        resume_token=resume_token,
+        error=error,
+        error_code=error_code,
+    )
 
 
 @runtime_checkable
