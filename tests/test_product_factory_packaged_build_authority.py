@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -350,6 +351,40 @@ def test_packaged_authority_reaches_durable_pf5_prepared_state(
     assert prepared.state is BuildExecutionState.PREPARED
     assert prepared.node_id == NODE_ID
     assert host.checkpoints.latest().snapshot.sequence == 2
+
+
+def test_repeat_bind_rejects_resource_scope_drift_for_same_work(
+    tmp_path: Path,
+) -> None:
+    _store, _startup_value, _node_value, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    bound, snapshot = runtime.authorities.bound_snapshot(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+    )
+    drifted = replace(
+        spec,
+        request=replace(
+            spec.request,
+            resources=ResourceEnvelope(2, 2048, 4096),
+        ),
+    )
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="does not match the packaged build authority snapshot",
+    ):
+        runtime.authorities.bind(
+            spec=drifted,
+            component_id=bound.component_id,
+            candidate_work_id=bound.candidate_work_id,
+            review_fingerprint=bound.review_fingerprint,
+            spec_version=bound.spec_version,
+            row_version=bound.row_version,
+            graph_digest=bound.graph_digest,
+            authority=snapshot,
+        )
 
 
 def test_template_drift_invalidates_already_bound_work(
