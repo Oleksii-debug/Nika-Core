@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import sys
 from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager
@@ -194,6 +195,134 @@ def _startup_lock(target: Path) -> Iterator[None]:
         raise LegacyDatabaseConflict(_MESSAGE) from None
 
 
+def _is_indirect(info: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(file_attributes & reparse_flag)
+
+
+def _snapshot_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _open_readonly_snapshot(path: Path) -> int:
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(getattr(os, "O_NONBLOCK", 0))
+    return os.open(path, flags)
+
+
+def _read_pending_record(path: Path) -> object | None:
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if _is_indirect(before) or not stat.S_ISREG(before.st_mode):
+        raise LegacyDatabaseConflict(_MESSAGE)
+    if before.st_size > _MAX_PENDING_BYTES:
+        raise LegacyDatabaseConflict(_MESSAGE)
+
+    try:
+        fd = _open_readonly_snapshot(path)
+    except OSError:
+        raise LegacyDatabaseConflict(_MESSAGE) from None
+    try:
+        opened = os.fstat(fd)
+        try:
+            current = os.lstat(path)
+        except OSError:
+            raise LegacyDatabaseConflict(_MESSAGE) from None
+        if (
+            _is_indirect(opened)
+            or _is_indirect(current)
+            or not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or _snapshot_identity(opened) != _snapshot_identity(before)
+            or _snapshot_identity(current) != _snapshot_identity(opened)
+        ):
+            raise LegacyDatabaseConflict(_MESSAGE)
+
+        chunks: list[bytes] = []
+        remaining = _MAX_PENDING_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > _MAX_PENDING_BYTES:
+            raise LegacyDatabaseConflict(_MESSAGE)
+
+        after = os.fstat(fd)
+        try:
+            final_path = os.lstat(path)
+        except OSError:
+            raise LegacyDatabaseConflict(_MESSAGE) from None
+        if (
+            _is_indirect(after)
+            or _is_indirect(final_path)
+            or _snapshot_identity(after) != _snapshot_identity(opened)
+            or _snapshot_identity(final_path) != _snapshot_identity(after)
+        ):
+            raise LegacyDatabaseConflict(_MESSAGE)
+    finally:
+        os.close(fd)
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        raise LegacyDatabaseConflict(_MESSAGE) from None
+
+
 def _publish_pending(path: Path, record: dict[str, object]) -> None:
     temporary = path.with_name(path.name + f".{uuid4().hex}.tmp")
     try:
@@ -247,11 +376,8 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
     manager = SQLiteRecoveryManager(SQLiteStore(target))
     manager.recover_interrupted_restore()
     pending_path = target.with_name(f".{target.name}.legacy-adoption.json")
-    pending = None
-    if pending_path.exists():
-        if pending_path.is_symlink() or pending_path.stat().st_size > 65536:
-            raise LegacyDatabaseConflict(_MESSAGE)
-        pending = json.loads(pending_path.read_text(encoding="utf-8"))
+    pending = _read_pending_record(pending_path)
+    if pending is not None:
         if (
             not isinstance(pending, dict)
             or set(pending)
