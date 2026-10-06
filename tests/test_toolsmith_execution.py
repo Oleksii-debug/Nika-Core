@@ -147,6 +147,100 @@ def test_windows_executable_launch_guard_denies_replace_until_release(
     assert executable.read_bytes() == b"replacement executable bytes"
 
 
+def test_typed_runner_rejects_final_executable_identity_change(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canonical = pathlib.Path(sys.executable).resolve(strict=True)
+    replacement = canonical.with_name(canonical.name + ".replacement")
+    original_resolve = execution_module._resolve_pinned_executable
+    calls = 0
+
+    def changing_resolve(
+        executable: pathlib.Path,
+        arguments: tuple[str, ...],
+    ) -> pathlib.Path:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return original_resolve(executable, arguments)
+        return replacement
+
+    monkeypatch.setattr(
+        execution_module,
+        "_resolve_pinned_executable",
+        changing_resolve,
+    )
+
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="changed before process launch",
+    ):
+        run_typed_process(
+            (sys.executable, "-c", "print('must not run')"),
+            process_policy=_python_process_policy(),
+            resource_budget=ResourceBudget(
+                timeout_seconds=5,
+                max_output_bytes=4096,
+                max_changed_files=1,
+            ),
+            cwd=tmp_path,
+            environment=sterile_git_environment(
+                {"PATH": os.environ.get("PATH", "")}
+            ),
+        )
+
+    assert calls == 2
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows CreateProcess boundary only")
+def test_windows_typed_runner_holds_executable_during_popen(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comspec = os.environ.get("COMSPEC")
+    if not comspec:
+        pytest.skip("COMSPEC unavailable")
+    source = pathlib.Path(comspec).resolve(strict=True)
+    executable = tmp_path / "runner.exe"
+    replacement = tmp_path / "replacement.exe"
+    shutil.copy2(source, executable)
+    replacement.write_bytes(b"replacement executable bytes")
+    original_popen = execution_module.subprocess.Popen
+    attempted = False
+
+    def probing_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        nonlocal attempted
+        attempted = True
+        with pytest.raises(OSError):
+            os.replace(replacement, executable)
+        return original_popen(*args, **kwargs)
+
+    monkeypatch.setattr(execution_module.subprocess, "Popen", probing_popen)
+
+    result = run_typed_process(
+        (str(executable), "/d", "/c", "echo guarded"),
+        process_policy=ProcessPolicy((str(executable),)),
+        resource_budget=ResourceBudget(
+            timeout_seconds=5,
+            max_output_bytes=4096,
+            max_changed_files=1,
+        ),
+        cwd=tmp_path,
+        environment=sterile_git_environment(
+            {"PATH": os.environ.get("PATH", "")}
+        ),
+    )
+
+    assert attempted is True
+    assert result.returncode == 0
+    assert "guarded" in result.stdout.casefold()
+    assert replacement.exists()
+
+    os.replace(replacement, executable)
+    assert executable.read_bytes() == b"replacement executable bytes"
+
+
 def test_typed_runner_uses_final_executable_launch_guard(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
