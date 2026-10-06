@@ -845,6 +845,39 @@ class PackagedTrustedExecutionAuthorityPort:
 
 
 @dataclass(slots=True)
+class PackagedRecoveryExecutionAuthorityPort:
+    """Resolve the exact bound grant only for durable post-effect recovery."""
+
+    authorities: PackagedBuildAuthorityStore
+
+    def resolve(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        work_id: str,
+    ) -> ProjectExecutionAuthority:
+        _bound, snapshot = self.authorities.bound_historical_snapshot(
+            project_id=project_id,
+            repository_id=repository_id,
+            work_id=work_id,
+        )
+        template = snapshot.template
+        return ProjectExecutionAuthority(
+            project_id=project_id,
+            repository_id=repository_id,
+            work_id=work_id,
+            permissions=frozenset({"build_release"}),
+            allowed_node_ids=(template.node_id,),
+            allowed_workspace_paths=(template.workspace_relpath,),
+            network_scopes=(),
+            credential_refs=(),
+            commands=(ApprovedBuildCommand(template.command_id, template.argv),),
+            evidence_refs=(_evidence_ref(snapshot),),
+        )
+
+
+@dataclass(slots=True)
 class PackagedTrustedBuildOutputPolicyPort:
     authorities: PackagedBuildAuthorityStore
 
@@ -883,6 +916,7 @@ class PackagedBuildAuthorityRuntime:
     authorities: PackagedBuildAuthorityStore
     reviewed_policies: PackagedReviewedBuildExecutionPolicyPort = field(init=False)
     trusted_execution: PackagedTrustedExecutionAuthorityPort = field(init=False)
+    recovery_execution: PackagedRecoveryExecutionAuthorityPort = field(init=False)
     output_policies: PackagedTrustedBuildOutputPolicyPort = field(init=False)
 
     def __post_init__(self) -> None:
@@ -892,6 +926,9 @@ class PackagedBuildAuthorityRuntime:
             self.authorities
         )
         self.trusted_execution = PackagedTrustedExecutionAuthorityPort(
+            self.authorities
+        )
+        self.recovery_execution = PackagedRecoveryExecutionAuthorityPort(
             self.authorities
         )
         self.output_policies = PackagedTrustedBuildOutputPolicyPort(
