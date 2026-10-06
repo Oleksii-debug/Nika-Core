@@ -589,6 +589,7 @@ def test_prepare_tier1_binds_promoted_candidate_as_logical_base(
         )
     )
     assert tier1["schema_version"] == 3
+    assert tier1["job_id"] == proof._TIER1_JOB_ID
     assert tier1["base_artifact_ref"] == report.candidate_artifact_ref
     assert tier1["frozen_package_sha256"] == tier1_package.manifest_sha256
     assert tier1["scale_tier_id"] == "scale-1"
@@ -597,6 +598,95 @@ def test_prepare_tier1_binds_promoted_candidate_as_logical_base(
     assert tier1["candidate_artifact_ref"] == (
         "models/nika-physical-scale-tier1-adapter"
     )
+    assert tier1["candidate_descriptor"] == proof._tier1_candidate_descriptor()
+
+
+def _exact_transition_fixture(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, object], object, SimpleNamespace, Path]:
+    root = tmp_path.resolve()
+    output_root = root / "tier1-run"
+    output_root.mkdir()
+    adapter = root / "tier0-adapter.safetensors"
+    adapter.write_bytes(b"tier0")
+    tier0 = SimpleNamespace(candidate_artifact_ref="models/tier0")
+    claim = {"proof": "canonical"}
+    progression = SimpleNamespace(canonical_payload=lambda: claim)
+    monkeypatch.setattr(
+        proof,
+        "candidate_artifact_path",
+        lambda _root, _ref: adapter,
+    )
+    config: dict[str, object] = {
+        "schema_version": 3,
+        "job_id": proof._TIER1_JOB_ID,
+        "base_artifact_ref": tier0.candidate_artifact_ref,
+        "output_root": str(output_root.resolve()),
+        "candidate_artifact_ref": proof._TIER1_CANDIDATE_REF,
+        "candidate_descriptor": proof._tier1_candidate_descriptor(),
+        "scale_tier_id": proof._TIER1_ID,
+        "progression_proof": claim,
+        "initial_adapter_path": str(adapter.resolve()),
+    }
+    return config, progression, tier0, adapter
+
+
+def test_tier1_transition_requires_exact_proof_values(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, progression, tier0, adapter = _exact_transition_fixture(
+        proof,
+        tmp_path,
+        monkeypatch,
+    )
+
+    observed = proof._require_tier1_transition_values(
+        tmp_path.resolve(),
+        config,
+        tier0=tier0,
+        proof=progression,
+    )
+
+    assert observed == adapter.resolve()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("job_id", "other-job"),
+        ("candidate_artifact_ref", "models/other"),
+        ("scale_tier_id", "other-tier"),
+        ("candidate_descriptor", {"model_id": "other"}),
+    ],
+)
+def test_tier1_transition_rejects_value_drift(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    config, progression, tier0, _adapter = _exact_transition_fixture(
+        proof,
+        tmp_path,
+        monkeypatch,
+    )
+    config[field] = value
+
+    with pytest.raises(
+        proof.ProofError,
+        match="does not encode the exact scale transition",
+    ):
+        proof._require_tier1_transition_values(
+            tmp_path.resolve(),
+            config,
+            tier0=tier0,
+            proof=progression,
+        )
 
 
 def test_configure_promotion_uses_explicit_non_regression_policy(
