@@ -456,14 +456,13 @@ class PackagedVoiceModelSetup:
             restart_required = True
 
         with self._lock:
-            if generation != self._generation:
-                return
-            self._active = False
-            self._cancelling = False
-            self._cancel_event = None
-            self._restart_required = restart_required
-            self._last_status = terminal_status
-            self._last_message = terminal_message
+            if generation == self._generation:
+                self._active = False
+                self._cancelling = False
+                self._cancel_event = None
+                self._restart_required = restart_required
+                self._last_status = terminal_status
+                self._last_message = terminal_message
 
         if cancellation is not None:
             raise cancellation
