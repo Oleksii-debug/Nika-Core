@@ -300,3 +300,34 @@ def test_require_repair_request_never_upgrades_nonfailed_work(tmp_path: Path) ->
         match="not an exact durable REPAIR_REQUIRED",
     ):
         service.require_repair_request(project.project_id, "core")
+
+
+def test_execution_plan_rejects_digest_length_as_repository_base_sha(
+    tmp_path: Path,
+) -> None:
+    (
+        _store,
+        _repository,
+        _tasks,
+        _service,
+        project,
+        graph,
+        _plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+
+    with pytest.raises(
+        PackagedProductFactoryPreparationError,
+        match="base SHA is invalid",
+    ):
+        PackagedProductFactoryExecutionPlan(
+            project_id=project.project_id,
+            expected_spec_version=project.spec_version,
+            expected_row_version=project.row_version,
+            graph=graph,
+            graph_version=1,
+            base_shas={"repo-core": "a" * 64},
+            component_goals={"core": "Implement the exact accepted ProductProject work"},
+            permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
+        )
