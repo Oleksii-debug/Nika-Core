@@ -518,12 +518,29 @@ def test_prepare_tier1_binds_promoted_candidate_as_logical_base(
         candidate_artifact_ref="models/tier0-adapter",
         candidate_sha256=candidate_sha256,
         candidate_byte_count=candidate.stat().st_size,
+        evidence_sha256=_sha(b"tier0-pilot-evidence"),
+        execution_plan_sha256=_sha(b"tier0-execution-plan"),
+    )
+    comparison_sha256 = _sha(b"tier0-comparison")
+    (tmp_path / "physical-evaluation.json").write_text(
+        json.dumps(
+            {
+                "experiment_id": proof._EXPERIMENT_ID,
+                "policy": proof._evaluation_policy(minimum_improvement=0.0),
+            }
+        ),
+        encoding="utf-8",
     )
     (tier0_root / "physical-old-new-evaluation-report.json").write_text(
         json.dumps(
             {
+                "requested_experiment_id": proof._EXPERIMENT_ID,
                 "experiment_status": "promoted",
                 "selected_candidate_id": report.candidate_artifact_ref,
+                "previous_champion_id": tier0_config["base_artifact_ref"],
+                "physical_pilot_evidence_sha256": report.evidence_sha256,
+                "evaluation_set_sha256": package.evaluation_set_sha256,
+                "comparison_evidence_sha256": comparison_sha256,
             }
         ),
         encoding="utf-8",
@@ -533,11 +550,17 @@ def test_prepare_tier1_binds_promoted_candidate_as_logical_base(
         "tier_index": 0,
         "candidate_artifact_ref": report.candidate_artifact_ref,
         "candidate_sha256": report.candidate_sha256,
+        "execution_plan_sha256": report.execution_plan_sha256,
+        "comparison_evidence_sha256": comparison_sha256,
+        "evaluation_set_sha256": package.evaluation_set_sha256,
     }
     progression = SimpleNamespace(
         tier_index=0,
         candidate_artifact_ref=report.candidate_artifact_ref,
         candidate_sha256=report.candidate_sha256,
+        execution_plan_sha256=report.execution_plan_sha256,
+        comparison_evidence_sha256=comparison_sha256,
+        evaluation_set_sha256=package.evaluation_set_sha256,
         canonical_payload=lambda: claim,
     )
     monkeypatch.setattr(proof, "_pilot_report", lambda _root: report)
@@ -633,7 +656,13 @@ def test_configure_promotion_rejects_noncanonical_policy(
         "minimum_improvement": 0.000001,
         "minimum_replays": 1,
         "primary_higher_is_better": True,
-        "guardrails": [],
+        "guardrails": [
+            {
+                "metric": "model_task_pass",
+                "higher_is_better": True,
+                "max_regression": 1.0,
+            }
+        ],
     }
     policy.update(policy_patch)
     (tmp_path / "physical-evaluation.json").write_text(
@@ -808,5 +837,6 @@ def test_trusted_progression_discovery_rejects_duplicate_durable_claims(
         proof._trusted_progression(
             root,
             workspace_id="physical-proof-workspace",
+            job_id="pilot-job",
         )
 
