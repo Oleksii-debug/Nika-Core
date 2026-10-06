@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.learning_cognition import (
     CognitionCandidate,
     CognitionCandidateKind,
@@ -17,9 +19,12 @@ from nika_core.learning_comparison import (
     MemoryRelation,
 )
 from nika_core.learning_composition import (
+    build_learning_semantic_update_router,
     cognition_candidate_from_comparisons,
     cognition_evidence_from_comparison,
 )
+from nika_core.learning_semantic_update import LearningSemanticUpdateRouter
+from nika_core.memory.service import MemoryService
 
 _COMPARATOR = "a" * 64
 _POLICY = "b" * 64
@@ -331,3 +336,42 @@ def test_reportable_candidate_excludes_raw_scope_comparison_and_statement() -> N
     assert statement not in serialized
     assert "CANARY-LOOP-B-42" not in serialized
     assert comparison.comparison_sha256 in serialized
+
+def test_semantic_router_factory_reuses_canonical_memory_without_new_schema(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "semantic-composition.db")
+    store.initialize()
+    with store.connection() as conn:
+        before = tuple(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            ).fetchall()
+        )
+
+    router = build_learning_semantic_update_router(MemoryService(store))
+
+    with store.connection() as conn:
+        after = tuple(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            ).fetchall()
+        )
+    assert type(router) is LearningSemanticUpdateRouter
+    assert after == before
+
+
+def test_semantic_router_factory_rejects_noncanonical_memory_service(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "semantic-composition-type.db")
+    store.initialize()
+
+    class DerivedMemoryService(MemoryService):
+        pass
+
+    with pytest.raises(TypeError, match="canonical MemoryService"):
+        build_learning_semantic_update_router(DerivedMemoryService(store))
+
