@@ -511,6 +511,71 @@ def test_stale_running_project_version_blocks_recovery_effect(
     assert worker.recover_calls == 0
 
 
+def test_stale_project_version_blocks_existing_uncertain_recovery_claim(
+    tmp_path: Path,
+) -> None:
+    (
+        _store,
+        repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    prepared = service.prepare(plan)
+    worker = service._host.worker
+    assert isinstance(worker, NeverDispatchWorker)
+
+    outcomes = asyncio.run(
+        service._host.dispatch_ready(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            max_parallel=1,
+            max_count=1,
+        )
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].disposition.value == "uncertain"
+    assert outcomes[0].operation_status is not None
+    assert outcomes[0].operation_status.value == "uncertain"
+    assert prepared.state.coordinator.snapshot().records[0].state.value == "running"
+    assert worker.dispatch_calls == 1
+    assert worker.inspect_calls == 0
+    assert worker.recover_calls == 0
+
+    latest = repository.get(project.project_id)
+    repository.update_spec(
+        latest.project_id,
+        replace(
+            latest.spec,
+            desired_outcome="Concurrent revision before existing recovery claim",
+        ),
+        expected_row_version=latest.row_version,
+        change_reason="regression: revise before existing recovery claim",
+    )
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        asyncio.run(
+            service._host.recover_running(
+                host_task_id=prepared.host_task_id,
+                state=prepared.state,
+                max_parallel=1,
+            )
+        )
+
+    assert prepared.state.coordinator.snapshot().records[0].state.value == "running"
+    assert worker.dispatch_calls == 1
+    assert worker.inspect_calls == 0
+    assert worker.recover_calls == 0
+
+
 def test_execution_plan_snapshots_mutable_graph_and_mapping_inputs(tmp_path: Path) -> None:
     (
         _store,
