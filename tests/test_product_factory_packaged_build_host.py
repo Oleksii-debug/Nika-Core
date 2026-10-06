@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +33,10 @@ from nika_core.product_factory_deployment import (
     ResourceEnvelope,
 )
 from nika_core.product_factory_local_coding import ContainedLocalCodingPolicy
+from nika_core.product_factory_local_repository_binding import (
+    ProductFactoryLocalRepositoryBindings,
+)
+from nika_core.product_factory_orchestration import RepositoryRef
 from nika_core.product_factory_packaged_build_host import (
     PackagedLocalBuildHostError,
     build_packaged_local_durable_build_host,
@@ -37,6 +44,7 @@ from nika_core.product_factory_packaged_build_host import (
 from nika_core.product_factory_packaged_local_startup import (
     PackagedLocalProductFactoryStartup,
 )
+from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
 from nika_core.toolsmith.contracts import AllowedPathPolicy, ResourceBudget
 
 PROJECT_ID = "project-pf5-packaged"
@@ -71,6 +79,105 @@ def _path_identity() -> RepositoryPathIdentity:
         RepositoryPathIdentity.CASE_INSENSITIVE
         if os.name == "nt"
         else RepositoryPathIdentity.CASE_SENSITIVE
+    )
+
+
+def _git() -> Path:
+    value = shutil.which("git")
+    if value is None:
+        pytest.skip("git is required for the packaged PF5 composition proof")
+    return Path(value).resolve()
+
+
+def _python() -> Path:
+    return Path(sys.executable).resolve()
+
+
+def _real_repository(tmp_path: Path) -> tuple[Path, str]:
+    root = tmp_path / "real source repo"
+    output = root / "products" / "build"
+    output.mkdir(parents=True)
+    (output / "input.txt").write_text("source\n", encoding="utf-8")
+    git = str(_git())
+    for command in (
+        (git, "-C", str(root), "init"),
+        (git, "-C", str(root), "config", "user.email", "tests@example.invalid"),
+        (git, "-C", str(root), "config", "user.name", "Nika Tests"),
+        (git, "-C", str(root), "add", "."),
+        (git, "-C", str(root), "commit", "-m", "fixture"),
+    ):
+        subprocess.run(
+            command,
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    source_sha = subprocess.run(
+        (git, "-C", str(root), "rev-parse", "HEAD"),
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()
+    return root, source_sha
+
+
+def _real_build_command() -> tuple[str, ...]:
+    return (
+        str(_python()),
+        "-c",
+        (
+            "from pathlib import Path; "
+            "Path('artifact.bin').write_bytes(b'nika-packaged-build')"
+        ),
+    )
+
+
+def _real_startup(tmp_path: Path) -> PackagedLocalProductFactoryStartup:
+    workspace = tmp_path / "PF5 real workspaces"
+    workspace.mkdir()
+    return PackagedLocalProductFactoryStartup(
+        workspace_parent=workspace.resolve(),
+        policy=ContainedLocalCodingPolicy(
+            allowed_executables=(str(_python()),),
+            resource_budget=ResourceBudget(
+                timeout_seconds=60,
+                max_output_bytes=1024 * 1024,
+                max_changed_files=8,
+            ),
+            lease_seconds=120,
+        ),
+        git_executable=_git(),
+    )
+
+
+def _bind_real_repository(store: SQLiteStore, root: Path) -> None:
+    locator = "https://example.invalid/nika-product.git"
+    repository = RepositoryRef(
+        REPOSITORY_ID,
+        "git",
+        locator,
+        "main",
+        case_sensitive_paths=os.name != "nt",
+    )
+    ProductProjectRepository(store).create(
+        project_id=PROJECT_ID,
+        name="PF5 packaged composition proof",
+        spec=ProductProjectSpec(
+            goal="Build the exact bound source",
+            desired_outcome="Produce one verified build artifact",
+            repository_refs=(locator,),
+        ),
+        idempotency_key="create-pf5-packaged-proof",
+    )
+    ProductFactoryLocalRepositoryBindings(store).bind(
+        project_id=PROJECT_ID,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
     )
 
 
@@ -123,6 +230,7 @@ def _authority(
     *,
     node_id: str = NODE_ID,
     evidence_ref: str = "authority://pf5/packaged-local",
+    command: tuple[str, ...] = ("python", "-m", "build"),
 ) -> Authority:
     return Authority(
         ProjectExecutionAuthority(
@@ -137,7 +245,7 @@ def _authority(
             (
                 ApprovedBuildCommand(
                     "build",
-                    ("python", "-m", "build"),
+                    command,
                 ),
             ),
             (evidence_ref,),
@@ -158,7 +266,11 @@ def _policy(*, node_work_id: str = WORK_ID) -> Policies:
     )
 
 
-def _spec(*, node_id: str = NODE_ID) -> BuildExecutionSpec:
+def _spec(
+    *,
+    node_id: str = NODE_ID,
+    source_sha: str = SOURCE_SHA,
+) -> BuildExecutionSpec:
     return BuildExecutionSpec(
         ExecutionRequest(
             PROJECT_ID,
@@ -168,7 +280,7 @@ def _spec(*, node_id: str = NODE_ID) -> BuildExecutionSpec:
             frozenset({"python"}),
             ResourceEnvelope(1, 1024, 2048),
         ),
-        SOURCE_SHA,
+        source_sha,
         BuildExecutionScopeRequest(
             REPOSITORY_ID,
             "products/build",
@@ -234,6 +346,25 @@ def test_composition_uses_one_canonical_registry_coordinator_and_local_node(tmp_
     assert host.node_port is host.file_evidence_port
 
 
+def test_composition_snapshots_startup_authority_against_caller_mutation(
+    tmp_path,
+) -> None:
+    host, _store, _task_id, startup, _authority_value, _policies = _host(tmp_path)
+    original_workspace = startup.workspace_parent
+    object.__setattr__(
+        startup,
+        "workspace_parent",
+        (tmp_path / "caller-mutated-missing-workspace").resolve(),
+    )
+    host.submit(_spec())
+
+    prepared = host.prepare(WORK_ID)
+
+    assert prepared.state is BuildExecutionState.PREPARED
+    assert host.node_port.startup is not startup
+    assert host.node_port.startup.workspace_parent == original_workspace
+
+
 def test_fresh_submit_and_prepare_are_durable_before_any_node_effect(tmp_path) -> None:
     host, _store, _task_id, _startup_value, _authority_value, _policies = _host(
         tmp_path
@@ -245,6 +376,72 @@ def test_fresh_submit_and_prepare_are_durable_before_any_node_effect(tmp_path) -
     assert submitted.state is BuildExecutionState.PENDING
     assert prepared.state is BuildExecutionState.PREPARED
     assert host.checkpoints.latest().snapshot.sequence == 2
+
+
+def test_packaged_composition_runs_real_bound_build_and_restores_terminal_state(
+    tmp_path,
+) -> None:
+    root, source_sha = _real_repository(tmp_path)
+    store, task_id = _store_and_task(tmp_path)
+    _bind_real_repository(store, root)
+    startup = _real_startup(tmp_path)
+    authority = _authority(command=_real_build_command())
+    policies = _policy()
+    host = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task_id,
+        project_id=PROJECT_ID,
+        node=_node(),
+        startup=startup,
+        trusted_authority=authority,
+        output_policies=policies,
+    )
+
+    host.submit(_spec(source_sha=source_sha))
+    prepared = host.prepare(WORK_ID)
+    dispatch = host.begin_dispatch(WORK_ID)
+    completed = host.execute(WORK_ID)
+
+    assert prepared.state is BuildExecutionState.PREPARED
+    assert dispatch.source_sha == source_sha
+    assert completed.state is BuildExecutionState.SUCCEEDED
+    assert completed.evidence is not None
+    assert completed.evidence.release_sha == source_sha
+    assert completed.evidence.succeeded is True
+    snapshot = host.snapshot()
+    assert len(snapshot.file_evidence) == 1
+    assert [item.path for item in snapshot.file_evidence[0].changed_files] == [
+        "products/build/artifact.bin"
+    ]
+    assert (root / "products" / "build" / "artifact.bin").exists() is False
+    status = subprocess.run(
+        (str(_git()), "-C", str(root), "status", "--porcelain"),
+        check=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout
+    assert status == ""
+    terminal_sequence = host.checkpoints.latest().snapshot.sequence
+    assert terminal_sequence >= 5
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    restarted = build_packaged_local_durable_build_host(
+        restarted_store,
+        host_task_id=task_id,
+        project_id=PROJECT_ID,
+        node=_node(),
+        startup=startup,
+        trusted_authority=authority,
+        output_policies=policies,
+    )
+    restored = restarted.snapshot()
+    assert restored.coordinator.records[0].state is BuildExecutionState.SUCCEEDED
+    assert restored.file_evidence == snapshot.file_evidence
+    assert restarted.execute(WORK_ID).state is BuildExecutionState.SUCCEEDED
+    assert restarted.checkpoints.latest().snapshot.sequence == terminal_sequence
 
 
 def test_restart_restores_existing_pf5_state_before_returning_usable_host(tmp_path) -> None:
@@ -314,6 +511,50 @@ def test_restart_rejects_trusted_execution_authority_drift(tmp_path) -> None:
             trusted_authority=_authority(evidence_ref="authority://pf5/drifted"),
             output_policies=policies,
         )
+
+
+def test_missing_pinned_build_executable_blocks_before_dispatch(tmp_path) -> None:
+    store, task_id = _store_and_task(tmp_path)
+    workspace = tmp_path / "PF5 pinned executable workspaces"
+    workspace.mkdir()
+    git = tmp_path / ("git-ready.exe" if os.name == "nt" else "git-ready")
+    build = tmp_path / ("builder.exe" if os.name == "nt" else "builder")
+    git.write_bytes(b"git-placeholder")
+    build.write_bytes(b"builder-placeholder")
+    if os.name != "nt":
+        git.chmod(0o755)
+        build.chmod(0o755)
+    startup = PackagedLocalProductFactoryStartup(
+        workspace_parent=workspace.resolve(),
+        policy=ContainedLocalCodingPolicy(
+            allowed_executables=(str(build.resolve()),),
+            resource_budget=ResourceBudget(
+                timeout_seconds=30,
+                max_output_bytes=100_000,
+                max_changed_files=8,
+            ),
+            lease_seconds=120,
+        ),
+        git_executable=git.resolve(),
+    )
+    host = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task_id,
+        project_id=PROJECT_ID,
+        node=_node(),
+        startup=startup,
+        trusted_authority=_authority(),
+        output_policies=_policy(),
+    )
+    build.unlink()
+    host.submit(_spec())
+
+    record = host.prepare(WORK_ID)
+
+    assert record.state is BuildExecutionState.WAITING_FOR_NODE
+    assert record.dispatch is None
+    assert record.evidence is None
+    assert host.checkpoints.latest().snapshot.sequence == 2
 
 
 def test_missing_git_marks_local_node_unavailable_without_effect(tmp_path) -> None:
