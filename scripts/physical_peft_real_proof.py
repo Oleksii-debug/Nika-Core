@@ -692,10 +692,9 @@ def verify(root: Path) -> None:
         "trained_adapter_tensors_sha256": report.trained_adapter_tensors_sha256,
         "tokenization_sha256": tokenization_sha256,
     }
-    (evidence_dir / "physical-proof-summary.json").write_text(
-        _canonical_json(summary) + "\n",
-        encoding="utf-8",
-        newline="",
+    _write_new_file(
+        evidence_dir / "physical-proof-summary.json",
+        (_canonical_json(summary) + "\n").encode("utf-8"),
     )
     print(report.evidence_sha256)
 
