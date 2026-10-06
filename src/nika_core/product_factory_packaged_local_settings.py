@@ -218,6 +218,7 @@ class PackagedLocalProductFactorySettings:
             "invalid",
         }:
             raise ValueError("runtime_status is invalid")
+        revision = 0
         try:
             with self._store.connection() as conn:
                 row = conn.execute(
@@ -245,7 +246,7 @@ class PackagedLocalProductFactorySettings:
         except (PackagedLocalProductFactorySettingsError, sqlite3.Error):
             return {
                 "status": "invalid",
-                "revision": 0,
+                "revision": revision,
                 "configured": False,
                 "config_json": None,
                 "environment_override": environment_override,
