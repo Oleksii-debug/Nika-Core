@@ -61,6 +61,10 @@ _SECRET_CONTENT_SUFFIXES = frozenset(
 )
 _SECRET_SCAN_CHUNK_BYTES = 64 * 1024
 _SECRET_SCAN_OVERLAP_BYTES = 8 * 1024
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
 _PREHUMAN_EVIDENCE_SCHEMA_VERSION = 4
 _PREHUMAN_REQUIRED_TRUE_FIELDS = (
     "release_manifest_source_sha_bound",
@@ -582,10 +586,55 @@ def _release_file_snapshot_is_stable(
 
 
 def _open_release_file_for_snapshot(path: Path) -> Any:
-    flags = os.O_RDONLY
-    for flag_name in ("O_BINARY", "O_CLOEXEC", "O_NOINHERIT", "O_NONBLOCK"):
-        flags |= getattr(os, flag_name, 0)
-    descriptor = os.open(path, flags)
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows release snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+
+        try:
+            descriptor = msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+    else:
+        flags = os.O_RDONLY
+        for flag_name in ("O_BINARY", "O_CLOEXEC", "O_NOINHERIT", "O_NONBLOCK"):
+            flags |= getattr(os, flag_name, 0)
+        descriptor = os.open(path, flags)
+
     try:
         return os.fdopen(descriptor, "rb", closefd=True)
     except (OSError, ValueError):
