@@ -8,7 +8,7 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
-from nika_core.product_factory_coordinator import WorkerResultEnvelope
+from nika_core.product_factory_coordinator import ReviewDecision, WorkerResultEnvelope
 from nika_core.product_factory_multi_repository import (
     MultiRepositoryExecutionError,
     MultiRepositoryProductFactoryHost,
@@ -35,7 +35,13 @@ from nika_core.product_factory_packaged_preparation import (
     product_factory_host_task_identity,
 )
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
-from nika_core.toolsmith.contracts import CodingResult, RecoveryState, TestEvidence
+from nika_core.toolsmith.contracts import (
+    CodingResult,
+    RecoveryState,
+    TestEvidence,
+    WorkerFailure,
+    WorkerFailureKind,
+)
 
 
 class AllowReviewAuthority:
@@ -111,6 +117,7 @@ class VersionAdvancingResultWorker:
                     for command in request.acceptance_commands
                 ),
             ),
+            producer_actor_id="worker-actor",
         )
 
     async def dispatch(self, request):
@@ -128,6 +135,37 @@ class VersionAdvancingResultWorker:
         if self.advance_on == "recover":
             self._advance_project()
         return self._result(request)
+
+
+class FailureResultWorker:
+    def __init__(self) -> None:
+        self.dispatch_calls = 0
+
+    async def dispatch(self, request):
+        self.dispatch_calls += 1
+        return WorkerResultEnvelope(
+            work_id=request.work_id,
+            component_id=request.component_id,
+            repository_id=request.repository_id,
+            base_sha=request.base_sha,
+            result_sha="f" * 40,
+            diff_digest="a" * 64,
+            coding_result=CodingResult(
+                job_id=request.work_id,
+                failure=WorkerFailure(
+                    kind=WorkerFailureKind.PROCESS_FAILED,
+                    message="deterministic worker failure",
+                    retryable=True,
+                ),
+            ),
+            producer_actor_id="worker-actor",
+        )
+
+    async def inspect(self, work_id: str) -> RecoveryState | None:
+        raise AssertionError(f"unexpected inspect: {work_id}")
+
+    async def recover(self, request, state):
+        raise AssertionError(f"unexpected recover: {request.work_id}:{state}")
 
 
 def _fixture(tmp_path: Path):
@@ -740,6 +778,89 @@ def test_project_revision_during_worker_recovery_blocks_stale_result_publication
     assert repository.get(project.project_id).row_version > project.row_version
 
 
+def test_repair_lineage_uses_pre_tamper_project_version_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        store,
+        repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    prepared = service.prepare(plan)
+    worker = FailureResultWorker()
+    service._host.worker = worker
+    service._host._program.worker = worker
+
+    outcomes = asyncio.run(
+        service._host.dispatch_ready(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            max_parallel=1,
+            max_count=1,
+        )
+    )
+    assert len(outcomes) == 1
+    assert outcomes[0].disposition.value == "repair_required"
+    assert prepared.state.coordinator.snapshot().records[0].state.value == "repair_required"
+
+    host_type = type(service._host)
+    original_lineage_intent = host_type._lineage_intent
+
+    def lineage_then_tamper(host, **kwargs):
+        intent = original_lineage_intent(host, **kwargs)
+        latest = repository.get(project.project_id)
+        current = repository.update_spec(
+            latest.project_id,
+            replace(
+                latest.spec,
+                desired_outcome="Concurrent revision after repair preview",
+            ),
+            expected_row_version=latest.row_version,
+            change_reason="regression: mutate bound project after repair preview",
+        )
+        object.__setattr__(
+            prepared.state.binding.project,
+            "spec_version",
+            current.spec_version,
+        )
+        object.__setattr__(
+            prepared.state.binding.project,
+            "row_version",
+            current.row_version,
+        )
+        object.__setattr__(prepared.state.binding.project, "spec", current.spec)
+        return intent
+
+    monkeypatch.setattr(host_type, "_lineage_intent", lineage_then_tamper)
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        service._host.prepare_repair_and_checkpoint(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            component_id="core",
+            reason="repair deterministic failure",
+        )
+
+    assert (
+        _checkpoint_stage_count(
+            store,
+            task_id=prepared.host_task_id,
+            stage="product_factory.repair_lineage.v1",
+        )
+        == 0
+    )
+
+
 def test_execution_plan_snapshots_mutable_graph_and_mapping_inputs(tmp_path: Path) -> None:
     (
         _store,
@@ -1108,3 +1229,123 @@ def test_preparation_preserves_persisted_team_review_authority(tmp_path: Path) -
     assert restored.state.binding.has_trusted_review_authority is True
     assert restored.state.binding.team_plan == team_plan
     assert restored.state.binding.reviewer_principals == reviewer_principals
+
+def test_product_revision_blocks_stale_review_checkpoint(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "trusted stale review.db")
+    store.initialize()
+    repository = ProductProjectRepository(store)
+    locator = "Oleksii-debug/Nika-Core"
+    permissions = frozenset({"read_source", "write_source", "run_tests"})
+    team_plan = DynamicTeamComposer().compose(
+        TeamCompositionRequest(
+            project_id="product-review-stale",
+            components=(ComponentBrief("core", "backend"),),
+            acceptance_criteria=("Independent review is required",),
+            permission_ceiling=permissions,
+            scale=ProjectScale.SMALL,
+        )
+    )
+    reviewer_role = next(role for role in team_plan.roles if role.independent_review)
+    reviewer_principals = ((reviewer_role.role_id, "reviewer-actor"),)
+    project = repository.create(
+        project_id=team_plan.project_id,
+        name="Stale review Product Factory",
+        spec=ProductProjectSpec(
+            goal="Review one trusted component",
+            desired_outcome="Review stays bound to the exact ProductProject version",
+            repository_refs=(locator,),
+            team_refs=(
+                team_plan.plan_id,
+                team_plan_fingerprint_ref(team_plan),
+                reviewer_principal_bindings_ref(team_plan, reviewer_principals),
+            ),
+        ),
+        idempotency_key="create:product-review-stale",
+    )
+    graph = ProductRepositoryGraph(
+        project_id=project.project_id,
+        repositories=(RepositoryRef("repo-core", "github", locator, "main"),),
+        components=(
+            ProductComponent(
+                component_id="core",
+                repository_id="repo-core",
+                paths=("src/nika_core",),
+                test_commands=(("python", "-m", "pytest", "tests"),),
+            ),
+        ),
+    )
+    evidence_authority = AllowReviewAuthority()
+    host = MultiRepositoryProductFactoryHost(
+        store,
+        NeverDispatchWorker(),
+        team_plan=team_plan,
+        review_evidence_authority=evidence_authority,
+        reviewer_principals=reviewer_principals,
+    )
+    service = PackagedProductFactoryPreparationService(
+        repository=repository,
+        tasks=TaskQueue(store),
+        host=host,
+        workspace_id="packaged.product-factory",
+    )
+    plan = PackagedProductFactoryExecutionPlan(
+        project_id=project.project_id,
+        expected_spec_version=project.spec_version,
+        expected_row_version=project.row_version,
+        graph=graph,
+        graph_version=1,
+        base_shas={"repo-core": "c" * 40},
+        component_goals={"core": "Implement reviewed work"},
+        permission_ceiling=permissions,
+    )
+    prepared = service.prepare(plan)
+    worker = VersionAdvancingResultWorker(
+        repository,
+        project.project_id,
+        advance_on="none",
+    )
+    service._host.worker = worker
+    service._host._program.worker = worker
+
+    outcomes = asyncio.run(
+        service._host.dispatch_ready(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            max_parallel=1,
+            max_count=1,
+        )
+    )
+    assert len(outcomes) == 1
+    assert outcomes[0].disposition.value == "review_required"
+
+    latest = repository.get(project.project_id)
+    repository.update_spec(
+        latest.project_id,
+        replace(
+            latest.spec,
+            desired_outcome="Concurrent revision before trusted review checkpoint",
+        ),
+        expected_row_version=latest.row_version,
+        change_reason="regression: revise before review checkpoint",
+    )
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        service._host.review_and_checkpoint(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            component_id="core",
+            decision=ReviewDecision(
+                reviewer_id="reviewer-actor",
+                accepted=True,
+                reason="independent evidence accepted",
+                evidence_refs=("review:evidence",),
+            ),
+        )
+
+    record = prepared.state.coordinator.snapshot().records[0]
+    assert record.state.value == "review_required"
+    assert record.review is None
+

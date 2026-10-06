@@ -406,6 +406,7 @@ class ProductFactoryProgramHost:
         coordinator: ProductFactoryCoordinator,
         component_id: str,
         decision: ReviewDecision,
+        read_only_precondition: Callable[[object], None] | None = None,
     ) -> WorkRecord:
         self._require_host_owned_review_authority(binding)
         request = _request_for_component(coordinator, component_id)
@@ -420,6 +421,7 @@ class ProductFactoryProgramHost:
                 coordinator=coordinator,
                 lease=lease,
                 prior_record=prior_record,
+                read_only_precondition=read_only_precondition,
             )
         except Exception:
             coordinator.restore(before)

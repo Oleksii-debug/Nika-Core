@@ -317,12 +317,25 @@ class MultiRepositoryProductFactoryHost:
         decision: ReviewDecision,
     ) -> WorkRecord:
         self._assert_state(host_task_id=host_task_id, state=state)
+        expected_project_version = (
+            state.authority.project_id,
+            state.authority.spec_version,
+            state.authority.row_version,
+        )
         return self._program.review_and_checkpoint(
             host_task_id=host_task_id,
             binding=state.binding,
             coordinator=state.coordinator,
             component_id=component_id,
             decision=decision,
+            read_only_precondition=lambda connection: (
+                self._require_exact_project_version(
+                    connection,
+                    project_id=expected_project_version[0],
+                    spec_version=expected_project_version[1],
+                    row_version=expected_project_version[2],
+                )
+            ),
         )
 
     def preview_repair(
@@ -404,9 +417,11 @@ class MultiRepositoryProductFactoryHost:
             component_id=component_id,
             base_sha=intent.to_base_sha,
             reason=reason,
-            read_only_precondition=lambda conn: self._require_current_project_version(
+            read_only_precondition=lambda conn: self._require_exact_project_version(
                 conn,
-                state.binding.project,
+                project_id=intent.project_id,
+                spec_version=intent.spec_version,
+                row_version=intent.row_version,
             ),
         )
         if request != preview:
@@ -772,7 +787,12 @@ class MultiRepositoryProductFactoryHost:
                 host_task_id=host_task_id,
                 project_id=state.authority.project_id,
             )
-            self._require_current_project_version(conn, state.binding.project)
+            self._require_exact_project_version(
+                conn,
+                project_id=intent.project_id,
+                spec_version=intent.spec_version,
+                row_version=intent.row_version,
+            )
             rows = conn.execute(
                 """
                 SELECT checkpoint_id, payload_json, checksum_sha256
