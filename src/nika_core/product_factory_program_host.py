@@ -238,6 +238,7 @@ class ProductFactoryProgramHost:
                     coordinator=coordinator,
                     requests=started,
                     leases=tuple(leases),
+                    read_only_precondition=effect_admission_precondition,
                 )
         except Exception:
             coordinator.restore(before_start)
@@ -610,6 +611,7 @@ class ProductFactoryProgramHost:
             envelope=envelope,
             was_uncertain=False,
             lease=lease,
+            read_only_precondition=effect_admission_precondition,
         )
 
     async def _recover_one(
@@ -731,6 +733,7 @@ class ProductFactoryProgramHost:
                     was_uncertain=False,
                     lease=lease,
                     release_lease=False,
+                    read_only_precondition=effect_admission_precondition,
                 )
 
             if operation.task_id != host_task_id or operation.operation_type != _OPERATION_TYPE:
@@ -828,6 +831,7 @@ class ProductFactoryProgramHost:
                             lease=lease,
                             release_recovery_claim=True,
                             request=request,
+                            read_only_precondition=effect_admission_precondition,
                         )
                     except Exception:
                         coordinator.restore(before)
@@ -916,6 +920,7 @@ class ProductFactoryProgramHost:
                 lease=lease,
                 release_lease=False,
                 recovery_claim=True,
+                read_only_precondition=effect_admission_precondition,
             )
         finally:
             self._release_best_effort(lease)
@@ -933,6 +938,7 @@ class ProductFactoryProgramHost:
         lease: WorkOwnershipLease,
         release_lease: bool = True,
         recovery_claim: bool = False,
+        read_only_precondition: Callable[[object], None] | None = None,
     ) -> ProgramWorkOutcome:
         before = coordinator.snapshot()
         try:
@@ -956,6 +962,7 @@ class ProductFactoryProgramHost:
                     host_task_id=host_task_id,
                     binding=binding,
                     coordinator=coordinator,
+                    read_only_precondition=read_only_precondition,
                 )
                 if recovery_claim:
                     self._drop_recovery_claim(connection, operation_key, lease)
@@ -1028,6 +1035,7 @@ class ProductFactoryProgramHost:
         coordinator: ProductFactoryCoordinator,
         requests: tuple[ComponentWorkRequest, ...],
         leases: tuple[WorkOwnershipLease, ...],
+        read_only_precondition: Callable[[object], None] | None = None,
     ) -> None:
         lease_by_work = {lease.work_id: lease for lease in leases}
         if set(lease_by_work) != {request.work_id for request in requests}:
@@ -1041,6 +1049,7 @@ class ProductFactoryProgramHost:
                 host_task_id=host_task_id,
                 binding=binding,
                 coordinator=coordinator,
+                read_only_precondition=read_only_precondition,
             )
 
     def _reserve_effect(
@@ -1298,6 +1307,7 @@ class ProductFactoryProgramHost:
         lease: WorkOwnershipLease,
         release_recovery_claim: bool = False,
         request: ComponentWorkRequest,
+        read_only_precondition: Callable[[object], None] | None = None,
     ) -> None:
         with self.store.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -1313,6 +1323,7 @@ class ProductFactoryProgramHost:
                 host_task_id=host_task_id,
                 binding=binding,
                 coordinator=coordinator,
+                read_only_precondition=read_only_precondition,
             )
             if release_recovery_claim:
                 self._drop_recovery_claim(connection, operation_key, lease)
