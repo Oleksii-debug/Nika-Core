@@ -278,7 +278,7 @@ def test_store_readmits_forged_target_before_it_becomes_authority(
     object.__setattr__(forged, "environment_id", "staging-eu-1")
     object.__setattr__(forged, "provider_ref", "ansible-staging")
     object.__setattr__(forged, "inventory", "inventory/staging.ini")
-    object.__setattr__(forged, "authorization_ref", "token=plaintext-secret")
+    object.__setattr__(forged, "authorization_ref", "ghp_plaintextsecret")
 
     sqlite = SQLiteStore(tmp_path / "nika.db")
     sqlite.initialize()
