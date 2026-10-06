@@ -127,6 +127,7 @@ def test_packaged_state_is_bounded_product_command_center_projection(tmp_path: P
         "status_counts": {},
         "decision_count": 0,
         "decision_state_counts": {},
+        "current_decision": None,
     }
     assert set(product_state).isdisjoint(
         {
