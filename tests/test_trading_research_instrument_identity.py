@@ -782,6 +782,22 @@ def test_adverse_slippage_never_crosses_limit_price(
     assert update.fill.price == Decimal(100)
 
 
+def test_migration_schema_with_text_version_fails_closed(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE trading_research_schema_migrations ("
+            "version TEXT PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO trading_research_schema_migrations(version) VALUES ('3')"
+        )
+
+    with pytest.raises(RuntimeError, match="migration column types"):
+        TradingStateRepository(store).initialize()
+
+
 def test_v3_schema_with_global_fill_primary_key_fails_closed(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
