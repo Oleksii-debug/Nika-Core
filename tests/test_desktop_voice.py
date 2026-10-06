@@ -31,7 +31,12 @@ from nika_core.ui.desktop_voice import (
     DesktopVoiceStatus,
     DesktopVoiceTurnController,
 )
-from nika_core.voice_turn import OneShotVoiceTurnService, VoiceTurnRequest, VoiceTurnResult
+from nika_core.voice_turn import (
+    OneShotVoiceTurnService,
+    VoiceTurnRequest,
+    VoiceTurnResult,
+    VoiceTurnStatus,
+)
 from nika_core.wake_activation import WakeActivationDetector
 
 
@@ -62,9 +67,15 @@ class _LoopSubmitter:
 
 
 class _MicrophoneAdapter:
-    def __init__(self, *, transcript_gate: threading.Event | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        transcript_gate: threading.Event | None = None,
+        amplitude: int = 1,
+    ) -> None:
         self.calls = 0
         self.transcript_gate = transcript_gate
+        self.amplitude = amplitude
         self.cancelled = threading.Event()
         self._capabilities = MicrophoneCaptureCapabilities(
             provider_id="test-microphone",
@@ -91,7 +102,8 @@ class _MicrophoneAdapter:
             provider_id=request.provider_id,
             device_id=request.device_id,
             sample_rate_hz=request.sample_rate_hz,
-            pcm_s16le=b"\x01\x00" * request.sample_count,
+            pcm_s16le=int(self.amplitude).to_bytes(2, "little", signed=True)
+            * request.sample_count,
             latency_ms=1.0,
         )
 
@@ -123,15 +135,18 @@ class _SttAdapter:
 def _service(
     microphone: _MicrophoneAdapter,
     stt: _SttAdapter | None = None,
+    *,
+    enable_voice_activity: bool = False,
 ) -> OneShotVoiceTurnService:
     return OneShotVoiceTurnService(
         microphone=MicrophoneCaptureService(microphone),
         speech_to_text=SpeechToTextService(stt or _SttAdapter()),
         wake_detector=WakeActivationDetector(),
+        enable_voice_activity=enable_voice_activity,
     )
 
 
-def _request(request_id: str) -> VoiceTurnRequest:
+def _request(request_id: str, *, sample_count: int = 16) -> VoiceTurnRequest:
     return VoiceTurnRequest(
         request_id=request_id,
         capture=MicrophoneCaptureRequest(
@@ -139,7 +154,7 @@ def _request(request_id: str) -> VoiceTurnRequest:
             provider_id="test-microphone",
             device_id="test-device",
             sample_rate_hz=16_000,
-            sample_count=16,
+            sample_count=sample_count,
         ),
         stt_provider_id="test-stt",
         stt_model="test-model",
@@ -197,6 +212,79 @@ def test_start_returns_immediately_and_projects_bounded_success_state() -> None:
         assert factory_threads[0] != ui_thread
     finally:
         submitter.close()
+
+
+def test_no_voice_activity_projects_completed_non_error_desktop_state() -> None:
+    submitter = _LoopSubmitter()
+    microphone = _MicrophoneAdapter(amplitude=0)
+    stt = _SttAdapter()
+    controller = DesktopVoiceTurnController(
+        service=_service(
+            microphone,
+            stt,
+            enable_voice_activity=True,
+        ),
+        request_factory=lambda request_id: _request(
+            request_id,
+            sample_count=3_200,
+        ),
+        submit=submitter.submit,
+    )
+    try:
+        assert controller.start({}).status == "accepted"
+        snapshot = _wait_status(controller, DesktopVoiceStatus.COMPLETED)
+        assert snapshot["activated"] is False
+        assert snapshot["transcript"] is None
+        assert snapshot["active"] is False
+        assert "Мовлення не виявлено" in str(snapshot["message"])
+        assert microphone.calls == 1
+        assert stt.calls == 0
+    finally:
+        submitter.close()
+
+
+def test_no_voice_activity_snapshot_rejects_forged_component_evidence() -> None:
+    result = asyncio.run(
+        _service(
+            _MicrophoneAdapter(amplitude=0),
+            enable_voice_activity=True,
+        ).run(
+            _request("desktop-voice-test", sample_count=3_200)
+        )
+    )
+    assert result.evidence.status is VoiceTurnStatus.NO_VOICE_ACTIVITY
+    object.__setattr__(result.evidence.capture, "audio_byte_count", 1)
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+    assert "неузгоджений стан" in snapshot.message
+
+
+def test_no_voice_activity_snapshot_rejects_forged_transcript() -> None:
+    result = asyncio.run(
+        _service(
+            _MicrophoneAdapter(amplitude=0),
+            enable_voice_activity=True,
+        ).run(
+            _request("desktop-voice-test", sample_count=3_200)
+        )
+    )
+    assert result.evidence.status is VoiceTurnStatus.NO_VOICE_ACTIVITY
+    object.__setattr__(result, "transcript", "forged transcript")
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+    assert "неузгоджений стан" in snapshot.message
 
 
 def test_behavioral_future_subclass_is_rejected_before_callback_registration() -> None:

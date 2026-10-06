@@ -582,6 +582,28 @@ class DesktopVoiceTurnController:
                 transcript=result.transcript,
             )
 
+        if evidence.status is VoiceTurnStatus.NO_VOICE_ACTIVITY:
+            if (
+                result.transcript is not None
+                or evidence.activated
+                or not _is_valid_no_voice_activity_evidence(evidence, request_id)
+            ):
+                return DesktopVoiceSnapshot(
+                    status=DesktopVoiceStatus.FAILED,
+                    request_id=request_id,
+                    message=(
+                        "Голосовий сервіс повернув неузгоджений стан "
+                        "відсутності мовлення."
+                    ),
+                )
+            return DesktopVoiceSnapshot(
+                status=DesktopVoiceStatus.COMPLETED,
+                request_id=request_id,
+                message="Мовлення не виявлено. Спробуйте ще раз.",
+                activated=False,
+                transcript=None,
+            )
+
         if result.transcript is not None or evidence.activated:
             return DesktopVoiceSnapshot(
                 status=DesktopVoiceStatus.FAILED,
@@ -617,6 +639,35 @@ class DesktopVoiceTurnController:
             raise TypeError("voice desktop action payload must be an exact dict")
         if payload:
             raise ValueError("voice desktop action does not accept payload authority")
+
+
+def _is_valid_no_voice_activity_evidence(
+    evidence: VoiceTurnEvidence,
+    request_id: str,
+) -> bool:
+    capture = evidence.capture
+    return (
+        type(capture.request_id) is str
+        and capture.request_id == request_id
+        and type(capture.provider_id) is str
+        and bool(capture.provider_id)
+        and _is_sha256(capture.device_id_sha256)
+        and type(capture.status) is MicrophoneCaptureStatus
+        and capture.status is MicrophoneCaptureStatus.SUCCEEDED
+        and type(capture.sample_rate_hz) is int
+        and 8_000 <= capture.sample_rate_hz <= 48_000
+        and type(capture.sample_count) is int
+        and capture.sample_count > 0
+        and type(capture.audio_byte_count) is int
+        and capture.audio_byte_count == capture.sample_count * 2
+        and _is_sha256(capture.audio_sha256)
+        and capture.error_code is None
+        and capture.retryable is None
+        and type(capture.cleanup_pending) is bool
+        and capture.cleanup_pending is False
+        and evidence.transcription is None
+        and evidence.wake is None
+    )
 
 
 def _is_valid_failure_evidence(
