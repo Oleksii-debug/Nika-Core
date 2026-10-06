@@ -1347,6 +1347,7 @@ def test_prepare_rejects_tampered_repository_locator_before_effect(
     assert _task_count(store) == 0
 
 
+@pytest.mark.parametrize("line_boundary", ["\n", "\u0085", "\u2028", "\u2029"])
 @pytest.mark.parametrize(
     ("target", "field"),
     [
@@ -1359,10 +1360,11 @@ def test_prepare_rejects_tampered_repository_locator_before_effect(
         ("component", "repository_id"),
     ],
 )
-def test_prepare_rejects_control_bearing_identity_before_effect(
+def test_prepare_rejects_line_boundaries_in_identity_before_effect(
     tmp_path: Path,
     target: str,
     field: str,
+    line_boundary: str,
 ) -> None:
     store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
         _fixture(tmp_path)
@@ -1372,7 +1374,7 @@ def test_prepare_rejects_control_bearing_identity_before_effect(
         carrier = plan.graph.repositories[0]
     elif target == "component":
         carrier = plan.graph.components[0]
-    object.__setattr__(carrier, field, "identity\nforged")
+    object.__setattr__(carrier, field, f"identity{line_boundary}forged")
 
     with pytest.raises(
         PackagedProductFactoryPreparationError,
