@@ -24,9 +24,18 @@ from nika_core.toolsmith.contracts import (
     ChangedFile,
     CodingJob,
     CodingResult,
+    IsolationClass,
     NetworkMode,
     RepositorySnapshot,
     ResourceBudget,
+    TestEvidence,
+)
+from nika_core.toolsmith.openhands_remote_worker import (
+    OpenHandsRemoteCodingWorker,
+    OpenHandsRunEvidence,
+    OpenHandsSandboxEndpoint,
+    RemoteFile,
+    SandboxedAcceptanceEvidence,
 )
 
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
@@ -436,3 +445,104 @@ def test_builder_rejects_malformed_provider_or_verifier_before_composition(
             acceptance_runtime=object(),
             **common,
         )
+
+
+class _MutatingRemoteRuntime:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def execute(self, job, endpoint, prompt, source_root, source_evidence):
+        self.calls.append((job, endpoint, prompt, source_root, source_evidence))
+        files = []
+        for item in source_evidence.files:
+            data = (source_root / item.path).read_bytes()
+            if item.path == "src/core.py":
+                data = b"VALUE = 2\n"
+            files.append(RemoteFile(item.path, data))
+        return OpenHandsRunEvidence("conversation-host-seam", tuple(files))
+
+    async def reconcile(self, job, binding, source_evidence):
+        raise AssertionError((job, binding, source_evidence))
+
+    async def cancel_recovery(self, binding):
+        raise AssertionError(binding)
+
+    async def cancel(self, job_id):
+        raise AssertionError(job_id)
+
+
+class _PassingAcceptanceRuntime:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def execute(self, job, candidate_files, candidate_evidence):
+        self.calls.append((job, candidate_files, candidate_evidence))
+        evidence = tuple(
+            TestEvidence(
+                command.argv,
+                0,
+                hashlib.sha256("\0".join(command.argv).encode("utf-8")).hexdigest(),
+            )
+            for command in job.acceptance_commands
+        )
+        return SandboxedAcceptanceEvidence(
+            IsolationClass.OS_SANDBOXED,
+            candidate_evidence.digest,
+            evidence,
+        )
+
+    async def cancel(self, job_id):
+        raise AssertionError(job_id)
+
+
+class _WorkingSandboxProvider:
+    def __init__(self) -> None:
+        self.released = []
+
+    async def acquire(self, _job):
+        return OpenHandsSandboxEndpoint(
+            endpoint_id="sandbox-host-seam",
+            host="http://127.0.0.1:30000",
+            working_dir="/workspace/nika-job",
+            isolation_class=IsolationClass.REMOTE_SANDBOXED,
+            sandbox_egress_hosts=("localhost",),
+            network_policy_enforced=True,
+        )
+
+    async def release(self, job, endpoint, *, succeeded):
+        self.released.append((job.job_id, endpoint.endpoint_id, succeeded))
+
+
+def test_ports_drive_real_openhands_worker_contract_to_private_candidate(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha = _repository(tmp_path)
+    _store, program = _program(tmp_path, repository)
+    provider = _WorkingSandboxProvider()
+    runtime = _MutatingRemoteRuntime()
+    acceptance = _PassingAcceptanceRuntime()
+    worker = OpenHandsRemoteCodingWorker(
+        provider,
+        runtime,
+        acceptance_runtime=acceptance,
+    )
+    adapter = CodingWorkerComponentAdapter(worker, program.ports, program.ports)
+    request = _request(base_sha, work_id="work-full-openhands-dispatch")
+
+    envelope = _run(adapter.dispatch(request))
+
+    assert envelope.base_sha == base_sha
+    assert envelope.result_sha != base_sha
+    assert len(envelope.diff_digest) == 64
+    assert envelope.producer_actor_id == "openhands-remote-coding-worker"
+    assert [item.path for item in envelope.coding_result.changed_files] == ["src/core.py"]
+    assert envelope.coding_result.test_evidence[0].exit_code == 0
+    assert provider.released == [
+        (request.work_id, "sandbox-host-seam", True)
+    ]
+    assert len(runtime.calls) == 1
+    assert len(acceptance.calls) == 1
+    assert (repository / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert program.ports.candidate_worktree(request.work_id).joinpath(
+        "src", "core.py"
+    ).read_text(encoding="utf-8") == "VALUE = 2\n"
