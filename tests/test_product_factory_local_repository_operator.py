@@ -162,6 +162,52 @@ def test_explicit_bind_and_version_fenced_unbind_round_trip(
     assert operator.snapshot(project.project_id)["repositories"][0]["bound"] is False
 
 
+def test_unbind_rejects_plan_repository_identity_substitution_without_mutation(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    plan_box = {"plan": _plan(project, repository)}
+    operator = PackagedLocalRepositoryOperator(
+        bindings=bindings,
+        resolve_plan=lambda project_id: plan_box["plan"]
+        if project_id == project.project_id
+        else (_ for _ in ()).throw(KeyError(project_id)),
+    )
+    root = _root(tmp_path)
+    assert operator.bind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "root_path": str(root),
+            "expected_binding_version": None,
+        }
+    ).status == "completed"
+
+    substituted = RepositoryRef(
+        repository_id=repository.repository_id,
+        provider="git",
+        locator=repository.locator,
+        default_branch=repository.default_branch,
+    )
+    plan_box["plan"] = _plan(project, substituted)
+
+    result = operator.unbind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "expected_binding_version": 1,
+        }
+    )
+
+    assert result.status == "rejected"
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) == 1
+
 def test_unbind_rejects_product_project_change_after_plan_validation(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,

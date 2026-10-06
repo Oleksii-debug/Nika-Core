@@ -564,6 +564,41 @@ def test_current_binding_version_survives_invalid_filesystem_identity(
         bindings.require(project.project_id, repository.repository_id)
 
 
+def test_unbind_expected_repository_identity_rejects_substitution_without_mutation(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=_root(tmp_path),
+        expected_binding_version=None,
+    )
+    substituted = _repository_ref(
+        repository_id=repository.repository_id,
+        provider="git",
+        locator=repository.locator,
+    )
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="does not match execution-plan repository",
+    ):
+        bindings.unbind(
+            project_id=project.project_id,
+            repository_id=repository.repository_id,
+            expected_binding_version=bound.binding_version,
+            expected_repository=substituted,
+        )
+
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) == bound.binding_version
+
 def test_unbind_expected_project_versions_reject_stale_plan_without_mutation(
     tmp_path: pathlib.Path,
 ) -> None:
