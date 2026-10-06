@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from nika_core.product_command.build_execution_adapter import (
+    build_execution_status_entries,
+)
 from nika_core.product_command.contracts import (
     ProductProjectDetail,
     ProductStatusEntry,
@@ -21,6 +24,11 @@ from nika_core.product_command.factory_status_adapter import (
 )
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_decisions import ProductDecisionSetSummary
+from nika_core.product_factory_build_execution import (
+    BuildExecutionRecord,
+    BuildExecutionSnapshot,
+    BuildExecutionState,
+)
 from nika_core.product_factory_coordinator import CoordinatorSnapshot, WorkState
 from nika_core.product_factory_credentials import CredentialBrokerSnapshot
 from nika_core.product_factory_deployment import (
@@ -57,8 +65,9 @@ class ProductCommandCenter:
         project_id: str,
         *,
         coordinator: CoordinatorSnapshot | None = None,
+        build_execution: BuildExecutionSnapshot | None = None,
     ) -> tuple[ProductProjectDetail, ProductDecisionSetSummary]:
-        """Compose the bounded packaged read model with optional trusted PF2 status."""
+        """Compose bounded packaged status from trusted PF2 and durable PF5 state."""
 
         detail, _credential_refs, decision_summary = (
             self._projects.inspect_project_presentation_context(project_id)
@@ -67,6 +76,9 @@ class ProductCommandCenter:
         if coordinator is not None:
             _validate_coordinator_scope(project_id, coordinator)
             statuses.extend(coordinator_status_entries(coordinator))
+        if build_execution is not None:
+            _validate_build_execution_scope(project_id, build_execution)
+            statuses.extend(build_execution_status_entries(build_execution))
         return _finalize_statuses(detail, statuses), decision_summary
 
     def inspect_project(
@@ -74,6 +86,7 @@ class ProductCommandCenter:
         project_id: str,
         *,
         coordinator: CoordinatorSnapshot | None = None,
+        build_execution: BuildExecutionSnapshot | None = None,
         execution: ExecutionRegistrySnapshot | None = None,
         deployment: DeploymentFabricSnapshot | None = None,
         credentials: CredentialBrokerSnapshot | None = None,
@@ -88,6 +101,9 @@ class ProductCommandCenter:
         if coordinator is not None:
             _validate_coordinator_scope(project_id, coordinator)
             statuses.extend(coordinator_status_entries(coordinator))
+        if build_execution is not None:
+            _validate_build_execution_scope(project_id, build_execution)
+            statuses.extend(build_execution_status_entries(build_execution))
         if execution is not None:
             _validate_execution_snapshot(execution)
             statuses.extend(execution_status_entries(_scope_execution(project_id, execution)))
@@ -184,6 +200,85 @@ def _validate_coordinator_scope(
             raise ProductCommandCenterScopeError(
                 "accepted coordinator record lacks accepted independent review evidence"
             )
+
+
+def _validate_build_execution_scope(
+    project_id: str,
+    snapshot: BuildExecutionSnapshot,
+) -> None:
+    if type(snapshot) is not BuildExecutionSnapshot or type(snapshot.records) is not tuple:
+        raise ProductCommandCenterScopeError(
+            "PF5 build execution snapshot has a noncanonical carrier"
+        )
+    if any(type(record) is not BuildExecutionRecord for record in snapshot.records):
+        raise ProductCommandCenterScopeError(
+            "PF5 build execution snapshot contains a noncanonical record"
+        )
+
+    work_ids = [record.spec.request.work_id for record in snapshot.records]
+    if work_ids != sorted(work_ids):
+        raise ProductCommandCenterScopeError(
+            "PF5 build execution work identities are not canonical"
+        )
+    _require_unique(work_ids, "PF5 build work")
+
+    for record in snapshot.records:
+        request = record.spec.request
+        grant = record.grant
+        repository_id = record.spec.scope.repository_id
+        if type(record.state) is not BuildExecutionState:
+            raise ProductCommandCenterScopeError(
+                "PF5 build execution record has a noncanonical state"
+            )
+        if (
+            request.project_id != project_id
+            or grant.project_id != project_id
+            or request.work_id != grant.work_id
+            or repository_id != grant.repository_id
+        ):
+            raise ProductCommandCenterScopeError(
+                "PF5 build execution crosses ProductProject or work identity"
+            )
+        _require_status_text(request.work_id, "PF5 build work id", max_length=160)
+        _require_status_text(repository_id, "PF5 repository id")
+
+        dispatch = record.dispatch
+        if dispatch is not None and (
+            dispatch.project_id != project_id
+            or dispatch.work_id != request.work_id
+            or dispatch.source_sha != record.spec.source_sha
+            or dispatch.grant != grant
+        ):
+            raise ProductCommandCenterScopeError(
+                "PF5 build dispatch does not match its durable work identity"
+            )
+        evidence = record.evidence
+        if evidence is not None and evidence.work_id != request.work_id:
+            raise ProductCommandCenterScopeError(
+                "PF5 build evidence does not match its durable work identity"
+            )
+
+
+def _require_status_text(
+    value: object,
+    label: str,
+    *,
+    max_length: int | None = None,
+) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or (max_length is not None and len(value) > max_length)
+        or any(
+            ord(character) < 32
+            or ord(character) == 127
+            or character in "\u0085\u2028\u2029"
+            for character in value
+        )
+    ):
+        raise ProductCommandCenterScopeError(f"{label} is not safe presentation text")
+    return value
 
 
 def _validate_execution_snapshot(snapshot: ExecutionRegistrySnapshot) -> None:
