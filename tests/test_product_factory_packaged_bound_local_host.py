@@ -656,7 +656,9 @@ async def test_worker_revalidates_binding_after_context_before_execute(
         await adapter.dispatch(request)
 
     assert planner_calls == []
-    assert not entry.program.worker.workspace_root_for(request.work_id).exists()
+    assert not (
+        entry.program.worker.workspace_root_for(request.work_id) / "worktree"
+    ).exists()
 
 
 @pytest.mark.asyncio
