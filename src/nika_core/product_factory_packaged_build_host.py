@@ -151,7 +151,22 @@ def build_packaged_local_durable_build_host(
         checkpoints,
     )
     if checkpoints.has_checkpoint():
-        host.restore_latest()
+        recovery_scope = getattr(trusted_authority, "historical_recovery", None)
+        if recovery_scope is None:
+            host.restore_latest()
+        elif not callable(recovery_scope):
+            raise PackagedLocalBuildHostError(
+                "PF5 historical recovery authority scope is not callable"
+            )
+        else:
+            saved = checkpoints.latest()
+            recovery_work_ids = frozenset(
+                record.spec.request.work_id
+                for record in saved.snapshot.coordinator.records
+                if record.dispatch is not None
+            )
+            with recovery_scope(recovery_work_ids):
+                host.restore_latest()
     return host
 
 
