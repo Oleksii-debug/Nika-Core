@@ -11,6 +11,7 @@ on:
       - "src/nika_core/product_factory_local_coding.py"
       - "src/nika_core/toolsmith/local_worker.py"
       - "src/nika_core/toolsmith/execution.py"
+      - "src/nika_core/product_factory_packaged_preparation.py"
       - "src/nika_core/product_factory_packaged_local_startup.py"
       - "src/nika_core/product_factory_packaged_bound_local_host.py"
       - "src/nika_core/kernel/default_actions.py"
@@ -24,6 +25,7 @@ on:
       - "tests/test_packaged_product_factory_execution_plan.py"
       - "tests/test_product_factory_contained_local_coding.py"
       - "tests/test_toolsmith_execution.py"
+      - "tests/test_packaged_product_factory_preparation.py"
       - "tests/test_product_factory_packaged_local_startup.py"
       - "tests/test_product_factory_packaged_bound_local_host.py"
       - ".github/workflows/pf11-local-repository-binding.yml"
@@ -74,6 +76,7 @@ jobs:
           src/nika_core/product_factory_local_coding.py
           src/nika_core/toolsmith/local_worker.py
           src/nika_core/toolsmith/execution.py
+          src/nika_core/product_factory_packaged_preparation.py
           src/nika_core/product_factory_packaged_local_startup.py
           src/nika_core/product_factory_packaged_bound_local_host.py
           src/nika_core/kernel/default_actions.py
@@ -85,6 +88,7 @@ jobs:
           tests/test_packaged_product_factory_execution_plan.py
           tests/test_product_factory_contained_local_coding.py
           tests/test_toolsmith_execution.py
+          tests/test_packaged_product_factory_preparation.py
           tests/test_product_factory_packaged_local_startup.py
           tests/test_product_factory_packaged_bound_local_host.py
       - name: Run durable-bound packaged-host regressions
@@ -97,6 +101,7 @@ jobs:
           tests/test_packaged_product_factory_execution_plan.py
           tests/test_product_factory_contained_local_coding.py
           tests/test_toolsmith_execution.py
+          tests/test_packaged_product_factory_preparation.py
           tests/test_product_factory_packaged_local_startup.py
           tests/test_product_factory_packaged_bound_local_host.py
           -q

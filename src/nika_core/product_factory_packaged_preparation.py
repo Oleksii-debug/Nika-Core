@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from urllib.parse import unquote, unquote_plus, urlsplit
 from uuid import NAMESPACE_URL, uuid5
 
 from nika_core.kernel.task_queue import TaskPayloadCorruptionError, TaskQueue
@@ -24,6 +25,19 @@ from nika_core.product_project import ProductProject, ProductProjectRepository
 PRODUCT_FACTORY_HOST_AGENT_ID = "product-factory"
 _HOST_TASK_KIND = "product_factory"
 _SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_MAX_LOCATOR_DECODE_ROUNDS = 64
+_SENSITIVE_LOCATOR_MARKERS = (
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "api-key",
+    "apikey",
+    "client_secret",
+    "password",
+    "passwd",
+    "secret=",
+    "token=",
+)
 
 
 class PackagedProductFactoryPreparationError(ValueError):
@@ -44,7 +58,7 @@ class PackagedProductFactoryExecutionPlan:
     permission_ceiling: frozenset[str]
 
     def __post_init__(self) -> None:
-        project_id = _plain_text(self.project_id, "project_id")
+        project_id = _identity_text(self.project_id, "project_id")
         if type(self.expected_spec_version) is not int or self.expected_spec_version < 1:
             raise PackagedProductFactoryPreparationError(
                 "expected_spec_version must be a positive integer"
@@ -373,10 +387,7 @@ def _snapshot_graph(graph: ProductRepositoryGraph) -> ProductRepositoryGraph:
         raise PackagedProductFactoryPreparationError(
             "repository graph is structurally invalid"
         ) from exc
-    if type(project_id) is not str:
-        raise PackagedProductFactoryPreparationError(
-            "repository graph project_id must be text"
-        )
+    project_id = _identity_text(project_id, "repository graph project_id")
     if type(repositories_value) is not tuple or type(components_value) is not tuple:
         raise PackagedProductFactoryPreparationError(
             "repository graph collections must be exact tuples"
@@ -422,9 +433,10 @@ def _snapshot_repository_ref(value: object) -> RepositoryRef:
         raise PackagedProductFactoryPreparationError(
             "repository graph repository identity fields must be text"
         )
-    if credential_ref is not None and type(credential_ref) is not str:
-        raise PackagedProductFactoryPreparationError(
-            "repository graph credential_ref must be text or None"
+    if credential_ref is not None:
+        credential_ref = _identity_text(
+            credential_ref,
+            "repository graph credential_ref",
         )
     if type(case_sensitive_paths) is not bool:
         raise PackagedProductFactoryPreparationError(
@@ -432,10 +444,10 @@ def _snapshot_repository_ref(value: object) -> RepositoryRef:
         )
     try:
         return RepositoryRef(
-            repository_id=repository_id,
-            provider=provider,
-            locator=locator,
-            default_branch=default_branch,
+            repository_id=_identity_text(repository_id, "repository_id"),
+            provider=_identity_text(provider, "repository provider"),
+            locator=_repository_locator(locator),
+            default_branch=_identity_text(default_branch, "repository default_branch"),
             credential_ref=credential_ref,
             case_sensitive_paths=case_sensitive_paths,
         )
@@ -485,8 +497,8 @@ def _snapshot_product_component(value: object) -> ProductComponent:
         )
     try:
         return ProductComponent(
-            component_id=component_id,
-            repository_id=repository_id,
+            component_id=_identity_text(component_id, "component_id"),
+            repository_id=_identity_text(repository_id, "component repository_id"),
             paths=paths_snapshot,
             dependencies=dependencies_snapshot,
             build_commands=build_snapshot,
@@ -549,6 +561,53 @@ def _text_mapping(value: Mapping[str, str], label: str) -> dict[str, str]:
             )
         result[key_text] = item_text
     return result
+
+
+def _identity_text(value: object, label: str) -> str:
+    text = _plain_text(value, label)
+    try:
+        text.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise PackagedProductFactoryPreparationError(
+            f"{label} must be valid UTF-8 identity text"
+        ) from exc
+    if any(ord(character) < 32 or ord(character) == 127 for character in text):
+        raise PackagedProductFactoryPreparationError(
+            f"{label} must be opaque single-line identity text"
+        )
+    return text
+
+
+def _repository_locator(value: object) -> str:
+    locator = _identity_text(value, "repository locator")
+    normalized = locator.casefold()
+    for _round in range(_MAX_LOCATOR_DECODE_ROUNDS):
+        if any(marker in normalized for marker in _SENSITIVE_LOCATOR_MARKERS):
+            raise PackagedProductFactoryPreparationError(
+                "repository locator must not contain credential material"
+            )
+        if "://" in normalized or normalized.startswith("//"):
+            try:
+                parsed = urlsplit(normalized)
+            except ValueError as exc:
+                raise PackagedProductFactoryPreparationError(
+                    "repository locator URL authority is invalid"
+                ) from exc
+            if parsed.username is not None or parsed.password is not None:
+                raise PackagedProductFactoryPreparationError(
+                    "repository locator must not contain inline URL credentials"
+                )
+            if parsed.query or parsed.fragment:
+                raise PackagedProductFactoryPreparationError(
+                    "repository locator must not contain URL query or fragment data"
+                )
+        decoded = unquote(unquote_plus(normalized)).casefold()
+        if decoded == normalized:
+            return locator
+        normalized = decoded
+    raise PackagedProductFactoryPreparationError(
+        "repository locator decoding exceeds the bounded limit"
+    )
 
 
 def _plain_text(value: object, label: str) -> str:

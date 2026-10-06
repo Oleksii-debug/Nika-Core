@@ -107,9 +107,24 @@ def test_private_git_workspace_uses_pinned_executable_launch_guard(
         source_environment={"PATH": os.environ.get("PATH", "")},
     )
     observed: list[pathlib.Path] = []
+    observed_expected_sha256: list[str | None] = []
     original_guard = execution_module._PinnedExecutableLaunchGuard
 
     class RecordingGuard(original_guard):
+        def __init__(
+            self,
+            executable: pathlib.Path,
+            arguments: tuple[str, ...],
+            *,
+            expected_sha256: str | None = None,
+        ) -> None:
+            observed_expected_sha256.append(expected_sha256)
+            super().__init__(
+                executable,
+                arguments,
+                expected_sha256=expected_sha256,
+            )
+
         def __enter__(self) -> pathlib.Path:
             resolved = super().__enter__()
             observed.append(resolved)
@@ -126,6 +141,9 @@ def test_private_git_workspace_uses_pinned_executable_launch_guard(
     assert prepared.head_sha == base_sha
     assert observed
     assert all(path.is_absolute() for path in observed)
+    assert observed_expected_sha256
+    assert all(value is not None for value in observed_expected_sha256)
+    assert len(set(observed_expected_sha256)) == 1
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows sharing semantics only")
@@ -191,6 +209,107 @@ def test_typed_runner_rejects_final_executable_identity_change(
         )
 
     assert calls == 2
+
+
+def test_executable_launch_guard_rejects_same_path_byte_replacement(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = tmp_path / "runner"
+    replacement = tmp_path / "replacement"
+    executable.write_bytes(b"trusted executable bytes")
+    replacement.write_bytes(b"replacement executable bytes")
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    os.replace(replacement, executable)
+
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="bytes changed before process launch",
+    ):
+        with guard:
+            raise AssertionError("changed executable must not cross launch guard")
+
+
+def test_typed_runner_rejects_same_path_replacement_after_admission(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / pathlib.Path(sys.executable).name
+    replacement = tmp_path / "replacement"
+    shutil.copy2(pathlib.Path(sys.executable).resolve(strict=True), executable)
+    replacement.write_bytes(b"replacement executable bytes")
+    original_prepare = execution_module._prepare_process_environment
+    replaced = False
+    popen_called = False
+
+    def prepare_then_replace(
+        *,
+        source: object,
+        workspace_root: pathlib.Path,
+    ) -> dict[str, str]:
+        nonlocal replaced
+        prepared = original_prepare(
+            source=source,  # type: ignore[arg-type]
+            workspace_root=workspace_root,
+        )
+        os.replace(replacement, executable)
+        replaced = True
+        return prepared
+
+    def forbidden_popen(*args: object, **kwargs: object) -> object:
+        nonlocal popen_called
+        popen_called = True
+        raise AssertionError("replaced executable reached Popen")
+
+    monkeypatch.setattr(
+        execution_module,
+        "_prepare_process_environment",
+        prepare_then_replace,
+    )
+    monkeypatch.setattr(execution_module.subprocess, "Popen", forbidden_popen)
+
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="bytes changed before process launch",
+    ):
+        run_typed_process(
+            (str(executable),),
+            process_policy=ProcessPolicy((str(executable),)),
+            resource_budget=ResourceBudget(
+                timeout_seconds=5,
+                max_output_bytes=4096,
+                max_changed_files=1,
+            ),
+            cwd=tmp_path,
+            environment=sterile_git_environment(
+                {"PATH": os.environ.get("PATH", "")}
+            ),
+        )
+
+    assert replaced is True
+    assert popen_called is False
+
+
+def test_git_launch_rejects_same_path_change_against_earlier_digest(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = tmp_path / "git"
+    replacement = tmp_path / "replacement"
+    executable.write_bytes(b"trusted git bytes")
+    replacement.write_bytes(b"replacement git bytes")
+    expected_sha256 = execution_module._pinned_executable_sha256(executable)
+    os.replace(replacement, executable)
+
+    with pytest.raises(
+        WorkspaceSecurityError,
+        match="executable authority changed before launch",
+    ):
+        execution_module._git(
+            (str(executable), "--version"),
+            cwd=tmp_path,
+            environment={},
+            expected_executable_sha256=expected_sha256,
+        )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows CreateProcess boundary only")
