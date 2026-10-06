@@ -145,7 +145,7 @@ class ProductFactoryToolsmithBridge:
             reason=reason,
             attempted_methods=attempted_methods,
         )
-        version, state = self.escalation.begin(gap)
+        version, state = _begin_escalation(self.escalation, gap)
         return _component_gap(
             request,
             gap,
@@ -182,7 +182,7 @@ class ProductFactoryToolsmithBridge:
             )
         gap = _gap_from_binding(durable)
         if durable.state is ComponentCapabilityBindingState.RESERVED:
-            version, state = self.escalation.begin(gap)
+            version, state = _begin_escalation(self.escalation, gap)
             try:
                 durable = bindings.mark_begun(
                     durable,
@@ -349,7 +349,7 @@ class ProductFactoryToolsmithBridge:
         if durable.state is not ComponentCapabilityBindingState.RESERVED:
             return durable
         gap = _gap_from_binding(durable)
-        version, state = self.escalation.begin(gap)
+        version, state = _begin_escalation(self.escalation, gap)
         try:
             return bindings.mark_begun(
                 durable,
@@ -430,6 +430,24 @@ class ProductFactoryToolsmithBridge:
                 "durable Toolsmith integration requires the Product Factory checkpoint host"
             )
         return self._checkpoints
+
+
+def _begin_escalation(
+    escalation: CapabilityEscalationPort,
+    gap: CapabilityGap,
+) -> tuple[int, CandidateState]:
+    result = escalation.begin(gap)
+    if (
+        type(result) is not tuple
+        or len(result) != 2
+        or type(result[0]) is not int
+        or result[0] < 0
+        or type(result[1]) is not CandidateState
+    ):
+        raise ProductFactoryToolsmithError(
+            "Toolsmith begin returned invalid escalation identity"
+        )
+    return result
 
 
 def _record_for_component(
