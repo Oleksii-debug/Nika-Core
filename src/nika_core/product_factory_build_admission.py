@@ -10,9 +10,11 @@ from nika_core.product_factory_build_execution import (
     BuildExecutionSpec,
 )
 from nika_core.product_factory_coordinator import (
+    CoordinatorError,
     ProductFactoryCoordinator,
     WorkRecord,
     WorkState,
+    validate_trusted_plan_snapshot,
 )
 from nika_core.product_factory_deployment import (
     ExecutionRequest,
@@ -156,6 +158,13 @@ def reviewed_component_build_spec(
     _validate_authority(authority)
 
     snapshot = coordinator.snapshot()
+    try:
+        trusted_plan_fingerprint = coordinator.trusted_plan_fingerprint
+        validate_trusted_plan_snapshot(snapshot, trusted_plan_fingerprint)
+    except CoordinatorError as exc:
+        raise ReviewedBuildAdmissionError(
+            "PF4 trusted plan authority is not valid for build admission"
+        ) from exc
     if (
         snapshot.project_id != authority.project_id
         or coordinator.graph.project_id != authority.project_id
@@ -182,7 +191,12 @@ def reviewed_component_build_spec(
     )
     if record is None:
         raise ReviewedBuildAdmissionError("reviewed-build component has no PF4 work record")
-    _validate_accepted_record(authority, component, record)
+    _validate_accepted_record(
+        authority,
+        component,
+        record,
+        trusted_plan=snapshot.trusted_plan,
+    )
     _verify_current_review_authority(coordinator, record)
 
     result = record.result
@@ -195,6 +209,7 @@ def reviewed_component_build_spec(
     review_fingerprint = reviewed_candidate_fingerprint(
         authority=authority,
         record=record,
+        trusted_plan_fingerprint=trusted_plan_fingerprint,
     )
     policy = policies.resolve(
         project_id=authority.project_id,
@@ -238,7 +253,11 @@ def reviewed_component_build_spec(
             "reviewed-build policy does not match exact accepted candidate authority"
         )
 
-    build_work_id = _build_work_id(authority=authority, record=record)
+    build_work_id = _build_work_id(
+        authority=authority,
+        record=record,
+        trusted_plan_fingerprint=trusted_plan_fingerprint,
+    )
     return BuildExecutionSpec(
         request=ExecutionRequest(
             project_id=authority.project_id,
@@ -266,11 +285,13 @@ def reviewed_candidate_fingerprint(
     *,
     authority: RepositoryGraphAuthority,
     record: WorkRecord,
+    trusted_plan_fingerprint: str,
 ) -> str:
     """Bind PF5 admission to exact PF4 candidate and independent-review evidence."""
 
     if type(record) is not WorkRecord:
         raise ReviewedBuildAdmissionError("reviewed-build record must be exact WorkRecord")
+    _validate_digest(trusted_plan_fingerprint, "trusted plan fingerprint")
     if record.result is None or record.review is None:
         raise ReviewedBuildAdmissionError(
             "reviewed-build fingerprint requires result and review evidence"
@@ -283,11 +304,15 @@ def reviewed_candidate_fingerprint(
         "spec_version": authority.spec_version,
         "row_version": authority.row_version,
         "graph_digest": authority.graph_digest,
+        "trusted_plan_fingerprint": trusted_plan_fingerprint,
         "component_id": record.request.component_id,
         "repository_id": record.request.repository_id,
         "candidate_work_id": record.request.work_id,
         "attempt": record.request.attempt,
         "base_sha": record.request.base_sha,
+        "permission_ceiling": sorted(record.request.permission_ceiling),
+        "allowed_paths": record.request.allowed_paths,
+        "acceptance_commands": record.request.acceptance_commands,
         "result_sha": result.result_sha,
         "diff_digest": result.diff_digest,
         "producer_actor_id": result.producer_actor_id,
@@ -333,7 +358,13 @@ def _validate_authority(authority: RepositoryGraphAuthority) -> None:
         )
 
 
-def _validate_accepted_record(authority, component, record: WorkRecord) -> None:
+def _validate_accepted_record(
+    authority,
+    component,
+    record: WorkRecord,
+    *,
+    trusted_plan,
+) -> None:
     if type(record) is not WorkRecord:
         raise ReviewedBuildAdmissionError("PF4 work record must be exact WorkRecord")
     if record.state is not WorkState.ACCEPTED:
@@ -347,6 +378,32 @@ def _validate_accepted_record(authority, component, record: WorkRecord) -> None:
     request = record.request
     result = record.result
     review = record.review
+    if type(trusted_plan) is not tuple or not trusted_plan:
+        raise ReviewedBuildAdmissionError(
+            "accepted PF4 work is missing immutable trusted plan authority"
+        )
+    initial_request = next(
+        (
+            item
+            for item in trusted_plan
+            if item.component_id == request.component_id
+        ),
+        None,
+    )
+    if initial_request is None:
+        raise ReviewedBuildAdmissionError(
+            "accepted PF4 work is absent from immutable trusted plan authority"
+        )
+    if (
+        request.project_id != initial_request.project_id
+        or request.repository_id != initial_request.repository_id
+        or request.allowed_paths != initial_request.allowed_paths
+        or request.acceptance_commands != initial_request.acceptance_commands
+        or request.permission_ceiling != initial_request.permission_ceiling
+    ):
+        raise ReviewedBuildAdmissionError(
+            "accepted PF4 work exceeds or drifts from immutable trusted plan authority"
+        )
     if (
         request.project_id != authority.project_id
         or request.component_id != component.component_id
@@ -441,8 +498,17 @@ def _verify_current_review_authority(
         )
 
 
-def _build_work_id(*, authority: RepositoryGraphAuthority, record: WorkRecord) -> str:
-    fingerprint = reviewed_candidate_fingerprint(authority=authority, record=record)
+def _build_work_id(
+    *,
+    authority: RepositoryGraphAuthority,
+    record: WorkRecord,
+    trusted_plan_fingerprint: str,
+) -> str:
+    fingerprint = reviewed_candidate_fingerprint(
+        authority=authority,
+        record=record,
+        trusted_plan_fingerprint=trusted_plan_fingerprint,
+    )
     return f"pf5-build:{fingerprint}"
 
 
