@@ -413,8 +413,10 @@ def test_windows_executable_admission_holds_lock_through_readmission(
     executable.write_bytes(b"trusted executable bytes")
     replacement.write_bytes(b"replacement executable bytes")
     original_resolve = execution_module._resolve_pinned_executable
+    original_hash = execution_module._pinned_executable_sha256
     calls = 0
     replacement_blocked = False
+    hash_replacement_blocked = False
 
     def probing_resolve(
         candidate: pathlib.Path,
@@ -428,17 +430,30 @@ def test_windows_executable_admission_holds_lock_through_readmission(
             replacement_blocked = True
         return original_resolve(candidate, arguments)
 
+    def probing_hash(candidate: pathlib.Path) -> str:
+        nonlocal hash_replacement_blocked
+        with pytest.raises(OSError):
+            os.replace(replacement, executable)
+        hash_replacement_blocked = True
+        return original_hash(candidate)
+
     monkeypatch.setattr(
         execution_module,
         "_resolve_pinned_executable",
         probing_resolve,
+    )
+    monkeypatch.setattr(
+        execution_module,
+        "_pinned_executable_sha256",
+        probing_hash,
     )
 
     admission = execution_module._admit_pinned_executable(executable, ())
 
     assert calls == 2
     assert replacement_blocked is True
-    assert admission.sha256 == execution_module._pinned_executable_sha256(executable)
+    assert hash_replacement_blocked is True
+    assert admission.sha256 == original_hash(executable)
     assert replacement.exists()
 
     os.replace(replacement, executable)
