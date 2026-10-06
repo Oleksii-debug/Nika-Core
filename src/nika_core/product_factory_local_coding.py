@@ -197,4 +197,17 @@ def build_contained_local_coding_program(
         idempotency=idempotency,
         review_evidence_authority=review_evidence_authority,
     )
-    return ContainedLocalCodingProgram(host=host, worker=worker, ports=ports)
+    multi_repository_host = MultiRepositoryProductFactoryHost(
+        store=store,
+        worker=host.worker,
+        team_plan=team_plan,
+        review_evidence_authority=review_evidence_authority,
+        reviewer_principals=reviewer_principals,
+        program_host=host,
+    )
+    return ContainedLocalCodingProgram(
+        host=host,
+        multi_repository_host=multi_repository_host,
+        worker=worker,
+        ports=ports,
+    )
