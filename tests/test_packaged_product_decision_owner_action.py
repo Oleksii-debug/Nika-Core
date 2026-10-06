@@ -169,6 +169,18 @@ def test_pf1_corrupt_unpresentable_persisted_decision_id_fails_closed(
     assert repository.get(_PROJECT_ID).row_version == 1
 
 
+def test_missing_decision_equal_to_project_id_does_not_clear_valid_selection(
+    tmp_path: Path,
+) -> None:
+    _store, repository, _service, router = _build(tmp_path / "id-collision.db")
+
+    with pytest.raises(PackagedProductJourneyError, match="не знайдено"):
+        router.create({"command": f"show product decision {_PROJECT_ID}"})
+
+    assert router.active_project_id == _PROJECT_ID
+    assert repository.get(_PROJECT_ID).project_id == _PROJECT_ID
+
+
 def test_multiple_pending_decisions_are_discoverable_by_bounded_pages_and_exact_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

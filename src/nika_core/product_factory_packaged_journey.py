@@ -20,6 +20,7 @@ from nika_core.product_command.contracts import (
 )
 from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
+    ProductProjectDecisionNotFoundError,
     ProductProjectPresentationConsistencyError,
 )
 from nika_core.product_command.routing import route_command
@@ -583,15 +584,15 @@ class PackagedProductCommandRouter:
         project_id = self._decision_read_project_id()
         try:
             decision = self._products.inspect_decision(project_id, decision_id)
-        except KeyError as exc:
-            if exc.args and exc.args[0] == project_id:
-                self.clear_stale_selection()
-                raise PackagedProductJourneyError(
-                    "Збережений ProductProject більше не існує. "
-                    "Застарілий вибір очищено."
-                ) from exc
+        except ProductProjectDecisionNotFoundError as exc:
             raise PackagedProductJourneyError(
                 f"Рішення ProductProject не знайдено: {decision_id}."
+            ) from exc
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. "
+                "Застарілий вибір очищено."
             ) from exc
         except ProductProjectPresentationConsistencyError as exc:
             raise PackagedProductJourneyError(

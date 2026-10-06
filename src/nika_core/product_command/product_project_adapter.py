@@ -41,6 +41,10 @@ class ProductProjectPresentationConsistencyError(RuntimeError):
     """Raised when durable project state changes during one presentation read."""
 
 
+class ProductProjectDecisionNotFoundError(KeyError):
+    """Raised when an exact ProductDecision is absent from an existing project."""
+
+
 class ProductProjectCommandService:
     """PF5 adapter over the integrated durable PF1 repositories and lifecycle."""
 
@@ -110,7 +114,10 @@ class ProductProjectCommandService:
     ) -> ProductUserDecision:
         """Read one exact decision without materializing unrelated decisions."""
         before = self._repository.get(project_id)
-        decision = self._decisions.get(project_id, decision_id)
+        try:
+            decision = self._decisions.get(project_id, decision_id)
+        except KeyError as exc:
+            raise ProductProjectDecisionNotFoundError(decision_id) from exc
         after = self._repository.get(project_id)
         if (
             before.row_version != after.row_version
