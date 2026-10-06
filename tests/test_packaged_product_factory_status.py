@@ -19,7 +19,12 @@ from nika_core.product_factory_orchestration import (
     ProductRepositoryGraph,
     RepositoryRef,
 )
-from nika_core.product_factory_packaged_journey import PackagedProductStateProvider
+from nika_core.product_factory_packaged_journey import (
+    PackagedProductCommandRouter,
+    PackagedProductSelectionStore,
+    PackagedProductStateProvider,
+    packaged_current_product_factory_status_command,
+)
 from nika_core.product_factory_packaged_preparation import (
     PRODUCT_FACTORY_HOST_AGENT_ID,
     PackagedProductFactoryExecutionPlan,
@@ -329,6 +334,138 @@ def test_packaged_state_exposes_bounded_component_status_without_evidence(
     assert "evidence" not in product_state["status_items"][0]
 
 
+def _status_router(
+    *,
+    store: SQLiteStore,
+    repository: ProductProjectRepository,
+    project_id: str,
+    center: PackagedProductCommandCenter,
+) -> PackagedProductCommandRouter:
+    selection = PackagedProductSelectionStore(store)
+    selection.select(project_id)
+    return PackagedProductCommandRouter(
+        products=ProductProjectCommandService(repository),
+        ordinary_handler=lambda _payload: pytest.fail(
+            "Factory status command must not fall through to ordinary task routing"
+        ),
+        selection_store=selection,
+        product_factory_status_inspector=center.inspect_packaged_project,
+    )
+
+
+def test_factory_status_command_is_exact_and_does_not_capture_broad_text() -> None:
+    assert packaged_current_product_factory_status_command(
+        "Show current Product Factory status"
+    )
+    assert packaged_current_product_factory_status_command(
+        "Покажи поточний статус Product Factory."
+    )
+    assert not packaged_current_product_factory_status_command(
+        "please show current Product Factory status when convenient"
+    )
+
+
+def test_factory_status_command_reports_prepared_authority_and_survives_restart(
+    tmp_path: Path,
+) -> None:
+    store, repository, project, plan, preparation, center = _fixture(tmp_path)
+    preparation.prepare(plan)
+    router = _status_router(
+        store=store,
+        repository=repository,
+        project_id=project.project_id,
+        center=center,
+    )
+
+    before = router.create({"command": "Покажи поточний статус Product Factory"})
+
+    assert before.status == "completed"
+    assert before.focus_id == "product-project-heading"
+    assert f"Статус Product Factory для {project.project_id}" in before.message
+    assert "компонентів 1" in before.message
+    assert "блокерів 0" in before.message
+    assert "core=ready" in before.message
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    restarted_repository = ProductProjectRepository(restarted_store)
+    restarted_center = PackagedProductCommandCenter(
+        products=ProductProjectCommandService(restarted_repository),
+        status_reader=PackagedProductFactoryStatusReader(restarted_store),
+    )
+    restarted_router = _status_router(
+        store=restarted_store,
+        repository=restarted_repository,
+        project_id=project.project_id,
+        center=restarted_center,
+    )
+
+    after = restarted_router.create({"command": "Show current Product Factory status"})
+
+    assert after == before
+
+
+def test_factory_status_command_bounds_large_component_summary(tmp_path: Path) -> None:
+    store, repository, project, plan, preparation, center = _fixture(tmp_path)
+    components = tuple(
+        ProductComponent(
+            component_id=f"component-{index}",
+            repository_id="repo-core",
+            paths=(f"src/component-{index}",),
+            test_commands=(("python", "-m", "pytest", f"tests/component-{index}"),),
+        )
+        for index in range(10)
+    )
+    wide_plan = PackagedProductFactoryExecutionPlan(
+        project_id=project.project_id,
+        expected_spec_version=project.spec_version,
+        expected_row_version=project.row_version,
+        graph=ProductRepositoryGraph(
+            project_id=project.project_id,
+            repositories=plan.graph.repositories,
+            components=components,
+        ),
+        graph_version=1,
+        base_shas=dict(plan.base_shas),
+        component_goals={
+            item.component_id: f"Implement {item.component_id}" for item in components
+        },
+        permission_ceiling=plan.permission_ceiling,
+    )
+    preparation.prepare(wide_plan)
+    router = _status_router(
+        store=store,
+        repository=repository,
+        project_id=project.project_id,
+        center=center,
+    )
+
+    result = router.create({"command": "Show current Product Factory status"})
+
+    assert "компонентів 10" in result.message
+    assert "показано 8 з 10 компонентів" in result.message
+    assert "component-0=ready" in result.message
+    assert "component-7=ready" in result.message
+    assert "component-8=ready" not in result.message
+    assert "component-9=ready" not in result.message
+
+
+def test_factory_status_command_reports_unprepared_current_version(tmp_path: Path) -> None:
+    store, repository, project, _plan, _preparation, center = _fixture(tmp_path)
+    router = _status_router(
+        store=store,
+        repository=repository,
+        project_id=project.project_id,
+        center=center,
+    )
+
+    result = router.create({"command": "Поточний статус Product Factory"})
+
+    assert result.status == "completed"
+    assert result.focus_id == "product-project-heading"
+    assert "ще не має підготовленого execution authority" in result.message
+
+
 def test_windows_composition_uses_read_only_packaged_factory_status_reader() -> None:
     source = (Path(__file__).resolve().parents[1] / "scripts" / "nika_windows.py").read_text(
         encoding="utf-8"
@@ -338,3 +475,7 @@ def test_windows_composition_uses_read_only_packaged_factory_status_reader() -> 
     assert "PackagedProductCommandCenter(" in source
     assert "status_reader=PackagedProductFactoryStatusReader(store)" in source
     assert "team_planner=PackagedProductFactoryTeamPlanner(product_repository)" in source
+    assert (
+        "product_factory_status_inspector=command_center.inspect_packaged_project"
+        in source
+    )

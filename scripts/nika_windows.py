@@ -359,6 +359,10 @@ def build_windows_bridge(
                 focus_id="model-route-kind",
             )
 
+    command_center = PackagedProductCommandCenter(
+        products=products,
+        status_reader=PackagedProductFactoryStatusReader(store),
+    )
     product_router = PackagedProductCommandRouter(
         products=products,
         ordinary_handler=create_ordinary_task,
@@ -382,12 +386,9 @@ def build_windows_bridge(
         selection_store=PackagedProductSelectionStore(store),
         decision_approval_authority=decision_approval_authority,
         team_planner=PackagedProductFactoryTeamPlanner(product_repository),
+        product_factory_status_inspector=command_center.inspect_packaged_project,
     )
     agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
-    command_center = PackagedProductCommandCenter(
-        products=products,
-        status_reader=PackagedProductFactoryStatusReader(store),
-    )
     product_state = PackagedProductStateProvider(
         base_state=backend.snapshot,
         router=product_router,

@@ -45,6 +45,10 @@ TaskStatusHandler = Callable[[str | None], UIResult]
 ActivityReportHandler = Callable[[], UIResult]
 TrainingStatusHandler = Callable[[str], UIResult]
 IntelligenceModeCommandHandler = Callable[[str], UIResult]
+ProductFactoryStatusInspector = Callable[
+    [str],
+    tuple[ProductProjectDetail, ProductDecisionSetSummary],
+]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
 _PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
 _REOPEN_PREFIXES = (
@@ -78,7 +82,16 @@ _SHOW_CURRENT_PRODUCT_FACTORY_PLAN_COMMANDS = frozenset(
         "покажи поточний план product factory",
     }
 )
+_CURRENT_PRODUCT_FACTORY_STATUS_COMMANDS = frozenset(
+    {
+        "current product factory status",
+        "show current product factory status",
+        "поточний статус product factory",
+        "покажи поточний статус product factory",
+    }
+)
 _PRODUCT_STATUS_PREVIEW_LIMIT = 24
+_PRODUCT_FACTORY_COMMAND_STATUS_LIMIT = 8
 _CURRENT_DECISION_COMMANDS = frozenset(
     {
         "current product decision",
@@ -242,6 +255,14 @@ def packaged_show_current_product_factory_plan_command(command: str) -> bool:
         " ".join(command.split()).casefold().strip(" :")
         in _SHOW_CURRENT_PRODUCT_FACTORY_PLAN_COMMANDS
     )
+
+
+def packaged_current_product_factory_status_command(command: str) -> bool:
+    """Recognize an exact read-only command for durable Product Factory execution status."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split()).casefold().strip(" :.!?")
+    return normalized in _CURRENT_PRODUCT_FACTORY_STATUS_COMMANDS
 
 
 def packaged_current_product_decision_command(command: str) -> bool:
@@ -530,6 +551,7 @@ class PackagedProductCommandRouter:
         selection_store: PackagedProductSelectionStore | None = None,
         decision_approval_authority: ApprovalAuthority | None = None,
         team_planner: PackagedProductFactoryTeamPlanner | None = None,
+        product_factory_status_inspector: ProductFactoryStatusInspector | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
@@ -544,6 +566,7 @@ class PackagedProductCommandRouter:
         self._selection_store = selection_store
         self._decision_approval_authority = decision_approval_authority
         self._team_planner = team_planner
+        self._product_factory_status_inspector = product_factory_status_inspector
         self._pending_decision_approvals: dict[
             str, _PendingPackagedDecisionApproval
         ] = {}
@@ -980,6 +1003,64 @@ class PackagedProductCommandRouter:
             raise PackagedProductJourneyError(str(exc)) from exc
         return _team_plan_ui_result(result)
 
+    def _describe_current_product_factory_status(self) -> UIResult:
+        project_id = self._active_project_id
+        if project_id is None:
+            raise PackagedProductJourneyError(
+                "Поточний ProductProject не вибрано. Створіть продукт або відкрийте його за ID."
+            )
+        inspector = self._product_factory_status_inspector
+        if inspector is None:
+            raise PackagedProductJourneyError(
+                "Статус Product Factory недоступний у цьому packaged-контексті."
+            )
+        try:
+            detail, _decision_summary = inspector(project_id)
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. Застарілий вибір очищено."
+            ) from exc
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "Product Factory змінився під час читання статусу. "
+                "Оновіть стан і повторіть команду."
+            ) from exc
+
+        components = tuple(
+            item for item in detail.statuses if item.kind is ProductStatusKind.COMPONENT
+        )
+        if not components:
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message=(
+                    f"Статус Product Factory для {project_id}: "
+                    "поточна версія ProductProject ще не має підготовленого execution authority."
+                ),
+                focus_id="product-project-heading",
+            )
+
+        shown = components[:_PRODUCT_FACTORY_COMMAND_STATUS_LIMIT]
+        component_summary = "; ".join(
+            f"{item.item_id}={item.state}" for item in shown
+        )
+        truncation = (
+            ""
+            if len(shown) == len(components)
+            else f"; показано {len(shown)} з {len(components)} компонентів"
+        )
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                f"Статус Product Factory для {project_id}: "
+                f"компонентів {len(components)}; блокерів {detail.summary.blocker_count}; "
+                f"{component_summary}{truncation}."
+            ),
+            focus_id="product-project-heading",
+        )
+
     def _require_team_planner_and_project(
         self,
     ) -> tuple[PackagedProductFactoryTeamPlanner, str]:
@@ -1084,6 +1165,8 @@ class PackagedProductCommandRouter:
             return self._plan_current_product_factory()
         if packaged_show_current_product_factory_plan_command(command):
             return self._describe_current_product_factory_plan()
+        if packaged_current_product_factory_status_command(command):
+            return self._describe_current_product_factory_status()
 
         reopen_target = packaged_product_reopen_target(command)
         if reopen_target is not None:
