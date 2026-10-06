@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.m11_release as m11_release
 import nika_core.product_project as product_project_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.packaging.release import build_release_manifest, verify_release_manifest
@@ -96,21 +97,69 @@ def test_staging_rejects_source_changed_between_lstat_and_open(
     bundle = tmp_path / "bundle"
     bundle.mkdir()
 
-    real_open = os.open
+    real_open = m11_release._open_canonical_installer_source
     swapped = False
 
-    def swapping_open(path, flags, *args, **kwargs):
+    def swapping_open(path: Path) -> int:
         nonlocal swapped
-        if Path(path) == canonical and not swapped:
+        if path == canonical and not swapped:
             swapped = True
             canonical.write_bytes(b"changed installer bytes\n")
-        return real_open(path, flags, *args, **kwargs)
+        return real_open(path)
 
-    monkeypatch.setattr(os, "open", swapping_open)
+    monkeypatch.setattr(m11_release, "_open_canonical_installer_source", swapping_open)
     with pytest.raises(RuntimeError, match="changed during staging"):
         _stage_canonical_installer(project_root, bundle)
     assert not (bundle / "install_nika_core.ps1").exists()
     assert not list(bundle.glob(".install_nika_core-*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_installer_staging_refuses_preexisting_writer_and_recovers_after_close(
+    tmp_path: Path,
+) -> None:
+    project_root = tmp_path / "repo"
+    scripts = project_root / "scripts"
+    scripts.mkdir(parents=True)
+    canonical = scripts / "install_nika_core.ps1"
+    canonical_bytes = b"Write-Output 'locked canonical installer'\n"
+    canonical.write_bytes(canonical_bytes)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+
+    with canonical.open("r+b"):
+        with pytest.raises(RuntimeError, match="could not be staged safely"):
+            _stage_canonical_installer(project_root, bundle)
+
+    assert not (bundle / "install_nika_core.ps1").exists()
+    assert not list(bundle.glob(".install_nika_core-*.tmp"))
+
+    packaged = _stage_canonical_installer(project_root, bundle)
+    assert packaged.read_bytes() == canonical_bytes
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_installer_source_snapshot_holds_write_delete_fence_until_close(
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / "install_nika_core.ps1"
+    renamed = tmp_path / "renamed-installer.ps1"
+    canonical.write_bytes(b"canonical installer\n")
+
+    descriptor = m11_release._open_canonical_installer_source(canonical)
+    try:
+        assert os.read(descriptor, len(b"canonical installer\n")) == b"canonical installer\n"
+        with pytest.raises(OSError):
+            canonical.write_bytes(b"replacement\n")
+        with pytest.raises(OSError):
+            canonical.replace(renamed)
+    finally:
+        os.close(descriptor)
+
+    canonical.replace(renamed)
+    renamed.replace(canonical)
+    canonical.write_bytes(b"replacement\n")
+    assert canonical.read_bytes() == b"replacement\n"
 
 
 def _create_continuity_project(data_path: Path) -> None:
