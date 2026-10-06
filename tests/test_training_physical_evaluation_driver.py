@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import nika_core.training_scale as training_scale
+
 import pytest
 
 import nika_core.training_physical_evaluation_driver as driver
@@ -516,6 +518,90 @@ def test_find_pilot_task_rejects_ambiguous_identity(tmp_path: Path) -> None:
             store,
             workspace_id="evaluation-workspace",
             job_id="pilot-job",
+        )
+
+
+def _trusted_progression_proof() -> driver.TrainingScaleProgressionProof:
+    return training_scale._build_progression_proof(
+        plan_sha256="1" * 64,
+        tier_index=0,
+        authorization_sha256="2" * 64,
+        job_id="pilot-job",
+        job_fingerprint="3" * 64,
+        base_artifact_ref="models/base",
+        base_sha256="4" * 64,
+        candidate_artifact_ref="models/pilot-candidate",
+        candidate_sha256="5" * 64,
+        frozen_package_sha256="6" * 64,
+        training_material_sha256="7" * 64,
+        execution_plan_sha256="8" * 64,
+        comparison_evidence_sha256="9" * 64,
+        evaluation_set_sha256="a" * 64,
+    )
+
+
+def test_scale_progression_record_is_durable_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "progression.sqlite3")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+    )
+    ledger = driver.IdempotencyLedger(store)
+    proof = _trusted_progression_proof()
+
+    first = driver._persist_scale_progression_record(
+        ledger=ledger,
+        task_id=task.task_id,
+        proof=proof,
+    )
+    second = driver._persist_scale_progression_record(
+        ledger=ledger,
+        task_id=task.task_id,
+        proof=proof,
+    )
+
+    assert first.status is driver.IdempotencyStatus.COMPLETED
+    assert second == first
+    assert first.operation_type == driver._SCALE_PROGRESSION_OPERATION_TYPE
+    assert first.result == {
+        "schema": "nika-physical-scale-progression-record-v1",
+        "proof_sha256": proof.proof_sha256,
+        "proof": proof.canonical_payload(),
+    }
+
+
+def test_scale_progression_record_rejects_incomplete_existing_state(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "progression.sqlite3")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+    )
+    ledger = driver.IdempotencyLedger(store)
+    proof = _trusted_progression_proof()
+    operation_key, input_fingerprint, _ = driver._scale_progression_record_identity(
+        proof
+    )
+    ledger.reserve_once(
+        operation_key=operation_key,
+        task_id=task.task_id,
+        operation_type=driver._SCALE_PROGRESSION_OPERATION_TYPE,
+        input_fingerprint=input_fingerprint,
+    )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="incomplete or inconsistent",
+    ):
+        driver._persist_scale_progression_record(
+            ledger=ledger,
+            task_id=task.task_id,
+            proof=proof,
         )
 
 

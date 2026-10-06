@@ -55,8 +55,16 @@ from nika_core.training_evaluation_comparison import (
 )
 from nika_core.training_evaluation_execution import run_attested_challenger_benchmark
 from nika_core.training_evaluation_subprocess import RegistrySubprocessLoadedModelAttestor
+from nika_core.training_materials import reconstruct_training_material_evidence
 from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
-from nika_core.training_scale import TrainingScaleError, TrainingScalePlan
+from nika_core.training_scale import (
+    TrainingScaleAuthorization,
+    TrainingScaleError,
+    TrainingScalePlan,
+    TrainingScaleProgressionProof,
+    authorize_training_scale,
+    build_scale_progression_proof,
+)
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingJobSpec,
@@ -94,6 +102,10 @@ _SCALE_TRAINING_TASK_KEYS = frozenset(
 )
 _SCALE_TRAINING_TASK_KEYS_WITH_PLAN = frozenset(
     {*_SCALE_TRAINING_TASK_KEYS, "scale_plan"}
+)
+_SCALE_PROGRESSION_OPERATION_TYPE = "training.physical_scale_progression"
+_SCALE_PROGRESSION_RESULT_KEYS = frozenset(
+    {"schema", "proof_sha256", "proof"}
 )
 _REPORT_KEYS = frozenset(
     {
@@ -600,6 +612,13 @@ def _policy_from_value(value: object) -> PromotionPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class _ScaleProgressionContext:
+    plan: TrainingScalePlan
+    authorization: TrainingScaleAuthorization
+    run: TrainingRunEvidence
+
+
+@dataclass(frozen=True, slots=True)
 class PhysicalEvaluationConfig:
     workspace_id: str
     project_id: str
@@ -957,6 +976,118 @@ def _candidate(
         )
     except (TypeError, ValueError) as exc:
         raise PhysicalEvaluationDriverError("physical model candidate is invalid") from exc
+
+
+def _reconstruct_scale_progression_context(
+    *,
+    task: TaskRecord,
+    package: FrozenLearningPackage,
+    workspace_id: str,
+    pilot: PhysicalTrainingPilotReport,
+    run: TrainingRunEvidence,
+) -> _ScaleProgressionContext | None:
+    payload = task.payload
+    raw_plan = payload.get("scale_plan")
+    if raw_plan is None:
+        return None
+    if payload.get("kind") != "physical_peft_pilot":
+        return None
+    try:
+        plan = TrainingScalePlan.from_canonical_payload(raw_plan)
+        materials = reconstruct_training_material_evidence(
+            package,
+            workspace_id=workspace_id,
+        )
+        authorization = authorize_training_scale(
+            plan=plan,
+            tier_id=payload["scale_tier_id"],
+            job_id=pilot.job_id,
+            base_artifact=run.base_artifact,
+            candidate_artifact_ref=pilot.candidate_artifact_ref,
+            material_evidence=materials,
+            execution_plan_sha256=pilot.execution_plan_sha256,
+            max_steps=pilot.completed_steps,
+        )
+    except (KeyError, TrainingScaleError, TypeError, ValueError) as exc:
+        raise PhysicalEvaluationDriverError(
+            "physical scale authority could not be reconstructed from durable run evidence"
+        ) from exc
+    if (
+        plan.plan_sha256 != payload.get("scale_plan_sha256")
+        or materials.training_material_sha256 != pilot.training_material_sha256
+        or authorization.authorization_sha256 != pilot.scale_authorization_sha256
+    ):
+        _fail("physical scale authority does not match completed training evidence")
+    return _ScaleProgressionContext(
+        plan=plan,
+        authorization=authorization,
+        run=run,
+    )
+
+
+def _scale_progression_record_identity(
+    proof: TrainingScaleProgressionProof,
+) -> tuple[str, str, dict[str, object]]:
+    if type(proof) is not TrainingScaleProgressionProof:
+        raise TypeError("proof must be an exact TrainingScaleProgressionProof")
+    canonical = proof.revalidated()
+    result = {
+        "schema": "nika-physical-scale-progression-record-v1",
+        "proof_sha256": canonical.proof_sha256,
+        "proof": canonical.canonical_payload(),
+    }
+    encoded = json.dumps(
+        result,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    fingerprint = hashlib.sha256(
+        b"nika-physical-scale-progression-record-v1\0" + encoded
+    ).hexdigest()
+    return (
+        f"physical-scale-progression:{canonical.proof_sha256}",
+        f"sha256:{fingerprint}",
+        result,
+    )
+
+
+def _persist_scale_progression_record(
+    *,
+    ledger: IdempotencyLedger,
+    task_id: str,
+    proof: TrainingScaleProgressionProof,
+) -> IdempotencyRecord:
+    operation_key, input_fingerprint, result = _scale_progression_record_identity(proof)
+    try:
+        record, created = ledger.reserve_once(
+            operation_key=operation_key,
+            task_id=task_id,
+            operation_type=_SCALE_PROGRESSION_OPERATION_TYPE,
+            input_fingerprint=input_fingerprint,
+        )
+    except IdempotencyConflictError as exc:
+        raise PhysicalEvaluationDriverError(
+            "durable physical scale progression identity conflicts with existing state"
+        ) from exc
+    if created:
+        return ledger.complete_pending_if_matches(
+            operation_key=record.operation_key,
+            task_id=record.task_id,
+            operation_type=record.operation_type,
+            input_fingerprint=record.input_fingerprint,
+            created_at=record.created_at,
+            result=result,
+        )
+    if (
+        record.status is not IdempotencyStatus.COMPLETED
+        or type(record.result) is not dict
+        or frozenset(record.result) != _SCALE_PROGRESSION_RESULT_KEYS
+        or dict(record.result) != result
+    ):
+        _fail("durable physical scale progression record is incomplete or inconsistent")
+    return record
 
 
 def _register_evaluator(
@@ -1389,6 +1520,7 @@ async def _run_attested_comparison(
     task: TaskRecord,
     pilot: PhysicalTrainingPilotReport,
     evaluation_set: EvaluationSet,
+    scale_progression: _ScaleProgressionContext | None,
     training_binding: object,
     champion_binding: object,
     champion: ModelCandidate,
@@ -1531,6 +1663,26 @@ async def _run_attested_comparison(
             experiment_id=experiment_id,
             repository=repository,
         )
+        if (
+            scale_progression is not None
+            and comparison.experiment_snapshot.status is ExperimentStatus.PROMOTED
+        ):
+            try:
+                progression_proof = build_scale_progression_proof(
+                    plan=scale_progression.plan,
+                    authorization=scale_progression.authorization,
+                    run=scale_progression.run,
+                    comparison=comparison,
+                )
+            except (TrainingScaleError, TypeError, ValueError) as exc:
+                raise PhysicalEvaluationDriverError(
+                    "promoted comparison could not produce canonical scale progression"
+                ) from exc
+            _persist_scale_progression_record(
+                ledger=ledger,
+                task_id=task.task_id,
+                proof=progression_proof,
+            )
         payload = _canonical_report_payload(
             requested_experiment_id=config.experiment_id,
             pilot=pilot,
@@ -1657,6 +1809,13 @@ def run_physical_evaluation_from_config(
         candidate_sha256=pilot.candidate_sha256,
         checkpoint_id=pilot.completed_checkpoint_id,
     )
+    scale_progression = _reconstruct_scale_progression_context(
+        task=task,
+        package=package,
+        workspace_id=config.workspace_id,
+        pilot=pilot,
+        run=completed,
+    )
     try:
         training_binding = bind_training_result_for_evaluation(
             spec=spec,
@@ -1689,6 +1848,7 @@ def run_physical_evaluation_from_config(
             task=task,
             pilot=pilot,
             evaluation_set=evaluation_set,
+            scale_progression=scale_progression,
             training_binding=training_binding,
             champion_binding=champion_binding,
             champion=champion,
