@@ -409,6 +409,9 @@ def build_windows_bridge(
                         local_product_factory_settings_invalid = True
                     else:
                         model_after_build = model_settings.snapshot()
+                        program_model_revision = (
+                            local_product_factory_program.model_authority.revision
+                        )
                         startup_settings_stable = True
                         if not local_product_factory_environment_override:
                             startup_settings_after = (
@@ -426,7 +429,9 @@ def build_windows_bridge(
                             )
                         if (
                             model_after_build.get("status") != "ready"
-                            or model_after_build.get("revision") != model_revision
+                            or model_after_build.get("revision")
+                            != program_model_revision
+                            or model_revision != program_model_revision
                             or not startup_settings_stable
                         ):
                             logging.getLogger(__name__).warning(
@@ -439,7 +444,9 @@ def build_windows_bridge(
                                 local_product_factory_program.multi_repository_host
                             )
                             local_product_factory_runtime_active = True
-                            local_product_factory_launch_model_revision = model_revision
+                            local_product_factory_launch_model_revision = (
+                                program_model_revision
+                            )
                             local_product_factory_launch_settings_revision = (
                                 startup_settings_revision
                             )
