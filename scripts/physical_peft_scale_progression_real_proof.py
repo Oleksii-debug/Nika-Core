@@ -376,8 +376,22 @@ def verify(root: Path) -> None:
     workspace_id = tier0_config.get("workspace_id")
     if type(workspace_id) is not str or not workspace_id:
         _fail("tier-0 workspace identity is invalid")
+    tier0_package_path = root / "frozen-package.json"
+    tier0_package = FrozenLearningPackage.from_json(
+        tier0_package_path.read_bytes(),
+        expected_manifest_sha256=str(
+            tier0_config.get("frozen_package_sha256", "")
+        ),
+    )
+    expected_plan = _scale_plan_payload(tier0_package)
+    if tier0_config.get("scale_plan") != expected_plan:
+        _fail("tier-0 config does not preserve the exact proof scale plan")
     tier0 = _pilot_report(root / "run")
-    if tier0.completed_steps != 2 or tier0.platform != "windows":
+    if (
+        tier0.completed_steps != 2
+        or tier0.platform != "windows"
+        or tier0.frozen_package_sha256 != tier0_package.manifest_sha256
+    ):
         _fail("tier-0 evidence is not the real Windows two-step pilot")
 
     evaluation = _read_object(
@@ -396,6 +410,8 @@ def verify(root: Path) -> None:
     if (
         proof.tier_index != 0
         or proof.candidate_sha256 != tier0.candidate_sha256
+        or proof.evaluation_set_sha256
+        != tier0_package.evaluation_set_sha256
     ):
         _fail("restored progression authority does not bind tier 0")
 
@@ -405,6 +421,7 @@ def verify(root: Path) -> None:
         or tier1_config.get("scale_tier_id") != _TIER1_ID
         or tier1_config.get("base_artifact_ref")
         != tier0.candidate_artifact_ref
+        or tier1_config.get("scale_plan") != expected_plan
         or tier1_config.get("progression_proof")
         != proof.canonical_payload()
     ):
@@ -437,6 +454,31 @@ def verify(root: Path) -> None:
         == tier1.trained_adapter_tensors_sha256
     ):
         _fail("tier-1 physical report does not prove full-budget warm-start training")
+
+    tier1_package_path = Path(
+        str(tier1_config.get("frozen_package_path", ""))
+    ).resolve(strict=True)
+    expected_tier1_package_path = (
+        root / "tier1-frozen-package.json"
+    ).resolve(strict=True)
+    if tier1_package_path != expected_tier1_package_path:
+        _fail("tier-1 config points at an unexpected frozen package")
+    tier1_package_bytes = tier1_package_path.read_bytes()
+    tier1_package = FrozenLearningPackage.from_json(
+        tier1_package_bytes,
+        expected_manifest_sha256=tier1.frozen_package_sha256,
+    )
+    if (
+        tier1_config.get("frozen_package_sha256")
+        != tier1.frozen_package_sha256
+        or tier1_package.base_artifact_sha256
+        != tier0.candidate_sha256
+        or tier1_package.evaluation_set_sha256
+        != tier0_package.evaluation_set_sha256
+        or tier1_package.candidate_dataset_sha256
+        != tier0_package.candidate_dataset_sha256
+    ):
+        _fail("tier-1 frozen package does not preserve progression authority")
 
     store = SQLiteStore(tier1_root / "physical-pilot.sqlite3")
     store.initialize()
@@ -479,6 +521,10 @@ def verify(root: Path) -> None:
     ):
         _fail("tier-1 candidate manifest does not bind warm-start foundation authority")
 
+    staged_assets_path = root / "staged-assets.json"
+    staged_assets = _read_object(staged_assets_path)
+    staged_assets_sha256, _ = _sha256_file(staged_assets_path)
+
     evidence = root / "scale-evidence"
     try:
         evidence.mkdir()
@@ -491,11 +537,16 @@ def verify(root: Path) -> None:
         "promotion_policy": "non-regression",
         "minimum_improvement": 0.0,
         "quality_improvement_claimed": False,
+        "scale_plan": expected_plan,
         "scale_plan_sha256": proof.plan_sha256,
         "evaluation_set_sha256": proof.evaluation_set_sha256,
+        "progression_proof": proof.canonical_payload(),
         "progression_proof_sha256": proof.proof_sha256,
+        "staged_assets_sha256": staged_assets_sha256,
+        "tier0_frozen_package_sha256": tier0.frozen_package_sha256,
         "tier0_candidate_sha256": tier0.candidate_sha256,
         "tier0_completed_steps": tier0.completed_steps,
+        "tier1_frozen_package_sha256": tier1.frozen_package_sha256,
         "tier1_candidate_sha256": tier1.candidate_sha256,
         "tier1_completed_steps": tier1.completed_steps,
         "tier1_previous_adapter_tensors_sha256": (
@@ -520,6 +571,18 @@ def verify(root: Path) -> None:
     _write_new(
         evidence / "tier0-old-vs-new-evaluation-report.json",
         (_canonical_json(evaluation) + "\n").encode("utf-8"),
+    )
+    _write_new(
+        evidence / "tier0-frozen-package.json",
+        tier0_package.to_json().encode("utf-8"),
+    )
+    _write_new(
+        evidence / "tier1-frozen-package.json",
+        tier1_package_bytes,
+    )
+    _write_new(
+        evidence / "staged-assets.json",
+        (_canonical_json(staged_assets) + "\n").encode("utf-8"),
     )
     print(_canonical_json(summary))
 
