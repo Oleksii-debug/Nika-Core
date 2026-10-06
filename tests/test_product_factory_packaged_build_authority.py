@@ -11,6 +11,7 @@ import nika_core.product_factory_packaged_build_authority as authority_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_build_execution import (
+    BuildExecutionError,
     BuildExecutionPortError,
     BuildExecutionState,
 )
@@ -452,6 +453,68 @@ def test_template_drift_invalidates_execution_but_preserves_bound_output_inspect
         match="different packaged authority",
     ):
         _admit(runtime)
+
+
+def test_reconfigured_restart_never_dispatches_pre_effect_work_under_old_grant(
+    tmp_path: Path,
+) -> None:
+    store, startup, node, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={
+            "kind": "product_factory",
+            "product_project_id": PROJECT_ID,
+        },
+    )
+    host = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task.task_id,
+        project_id=PROJECT_ID,
+        node=node,
+        startup=startup,
+        trusted_authority=runtime.trusted_execution,
+        output_policies=runtime.output_policies,
+        recovery_authority=runtime.recovery_execution,
+    )
+    host.submit(spec)
+    prepared = host.prepare(spec.request.work_id)
+    assert prepared.state is BuildExecutionState.PREPARED
+
+    runtime.authorities.configure(
+        _template(argv_suffix=("--wheel",), max_changed_files=3),
+        expected_revision=1,
+    )
+    restarted_runtime = PackagedBuildAuthorityRuntime(
+        PackagedBuildAuthorityStore(
+            store,
+            node=node,
+            startup=startup,
+        )
+    )
+    restarted = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task.task_id,
+        project_id=PROJECT_ID,
+        node=node,
+        startup=startup,
+        trusted_authority=restarted_runtime.trusted_execution,
+        output_policies=restarted_runtime.output_policies,
+        recovery_authority=restarted_runtime.recovery_execution,
+    )
+    assert (
+        restarted.snapshot().coordinator.records[0].state
+        is BuildExecutionState.PREPARED
+    )
+
+    with pytest.raises(BuildExecutionError, match="changed before dispatch"):
+        restarted.begin_dispatch(spec.request.work_id)
+
+    blocked = restarted.snapshot().coordinator.records[0]
+    assert blocked.state is BuildExecutionState.WAITING_FOR_AUTHORITY
+    assert blocked.dispatch is None
+    assert blocked.lease_id is None
 
 
 def test_reconfigured_restart_restores_uncertain_effect_without_stale_replay(
