@@ -132,7 +132,9 @@ def test_decode_requires_strict_utf8_without_bom() -> None:
 
 def test_decode_requires_exact_bytes_carrier() -> None:
     with pytest.raises(TypeError, match="exact bytes"):
-        decode_packaged_product_factory_execution_plan(bytearray(_encode(_claim())))  # type: ignore[arg-type]
+        decode_packaged_product_factory_execution_plan(  # type: ignore[arg-type]
+            bytearray(_encode(_claim()))
+        )
 
 
 def test_decode_rejects_unknown_authority_fields() -> None:
@@ -179,6 +181,21 @@ def test_decode_rejects_inline_credential_material() -> None:
     with pytest.raises(
         PackagedExecutionPlanAdmissionError,
         match="credref",
+    ):
+        decode_packaged_product_factory_execution_plan(_encode(claim))
+
+
+def test_decode_rejects_inline_url_credentials_in_repository_locator() -> None:
+    claim = _claim()
+    repositories = claim["repositories"]
+    assert isinstance(repositories, list)
+    repository = repositories[0]
+    assert isinstance(repository, dict)
+    repository["locator"] = "https://token-value@github.com/example/repository"
+
+    with pytest.raises(
+        PackagedExecutionPlanAdmissionError,
+        match="inline URL credentials",
     ):
         decode_packaged_product_factory_execution_plan(_encode(claim))
 
