@@ -577,7 +577,32 @@ try {
 
         Invoke-Check 'session1.owner_decision_two_step_approval' {
             Dispatch-CreateFromCommandInput "approve product decision $script:approvalDecisionId" | Out-Null
-            $requestPattern = '^Рішення ще не схвалено\. Створено одноразовий trusted approval request: approval-request-[A-Za-z0-9_-]+\. Щоб підтвердити саме цю дію, введіть: confirm product decision approval approval-request-[A-Za-z0-9_-]+
+            $requestPattern = '^Рішення ще не схвалено\. Створено одноразовий trusted approval request: approval-request-[A-Za-z0-9_-]+\. Щоб підтвердити саме цю дію, введіть: confirm product decision approval approval-request-[A-Za-z0-9_-]+$'
+            $status = Wait-UniqueElement '' ([System.Windows.Automation.ControlType]::Text) $requestPattern
+            $message = [string]$status.Current.Name
+            $requestMatches = [regex]::Matches($message, 'approval-request-[A-Za-z0-9_-]+')
+            Require ($requestMatches.Count -eq 2) 'Approval request message did not contain the exact request id twice.'
+            $requestId = $requestMatches[0].Value
+            Require ($requestMatches[1].Value -eq $requestId) 'Approval request message exposed mismatched request identities.'
+            $editor = Wait-UniqueElement 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
+            Assert-ExactFocus $editor 'command input after approval request'
+
+            Dispatch-CreateFromCommandInput "confirm product decision approval $requestId" | Out-Null
+            Wait-UniqueElement "Рішення ProductProject схвалено через trusted owner authority: $script:approvalDecisionId." ([System.Windows.Automation.ControlType]::Text) | Out-Null
+            $heading = Wait-UniqueElement 'ProductProject' ([System.Windows.Automation.ControlType]::Text)
+            Assert-ExactFocus $heading 'ProductProject heading after trusted approval'
+            $script:approvalState = 'two_step_approval_proven'
+            "trusted one-shot approval request $requestId confirmed through packaged keyboard UI"
+        } | Out-Null
+
+        Invoke-Check 'session1.owner_decision_rejection' {
+            Dispatch-CreateFromCommandInput "reject product decision $script:rejectionDecisionId" | Out-Null
+            Wait-UniqueElement "Рішення ProductProject відхилено: $script:rejectionDecisionId." ([System.Windows.Automation.ControlType]::Text) | Out-Null
+            $heading = Wait-UniqueElement 'ProductProject' ([System.Windows.Automation.ControlType]::Text)
+            Assert-ExactFocus $heading 'ProductProject heading after decision rejection'
+            $script:approvalState = 'two_step_approval_and_rejection_proven'
+            'independent pending decision rejected through packaged keyboard UI'
+        } | Out-Null
 
         Invoke-Check 'session1.keyboard_close' {
             Stop-NikaSession 'first journey close'
@@ -680,135 +705,6 @@ finally {
         approval_ui = $approvalState
         coordinate_fallback_used = $false
         semantic_tiers = @('UIAutomation exact process/window generation', 'WebView2 semantic descendants', 'keyboard shortcuts/focus', 'UIA ValuePattern readback', 'packaged owner-decision two-step approval/rejection')
-        checks = $checks.ToArray()
-        pass = ($failures.Count -eq 0)
-        failure_count = $failures.Count
-        failures = $failures.ToArray()
-        human_tested = $false
-        nvda_verified = $false
-        production_release_ready = $false
-    }
-    $payload | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $EvidencePath -Encoding UTF8
-    Write-Host "ONE-SHOT-58 evidence: $EvidencePath"
-    Write-Host "ONE-SHOT-58 failures: $($failures.Count)"
-}
-
-if ($failures.Count -gt 0) { exit 1 }
-exit 0
-            $status = Wait-UniqueElement '' ([System.Windows.Automation.ControlType]::Text) $requestPattern
-            $message = [string]$status.Current.Name
-            $requestMatches = [regex]::Matches($message, 'approval-request-[A-Za-z0-9_-]+')
-            Require ($requestMatches.Count -eq 2) 'Approval request message did not contain the exact request id twice.'
-            $requestId = $requestMatches[0].Value
-            Require ($requestMatches[1].Value -eq $requestId) 'Approval request message exposed mismatched request identities.'
-            $editor = Wait-UniqueElement 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
-            Assert-ExactFocus $editor 'command input after approval request'
-
-            Dispatch-CreateFromCommandInput "confirm product decision approval $requestId" | Out-Null
-            Wait-UniqueElement "Рішення ProductProject схвалено через trusted owner authority: $script:approvalDecisionId." ([System.Windows.Automation.ControlType]::Text) | Out-Null
-            $heading = Wait-UniqueElement 'ProductProject' ([System.Windows.Automation.ControlType]::Text)
-            Assert-ExactFocus $heading 'ProductProject heading after trusted approval'
-            $script:approvalState = 'two_step_approval_proven'
-            "trusted one-shot approval request $requestId confirmed through packaged keyboard UI"
-        } | Out-Null
-
-        Invoke-Check 'session1.owner_decision_rejection' {
-            Dispatch-CreateFromCommandInput "reject product decision $script:rejectionDecisionId" | Out-Null
-            Wait-UniqueElement "Рішення ProductProject відхилено: $script:rejectionDecisionId." ([System.Windows.Automation.ControlType]::Text) | Out-Null
-            $heading = Wait-UniqueElement 'ProductProject' ([System.Windows.Automation.ControlType]::Text)
-            Assert-ExactFocus $heading 'ProductProject heading after decision rejection'
-            $script:approvalState = 'two_step_approval_and_rejection_proven'
-            'independent pending decision rejected through packaged keyboard UI'
-        } | Out-Null
-
-        Invoke-Check 'session1.keyboard_close' {
-            Stop-NikaSession 'first journey close'
-            'closed exact packaged process via Alt+F4'
-        } | Out-Null
-    }
-
-    if ($null -ne $productId) {
-        Invoke-Check 'persisted_product_factory_state_via_packaged_cli' {
-            $proofPath = Join-Path (Split-Path -Parent $EvidencePath) 'one-shot-58-pf11-restart-proof.json'
-            Remove-Item -LiteralPath $proofPath -Force -ErrorAction SilentlyContinue
-            $proofStart = [System.Diagnostics.ProcessStartInfo]::new()
-            $proofStart.FileName = $ExePath
-            $proofStart.UseShellExecute = $false
-            [void]$proofStart.ArgumentList.Add('--pf11-proof')
-            [void]$proofStart.ArgumentList.Add('--pf11-proof-output')
-            [void]$proofStart.ArgumentList.Add($proofPath)
-            [void]$proofStart.ArgumentList.Add('--pf11-proof-command')
-            [void]$proofStart.ArgumentList.Add($productCommand)
-            $proofProcess = [System.Diagnostics.Process]::Start($proofStart)
-            if ($null -eq $proofProcess) { throw 'Packaged --pf11-proof process did not start.' }
-            $proofProcess.WaitForExit()
-            if ($proofProcess.ExitCode -ne 0) { throw "Packaged --pf11-proof exited $($proofProcess.ExitCode)." }
-            Require (Test-Path -LiteralPath $proofPath -PathType Leaf) 'Packaged --pf11-proof did not produce evidence.'
-            $proof = Get-Content -LiteralPath $proofPath -Raw -Encoding UTF8 | ConvertFrom-Json
-            Require ($proof.project_id -eq $script:productId) "Persisted project id '$($proof.project_id)' != UI-created '$script:productId'."
-            Require ($proof.spec_version -eq 1) 'Persisted ProductProject spec_version changed.'
-            Require ($proof.command_center_state_proven -eq $true) 'Packaged CLI did not prove ProductCommandCenter state.'
-            Require ($proof.restart_selection_integrity_proven -eq $true) 'Packaged CLI did not prove restart selection integrity.'
-            Require ($proof.human_tested -eq $false -and $proof.nvda_verified -eq $false) 'CLI evidence incorrectly granted human/NVDA status.'
-            'packaged executable independently reopened the same SQLite ProductProject and bounded state'
-        } | Out-Null
-    }
-
-    Invoke-Check 'session2.restart_launch' { Start-NikaSession } | Out-Null
-    if ($null -ne $session -and $null -ne $productId) {
-        Invoke-Check 'session2.recover_and_show_current' {
-            Dispatch-CreateFromCommandInput 'Show current ProductProject' | Out-Null
-            Wait-UniqueElement '' ([System.Windows.Automation.ControlType]::Text) "^Поточний ProductProject: $([regex]::Escape($script:productId)); spec version 1; state .+; goal: $([regex]::Escape($productCommand))\.$" | Out-Null
-            'restart recovered durable presentation selection and showed exact current project'
-        } | Out-Null
-        Invoke-Check 'session2.keyboard_close' { Stop-NikaSession 'second journey close'; 'closed via Alt+F4' } | Out-Null
-    } elseif ($null -ne $session) {
-        Stop-NikaSession 'cleanup after missing project id'
-    }
-
-    Invoke-Check 'session3.reopen_after_close' { Start-NikaSession } | Out-Null
-    if ($null -ne $session -and $null -ne $productId) {
-        Invoke-Check 'session3.current_state_still_recoverable' {
-            Dispatch-CreateFromCommandInput 'Show current ProductProject' | Out-Null
-            Wait-UniqueElement '' ([System.Windows.Automation.ControlType]::Text) "^Поточний ProductProject: $([regex]::Escape($script:productId)); spec version 1; state .+; goal: $([regex]::Escape($productCommand))\.$" | Out-Null
-            'second reopen preserved same ProductProject identity/state'
-        } | Out-Null
-        Invoke-Check 'session3.keyboard_close' { Stop-NikaSession 'third journey close'; 'closed via Alt+F4' } | Out-Null
-    } elseif ($null -ne $session) {
-        Stop-NikaSession 'final cleanup after missing project id'
-    }
-}
-catch {
-    Add-Check 'harness.unhandled' 'FAIL' $_.Exception.Message
-}
-finally {
-    if ($null -ne $session) {
-        try { Stop-NikaSession 'final cleanup' } catch { Add-Check 'harness.cleanup' 'FAIL' $_.Exception.Message }
-    }
-    if ($null -eq $previousWebView2BrowserArgs) {
-        Remove-Item Env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
-    } else {
-        $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $previousWebView2BrowserArgs
-    }
-    if ($null -eq $previousDbPath) {
-        Remove-Item Env:NIKA_DB_PATH -ErrorAction SilentlyContinue
-    } else {
-        $env:NIKA_DB_PATH = $previousDbPath
-    }
-
-    $evidenceParent = Split-Path -Parent $EvidencePath
-    New-Item -ItemType Directory -Path $evidenceParent -Force | Out-Null
-    $payload = [ordered]@{
-        schema_version = 1
-        target_source_sha = $TargetSourceSha
-        harness_sha = $HarnessSha
-        executable_path = $ExePath
-        bundle_path = $BundleDir
-        database_path = $DatabasePath
-        product_project_id = $productId
-        approval_ui = $approvalState
-        coordinate_fallback_used = $false
-        semantic_tiers = @('UIAutomation exact process/window generation', 'WebView2 semantic descendants', 'keyboard shortcuts/focus', 'UIA ValuePattern readback')
         checks = $checks.ToArray()
         pass = ($failures.Count -eq 0)
         failure_count = $failures.Count
