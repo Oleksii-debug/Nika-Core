@@ -56,6 +56,7 @@ from nika_core.training_evaluation_comparison import (
 from nika_core.training_evaluation_execution import run_attested_challenger_benchmark
 from nika_core.training_evaluation_subprocess import RegistrySubprocessLoadedModelAttestor
 from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
+from nika_core.training_scale import TrainingScaleError, TrainingScalePlan
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingJobSpec,
@@ -86,7 +87,9 @@ _SCALE_TRAINING_TASK_KEYS = frozenset(
     {
         "job_id",
         "kind",
+        "progression_proof",
         "progression_proof_sha256",
+        "scale_plan",
         "scale_plan_sha256",
         "scale_tier_id",
     }
@@ -793,10 +796,27 @@ def _matches_physical_training_task_payload(
     tier_id = payload.get("scale_tier_id")
     if type(tier_id) is not str or _SCALE_TIER_ID_RE.fullmatch(tier_id) is None:
         return False
+    try:
+        plan = TrainingScalePlan.from_canonical_payload(payload.get("scale_plan"))
+    except (TrainingScaleError, TypeError, ValueError):
+        return False
+    if plan.plan_sha256 != plan_sha256:
+        return False
+    matching = tuple(
+        index for index, tier in enumerate(plan.tiers) if tier.tier_id == tier_id
+    )
+    if len(matching) != 1:
+        return False
     proof_sha256 = payload.get("progression_proof_sha256")
+    proof_payload = payload.get("progression_proof")
     if kind == "physical_peft_pilot":
-        return proof_sha256 is None
-    return type(proof_sha256) is str and _SHA256_RE.fullmatch(proof_sha256) is not None
+        return matching[0] == 0 and proof_sha256 is None and proof_payload is None
+    return (
+        matching[0] > 0
+        and type(proof_sha256) is str
+        and _SHA256_RE.fullmatch(proof_sha256) is not None
+        and type(proof_payload) is dict
+    )
 
 
 def _find_pilot_task(
