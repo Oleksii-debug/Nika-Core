@@ -775,6 +775,15 @@ def _non_finite_mutation_fake_stack() -> tuple[object, ...]:
     return _trainer_variant_stack(_NonFiniteMutationFakeTrainer)
 
 
+class _MustNotTrainFakeTrainer(_FakeTrainer):
+    def __init__(self, **kwargs: object) -> None:
+        raise AssertionError("durable completed step must replay without Trainer construction")
+
+
+def _must_not_train_fake_stack() -> tuple[object, ...]:
+    return _trainer_variant_stack(_MustNotTrainFakeTrainer)
+
+
 def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -812,6 +821,118 @@ def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
     assert b"models/base" in candidate_bytes
     assert b"C:/private/model" not in candidate_bytes
     assert second_state["checkpoint_step"] == 2
+
+
+def test_completed_intermediate_checkpoint_replays_without_optimizer_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    first_state, first_candidate = peft._train_one_step(request, config, consumed)
+    assert first_candidate is None
+
+    checkpoint = (
+        config.output_root
+        / peft._candidate_key(request.candidate_artifact_ref)
+        / "trainer"
+        / "checkpoint-1"
+    )
+    before = {
+        path.relative_to(checkpoint).as_posix(): path.read_bytes()
+        for path in checkpoint.rglob("*")
+        if path.is_file()
+    }
+
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _must_not_train_fake_stack,
+    )
+    replay_state, replay_candidate = peft._train_one_step(
+        request,
+        config,
+        consumed,
+    )
+
+    after = {
+        path.relative_to(checkpoint).as_posix(): path.read_bytes()
+        for path in checkpoint.rglob("*")
+        if path.is_file()
+    }
+    assert replay_state == first_state
+    assert replay_candidate is None
+    assert after == before
+
+
+def test_completed_final_step_replays_existing_candidate_without_overwrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    first_state, first_sha256 = peft._train_one_step(request, config, consumed)
+    assert first_sha256 is not None
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    candidate_bytes = candidate.read_bytes()
+
+    def _manifest_from_fake_candidate(path: Path) -> dict[str, object]:
+        carrier = json.loads(path.read_bytes())
+        return json.loads(carrier["metadata"]["nika_adapter_manifest"])
+
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        _manifest_from_fake_candidate,
+    )
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _must_not_train_fake_stack,
+    )
+
+    replay_state, replay_sha256 = peft._train_one_step(
+        request,
+        config,
+        consumed,
+    )
+
+    assert replay_state == first_state
+    assert replay_sha256 == first_sha256
+    assert candidate.read_bytes() == candidate_bytes
+
+
+def test_incomplete_target_checkpoint_fails_closed_before_retry_training(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    job_root = peft._ensure_job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "stale-optimizer.bin").write_bytes(b"partial-state")
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _must_not_train_fake_stack,
+    )
+
+    with pytest.raises(peft.PeftTrainerError, match="step_checkpoint_incomplete"):
+        peft._train_one_step(request, config, consumed)
+
+    assert (checkpoint / "stale-optimizer.bin").read_bytes() == b"partial-state"
+    assert not (checkpoint / peft._CHECKPOINT_MARKER).exists()
 
 
 class _PriorCheckpointTamperingFakeTrainer(_FakeTrainer):
