@@ -129,18 +129,18 @@ class _RuntimeApi:
         if request.method == "POST" and request.url.path == "/pause":
             assert payload == {"runtime_id": self.runtime_id}
             self.status = "paused"
-            return httpx.Response(200, json={"ok": True})
+            return httpx.Response(204)
 
         if request.method == "POST" and request.url.path == "/resume":
             assert payload == {"runtime_id": self.runtime_id}
             self.status = "running"
-            return httpx.Response(200, json={"ok": True})
+            return httpx.Response(204)
 
         if request.method == "POST" and request.url.path == "/stop":
             assert payload == {"runtime_id": self.runtime_id}
             self.exists = False
             self.status = "stopped"
-            return httpx.Response(200, json={"ok": True})
+            return httpx.Response(204)
 
         raise AssertionError((request.method, request.url, payload))
 
