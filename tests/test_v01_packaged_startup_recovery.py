@@ -69,6 +69,58 @@ class _PackagedRecoveryRuntime:
         )
 
 
+class _PackagedApprovalRecoveryRuntime(_PackagedRecoveryRuntime):
+    capabilities = frozenset(
+        {
+            RuntimeCapability.DURABLE_RESUME,
+            RuntimeCapability.HUMAN_APPROVAL,
+            RuntimeCapability.CANCELLATION,
+        }
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.approval_values: list[tuple[str, object]] = []
+
+    async def resume(self, request):
+        self.resume_calls += 1
+        self.resumed_task_ids.append(request.task_id)
+        self.approval_values.append((request.task_id, request.value))
+        self.resume_started.set()
+        return RuntimeResult(
+            outcome=RuntimeOutcome.COMPLETED,
+            output={"approved": bool(request.value)},
+        )
+
+
+def _waiting_approval_task(path, runtime: _PackagedApprovalRecoveryRuntime):
+    store = SQLiteStore(path)
+    store.initialize()
+    queue = TaskQueue(store)
+    task = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "resume the exact approval-waiting packaged task"},
+    )
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    queue.transition(task.task_id, TaskState.WAITING_APPROVAL)
+    thread_id = f"desktop-{task.task_id}"
+    RuntimeSessionStore(store).record_result(
+        task_id=task.task_id,
+        runtime_id=runtime.runtime_id,
+        thread_id=thread_id,
+        result=RuntimeResult(
+            outcome=RuntimeOutcome.WAITING_APPROVAL,
+            resume_token=runtime.initial_resume_token(
+                task_id=task.task_id,
+                thread_id=thread_id,
+            ),
+        ),
+    )
+    return store, queue, task.task_id
+
+
 def _crash_left_running_task(path, runtime: _PackagedRecoveryRuntime):
     store = SQLiteStore(path)
     store.initialize()
@@ -260,3 +312,147 @@ def test_startup_recovery_admission_rejection_isolated_per_task(
     assert recovery["resume_failed_count"] == 0
     backend.close()
 
+
+
+
+def test_packaged_recovery_exposes_bounded_exact_approval_candidate_and_approves(
+    tmp_path,
+) -> None:
+    runtime = _PackagedApprovalRecoveryRuntime()
+    database = tmp_path / "Ніка approval recovery" / "nika core.db"
+    store, queue, task_id = _waiting_approval_task(database, runtime)
+    backend = DesktopBackend(
+        queue=queue,
+        agents=AgentRegistry(store),
+        workspaces=WorkspaceRegistry(store),
+        audit=AuditLog(store),
+        runtime=runtime,
+    )
+
+    recovery = backend.start_startup_recovery(startup_wait_seconds=0)
+    assert recovery["status"] == "manual"
+    assert recovery["approval_count"] == 1
+    assert recovery["approval_task_ids"] == [task_id]
+    assert recovery["approval_candidates_truncated"] is False
+
+    result = backend.approve_recovery({"task_id": task_id})
+    assert result.status == "accepted"
+    assert result.focus_id == "recovery-heading"
+    assert backend.startup_recovery_snapshot()["approval_task_ids"] == []
+    assert runtime.resume_started.wait(timeout=2)
+
+    for _ in range(100):
+        if queue.get(task_id).state is TaskState.COMPLETED:
+            break
+        Event().wait(0.01)
+    assert queue.get(task_id).state is TaskState.COMPLETED
+    assert runtime.approval_values == [(task_id, True)]
+
+    for _ in range(100):
+        if backend.startup_recovery_snapshot()["approval_count"] == 0:
+            break
+        Event().wait(0.01)
+    assert backend.startup_recovery_snapshot()["approval_count"] == 0
+    backend.close()
+
+
+def test_packaged_recovery_rejection_is_explicit_false_and_capability_fenced(
+    tmp_path,
+) -> None:
+    runtime = _PackagedApprovalRecoveryRuntime()
+    database = tmp_path / "Ніка rejection recovery" / "nika core.db"
+    store, queue, task_id = _waiting_approval_task(database, runtime)
+    backend = DesktopBackend(
+        queue=queue,
+        agents=AgentRegistry(store),
+        workspaces=WorkspaceRegistry(store),
+        audit=AuditLog(store),
+        runtime=runtime,
+    )
+    backend.start_startup_recovery(startup_wait_seconds=0)
+
+    result = backend.reject_recovery({"task_id": task_id})
+    assert result.status == "accepted"
+    assert runtime.resume_started.wait(timeout=2)
+    for _ in range(100):
+        if queue.get(task_id).state is TaskState.COMPLETED:
+            break
+        Event().wait(0.01)
+    assert runtime.approval_values == [(task_id, False)]
+    assert queue.get(task_id).state is TaskState.COMPLETED
+    backend.close()
+
+    unsupported = _PackagedRecoveryRuntime()
+    unsupported_db = tmp_path / "Ніка unsupported approval" / "nika core.db"
+    store2 = SQLiteStore(unsupported_db)
+    store2.initialize()
+    queue2 = TaskQueue(store2)
+    task2 = queue2.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "unsupported approval"},
+    )
+    queue2.transition(task2.task_id, TaskState.READY)
+    queue2.transition(task2.task_id, TaskState.RUNNING)
+    queue2.transition(task2.task_id, TaskState.WAITING_APPROVAL)
+    thread_id = f"desktop-{task2.task_id}"
+    RuntimeSessionStore(store2).record_result(
+        task_id=task2.task_id,
+        runtime_id=unsupported.runtime_id,
+        thread_id=thread_id,
+        result=RuntimeResult(
+            outcome=RuntimeOutcome.WAITING_APPROVAL,
+            resume_token=unsupported.initial_resume_token(
+                task_id=task2.task_id,
+                thread_id=thread_id,
+            ),
+        ),
+    )
+    backend2 = DesktopBackend(
+        queue=queue2,
+        agents=AgentRegistry(store2),
+        workspaces=WorkspaceRegistry(store2),
+        audit=AuditLog(store2),
+        runtime=unsupported,
+    )
+    snapshot = backend2.start_startup_recovery(startup_wait_seconds=0)
+    assert snapshot["approval_count"] == 1
+    assert snapshot["approval_task_ids"] == []
+    assert snapshot["approval_candidates_truncated"] is True
+    try:
+        backend2.approve_recovery({"task_id": task2.task_id})
+    except ValueError as exc:
+        assert "HUMAN_APPROVAL" in str(exc) or "durable approval resume" in str(exc)
+    else:
+        raise AssertionError("runtime without HUMAN_APPROVAL must fail closed")
+    assert queue2.get(task2.task_id).state is TaskState.WAITING_APPROVAL
+    backend2.close()
+
+
+def test_packaged_windows_registers_recovery_approval_actions(tmp_path) -> None:
+    config = AppConfig(database_path=tmp_path / "bridge actions" / "nika.db")
+    bridge, _products = nika_windows.build_windows_bridge(
+        config,
+        start_startup_recovery=False,
+    )
+    actions = {item["action_id"] for item in bridge.list_actions()}
+    assert {"recovery.approve", "recovery.reject"}.issubset(actions)
+    canonical_missing_task = "00000000-0000-0000-0000-000000000001"
+    approved = bridge.dispatch(
+        {
+            "request_id": "recovery-approve-proof",
+            "action_id": "recovery.approve",
+            "payload": {"task_id": canonical_missing_task},
+        }
+    )
+    rejected = bridge.dispatch(
+        {
+            "request_id": "recovery-reject-proof",
+            "action_id": "recovery.reject",
+            "payload": {"task_id": canonical_missing_task},
+        }
+    )
+    assert approved["status"] == "rejected"
+    assert rejected["status"] == "rejected"
+    assert "Завдання не знайдено" in approved["message"]
+    assert "Завдання не знайдено" in rejected["message"]

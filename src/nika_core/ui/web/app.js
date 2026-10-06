@@ -84,6 +84,10 @@
     blocked_count: document.getElementById("recovery-blocked-count"),
     resume_failed_count: document.getElementById("recovery-failed-count"),
   });
+  const recoveryApprovalActions = document.getElementById("recovery-approval-actions");
+  const recoveryApprovalTask = document.getElementById("recovery-approval-task");
+  const recoveryApprove = document.getElementById("recovery-approve");
+  const recoveryReject = document.getElementById("recovery-reject");
   const allowedRecoveryStatuses = new Set([
     "not_started",
     "inventory",
@@ -284,7 +288,14 @@
   let actions = [];
   let actionsReady = false;
   // One outstanding durable task command per UI session: a second click must not mint a new request ID.
-  const taskMutationActions = new Set(["task.create", "task.pause", "task.resume", "agent.stop"]);
+  const taskMutationActions = new Set([
+    "task.create",
+    "task.pause",
+    "task.resume",
+    "agent.stop",
+    "recovery.approve",
+    "recovery.reject",
+  ]);
   const inFlightActions = new Set();
   let keymapMutationPending = false;
   let stateUnavailableReported = false;
@@ -1072,12 +1083,34 @@
     return { ok: true, changed, modelResultBecameAvailable };
   }
 
+  function validRecoveryApprovalTaskId(value) {
+    return typeof value === "string"
+      && value.length > 0
+      && value.length <= 120
+      && !Array.from(value).some((char) => {
+        const code = char.charCodeAt(0);
+        return code < 32 || code === 127;
+      });
+  }
+
   function validStartupRecovery(snapshot) {
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false;
     if (snapshot.schema_version !== 1 || !allowedRecoveryStatuses.has(snapshot.status)) return false;
-    return Object.keys(recoveryFields).every((field) => (
+    if (!Object.keys(recoveryFields).every((field) => (
       Number.isSafeInteger(snapshot[field]) && snapshot[field] >= 0
-    ));
+    ))) return false;
+    if (
+      !Array.isArray(snapshot.approval_task_ids)
+      || snapshot.approval_task_ids.length > 8
+      || typeof snapshot.approval_candidates_truncated !== "boolean"
+      || snapshot.approval_task_ids.length > snapshot.approval_count
+    ) return false;
+    const seen = new Set();
+    for (const taskId of snapshot.approval_task_ids) {
+      if (!validRecoveryApprovalTaskId(taskId) || seen.has(taskId)) return false;
+      seen.add(taskId);
+    }
+    return true;
   }
 
   function renderStartupRecovery(snapshot) {
@@ -1092,6 +1125,13 @@
       for (const node of Object.values(recoveryFields)) {
         if (node) node.textContent = "—";
       }
+      if (recoveryApprovalTask) {
+        recoveryApprovalTask.replaceChildren();
+        recoveryApprovalTask.disabled = true;
+      }
+      if (recoveryApprove) recoveryApprove.disabled = true;
+      if (recoveryReject) recoveryReject.disabled = true;
+      if (recoveryApprovalActions) recoveryApprovalActions.hidden = true;
       return {
         ok: false,
         changed,
@@ -1104,6 +1144,25 @@
       if (node) node.textContent = String(snapshot[field]);
     }
     recoverySummary.hidden = false;
+
+    if (recoveryApprovalTask && recoveryApprovalActions && recoveryApprove && recoveryReject) {
+      const previousTaskId = recoveryApprovalTask.value;
+      recoveryApprovalTask.replaceChildren();
+      for (const taskId of snapshot.approval_task_ids) {
+        const option = document.createElement("option");
+        option.value = taskId;
+        option.textContent = `Завдання ${taskId}`;
+        recoveryApprovalTask.appendChild(option);
+      }
+      if (snapshot.approval_task_ids.includes(previousTaskId)) {
+        recoveryApprovalTask.value = previousTaskId;
+      }
+      const hasApprovalAction = snapshot.approval_task_ids.length > 0;
+      recoveryApprovalActions.hidden = !hasApprovalAction;
+      recoveryApprovalTask.disabled = !hasApprovalAction;
+      recoveryApprove.disabled = !hasApprovalAction;
+      recoveryReject.disabled = !hasApprovalAction;
+    }
 
     const messages = {
       not_started: "Перевірка незавершеної роботи ще не почалася.",
@@ -1950,6 +2009,12 @@
       return;
     }
     const selectedTaskControl = trigger?.dataset?.selectedTaskControl === "true";
+    const recoveryApprovalAction = ["recovery.approve", "recovery.reject"].includes(actionId);
+    if (recoveryApprovalAction && !recoveryApprovalTask?.value) {
+      announce("Немає перевіреного завдання, яке очікує підтвердження.", true);
+      focusElementById("recovery-heading");
+      return;
+    }
     if (selectedTaskControl && !selectedTaskId) {
       announce("Спочатку виберіть незавершене завдання у списку «Завдання».", true);
       trigger?.focus?.();
@@ -2000,6 +2065,7 @@
       ) {
         payload.task_id = selectedTaskId;
       }
+      if (recoveryApprovalAction) payload.task_id = recoveryApprovalTask.value;
       if (actionId === "task.create") payload.command = commandInput.value.trim();
       if (actionId === "voice.model.import") payload.source_root = voiceModelSource?.value ?? "";
       if (actionId === "speech.start") payload.text = speechText?.value ?? "";

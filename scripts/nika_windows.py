@@ -439,6 +439,8 @@ def build_windows_bridge(
             "task.resume": resume_ordinary_task,
             "task.page.previous": backend.previous_task_page,
             "task.page.next": backend.next_task_page,
+            "recovery.approve": backend.approve_recovery,
+            "recovery.reject": backend.reject_recovery,
             "agent.stop": backend.stop_agent,
             "voice.start": voice.start,
             "voice.cancel": voice.cancel,

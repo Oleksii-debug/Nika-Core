@@ -58,7 +58,32 @@
         <dt>Невдалі спроби безпечного продовження</dt>
         <dd id="recovery-failed-count">0</dd>
       </dl>
-      <p id="recovery-help">Nika автоматично продовжує лише crash-left роботу з канонічно перевіреним checkpoint і без невизначених зовнішніх ефектів. Призупинена, очікуюча підтвердження або невизначена робота не запускається без відповідної authority.</p>
+      <div id="recovery-approval-actions" hidden>
+        <label for="recovery-approval-task">Завдання, яке очікує підтвердження</label>
+        <select
+          id="recovery-approval-task"
+          aria-describedby="recovery-approval-help recovery-status"
+          disabled
+        ></select>
+        <p id="recovery-approval-help">Схвалення або відхилення передає лише явне булеве рішення до вже збереженої runtime-сесії. Перед продовженням Nika повторно перевіряє task state, runtime identity, checkpoint і recovery claim. Якщо очікує більше восьми завдань, після рішення для одного з показаних перечитайте список.</p>
+        <div class="actions">
+          <button
+            type="button"
+            id="recovery-approve"
+            data-action-id="recovery.approve"
+            data-error-focus-target="recovery-heading"
+            disabled
+          >Схвалити й продовжити</button>
+          <button
+            type="button"
+            id="recovery-reject"
+            data-action-id="recovery.reject"
+            data-error-focus-target="recovery-heading"
+            disabled
+          >Відхилити й продовжити</button>
+        </div>
+      </div>
+      <p id="recovery-help">Nika автоматично продовжує лише crash-left роботу з канонічно перевіреним checkpoint і без невизначених зовнішніх ефектів. Призупинена, очікуюча підтвердження або невизначена робота не запускається без відповідної authority. Для runtime, який заявляє HUMAN_APPROVAL і DURABLE_RESUME, перевірені очікуючі сесії можна явно схвалити або відхилити клавіатурою.</p>
     </section>
     <section aria-labelledby="model-settings-heading">
       <h2 id="model-settings-heading" tabindex="-1">Модель для нових завдань</h2>

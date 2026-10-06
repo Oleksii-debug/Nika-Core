@@ -236,6 +236,10 @@ def test_local_html_has_required_semantics_and_registered_action_ids(tmp_path: P
     )
     assert 'id="product-factory-help"' in html
     assert "покажи поточний статус Product Factory" in html
+    assert '<label for="recovery-approval-task">' in html
+    assert 'id="recovery-approval-task"' in html
+    assert 'data-action-id="recovery.approve"' in html
+    assert 'data-action-id="recovery.reject"' in html
     assert '<label for="keymap-json">' in html
     assert '<caption>Комбінації клавіш Nika Core</caption>' in html
     assert 'id="workspaces-heading"' in html
@@ -248,6 +252,8 @@ def test_local_html_has_required_semantics_and_registered_action_ids(tmp_path: P
         "task.create",
         "task.pause",
         "task.resume",
+        "recovery.approve",
+        "recovery.reject",
         "agent.stop",
     ):
         assert action_id in registered
@@ -300,6 +306,9 @@ def test_javascript_preserves_edit_shortcuts_and_wires_keymap_transfer() -> None
     assert "globalThis.pywebview.api.set_binding" in script
     assert "globalThis.pywebview.api.export_keymap" in script
     assert "globalThis.pywebview.api.import_keymap" in script
+    assert "snapshot.approval_task_ids.length > 8" in script
+    assert 'option.textContent = `Завдання ${taskId}`' in script
+    assert "if (recoveryApprovalAction) payload.task_id = recoveryApprovalTask.value;" in script
 
 
 def test_packaged_uia_gate_waits_for_bridge_readiness_before_hotkeys() -> None:

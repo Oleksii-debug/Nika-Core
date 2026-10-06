@@ -41,6 +41,7 @@ _LOCAL_CANCEL_STATES = frozenset(
     {TaskState.CREATED, TaskState.READY, TaskState.PAUSED, TaskState.BLOCKED}
 )
 _TASK_PAGE_SIZE = 50
+_RECOVERY_APPROVAL_PAGE_SIZE = 8
 
 
 class _DesktopRuntimeLoop:
@@ -134,6 +135,8 @@ class DesktopBackend:
             "auto_resume_count": 0,
             "manual_resume_count": 0,
             "approval_count": 0,
+            "approval_task_ids": [],
+            "approval_candidates_truncated": False,
             "uncertain_count": 0,
             "blocked_count": 0,
             "resume_failed_count": 0,
@@ -254,6 +257,88 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
+    def approve_recovery(self, payload: Mapping[str, Any]) -> UIResult:
+        return self._resolve_recovery_approval(payload, approved=True)
+
+    def reject_recovery(self, payload: Mapping[str, Any]) -> UIResult:
+        return self._resolve_recovery_approval(payload, approved=False)
+
+    def _resolve_recovery_approval(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        approved: bool,
+    ) -> UIResult:
+        record = self._explicit_task(payload)
+        if record is None:
+            raise ValueError("Виберіть завдання, яке очікує підтвердження.")
+        if record.state is not TaskState.WAITING_APPROVAL:
+            raise ValueError(
+                "Вибране завдання більше не очікує підтвердження; стан перечитано."
+            )
+        required = {
+            RuntimeCapability.DURABLE_RESUME,
+            RuntimeCapability.HUMAN_APPROVAL,
+        }
+        if not required.issubset(self._runtime.capabilities):
+            raise ValueError(
+                "Поточний runtime не заявляє безпечне durable approval resume."
+            )
+
+        recovery_snapshot = self.startup_recovery_snapshot()
+        exposed = recovery_snapshot.get("approval_task_ids")
+        if type(exposed) is not list or record.task_id not in exposed:
+            raise ValueError(
+                "Вибране підтвердження не належить поточному перевіреному "
+                "recovery inventory; перечитайте стан."
+            )
+
+        if self._admit_resumed_task is not None:
+            self._admit_resumed_task(record)
+        current = self._queue.get(record.task_id)
+        if current != record or current.state is not TaskState.WAITING_APPROVAL:
+            raise RuntimeError(
+                "task approval admission changed durable task authority before submission"
+            )
+
+        candidates = self._recovery_service().inspect()
+        if not any(
+            item.task_id == record.task_id
+            and item.disposition is RecoveryDisposition.WAITING_APPROVAL
+            for item in candidates
+        ):
+            raise ValueError(
+                "Recovery authority змінилася; підтвердження відхилено до нового inventory."
+            )
+
+        session = self._coordinator.sessions.get(record.task_id)
+        if session is None or session.runtime_id != self._runtime.runtime_id:
+            raise ValueError(
+                "Збережена runtime-сесія для підтвердження недоступна або належить іншому runtime."
+            )
+
+        future = self._submit_runtime(
+            record.task_id,
+            session.thread_id,
+            self._coordinator.resume_saved_approval(
+                self._runtime,
+                task_id=record.task_id,
+                approval_value=approved,
+            ),
+        )
+        self._mark_recovery_approval_submitted(record.task_id)
+        future.add_done_callback(self._recovery_approval_done)
+        decision = "схвалення" if approved else "відхилення"
+        return UIResult(
+            request_id="desktop-handler",
+            status="accepted",
+            message=(
+                f"Явне {decision} прийнято для безпечного продовження "
+                "перевіреної runtime-сесії."
+            ),
+            focus_id="recovery-heading",
+        )
+
     def stop_agent(self, payload: Mapping[str, Any]) -> UIResult:
         record = self._explicit_task(payload)
         if record is None:
@@ -349,15 +434,7 @@ class DesktopBackend:
                 "status": "inventory",
             }
 
-        runtimes = RuntimeRegistry()
-        runtimes.register(self._runtime)
-        recovery = RuntimeRecoveryService(
-            queue=self._queue,
-            audit=self._audit,
-            runtimes=runtimes,
-            coordinator=self._coordinator,
-            sessions=self._coordinator.sessions,
-        )
+        recovery = self._recovery_service()
         try:
             candidates = recovery.inspect()
         except Exception:
@@ -525,8 +602,8 @@ class DesktopBackend:
         with self._startup_recovery_lock:
             self._startup_recovery_state = dict(state)
 
-    @staticmethod
     def _recovery_projection(
+        self,
         candidates: tuple[RecoveryCandidate, ...],
         *,
         resume_failed_count: int = 0,
@@ -537,8 +614,22 @@ class DesktopBackend:
         manual_resume_count = sum(
             item.disposition is RecoveryDisposition.MANUAL_RESUME for item in candidates
         )
-        approval_count = sum(
-            item.disposition is RecoveryDisposition.WAITING_APPROVAL for item in candidates
+        approval_candidates = tuple(
+            sorted(
+                item.task_id
+                for item in candidates
+                if item.disposition is RecoveryDisposition.WAITING_APPROVAL
+            )
+        )
+        approval_count = len(approval_candidates)
+        approval_actions_supported = {
+            RuntimeCapability.DURABLE_RESUME,
+            RuntimeCapability.HUMAN_APPROVAL,
+        }.issubset(self._runtime.capabilities)
+        approval_task_ids = (
+            list(approval_candidates[:_RECOVERY_APPROVAL_PAGE_SIZE])
+            if approval_actions_supported
+            else []
         )
         uncertain_count = sum(
             item.disposition is RecoveryDisposition.RECONCILE_SIDE_EFFECTS for item in candidates
@@ -566,6 +657,8 @@ class DesktopBackend:
             "auto_resume_count": auto_resume_count,
             "manual_resume_count": manual_resume_count,
             "approval_count": approval_count,
+            "approval_task_ids": approval_task_ids,
+            "approval_candidates_truncated": approval_count > len(approval_task_ids),
             "uncertain_count": uncertain_count,
             "blocked_count": blocked_count,
             "resume_failed_count": resume_failed_count,
@@ -607,6 +700,66 @@ class DesktopBackend:
                     "status": "attention",
                     "blocked_count": 1,
                     "resume_failed_count": max(1, failed_count),
+                }
+            )
+            return
+        self._set_startup_recovery_state(
+            self._recovery_projection(
+                candidates,
+                resume_failed_count=failed_count,
+            )
+        )
+
+    def _recovery_service(self) -> RuntimeRecoveryService:
+        runtimes = RuntimeRegistry()
+        runtimes.register(self._runtime)
+        return RuntimeRecoveryService(
+            queue=self._queue,
+            audit=self._audit,
+            runtimes=runtimes,
+            coordinator=self._coordinator,
+            sessions=self._coordinator.sessions,
+        )
+
+    def _mark_recovery_approval_submitted(self, task_id: str) -> None:
+        with self._startup_recovery_lock:
+            current_ids = self._startup_recovery_state.get("approval_task_ids")
+            if type(current_ids) is not list:
+                return
+            remaining = [item for item in current_ids if item != task_id]
+            approval_count = self._startup_recovery_state.get("approval_count")
+            if type(approval_count) is not int or isinstance(approval_count, bool):
+                approval_count = len(remaining)
+            self._startup_recovery_state = {
+                **self._startup_recovery_state,
+                "approval_task_ids": remaining,
+                "approval_candidates_truncated": approval_count > len(remaining),
+            }
+
+    def _recovery_approval_done(self, future: Future[Any]) -> None:
+        failed_count = 1 if future.cancelled() else 0
+        if not future.cancelled() and future.exception() is not None:
+            failed_count = 1
+        try:
+            candidates = self._recovery_service().inspect()
+        except Exception:  # noqa: BLE001 - post-decision recovery inventory fails closed
+            current = self.startup_recovery_snapshot()
+            blocked = current.get("blocked_count", 0)
+            previous_failed = current.get("resume_failed_count", 0)
+            blocked_count = (
+                blocked if type(blocked) is int and not isinstance(blocked, bool) else 0
+            )
+            resume_failed_count = (
+                previous_failed
+                if type(previous_failed) is int and not isinstance(previous_failed, bool)
+                else 0
+            )
+            self._set_startup_recovery_state(
+                {
+                    **current,
+                    "status": "attention",
+                    "blocked_count": max(1, blocked_count),
+                    "resume_failed_count": max(failed_count, resume_failed_count),
                 }
             )
             return
@@ -686,7 +839,7 @@ class DesktopBackend:
         task_id: str,
         thread_id: str,
         coroutine: Coroutine[Any, Any, Any],
-    ) -> None:
+    ) -> Future[Any]:
         with self._active_lock:
             existing = self._active_futures.get(task_id)
             if existing is not None and not existing.done():
@@ -695,6 +848,7 @@ class DesktopBackend:
             future = self._host().submit(coroutine)
             self._active_futures[task_id] = future
         future.add_done_callback(lambda done: self._runtime_done(task_id, done))
+        return future
 
     def _packaged_done(self, future: Future[Any]) -> None:
         with self._active_lock:
