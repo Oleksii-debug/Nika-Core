@@ -32,6 +32,28 @@ _EXPERIMENT_ID = "physical-scale-progression-real-proof-v1"
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_JSON_BYTES = 1024 * 1024
+_TIER1_REPLACED_CONFIG_FIELDS = frozenset(
+    {
+        "base_artifact_ref",
+        "candidate_artifact_ref",
+        "candidate_descriptor",
+        "frozen_package_path",
+        "frozen_package_sha256",
+        "job_id",
+        "output_root",
+        "schema_version",
+    }
+)
+_TIER1_ADDED_CONFIG_FIELDS = frozenset(
+    {"initial_adapter_path", "progression_proof", "scale_tier_id"}
+)
+_CROSS_TIER_RUNTIME_FIELDS = (
+    "model_dir_manifest_sha256",
+    "trainer_artifact_id",
+    "trainer_deployment_sha256",
+    "trainer_implementation_sha256",
+    "training_runtime_manifest_sha256",
+)
 
 
 class ProofError(RuntimeError):
@@ -203,6 +225,90 @@ def _material_limits(
     )
 
 
+def _evaluation_policy(*, minimum_improvement: float) -> dict[str, object]:
+    return {
+        "primary_metric": "model_quality_score",
+        "minimum_improvement": minimum_improvement,
+        "minimum_replays": 1,
+        "primary_higher_is_better": True,
+        "guardrails": [
+            {
+                "metric": "model_task_pass",
+                "higher_is_better": True,
+                "max_regression": 1.0,
+            }
+        ],
+    }
+
+
+def _require_scale_promotion_config(config: dict[str, object]) -> None:
+    if (
+        config.get("experiment_id") != _EXPERIMENT_ID
+        or config.get("policy") != _evaluation_policy(minimum_improvement=0.0)
+    ):
+        _fail("physical evaluation config is not the exact scale promotion policy")
+
+
+def _require_tier1_config_continuity(
+    tier0: dict[str, object],
+    tier1: dict[str, object],
+) -> None:
+    expected_keys = set(tier0) | set(_TIER1_ADDED_CONFIG_FIELDS)
+    if set(tier1) != expected_keys:
+        _fail("tier-1 config fields changed outside the scale transition")
+    for key, value in tier0.items():
+        if key in _TIER1_REPLACED_CONFIG_FIELDS:
+            continue
+        if tier1.get(key) != value:
+            _fail(f"tier-1 config changed preserved field: {key}")
+
+
+def _cross_tier_runtime_authority(
+    tier0: PhysicalTrainingPilotReport,
+    tier1: PhysicalTrainingPilotReport,
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for field in _CROSS_TIER_RUNTIME_FIELDS:
+        first = getattr(tier0, field)
+        second = getattr(tier1, field)
+        if (
+            type(first) is not str
+            or _SHA256_RE.fullmatch(first) is None
+            or second != first
+        ):
+            _fail(f"cross-tier runtime authority changed: {field}")
+        result[field] = first
+    return result
+
+
+def _require_evaluation_binding(
+    evaluation: dict[str, object],
+    *,
+    tier0: PhysicalTrainingPilotReport,
+    proof: object,
+    evaluation_set_sha256: str,
+    previous_champion_id: object,
+) -> None:
+    if (
+        evaluation.get("requested_experiment_id") != _EXPERIMENT_ID
+        or evaluation.get("experiment_status") != "promoted"
+        or evaluation.get("selected_candidate_id") != tier0.candidate_artifact_ref
+        or evaluation.get("previous_champion_id") != previous_champion_id
+        or evaluation.get("physical_pilot_evidence_sha256") != tier0.evidence_sha256
+        or evaluation.get("evaluation_set_sha256") != evaluation_set_sha256
+        or evaluation.get("comparison_evidence_sha256")
+        != getattr(proof, "comparison_evidence_sha256", None)
+        or getattr(proof, "candidate_artifact_ref", None)
+        != tier0.candidate_artifact_ref
+        or getattr(proof, "candidate_sha256", None) != tier0.candidate_sha256
+        or getattr(proof, "execution_plan_sha256", None)
+        != tier0.execution_plan_sha256
+        or getattr(proof, "evaluation_set_sha256", None)
+        != evaluation_set_sha256
+    ):
+        _fail("old-vs-new evaluation evidence does not bind exact tier-0 authority")
+
+
 def _scale_plan_payload(package: FrozenLearningPackage) -> dict[str, object]:
     train_records, train_bytes, validation_records, validation_bytes = (
         _material_limits(package)
@@ -244,17 +350,9 @@ def configure_promotion(root: Path) -> None:
     path = root / "physical-evaluation.json"
     config = _read_object(path)
     policy = config.get("policy")
-    if type(policy) is not dict:
-        _fail("physical evaluation policy is missing")
-    if (
-        policy.get("primary_metric") != "model_quality_score"
-        or policy.get("primary_higher_is_better") is not True
-        or policy.get("minimum_replays") != 1
-    ):
+    if policy != _evaluation_policy(minimum_improvement=0.000001):
         _fail("physical evaluation policy is not the canonical real-proof policy")
-    policy = dict(policy)
-    policy["minimum_improvement"] = 0.0
-    config["policy"] = policy
+    config["policy"] = _evaluation_policy(minimum_improvement=0.0)
     config["experiment_id"] = _EXPERIMENT_ID
     _replace_json(path, config)
     print(path)
@@ -262,27 +360,30 @@ def configure_promotion(root: Path) -> None:
 
 def _pilot_report(root: Path) -> PhysicalTrainingPilotReport:
     try:
-        raw = (root / "physical-pilot-report.json").read_text(
-            encoding="utf-8",
-            errors="strict",
+        _value, raw = _read_object_snapshot(root / "physical-pilot-report.json")
+        return PhysicalTrainingPilotReport.from_json(
+            raw.decode("utf-8", errors="strict")
         )
-    except OSError as exc:
-        raise ProofError("physical pilot report is unavailable") from exc
-    return PhysicalTrainingPilotReport.from_json(raw)
+    except ProofError:
+        raise
+    except (RuntimeError, TypeError, UnicodeError, ValueError) as exc:
+        raise ProofError("physical pilot report is invalid") from exc
 
 
 def _trusted_progression(
     output_root: Path,
     *,
     workspace_id: str,
+    job_id: str,
 ) -> object:
-    report = _pilot_report(output_root)
+    if type(job_id) is not str or not job_id:
+        _fail("tier-0 job identity is invalid")
     store = SQLiteStore(output_root / "physical-pilot.sqlite3")
     store.initialize()
     task = _find_pilot_task(
         store,
         workspace_id=workspace_id,
-        job_id=report.job_id,
+        job_id=job_id,
     )
     ledger = IdempotencyLedger(store)
     claim: dict[str, object] | None = None
@@ -338,7 +439,11 @@ def prepare_tier1(root: Path) -> None:
     ):
         _fail("tier-0 evaluation did not canonically promote the trained challenger")
 
-    proof = _trusted_progression(tier0_root, workspace_id=workspace_id)
+    proof = _trusted_progression(
+        tier0_root,
+        workspace_id=workspace_id,
+        job_id=report.job_id,
+    )
     if (
         proof.tier_index != 0
         or proof.candidate_artifact_ref != report.candidate_artifact_ref
@@ -440,28 +545,29 @@ def verify(root: Path) -> None:
     ):
         _fail("tier-0 evidence is not the real Windows two-step pilot")
 
+    evaluation_config = _read_object(root / "physical-evaluation.json")
+    _require_scale_promotion_config(evaluation_config)
     evaluation = _read_object(
         root / "run" / "physical-old-new-evaluation-report.json"
     )
-    if (
-        evaluation.get("experiment_status") != "promoted"
-        or evaluation.get("selected_candidate_id")
-        != tier0.candidate_artifact_ref
-        or evaluation.get("previous_champion_id")
-        != tier0_config.get("base_artifact_ref")
-    ):
-        _fail("old-vs-new result is not a canonical tier-0 promotion")
 
-    proof = _trusted_progression(root / "run", workspace_id=workspace_id)
-    if (
-        proof.tier_index != 0
-        or proof.candidate_sha256 != tier0.candidate_sha256
-        or proof.evaluation_set_sha256
-        != tier0_package.evaluation_set_sha256
-    ):
+    proof = _trusted_progression(
+        root / "run",
+        workspace_id=workspace_id,
+        job_id=tier0.job_id,
+    )
+    if proof.tier_index != 0:
         _fail("restored progression authority does not bind tier 0")
+    _require_evaluation_binding(
+        evaluation,
+        tier0=tier0,
+        proof=proof,
+        evaluation_set_sha256=tier0_package.evaluation_set_sha256,
+        previous_champion_id=tier0_config.get("base_artifact_ref"),
+    )
 
     tier1_config = _read_object(root / "tier1-physical-pilot.json")
+    _require_tier1_config_continuity(tier0_config, tier1_config)
     if (
         tier1_config.get("schema_version") != 3
         or tier1_config.get("scale_tier_id") != _TIER1_ID
@@ -481,6 +587,7 @@ def verify(root: Path) -> None:
     ):
         _fail("tier-1 warm-start adapter changed after promotion")
     initial_manifest = candidate_adapter_manifest(initial_adapter)
+    base_gguf_sha256, _ = _sha256_file(root / "base.gguf")
     (
         tier0_previous_tensors_sha256,
         initial_tensors_sha256,
@@ -495,6 +602,7 @@ def verify(root: Path) -> None:
         or tier0_previous_tensors_sha256
         != tier0.previous_adapter_tensors_sha256
         or initial_tensors_sha256 != tier0.trained_adapter_tensors_sha256
+        or initial_manifest.get("foundation_model_sha256") != base_gguf_sha256
     ):
         _fail("tier-0 candidate manifest does not match physical tensor evidence")
 
@@ -511,6 +619,8 @@ def verify(root: Path) -> None:
         == tier1.trained_adapter_tensors_sha256
     ):
         _fail("tier-1 physical report does not prove full-budget warm-start training")
+
+    runtime_authority = _cross_tier_runtime_authority(tier0, tier1)
 
     tier1_package_path = Path(
         str(tier1_config.get("frozen_package_path", ""))
@@ -573,7 +683,6 @@ def verify(root: Path) -> None:
         manifest,
         name="tier-1 candidate adapter",
     )
-    base_gguf_sha256, _ = _sha256_file(root / "base.gguf")
     if (
         manifest.get("schema") != "nika-peft-candidate-v3"
         or manifest.get("base_artifact_ref")
@@ -604,7 +713,7 @@ def verify(root: Path) -> None:
     except OSError as exc:
         raise ProofError("scale evidence directory could not be created") from exc
     summary = {
-        "schema": "nika-real-physical-scale-progression-proof-v2",
+        "schema": "nika-real-physical-scale-progression-proof-v3",
         "source_sha": source_sha,
         "platform": "windows",
         "promotion_policy": "non-regression",
@@ -613,9 +722,27 @@ def verify(root: Path) -> None:
         "scale_plan": expected_plan,
         "scale_plan_sha256": proof.plan_sha256,
         "evaluation_set_sha256": proof.evaluation_set_sha256,
+        "comparison_evidence_sha256": proof.comparison_evidence_sha256,
+        "model_dir_manifest_sha256": runtime_authority[
+            "model_dir_manifest_sha256"
+        ],
         "progression_proof": proof.canonical_payload(),
         "progression_proof_sha256": proof.proof_sha256,
         "staged_assets_sha256": staged_assets_sha256,
+        "resource_budget": tier0_config.get("resource_budget"),
+        "runtime_versions": tier0_config.get("runtime_versions"),
+        "trainer_parameters": tier0_config.get("trainer_parameters"),
+        "trainer_artifact_id": runtime_authority["trainer_artifact_id"],
+        "trainer_deployment_sha256": runtime_authority[
+            "trainer_deployment_sha256"
+        ],
+        "trainer_implementation_sha256": runtime_authority[
+            "trainer_implementation_sha256"
+        ],
+        "training_runtime_manifest_sha256": runtime_authority[
+            "training_runtime_manifest_sha256"
+        ],
+        "tier0_evidence_sha256": tier0.evidence_sha256,
         "tier0_frozen_package_sha256": tier0.frozen_package_sha256,
         "tier0_candidate_sha256": tier0.candidate_sha256,
         "tier0_candidate_manifest_sha256": tier0.candidate_manifest_sha256,
@@ -625,6 +752,7 @@ def verify(root: Path) -> None:
         ),
         "tier0_trained_adapter_tensors_sha256": initial_tensors_sha256,
         "tokenization_sha256": tier0_tokenization_sha256,
+        "tier1_evidence_sha256": tier1.evidence_sha256,
         "tier1_frozen_package_sha256": tier1.frozen_package_sha256,
         "tier1_candidate_sha256": tier1.candidate_sha256,
         "tier1_candidate_manifest_sha256": tier1.candidate_manifest_sha256,
