@@ -996,15 +996,33 @@ def _find_pilot_task(
         conn.execute("BEGIN")
         cursor = conn.execute(
             "SELECT task_id, workspace_id, agent_id, state, payload_json "
-            "FROM tasks WHERE workspace_id = ? AND agent_id = ? "
+            "FROM tasks WHERE "
+            "(workspace_id = ? OR "
+            "(typeof(workspace_id) != 'text' AND CAST(workspace_id AS TEXT) = ?)) "
+            "AND (agent_id = ? OR "
+            "(typeof(agent_id) != 'text' AND CAST(agent_id AS TEXT) = ?)) "
             "ORDER BY task_id ASC",
-            (workspace_id, "physical-peft-pilot"),
+            (
+                workspace_id,
+                workspace_id,
+                "physical-peft-pilot",
+                "physical-peft-pilot",
+            ),
         )
         while True:
             rows = cursor.fetchmany(128)
             if not rows:
                 break
             for row in rows:
+                if (
+                    type(row["task_id"]) is not str
+                    or not row["task_id"]
+                    or type(row["workspace_id"]) is not str
+                    or row["workspace_id"] != workspace_id
+                    or type(row["agent_id"]) is not str
+                    or row["agent_id"] != "physical-peft-pilot"
+                ):
+                    _fail("physical pilot task identity storage is non-canonical")
                 task = queue._record_from_row(row)
                 if not _matches_physical_training_task_payload(
                     task.payload,
