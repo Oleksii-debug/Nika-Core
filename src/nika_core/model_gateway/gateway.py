@@ -212,12 +212,42 @@ class ModelGateway:
                 self._audit_failure(request, capabilities.provider_id, error)
                 raise error
 
-            canonical_response, response_error = self._snapshot_success_response(
-                response=response,
-                request=request,
-                trusted_provider_id=capabilities.provider_id,
-                trusted_provider_kind=capabilities.kind,
-            )
+            snapshot_cancelled = False
+            snapshot_terminal_error: ModelGatewayError | None = None
+            try:
+                snapshot_task = asyncio.create_task(
+                    self._snapshot_provider_response(
+                        response=response,
+                        request=request,
+                        trusted_provider_id=capabilities.provider_id,
+                        trusted_provider_kind=capabilities.kind,
+                    )
+                )
+                canonical_response, response_error = await snapshot_task
+            except asyncio.CancelledError:
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    self._audit(
+                        event_type="model.cancelled",
+                        request=request,
+                        payload={"provider_id": capabilities.provider_id},
+                    )
+                    snapshot_cancelled = True
+                else:
+                    error = ModelGatewayError(
+                        ModelErrorCode.PROVIDER_ERROR,
+                        "model provider returned an invalid success response",
+                        provider_id=capabilities.provider_id,
+                        retryable=False,
+                        failure_effect=ModelFailureEffect.UNKNOWN,
+                    )
+                    self._audit_failure(request, capabilities.provider_id, error)
+                    snapshot_terminal_error = error
+
+            if snapshot_cancelled:
+                raise asyncio.CancelledError()
+            if snapshot_terminal_error is not None:
+                raise snapshot_terminal_error
             if response_error is not None:
                 self._audit_failure(
                     request,
@@ -366,6 +396,21 @@ class ModelGateway:
         )
 
     @staticmethod
+    async def _snapshot_provider_response(
+        *,
+        response: object,
+        request: ModelRequest,
+        trusted_provider_id: str,
+        trusted_provider_kind: ProviderKind,
+    ) -> tuple[ModelResponse | None, ModelGatewayError | None]:
+        return ModelGateway._snapshot_success_response(
+            response=response,
+            request=request,
+            trusted_provider_id=trusted_provider_id,
+            trusted_provider_kind=trusted_provider_kind,
+        )
+
+    @staticmethod
     def _snapshot_success_response(
         *,
         response: object,
@@ -380,7 +425,7 @@ class ModelGateway:
             retryable=False,
             failure_effect=ModelFailureEffect.UNKNOWN,
         )
-        if type(response) is not ModelResponse:
+        if not isinstance(response, ModelResponse):
             return None, invalid_error
 
         try:
@@ -391,7 +436,7 @@ class ModelGateway:
             model = response.model
             raw_usage = response.usage
             latency_ms = response.latency_ms
-            if type(raw_usage) is not ModelUsage:
+            if not isinstance(raw_usage, ModelUsage):
                 return None, invalid_error
             input_tokens = raw_usage.input_tokens
             output_tokens = raw_usage.output_tokens
