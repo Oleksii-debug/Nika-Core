@@ -338,12 +338,13 @@ def _complete_scale_progression_record(
     task_id: str,
     operation_key: str,
     claim: dict[str, object],
+    operation_type: str = "training.physical_scale_progression",
 ) -> None:
     ledger = IdempotencyLedger(store)
     record, created = ledger.reserve_once(
         operation_key=operation_key,
         task_id=task_id,
-        operation_type="training.physical_scale_progression",
+        operation_type=operation_type,
         input_fingerprint="sha256:" + _sha(operation_key.encode("utf-8")),
     )
     assert created is True
@@ -428,6 +429,32 @@ def test_trusted_progression_discovery_streams_durable_history(
         proof.IdempotencyLedger,
         "list_for_task",
         forbid_list_for_task,
+    )
+
+    restored = proof._trusted_progression(
+        root,
+        workspace_id="physical-proof-workspace",
+    )
+
+    assert restored.canonical_payload() == claim
+
+
+def test_trusted_progression_discovery_ignores_other_completed_operations(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, store, task, claim = _progression_discovery_fixture(
+        proof,
+        tmp_path,
+        monkeypatch,
+    )
+    _complete_scale_progression_record(
+        store,
+        task_id=task.task_id,
+        operation_key="unrelated-lookalike",
+        operation_type="training.irrelevant",
+        claim=claim,
     )
 
     restored = proof._trusted_progression(
