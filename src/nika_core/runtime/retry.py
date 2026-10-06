@@ -160,7 +160,7 @@ def _format_utc(value: datetime) -> str:
 
 
 def _parse_utc(value: object, *, field_name: str) -> datetime:
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise ValueError(f"{field_name} must be a timezone-aware ISO timestamp")
     try:
         parsed = datetime.fromisoformat(value)
@@ -201,7 +201,7 @@ def _require_bool(value: bool, *, field_name: str) -> bool:
 def _validate_retry_after(value: float | None) -> float | None:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) not in (int, float):
         raise TypeError("retry_after_seconds must be a finite non-negative number")
     normalized = _normalize_retry_number(value, field_name="retry_after_seconds")
     if not isfinite(normalized) or normalized < 0:
@@ -220,11 +220,11 @@ class ScriptRetryIntent:
     deadline_utc: datetime | None = None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.operation_id, str) or not self.operation_id.strip():
+        if type(self.operation_id) is not str or not self.operation_id.strip():
             raise ValueError("operation_id must not be empty")
         if self.operation_id != self.operation_id.strip():
             raise ValueError("operation_id must not contain leading or trailing whitespace")
-        if not isinstance(self.condition, ScriptRetryCondition):
+        if type(self.condition) is not ScriptRetryCondition:
             raise TypeError("condition must be a ScriptRetryCondition")
         _validate_retry_count(self.retry_number, field_name="retry_number", minimum=1)
         not_before = _as_utc(self.not_before_utc, field_name="not_before_utc")
@@ -252,8 +252,10 @@ class ScriptRetryIntent:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> ScriptRetryIntent:
-        if not isinstance(payload, Mapping):
-            raise TypeError("retry intent payload must be a mapping")
+        if type(payload) is not dict:
+            raise TypeError("retry intent payload must be an exact dict")
+        if any(type(key) is not str for key in payload):
+            raise TypeError("retry intent payload keys must be exact strings")
         expected_keys = {
             "version",
             "operation_id",
@@ -265,24 +267,20 @@ class ScriptRetryIntent:
         if set(payload) != expected_keys:
             raise ValueError("retry intent payload fields are invalid")
         version = payload["version"]
-        if (
-            isinstance(version, bool)
-            or not isinstance(version, int)
-            or version != _SCRIPT_RETRY_INTENT_VERSION
-        ):
+        if type(version) is not int or version != _SCRIPT_RETRY_INTENT_VERSION:
             raise ValueError("retry intent payload version is unsupported")
         operation_id = payload["operation_id"]
-        if not isinstance(operation_id, str):
+        if type(operation_id) is not str:
             raise TypeError("operation_id must be text")
         condition_value = payload["condition"]
-        if not isinstance(condition_value, str):
+        if type(condition_value) is not str:
             raise TypeError("condition must be text")
         try:
             condition = ScriptRetryCondition(condition_value)
         except ValueError as exc:
             raise ValueError("retry condition is unsupported") from exc
         retry_number = payload["retry_number"]
-        if isinstance(retry_number, bool) or not isinstance(retry_number, int):
+        if type(retry_number) is not int:
             raise TypeError("retry_number must be a positive integer")
         deadline_value = payload["deadline_utc"]
         deadline = (
@@ -396,7 +394,7 @@ def evaluate_script_retry_intent(
 ) -> ScriptRetryDecision:
     """Re-evaluate a durable retry intent after wait or process restart."""
 
-    if not isinstance(intent, ScriptRetryIntent):
+    if type(intent) is not ScriptRetryIntent:
         raise TypeError("intent must be a ScriptRetryIntent")
     _require_bool(replay_safe, field_name="replay_safe")
     _require_bool(paused, field_name="paused")

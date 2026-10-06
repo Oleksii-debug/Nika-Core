@@ -20,6 +20,36 @@ from nika_core.scheduler.store import ScheduledJobStore
 NOW = datetime(2026, 8, 27, 20, 0, tzinfo=UTC)
 
 
+class _SpoofingRetryCondition(str):
+    def __eq__(self, other: object) -> bool:
+        del other
+        return True
+
+    def __hash__(self) -> int:
+        return hash(ScriptRetryCondition.TEMPORARY_BUSY.value)
+
+
+class _SpoofingIntentVersion(int):
+    def __ne__(self, other: object) -> bool:
+        del other
+        return False
+
+
+class _SpoofingRetryAfter(float):
+    def __float__(self) -> float:
+        return 0.0
+
+
+class _StickyWhitespaceOperationId(str):
+    def strip(self, chars: str | None = None) -> str:
+        del chars
+        return self
+
+
+class _BehavioralRetryPayload(dict[str, object]):
+    pass
+
+
 @pytest.mark.parametrize(
     "condition",
     [
@@ -387,6 +417,70 @@ def test_durable_intent_codec_fails_closed(
 
     with pytest.raises(expected_error):
         ScriptRetryIntent.from_payload(payload)
+
+
+def test_retry_intent_rejects_behavioral_payload_container() -> None:
+    payload = ScriptRetryIntent(
+        operation_id="codec-op",
+        condition=ScriptRetryCondition.TEMPORARY_BUSY,
+        retry_number=1,
+        not_before_utc=NOW + timedelta(seconds=1),
+    ).to_payload()
+
+    with pytest.raises(TypeError, match="exact dict"):
+        ScriptRetryIntent.from_payload(_BehavioralRetryPayload(payload))
+
+
+def test_retry_intent_rejects_spoofed_condition_and_version_carriers() -> None:
+    payload = ScriptRetryIntent(
+        operation_id="codec-op",
+        condition=ScriptRetryCondition.TEMPORARY_BUSY,
+        retry_number=1,
+        not_before_utc=NOW + timedelta(seconds=1),
+    ).to_payload()
+
+    spoofed_condition = _SpoofingRetryCondition("not-a-real-condition")
+    assert ScriptRetryCondition(spoofed_condition) is ScriptRetryCondition.TEMPORARY_BUSY
+    payload["condition"] = spoofed_condition
+    with pytest.raises(TypeError, match="condition must be text"):
+        ScriptRetryIntent.from_payload(payload)
+
+    payload["condition"] = ScriptRetryCondition.TEMPORARY_BUSY.value
+    spoofed_version = _SpoofingIntentVersion(2)
+    assert int(spoofed_version) == 2
+    assert (spoofed_version != 1) is False
+    payload["version"] = spoofed_version
+    with pytest.raises(ValueError, match="version"):
+        ScriptRetryIntent.from_payload(payload)
+
+
+def test_retry_intent_rejects_behavioral_operation_identity() -> None:
+    operation_id = _StickyWhitespaceOperationId("   ")
+    assert operation_id.strip() is operation_id
+
+    with pytest.raises(ValueError, match="operation_id"):
+        ScriptRetryIntent(
+            operation_id=operation_id,
+            condition=ScriptRetryCondition.TEMPORARY_BUSY,
+            retry_number=1,
+            not_before_utc=NOW + timedelta(seconds=1),
+        )
+
+
+def test_rate_limit_hint_rejects_behavioral_numeric_carrier() -> None:
+    retry_after = _SpoofingRetryAfter(100.0)
+    assert float(retry_after) == 0.0
+
+    with pytest.raises(TypeError, match="retry_after_seconds"):
+        plan_script_retry(
+            RetryPolicy(max_retries=1, base_delay_seconds=1, max_delay_seconds=120),
+            operation_id="rate-limit-carrier",
+            condition=ScriptRetryCondition.EXPLICIT_RATE_LIMIT,
+            retries_used=0,
+            now=NOW,
+            replay_safe=True,
+            retry_after_seconds=retry_after,
+        )
 
 
 def test_retry_safety_flags_require_real_booleans() -> None:
