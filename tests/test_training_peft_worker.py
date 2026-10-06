@@ -725,6 +725,30 @@ def test_response_tokens_must_survive_sequence_budget() -> None:
         )
 
 
+def test_partial_response_truncation_is_rejected() -> None:
+    tokenizer = _FakeTokenizer()
+
+    with pytest.raises(peft.PeftTrainerError, match="response_tokens_truncated"):
+        peft._TokenizedDataset(
+            (peft.TrainingExample("p" * 27, "answer"),),
+            tokenizer,
+            32,
+        )
+
+
+def test_complete_sequence_at_budget_is_accepted_without_partial_response() -> None:
+    tokenizer = _FakeTokenizer()
+    dataset = peft._TokenizedDataset(
+        (peft.TrainingExample("p", "a"),),
+        tokenizer,
+        8,
+    )
+
+    item = dataset[0]
+    assert len(item["input_ids"]) == 8
+    assert len(item["attention_mask"]) == 8
+
+
 class _FakeTokenizerFactory:
     @staticmethod
     def from_pretrained(*args: object, **kwargs: object) -> _FakeTokenizer:
@@ -2732,7 +2756,6 @@ def test_adapter_config_snapshot_rejects_identity_drift(
         ),
         encoding="utf-8",
     )
-
     real_lstat = peft.os.lstat
     config_calls = 0
 
@@ -2752,7 +2775,6 @@ def test_adapter_config_snapshot_rejects_identity_drift(
         return value
 
     monkeypatch.setattr(peft.os, "lstat", drifting_lstat)
-
     with pytest.raises(peft.PeftTrainerError, match="adapter_config_read_failed"):
         peft._adapter_config_snapshot(adapter_dir, request, config)
 
