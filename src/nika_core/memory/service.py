@@ -145,6 +145,7 @@ class MemoryService:
         expires_at: datetime | None,
         expected_updated_at: datetime | None | object,
     ) -> MemoryRecord:
+        self._store.require_connection(conn)
         scope = _require_scope(scope)
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)
@@ -334,8 +335,7 @@ class MemoryService:
         now: datetime | None = None,
     ) -> MemoryRecord | None:
         """Read one memory row inside a caller-owned canonical SQLite transaction."""
-        if type(conn) is not sqlite3.Connection:
-            raise TypeError("conn must be an exact sqlite3.Connection")
+        self._store.require_connection(conn)
         scope = _require_scope(scope)
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)

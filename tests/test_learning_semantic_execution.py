@@ -704,3 +704,25 @@ def test_completed_replay_rejects_corrupted_durable_receipt_schema(
         key="memory-1",
     )
     assert after == before
+
+def test_idempotency_rejects_foreign_caller_owned_connection(
+    tmp_path: Path,
+) -> None:
+    primary_store = SQLiteStore(tmp_path / "idempotency-shared.db")
+    foreign_store = SQLiteStore(primary_store.path)
+    primary_store.initialize()
+    ledger = IdempotencyLedger(primary_store)
+
+    with foreign_store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(ValueError, match="not opened by this SQLiteStore"):
+            ledger.reserve_with_connection(
+                conn,
+                operation_key="learning-semantic-update:" + "f" * 64,
+                task_id="foreign-connection-task",
+                operation_type="learning.semantic_update",
+                input_fingerprint="f" * 64,
+            )
+
+    assert ledger.list_for_task("foreign-connection-task") == ()
+    assert IdempotencyLedger(foreign_store).list_for_task("foreign-connection-task") == ()
