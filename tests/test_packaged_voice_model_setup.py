@@ -124,6 +124,109 @@ def test_voice_model_setup_background_start_is_nonblocking_and_terminal(
     assert str(source) not in repr(terminal)
 
 
+def test_voice_model_setup_background_unexpected_failure_recovers_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[Coroutine[Any, Any, Any]] = []
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        submitted.append(coroutine)
+        return Future()
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+
+    def fail_unexpectedly(
+        _source_text: str,
+        *,
+        cancel_event: model_setup.Event | None,
+    ) -> None:
+        del cancel_event
+        raise ValueError("PRIVATE WORKER DETAIL")
+
+    monkeypatch.setattr(setup, "_perform_install", fail_unexpectedly)
+
+    started = setup.start({"source_root": str(source)})
+    asyncio.run(submitted[0])
+    terminal = setup.snapshot()
+
+    assert started.status == "accepted"
+    assert terminal["status"] == "failed"
+    assert terminal["active"] is False
+    assert terminal["can_import"] is True
+    assert terminal["restart_required"] is False
+    assert "PRIVATE" not in str(terminal["message"])
+    assert not (data_root / "voice" / "whisper").exists()
+
+
+def test_voice_model_setup_rejects_invalid_host_future_without_sticking_active_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> object:
+        del coroutine
+        return object()
+
+    setup = PackagedVoiceModelSetup(
+        data_root,
+        submit=submit,  # type: ignore[arg-type]
+    )
+
+    result = setup.start({"source_root": str(source)})
+    terminal = setup.snapshot()
+
+    assert result.status == "failed"
+    assert terminal["status"] == "failed"
+    assert terminal["active"] is False
+    assert terminal["can_import"] is True
+    assert terminal["restart_required"] is False
+    assert not (data_root / "voice" / "whisper").exists()
+
+
+@pytest.mark.parametrize("future_mode", ["failed", "cancelled"])
+def test_voice_model_setup_background_host_future_interruption_recovers_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    future_mode: str,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        coroutine.close()
+        future: Future[Any] = Future()
+        if future_mode == "failed":
+            future.set_exception(RuntimeError("PRIVATE HOST DETAIL"))
+        else:
+            assert future.cancel()
+        return future
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+
+    started = setup.start({"source_root": str(source)})
+    terminal = setup.snapshot()
+
+    assert started.status == "accepted"
+    assert terminal["status"] == "failed"
+    assert terminal["active"] is False
+    assert terminal["can_import"] is True
+    assert terminal["restart_required"] is False
+    assert terminal["message"] == "Фоновий імпорт голосової моделі було перервано."
+    assert "PRIVATE" not in repr(terminal)
+    assert not (data_root / "voice" / "whisper").exists()
+
+
 def test_voice_model_setup_background_cancel_is_cooperative(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
