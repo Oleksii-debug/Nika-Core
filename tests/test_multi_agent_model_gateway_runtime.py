@@ -134,6 +134,7 @@ def test_three_agent_local_route_uses_same_model_gateway_adapter(tmp_path: Path)
             json={
                 "model": "qwen3:8b",
                 "message": {"role": "assistant", "content": "local-result"},
+                "done": True,
                 "prompt_eval_count": 11,
                 "eval_count": 3,
             },
@@ -404,6 +405,7 @@ def test_checker_model_receives_both_worker_result_handoffs(tmp_path: Path) -> N
             json={
                 "model": "qwen3:8b",
                 "message": {"role": "assistant", "content": answer},
+                "done": True,
             },
         )
 
