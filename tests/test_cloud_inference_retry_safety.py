@@ -107,6 +107,10 @@ class _SpoofingFailureEffect(str):
     __hash__ = str.__hash__
 
 
+class _SpoofingSafetyKey(str):
+    """String-shaped key whose carrier type must not cross the retry boundary."""
+
+
 def test_fresh_retry_rejects_behavioral_output_mapping_authority() -> None:
     output = _BehavioralSafetyOutput()
     assert "provider_retryable" in output
@@ -140,6 +144,39 @@ def test_fresh_retry_rejects_behavioral_failure_effect_scalar() -> None:
 
     assert fresh_retry_safety_evidence(result) is False
     assert policy.should_retry(result, retries_used=0) is False
+
+
+def test_fresh_retry_rejects_nonexact_provider_evidence_keys() -> None:
+    output = {
+        _SpoofingSafetyKey("provider_retryable"): True,
+        _SpoofingSafetyKey("failure_effect"): "no_effect",
+    }
+    assert type(output) is dict
+    assert set(output) == {"provider_retryable", "failure_effect"}
+
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.FAILED,
+        output=output,
+        error="temporary provider failure",
+        error_code=RuntimeErrorCode.TRANSIENT,
+    )
+    policy = _cloud_retry_policy()
+
+    assert fresh_retry_safety_evidence(result) is False
+    assert policy.should_retry(result, retries_used=0) is False
+
+
+def test_fresh_retry_preserves_exact_generic_output_compatibility() -> None:
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.FAILED,
+        output={"diagnostic": "temporary"},
+        error="temporary generic runtime failure",
+        error_code=RuntimeErrorCode.TRANSIENT,
+    )
+    policy = _cloud_retry_policy()
+
+    assert fresh_retry_safety_evidence(result) is None
+    assert policy.should_retry(result, retries_used=0) is True
 
 
 class _ForeignRetryRuntime:
