@@ -1,0 +1,66 @@
+name: PF11 Local Repository Binding
+
+on:
+  pull_request:
+    paths:
+      - "src/nika_core/product_project_schema.py"
+      - "src/nika_core/product_factory_local_repository_binding.py"
+      - "src/nika_core/product_factory_local_coding.py"
+      - "scripts/nika_windows.py"
+      - "tests/test_product_factory_local_repository_binding.py"
+      - "tests/test_product_factory_contained_local_coding.py"
+      - "tests/test_product_factory_packaged_local_startup.py"
+      - ".github/workflows/pf11-local-repository-binding.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+concurrency:
+  group: pf11-local-repository-binding-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  binding:
+    name: Repository binding authority (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
+      - name: Install focused qualification dependencies
+        run: python -m pip install -e ".[dev]"
+      - name: Verify installed dependency consistency
+        run: python -m pip check
+      - name: Lint local repository binding slice
+        run: >-
+          python -m ruff check
+          src/nika_core/product_project_schema.py
+          src/nika_core/product_factory_local_repository_binding.py
+          src/nika_core/product_factory_local_coding.py
+          scripts/nika_windows.py
+          tests/test_product_factory_local_repository_binding.py
+          tests/test_product_factory_contained_local_coding.py
+          tests/test_product_factory_packaged_local_startup.py
+      - name: Run local repository binding regressions
+        run: >-
+          python -m pytest
+          tests/test_product_factory_local_repository_binding.py
+          tests/test_product_factory_contained_local_coding.py
+          tests/test_product_factory_packaged_local_startup.py
+          -q

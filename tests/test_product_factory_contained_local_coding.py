@@ -11,7 +11,11 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_coding_worker_adapter import CodingWorkerComponentAdapter
-from nika_core.product_factory_coordinator import ProductFactoryCoordinator, WorkState
+from nika_core.product_factory_coordinator import (
+    ComponentWorkRequest,
+    ProductFactoryCoordinator,
+    WorkState,
+)
 from nika_core.product_factory_local_coding import (
     ContainedLocalCodingPolicy,
     ContainedLocalProductFactoryPorts,
@@ -120,7 +124,21 @@ def test_product_factory_adapter_reaches_real_private_candidate_and_review_gate(
         allowed_executables=(python,),
         resource_budget=ResourceBudget(20, 1024 * 1024, 10),
     )
-    ports = ContainedLocalProductFactoryPorts(worker, policy)
+    effect_checks: list[tuple[str, bool]] = []
+
+    def require_effect_authority(request: ComponentWorkRequest) -> None:
+        effect_checks.append(
+            (
+                request.repository_id,
+                worker.workspace_root_for(request.work_id).exists(),
+            )
+        )
+
+    ports = ContainedLocalProductFactoryPorts(
+        worker,
+        policy,
+        effect_authorizer=require_effect_authority,
+    )
     adapter = CodingWorkerComponentAdapter(worker, ports, ports)
     coordinator = ProductFactoryCoordinator(
         _graph(
@@ -153,6 +171,109 @@ def test_product_factory_adapter_reaches_real_private_candidate_and_review_gate(
     assert (repository / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     candidate = worker.candidate_worktree(record.request.work_id)
     assert (candidate / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert effect_checks == [("repo-1", False), ("repo-1", True)]
+
+
+def test_effect_authority_failure_precedes_repository_source_read(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, base_sha = _repository(tmp_path)
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    python = str(pathlib.Path(sys.executable).resolve(strict=True))
+    planner = _Planner()
+    worker = ContainedLocalCodingWorker(
+        workspace_parent=jobs,
+        repositories={"repo-1": repository},
+        planner=planner,
+    )
+    policy = ContainedLocalCodingPolicy(
+        allowed_executables=(python,),
+        resource_budget=ResourceBudget(20, 1024 * 1024, 10),
+    )
+    request = ComponentWorkRequest(
+        work_id="work-authority-denied",
+        project_id="project-1",
+        component_id="core",
+        repository_id="repo-1",
+        goal="update core",
+        base_sha=base_sha,
+        allowed_paths=("src",),
+        permission_ceiling=PERMISSIONS,
+        acceptance_commands=(),
+    )
+
+    def unexpected_source_read(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("repository source was read before effect authority")
+
+    def deny_effect(_request: ComponentWorkRequest) -> None:
+        raise RuntimeError("durable repository authority changed")
+
+    monkeypatch.setattr(
+        worker,
+        "repository_tree_digest",
+        unexpected_source_read,
+    )
+    ports = ContainedLocalProductFactoryPorts(
+        worker,
+        policy,
+        effect_authorizer=deny_effect,
+    )
+
+    with pytest.raises(RuntimeError, match="durable repository authority changed"):
+        _run(ports.context_for(request))
+
+    assert not worker.workspace_root_for(request.work_id).exists()
+    assert planner.calls == 0
+
+
+def test_effect_authority_is_rechecked_before_worker_evidence_is_accepted(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha = _repository(tmp_path)
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
+    python = str(pathlib.Path(sys.executable).resolve(strict=True))
+    planner = _Planner()
+    worker = ContainedLocalCodingWorker(
+        workspace_parent=jobs,
+        repositories={"repo-1": repository},
+        planner=planner,
+    )
+    policy = ContainedLocalCodingPolicy(
+        allowed_executables=(python,),
+        resource_budget=ResourceBudget(20, 1024 * 1024, 10),
+    )
+    checks = 0
+
+    def revoke_before_evidence(_request: ComponentWorkRequest) -> None:
+        nonlocal checks
+        checks += 1
+        if checks == 2:
+            raise RuntimeError("durable repository authority changed")
+
+    ports = ContainedLocalProductFactoryPorts(
+        worker,
+        policy,
+        effect_authorizer=revoke_before_evidence,
+    )
+    adapter = CodingWorkerComponentAdapter(worker, ports, ports)
+    coordinator = ProductFactoryCoordinator(_graph((python, "-c", "pass")))
+    coordinator.plan(
+        base_shas={"repo-1": base_sha},
+        goals={"core": "update core"},
+        permission_ceiling=PERMISSIONS,
+    )
+
+    with pytest.raises(RuntimeError, match="durable repository authority changed"):
+        _run(adapter.run_component(coordinator, "core"))
+
+    record = coordinator.snapshot().records[0]
+    assert checks == 2
+    assert planner.calls == 1
+    assert record.state is WorkState.RUNNING
+    assert (repository / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
 def test_production_builder_reuses_canonical_program_host_and_same_ports(
