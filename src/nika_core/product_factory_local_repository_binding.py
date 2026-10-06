@@ -223,11 +223,20 @@ class ProductFactoryLocalRepositoryBindings:
                     "local repository binding version changed"
                 )
             conn.execute(
-                "INSERT INTO audit_events(event_type,entity_type,entity_id,payload_json,created_at) "
-                "VALUES ('product_factory.local_repository.unbound','product_project',?,?,?)",
+                "INSERT INTO audit_events("
+                "event_type,entity_type,entity_id,payload_json,created_at"
+                ") VALUES ('product_factory.local_repository.unbound','product_project',?,?,?)",
                 (
                     project_id,
-                    f'{{"binding_version":{current},"repository_id":"{_json_text(repository_id)}"}}',
+                    json.dumps(
+                        {
+                            "binding_version": current,
+                            "repository_id": repository_id,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
                     now,
                 ),
             )
