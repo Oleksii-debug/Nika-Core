@@ -8,11 +8,15 @@ from threading import Event, Thread
 import pytest
 
 import nika_core.product_factory_packaged_execution_plan_file as plan_file_module
+from nika_core.config import AppConfig
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.default_actions import build_default_action_registry
+from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
 from nika_core.product_factory_packaged_execution_plan_file import (
     PackagedExecutionPlanFileError,
     PackagedProductFactoryExecutionPlanFileSource,
 )
+from scripts import nika_windows
 
 ROOT = Path(__file__).resolve().parents[1]
 _PROJECT_ID = "product-" + "a" * 64
@@ -278,11 +282,20 @@ def test_accessible_execution_plan_file_controls_and_bridge_contract() -> None:
     assert 'type="text"' in html
     assert (
         'aria-describedby="product-factory-execution-plan-help '
+        'product-factory-execution-plan-status"\n          disabled'
+        in html
+    )
+    assert (
+        'aria-describedby="product-factory-execution-plan-help '
         'product-factory-execution-plan-status"'
         in html
     )
     assert 'data-action-id="product.factory.execution_plan.load"' in html
     assert 'data-error-focus-target="product-factory-execution-plan-path"' in html
+    assert (
+        'data-error-focus-target="product-factory-execution-plan-path"\n            disabled'
+        in html
+    )
 
     assert (
         'if (actionId === "product.factory.execution_plan.load")'
@@ -306,15 +319,88 @@ def test_accessible_execution_plan_file_controls_and_bridge_contract() -> None:
         in script
     )
     assert (
-        "else product_factory_execution_plan_files.resolve"
+        "product_factory_execution_host is not None\n"
+        "            and product_factory_execution_plan_resolver is None"
         in script
     )
+    assert "execution_plan_resolver = product_factory_execution_plan_resolver" in script
+    assert "execution_plan_resolver = product_factory_execution_plan_files.resolve" in script
     assert (
         '"product.factory.execution_plan.load": '
-        "product_factory_execution_plan_files.load"
+        "load_product_factory_execution_plan"
         in script
     )
     assert (
         'state["product_factory_execution_plan"] = ('
         in script
     )
+
+
+class _UnusedProgramWorker:
+    async def dispatch(self, request):
+        raise AssertionError(f"unexpected dispatch: {request.work_id}")
+
+    async def inspect(self, work_id: str):
+        return None
+
+    async def recover(self, request, state):
+        raise AssertionError(f"unexpected recover: {request.work_id}:{state}")
+
+
+def _plan_file_command(path: Path, request_id: str) -> dict[str, object]:
+    return {
+        "request_id": request_id,
+        "action_id": "product.factory.execution_plan.load",
+        "payload": {"path": str(path)},
+    }
+
+
+def test_windows_bridge_rejects_plan_file_when_execution_host_is_unconfigured(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+    bridge, _products = nika_windows.build_windows_bridge(
+        config,
+        start_startup_recovery=False,
+    )
+
+    state = bridge.get_state()
+    assert state["ok"] is True
+    assert state["state"]["product_factory_execution_plan"] is None
+
+    result = bridge.dispatch(
+        _plan_file_command(tmp_path / "must-not-be-read.json", "plan-no-host")
+    )
+    assert result["status"] == "rejected"
+    assert "недоступне" in result["message"]
+    assert result["focus_id"] == "product-factory-execution-plan-path"
+
+
+def test_windows_bridge_rejects_plan_file_when_custom_resolver_owns_authority(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+    host_store = SQLiteStore(config.database_path)
+    host_store.initialize()
+    host = MultiRepositoryProductFactoryHost(host_store, _UnusedProgramWorker())
+
+    def custom_resolver(_project_id: str):
+        raise AssertionError("custom resolver must not run during file admission")
+
+    bridge, _products = nika_windows.build_windows_bridge(
+        config,
+        start_startup_recovery=False,
+        product_factory_execution_host=host,
+        product_factory_execution_plan_resolver=custom_resolver,
+    )
+
+    state = bridge.get_state()
+    assert state["ok"] is True
+    assert state["state"]["product_factory_execution_plan"] is None
+
+    result = bridge.dispatch(
+        _plan_file_command(tmp_path / "must-not-be-read.json", "plan-custom-resolver")
+    )
+    assert result["status"] == "rejected"
+    assert "недоступне" in result["message"]
+    assert result["focus_id"] == "product-factory-execution-plan-path"
