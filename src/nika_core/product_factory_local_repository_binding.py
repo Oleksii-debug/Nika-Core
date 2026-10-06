@@ -136,6 +136,7 @@ class ProductFactoryLocalRepositoryBindings:
                 raise ProductFactoryLocalRepositoryBindingError(
                     "ProductProject changed while binding local repository"
                 )
+            _require_filesystem_identity(root, identity)
             alias_rows = conn.execute(
                 "SELECT * FROM product_factory_local_repository_bindings "
                 "WHERE project_id = ? AND repository_id <> ?",
