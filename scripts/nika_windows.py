@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import sqlite3
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
@@ -356,86 +357,98 @@ def build_windows_bridge(
         and local_product_factory_startup is not None
         and not local_product_factory_settings_invalid
     ):
-        startup_settings_revision: int | None = None
-        if not local_product_factory_environment_override:
-            startup_settings_snapshot = local_product_factory_settings.snapshot(
-                environment_override=False,
-                runtime_status="not_configured",
-            )
-            raw_settings_revision = startup_settings_snapshot.get("revision")
-            if (
-                startup_settings_snapshot.get("status") != "ready"
-                or startup_settings_snapshot.get("config_json")
-                != local_product_factory_startup_json
-                or type(raw_settings_revision) is not int
-                or raw_settings_revision < 1
-            ):
-                local_product_factory_settings_invalid = True
-            else:
-                startup_settings_revision = raw_settings_revision
-
-        model_snapshot = model_settings.snapshot()
-        model_revision = model_snapshot.get("revision")
-        local_product_factory_model_ready = (
-            not local_product_factory_settings_invalid
-            and model_snapshot.get("status") == "ready"
-            and model_snapshot.get("route_kind") == "ollama"
-            and model_snapshot.get("provider_id") == "ollama"
-            and model_snapshot.get("provider_kind") == "local"
-            and type(model_revision) is int
-            and model_revision >= 1
-        )
-        if local_product_factory_model_ready:
-            try:
-                local_product_factory_program = (
-                    build_packaged_local_product_factory_program(
-                        store,
-                        settings=model_settings,
-                        startup=local_product_factory_startup,
-                    )
-                )
-            except Exception as exc:  # noqa: BLE001 - optional backend must fail closed
-                logging.getLogger(__name__).error(
-                    "Local Product Factory startup failed: exception_type=%s",
-                    type(exc).__name__,
-                )
-                local_product_factory_settings_invalid = True
-            else:
-                model_after_build = model_settings.snapshot()
-                startup_settings_stable = True
+        try:
+            # Both persisted authorities use BEGIN IMMEDIATE for mutation. Hold the
+            # matching reservation through snapshot, composition and activation so a
+            # second window/process cannot install a mixed startup/model authority.
+            with store.connection() as local_factory_authority_guard:
+                local_factory_authority_guard.execute("BEGIN IMMEDIATE")
+                startup_settings_revision: int | None = None
                 if not local_product_factory_environment_override:
-                    startup_settings_after = (
-                        local_product_factory_settings.snapshot(
-                            environment_override=False,
-                            runtime_status="not_configured",
+                    startup_settings_snapshot = local_product_factory_settings.snapshot(
+                        environment_override=False,
+                        runtime_status="not_configured",
+                    )
+                    raw_settings_revision = startup_settings_snapshot.get("revision")
+                    if (
+                        startup_settings_snapshot.get("status") != "ready"
+                        or startup_settings_snapshot.get("config_json")
+                        != local_product_factory_startup_json
+                        or type(raw_settings_revision) is not int
+                        or raw_settings_revision < 1
+                    ):
+                        local_product_factory_settings_invalid = True
+                    else:
+                        startup_settings_revision = raw_settings_revision
+
+                model_snapshot = model_settings.snapshot()
+                model_revision = model_snapshot.get("revision")
+                local_product_factory_model_ready = (
+                    not local_product_factory_settings_invalid
+                    and model_snapshot.get("status") == "ready"
+                    and model_snapshot.get("route_kind") == "ollama"
+                    and model_snapshot.get("provider_id") == "ollama"
+                    and model_snapshot.get("provider_kind") == "local"
+                    and type(model_revision) is int
+                    and model_revision >= 1
+                )
+                if local_product_factory_model_ready:
+                    try:
+                        local_product_factory_program = (
+                            build_packaged_local_product_factory_program(
+                                store,
+                                settings=model_settings,
+                                startup=local_product_factory_startup,
+                            )
                         )
-                    )
-                    startup_settings_stable = (
-                        startup_settings_after.get("status") == "ready"
-                        and startup_settings_after.get("config_json")
-                        == local_product_factory_startup_json
-                        and startup_settings_after.get("revision")
-                        == startup_settings_revision
-                    )
-                if (
-                    model_after_build.get("status") != "ready"
-                    or model_after_build.get("revision") != model_revision
-                    or not startup_settings_stable
-                ):
-                    logging.getLogger(__name__).warning(
-                        "Local Product Factory authority changed during startup; "
-                        "restart is required before execution"
-                    )
-                    local_product_factory_settings_invalid = True
-                else:
-                    product_factory_execution_host = (
-                        local_product_factory_program.multi_repository_host
-                    )
-                    local_product_factory_runtime_active = True
-                    local_product_factory_launch_model_revision = model_revision
-                    local_product_factory_launch_settings_revision = (
-                        startup_settings_revision
-                    )
+                    except Exception as exc:  # noqa: BLE001 - optional backend must fail closed
+                        logging.getLogger(__name__).error(
+                            "Local Product Factory startup failed: exception_type=%s",
+                            type(exc).__name__,
+                        )
+                        local_product_factory_settings_invalid = True
+                    else:
+                        model_after_build = model_settings.snapshot()
+                        startup_settings_stable = True
+                        if not local_product_factory_environment_override:
+                            startup_settings_after = (
+                                local_product_factory_settings.snapshot(
+                                    environment_override=False,
+                                    runtime_status="not_configured",
+                                )
+                            )
+                            startup_settings_stable = (
+                                startup_settings_after.get("status") == "ready"
+                                and startup_settings_after.get("config_json")
+                                == local_product_factory_startup_json
+                                and startup_settings_after.get("revision")
+                                == startup_settings_revision
+                            )
+                        if (
+                            model_after_build.get("status") != "ready"
+                            or model_after_build.get("revision") != model_revision
+                            or not startup_settings_stable
+                        ):
+                            logging.getLogger(__name__).warning(
+                                "Local Product Factory authority changed during startup; "
+                                "restart is required before execution"
+                            )
+                            local_product_factory_settings_invalid = True
+                        else:
+                            product_factory_execution_host = (
+                                local_product_factory_program.multi_repository_host
+                            )
+                            local_product_factory_runtime_active = True
+                            local_product_factory_launch_model_revision = model_revision
+                            local_product_factory_launch_settings_revision = (
+                                startup_settings_revision
+                            )
+        except sqlite3.Error as exc:
+            logging.getLogger(__name__).error(
+                "Local Product Factory authority fence failed: exception_type=%s",
+                type(exc).__name__,
+            )
+            local_product_factory_settings_invalid = True
 
     local_product_factory_launch_json = local_product_factory_startup_json
 
