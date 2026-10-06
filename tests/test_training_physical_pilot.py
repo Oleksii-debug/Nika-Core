@@ -277,7 +277,7 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     )
 
     assert report.platform == "windows"
-    assert report.schema_version == 5
+    assert report.schema_version == 6
     assert report.completed_steps == 2
     assert report.job_fingerprint == "f" * 64
     assert report.trainer_job_fingerprint == _TRAINER_JOB_FINGERPRINT
@@ -330,6 +330,47 @@ def test_report_accepts_bounded_higher_tier_completion(tmp_path: Path) -> None:
     )
 
     assert restored.completed_steps == 8
+
+
+def test_report_reads_legacy_v5_with_original_two_step_semantics(
+    tmp_path: Path,
+) -> None:
+    report = _build_report(tmp_path)
+    payload = report.canonical_payload()
+    payload["schema_version"] = 5
+
+    restored = PhysicalTrainingPilotReport.from_json(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+
+    assert restored.schema_version == 5
+    assert restored.completed_steps == 2
+    assert restored.evidence_sha256 != report.evidence_sha256
+
+
+def test_report_rejects_multi_step_claim_under_legacy_v5(tmp_path: Path) -> None:
+    report = _build_report(tmp_path)
+    payload = report.canonical_payload()
+    payload["schema_version"] = 5
+    payload["completed_steps"] = 8
+
+    with pytest.raises(
+        PhysicalTrainingPilotError,
+        match="legacy physical pilot report requires exactly two completed steps",
+    ):
+        PhysicalTrainingPilotReport.from_json(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
 
 
 def test_report_from_json_rejects_legacy_v4_without_tensor_evidence(
