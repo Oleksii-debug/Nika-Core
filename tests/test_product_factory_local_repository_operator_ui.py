@@ -43,3 +43,24 @@ def test_packaged_bridge_registers_operator_actions_and_redacted_state() -> None
     assert '"product.factory.local_repository.unbind":' in windows
     assert '"product.factory.local_repository.bind"' in actions
     assert '"product.factory.local_repository.unbind"' in actions
+
+
+def test_windows_uia_release_proof_covers_local_repository_operator_controls() -> None:
+    proof = _text("scripts/m5_uia_proof.ps1")
+    for fragment in (
+        "Репозиторій з поточного плану",
+        "Повний шлях до локального Git-кореня",
+        "Прив’язати локальний репозиторій",
+        "Скасувати локальну прив’язку",
+        "[System.Windows.Automation.ControlType]::ComboBox",
+        "[System.Windows.Automation.ControlType]::Edit",
+        "[System.Windows.Automation.ControlType]::Button",
+        "Packaged local repository control was enabled before local Product Factory execution authority was configured.",
+    ):
+        assert fragment in proof
+
+    wrapper = _text("scripts/v01_autostart_uia_proof.ps1")
+    assert "m5_uia_proof.ps1" in wrapper
+
+    workflow = _text(".github/workflows/m11-windows-release.yml")
+    assert "tests/test_product_factory_local_repository_operator_ui.py" in workflow

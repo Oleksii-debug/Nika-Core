@@ -56,7 +56,11 @@ $requiredNames = @(
     'Папка локальної голосової моделі — повний шлях',
     'Імпортувати голосову модель',
     'Скасувати імпорт голосової моделі',
-    'Клавіатура'
+    'Клавіатура',
+    'Репозиторій з поточного плану',
+    'Повний шлях до локального Git-кореня',
+    'Прив’язати локальний репозиторій',
+    'Скасувати локальну прив’язку'
 )
 
 # WebView2 enables renderer accessibility on demand when assistive technology such
@@ -739,6 +743,21 @@ try {
         $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
         $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
         $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
+        $factoryLocalRepositoryControl = Wait-DescendantName 'Репозиторій з поточного плану' ([System.Windows.Automation.ControlType]::ComboBox)
+        $factoryLocalRepositoryRootControl = Wait-DescendantName 'Повний шлях до локального Git-кореня' ([System.Windows.Automation.ControlType]::Edit)
+        $factoryLocalRepositoryBindControl = Wait-DescendantName 'Прив’язати локальний репозиторій' ([System.Windows.Automation.ControlType]::Button)
+        $factoryLocalRepositoryUnbindControl = Wait-DescendantName 'Скасувати локальну прив’язку' ([System.Windows.Automation.ControlType]::Button)
+        foreach ($control in @(
+            $factoryLocalRepositoryControl,
+            $factoryLocalRepositoryRootControl,
+            $factoryLocalRepositoryBindControl,
+            $factoryLocalRepositoryUnbindControl
+        )) {
+            if ((Resolve-BoundControlIdentity $control).Current.IsEnabled) {
+                throw 'Packaged local repository control was enabled before local Product Factory execution authority was configured.'
+            }
+        }
+        Write-Host 'Packaged local repository controls are UIA-discoverable and fail closed before execution authority is configured.'
         $voiceModelSourceControl = Wait-DescendantName 'Папка локальної голосової моделі — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
         $voiceModelImportControl = Wait-DescendantName 'Імпортувати голосову модель' ([System.Windows.Automation.ControlType]::Button)
         $voiceModelCancelControl = Wait-DescendantName 'Скасувати імпорт голосової моделі' ([System.Windows.Automation.ControlType]::Button)
