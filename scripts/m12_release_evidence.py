@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import zipfile
@@ -21,6 +23,10 @@ from nika_core.product_project import ProductProjectRepository
 
 _INSTALLER_NAME = "install_nika_core.ps1"
 _UPGRADE_PROBE_NAME = "m12-byte-distinct-upgrade-proof.txt"
+_MAX_RUNTIME_EVIDENCE_JSON_BYTES = 1024 * 1024
+_MAX_RUNTIME_EVIDENCE_JSON_DEPTH = 64
+_MAX_RUNTIME_EVIDENCE_JSON_INTEGER_BITS = 4096
+_MAX_RUNTIME_EVIDENCE_JSON_INTEGER_DECIMAL_CHARS = 1234
 
 
 def parser() -> argparse.ArgumentParser:
@@ -33,6 +39,163 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--artifact-reference", required=True)
     result.add_argument("--product-version", required=True)
     return result
+
+
+def _unique_runtime_json_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _finite_runtime_json_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    return value
+
+
+def _bounded_runtime_json_int(raw: str) -> int:
+    digits = raw[1:] if raw.startswith("-") else raw
+    if len(digits) > _MAX_RUNTIME_EVIDENCE_JSON_INTEGER_DECIMAL_CHARS:
+        raise ValueError("runtime evidence integer exceeds the digit limit")
+    value = int(raw)
+    if value.bit_length() > _MAX_RUNTIME_EVIDENCE_JSON_INTEGER_BITS:
+        raise ValueError("runtime evidence integer exceeds the bit limit")
+    return value
+
+
+def _reject_runtime_json_constant(_raw: str) -> None:
+    raise ValueError("non-JSON numeric constant")
+
+
+def _require_bounded_runtime_json_depth(content: bytes) -> None:
+    depth = 0
+    quoted = False
+    escaped = False
+    for byte in content:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:
+                escaped = True
+            elif byte == 0x22:
+                quoted = False
+        elif byte == 0x22:
+            quoted = True
+        elif byte in (0x5B, 0x7B):
+            depth += 1
+            if depth > _MAX_RUNTIME_EVIDENCE_JSON_DEPTH:
+                raise ValueError("runtime evidence exceeds JSON depth limit")
+        elif byte in (0x5D, 0x7D):
+            depth -= 1
+            if depth < 0:
+                raise ValueError("runtime evidence contains unbalanced JSON")
+
+
+def _read_runtime_evidence_json(path: Path, *, label: str) -> object:
+    try:
+        with path.open("rb") as handle:
+            content = handle.read(_MAX_RUNTIME_EVIDENCE_JSON_BYTES + 1)
+        if len(content) > _MAX_RUNTIME_EVIDENCE_JSON_BYTES:
+            raise ValueError("runtime evidence exceeds the byte limit")
+        _require_bounded_runtime_json_depth(content)
+        return json.loads(
+            content.decode("utf-8-sig"),
+            object_pairs_hook=_unique_runtime_json_object,
+            parse_float=_finite_runtime_json_float,
+            parse_int=_bounded_runtime_json_int,
+            parse_constant=_reject_runtime_json_constant,
+        )
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+        raise RuntimeError(f"{label} is invalid or oversized JSON") from exc
+
+
+def _stable_file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _is_regular_non_reparse(value: os.stat_result) -> bool:
+    if not stat.S_ISREG(value.st_mode):
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(value, "st_file_attributes", 0)
+    return not (reparse_flag and attributes & reparse_flag)
+
+
+def _snapshot_release_artifact(source: Path, snapshot_dir: Path) -> Path:
+    """Copy one stable regular release artifact into a private verification snapshot."""
+    try:
+        before = source.lstat()
+    except OSError as exc:
+        raise RuntimeError("M12 release artifact is missing or unsafe") from exc
+    if not _is_regular_non_reparse(before):
+        raise RuntimeError("M12 release artifact is missing or unsafe")
+    if not snapshot_dir.is_dir() or snapshot_dir.is_symlink():
+        raise RuntimeError("M12 artifact snapshot directory is unsafe")
+
+    descriptor = -1
+    temporary: Path | None = None
+    target = snapshot_dir / "verified-distributable.zip"
+    try:
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(source, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not _is_regular_non_reparse(opened)
+            or _stable_file_identity(opened) != _stable_file_identity(before)
+        ):
+            raise RuntimeError("M12 release artifact changed before snapshot")
+
+        with os.fdopen(descriptor, "rb", closefd=True) as input_stream:
+            descriptor = -1
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=".m12-artifact-",
+                suffix=".tmp",
+                dir=snapshot_dir,
+                delete=False,
+            ) as output:
+                temporary = Path(output.name)
+                shutil.copyfileobj(input_stream, output)
+                output.flush()
+                os.fsync(output.fileno())
+            after = os.fstat(input_stream.fileno())
+
+        current = source.lstat()
+        if (
+            not _is_regular_non_reparse(current)
+            or _stable_file_identity(after) != _stable_file_identity(opened)
+            or _stable_file_identity(current) != _stable_file_identity(opened)
+        ):
+            raise RuntimeError("M12 release artifact changed during snapshot")
+
+        os.replace(temporary, target)
+        temporary = None
+        snapshotted = target.lstat()
+        if not _is_regular_non_reparse(snapshotted):
+            raise RuntimeError("M12 release artifact snapshot is unsafe")
+    except OSError as exc:
+        raise RuntimeError("M12 release artifact could not be snapshotted safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return target
 
 
 def _powershell() -> str:
@@ -204,17 +367,21 @@ def _require_rollback_operation_marker(
     source_digest: str,
     target_digest: str,
 ) -> None:
-    try:
-        payload = json.loads(marker_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("packaged rollback did not preserve a valid operation marker") from exc
+    payload = _read_runtime_evidence_json(
+        marker_path,
+        label="packaged rollback operation marker",
+    )
     expected = {
         "marker_version": 1,
         "operation_id": operation_id,
         "source_digest": source_digest,
         "target_digest": target_digest,
     }
-    if type(payload) is not dict or payload != expected:
+    if (
+        type(payload) is not dict
+        or type(payload.get("marker_version")) is not int
+        or payload != expected
+    ):
         raise RuntimeError("packaged rollback operation marker does not match exact image authority")
 
 
@@ -229,17 +396,21 @@ def _run_installed_pf11(executable: Path, output: Path, *, env: dict[str, str]) 
         env=env,
         label="installed NikaCore.exe PF11 proof",
     )
-    try:
-        payload = json.loads(output.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("installed NikaCore.exe did not emit valid PF11 JSON") from exc
-    if not isinstance(payload, dict):
+    payload = _read_runtime_evidence_json(
+        output,
+        label="installed NikaCore.exe PF11 evidence",
+    )
+    if type(payload) is not dict:
         raise TypeError("installed NikaCore.exe PF11 evidence must be an object")
+    route = payload.get("route")
     project_id = payload.get("project_id")
+    spec_version = payload.get("spec_version")
     if (
-        payload.get("route") != "product_project"
-        or payload.get("spec_version") != 1
-        or not isinstance(project_id, str)
+        type(route) is not str
+        or route != "product_project"
+        or type(spec_version) is not int
+        or spec_version != 1
+        or type(project_id) is not str
         or not project_id.strip()
     ):
         raise RuntimeError("installed NikaCore.exe returned invalid PF11 route evidence")
@@ -556,24 +727,28 @@ def prove_packaged_installer_lifecycle(artifact: Path) -> None:
 
 def main() -> int:
     args = parser().parse_args()
-    findings = verify_distributable_evidence(
-        args.artifact,
-        args.evidence,
-        source_sha=args.source_sha,
-        artifact_reference=args.artifact_reference,
-        expected_product_version=args.product_version,
-    )
-    if not findings:
-        findings = verify_release_archive(
-            args.artifact,
+    with tempfile.TemporaryDirectory(prefix="nika-m12-artifact-") as temporary:
+        snapshot = _snapshot_release_artifact(args.artifact, Path(temporary))
+        findings = verify_distributable_evidence(
+            snapshot,
+            args.evidence,
             source_sha=args.source_sha,
+            artifact_reference=args.artifact_reference,
             expected_product_version=args.product_version,
         )
-    if findings:
-        raise SystemExit("M12 distributable evidence verification failed: " + ", ".join(findings))
-    if os.name == "nt":
-        prove_packaged_installer_lifecycle(args.artifact)
-        print("M12 packaged Install -> Update -> Rollback lifecycle verified")
+        if not findings:
+            findings = verify_release_archive(
+                snapshot,
+                source_sha=args.source_sha,
+                expected_product_version=args.product_version,
+            )
+        if findings:
+            raise SystemExit(
+                "M12 distributable evidence verification failed: " + ", ".join(findings)
+            )
+        if os.name == "nt":
+            prove_packaged_installer_lifecycle(snapshot)
+            print("M12 packaged Install -> Update -> Rollback lifecycle verified")
     print("M12 distributable evidence verified")
     return 0
 
