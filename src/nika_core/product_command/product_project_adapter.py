@@ -48,6 +48,12 @@ class ProductProjectCommandService:
         self._decisions = ProductDecisionRepository(repository.store)
         self._lifecycle = ProductProjectLifecycleService(repository.store)
 
+    @staticmethod
+    def _require_expected_row_version(value: object) -> int:
+        if type(value) is not int or value < 0:
+            raise ValueError("expected_row_version must be a non-negative integer")
+        return value
+
     def create_project(
         self,
         *,
@@ -98,6 +104,8 @@ class ProductProjectCommandService:
         desired_outcome: str | None = None,
         hypothesis: str | None = None,
     ) -> ProductProjectDetail:
+        if type(expected_spec_version) is not int or expected_spec_version < 1:
+            raise ValueError("expected_spec_version must be a positive integer")
         current = self._repository.get(project_id)
         if current.spec_version != expected_spec_version:
             raise StaleProjectVersionError(
@@ -133,6 +141,7 @@ class ProductProjectCommandService:
         expected_row_version: int,
         idempotency_key: str,
     ) -> ProductProjectDetail:
+        expected_row_version = self._require_expected_row_version(expected_row_version)
         self._decisions.record(
             project_id,
             decision,
@@ -165,6 +174,7 @@ class ProductProjectCommandService:
         decision_id: str,
         expected_row_version: int,
     ) -> ProductProjectDetail:
+        expected_row_version = self._require_expected_row_version(expected_row_version)
         self._decisions.link_requirement(
             project_id,
             requirement_id=requirement_id,
@@ -194,6 +204,7 @@ class ProductProjectCommandService:
         reason: str,
         changed_by_ref: str,
     ) -> ProductProjectDetail:
+        expected_row_version = self._require_expected_row_version(expected_row_version)
         self._lifecycle.transition(
             project_id,
             new_state,
