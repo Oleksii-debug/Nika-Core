@@ -1889,12 +1889,6 @@ def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root:
         or request.base_artifact_sha256 != logical_base_sha256
     ):
         _fail("logical_base_digest_mismatch")
-    source_sha256, _ = _hash_regular_snapshot(
-        source,
-        code="base_gguf_digest_mismatch",
-    )
-    if source_sha256 != config.base_gguf_sha256:
-        _fail("base_gguf_digest_mismatch")
     target_dir = _ensure_child_directory(
         job_root,
         "base",
@@ -1909,6 +1903,13 @@ def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root:
         if target_sha256 != config.base_gguf_sha256:
             _fail("staged_base_digest_mismatch")
         return target
+
+    source_sha256, _ = _hash_regular_snapshot(
+        source,
+        code="base_gguf_digest_mismatch",
+    )
+    if source_sha256 != config.base_gguf_sha256:
+        _fail("base_gguf_digest_mismatch")
     temporary = target_dir / ".base.gguf.tmp"
     try:
         source_stat = _require_regular_unlinked(
