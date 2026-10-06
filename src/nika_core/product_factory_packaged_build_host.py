@@ -160,12 +160,15 @@ def build_packaged_local_durable_build_host(
             )
         else:
             saved = checkpoints.latest()
-            recovery_work_ids = frozenset(
-                record.spec.request.work_id
+            recovery_dispatches = frozenset(
+                (
+                    record.spec.request.work_id,
+                    record.dispatch.dispatch_id,
+                )
                 for record in saved.snapshot.coordinator.records
                 if record.dispatch is not None
             )
-            with recovery_scope(recovery_work_ids):
+            with recovery_scope(recovery_dispatches):
                 host.restore_latest()
     return host
 
