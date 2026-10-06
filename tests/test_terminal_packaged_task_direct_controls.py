@@ -260,6 +260,10 @@ def test_current_windows_bridge_routes_status_pause_and_stop_without_new_task(
     tmp_path: Path,
 ) -> None:
     database = (tmp_path / "windows task controls.db").resolve()
+    bridge, _products = nika_windows.build_windows_bridge(
+        AppConfig(database_path=database),
+        start_startup_recovery=False,
+    )
     store = SQLiteStore(database)
     store.initialize()
     queue = TaskQueue(store)
@@ -269,11 +273,6 @@ def test_current_windows_bridge_routes_status_pause_and_stop_without_new_task(
         payload={"command": "fixture command"},
     )
     queue.transition(record.task_id, TaskState.READY)
-
-    bridge, _products = nika_windows.build_windows_bridge(
-        AppConfig(database_path=database),
-        start_startup_recovery=False,
-    )
 
     status = bridge.dispatch(
         {
