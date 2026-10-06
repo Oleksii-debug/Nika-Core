@@ -29,6 +29,7 @@ from nika_core.packaged_agent_builder import (
     PackagedAgentBuilderDraftHandler,
     PackagedAgentBuilderStateProjector,
 )
+from nika_core.packaged_intelligence_mode import PackagedIntelligenceModeCommandAdapter
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
@@ -241,6 +242,7 @@ def build_windows_bridge(
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
     model_settings = V01ModelSettings(store)
+    intelligence_mode_commands = PackagedIntelligenceModeCommandAdapter(model_settings)
     cloud_permissions = V01CloudModelPermissionService(
         store=store,
         settings=model_settings,
@@ -320,6 +322,7 @@ def build_windows_bridge(
             training_status,
             task_id,
         ),
+        intelligence_mode_handler=intelligence_mode_commands.execute,
         selection_store=PackagedProductSelectionStore(store),
     )
     agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)

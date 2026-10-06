@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.packaged_intelligence_mode import is_packaged_intelligence_mode_command
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.contracts import CommandRouteKind, ProductProjectDetail
 from nika_core.product_command.product_project_adapter import (
@@ -25,6 +26,7 @@ TaskControlHandler = Callable[[Mapping[str, Any]], UIResult]
 TaskStatusHandler = Callable[[], UIResult]
 ActivityReportHandler = Callable[[], UIResult]
 TrainingStatusHandler = Callable[[str], UIResult]
+IntelligenceModeCommandHandler = Callable[[str], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
 _PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
 _REOPEN_PREFIXES = (
@@ -276,8 +278,9 @@ class PackagedProductCommandRouter:
     """Route packaged command input to durable ProductProject, read-only report, or task handling.
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
-    Explicit daily-report, training-status and long-task control intents delegate only to
-    injected incumbent handlers. Explicit Agent Builder intent delegates only to an injected
+    Explicit daily-report, training-status, intelligence-mode and long-task control intents
+    delegate only to injected incumbent handlers. Explicit Agent Builder intent delegates only
+    to an injected
     safe-draft handler. Toolsmith remains a separate fail-closed route. No high-impact external
     action is launched merely by command classification.
     """
@@ -294,6 +297,7 @@ class PackagedProductCommandRouter:
         task_status_handler: TaskStatusHandler | None = None,
         activity_report_handler: ActivityReportHandler | None = None,
         training_status_handler: TrainingStatusHandler | None = None,
+        intelligence_mode_handler: IntelligenceModeCommandHandler | None = None,
         selection_store: PackagedProductSelectionStore | None = None,
     ) -> None:
         self._products = products
@@ -305,6 +309,7 @@ class PackagedProductCommandRouter:
         self._task_status_handler = task_status_handler
         self._activity_report_handler = activity_report_handler
         self._training_status_handler = training_status_handler
+        self._intelligence_mode_handler = intelligence_mode_handler
         self._selection_store = selection_store
         self._active_project_id = selection_store.load() if selection_store is not None else None
 
@@ -394,6 +399,13 @@ class PackagedProductCommandRouter:
                     "Щоденний звіт активності недоступний у цьому запуску."
                 )
             return self._activity_report_handler()
+
+        if is_packaged_intelligence_mode_command(command):
+            if self._intelligence_mode_handler is None:
+                raise PackagedProductJourneyError(
+                    "Керування режимом інтелекту недоступне у цьому запуску."
+                )
+            return self._intelligence_mode_handler(command)
 
         training_task_id = packaged_training_status_target(command)
         if training_task_id is not None:
