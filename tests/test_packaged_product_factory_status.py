@@ -372,6 +372,12 @@ def test_factory_status_command_is_exact_and_does_not_capture_broad_text() -> No
     assert packaged_current_product_factory_status_command(
         "Покажи поточний статус Product Factory."
     )
+    assert packaged_current_product_factory_status_command(
+        "Покажи поточний стан Product Factory."
+    )
+    assert packaged_current_product_factory_status_command(
+        "Статус поточного Product Factory."
+    )
     assert not packaged_current_product_factory_status_command(
         "please show current Product Factory status when convenient"
     )
@@ -392,7 +398,7 @@ def test_factory_status_command_reports_prepared_authority_and_survives_restart(
     before = router.create({"command": "Покажи поточний статус Product Factory"})
 
     assert before.status == "completed"
-    assert before.focus_id == "product-project-heading"
+    assert before.focus_id == "product-project-operator-heading"
     assert f"Статус Product Factory для {project.project_id}" in before.message
     assert "компонентів 1" in before.message
     assert "блокерів 0" in before.message
@@ -474,8 +480,11 @@ def test_factory_status_command_reports_unprepared_current_version(tmp_path: Pat
     result = router.create({"command": "Поточний статус Product Factory"})
 
     assert result.status == "completed"
-    assert result.focus_id == "product-project-heading"
-    assert "ще не має підготовленого execution authority" in result.message
+    assert result.focus_id == "product-project-operator-heading"
+    assert result.message == (
+        f"Статус Product Factory для {project.project_id}: "
+        "поточна версія ProductProject ще не має підготовленого execution authority."
+    )
 
 
 def test_windows_composition_uses_read_only_packaged_factory_status_reader() -> None:

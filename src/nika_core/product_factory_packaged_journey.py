@@ -89,6 +89,9 @@ _CURRENT_PRODUCT_FACTORY_STATUS_COMMANDS = frozenset(
         "show current product factory status",
         "поточний статус product factory",
         "покажи поточний статус product factory",
+        "поточний стан product factory",
+        "покажи поточний стан product factory",
+        "статус поточного product factory",
     }
 )
 _PRODUCT_STATUS_PREVIEW_LIMIT = 24
@@ -1039,7 +1042,7 @@ class PackagedProductCommandRouter:
                     f"Статус Product Factory для {project_id}: "
                     "поточна версія ProductProject ще не має підготовленого execution authority."
                 ),
-                focus_id="product-project-heading",
+                focus_id="product-project-operator-heading",
             )
 
         shown = components[:_PRODUCT_FACTORY_COMMAND_STATUS_LIMIT]
@@ -1059,7 +1062,7 @@ class PackagedProductCommandRouter:
                 f"компонентів {len(components)}; блокерів {detail.summary.blocker_count}; "
                 f"{component_summary}{truncation}."
             ),
-            focus_id="product-project-heading",
+            focus_id="product-project-operator-heading",
         )
 
     def _require_team_planner_and_project(
