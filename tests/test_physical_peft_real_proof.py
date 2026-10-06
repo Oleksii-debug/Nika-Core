@@ -209,3 +209,13 @@ def test_candidate_evidence_snapshot_rejects_tensor_path_mutation(
             candidate_bytes,
         )
 
+def test_write_new_file_never_replaces_existing_evidence(tmp_path: Path) -> None:
+    proof = _proof_module()
+    target = tmp_path / "physical-proof-summary.json"
+    target.write_bytes(b"existing-evidence")
+
+    with pytest.raises(proof.ProofError, match="could not be published"):
+        proof._write_new_file(target, b"replacement")
+
+    assert target.read_bytes() == b"existing-evidence"
+
