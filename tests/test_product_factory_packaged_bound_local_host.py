@@ -1621,6 +1621,7 @@ async def test_worker_revalidates_binding_after_private_git_source_copy(
     assert not (job_root / "_nika_private_git").exists()
     assert not (job_root / "worktree").exists()
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mutation_point", ("commit", "acceptance"))
 async def test_worker_revalidates_binding_after_private_candidate_effects(
