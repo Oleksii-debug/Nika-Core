@@ -1,0 +1,15 @@
+* { box-sizing: border-box; }
+html { font-family: system-ui, sans-serif; line-height: 1.5; }
+body { margin: 0; max-width: 1100px; padding: 1rem; }
+.skip-link { position: absolute; left: -10000px; top: auto; }
+.skip-link:focus { left: 1rem; top: 1rem; padding: .5rem; background: Canvas; color: CanvasText; z-index: 10; }
+header, nav, main, section { margin-bottom: 1.25rem; }
+nav, .actions { display: flex; flex-wrap: wrap; gap: .5rem; }
+button, input, textarea { font: inherit; }
+button { padding: .45rem .7rem; }
+textarea { display: block; width: 100%; max-width: 60rem; margin: .4rem 0 .7rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { border: 1px solid ButtonBorder; padding: .5rem; text-align: left; vertical-align: top; }
+input[type="text"] { width: 100%; min-width: 12rem; }
+:focus-visible { outline: 3px solid Highlight; outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }

@@ -1,0 +1,675 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import sys
+from contextlib import closing
+from pathlib import Path
+
+import pytest
+
+from nika_core.config import AppConfig
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.multi_agent import MultiAgentStore, TeamQuota
+from nika_core.reliability import legacy_database as adoption
+from nika_core.reliability.backup import SQLiteRecoveryManager
+from nika_core.runtime.idempotency import IdempotencyLedger
+
+
+class ProcessLoss(BaseException):
+    pass
+
+
+def _legacy(path: Path):
+    store = SQLiteStore(path)
+    store.initialize()
+    task = TaskQueue(store).create(workspace_id="w", agent_id="a", payload={"text": "Дані"})
+    teams = MultiAgentStore(store)
+    teams.create_team(
+        team_id="team",
+        root_member_id="root",
+        root_agent_id="a",
+        root_agent_version=1,
+        root_thread_id="thread",
+        root_grants=(),
+        quota=TeamQuota(max_total_agents=3, max_parallel=2),
+    )
+    for name in ("worker-a", "worker-b"):
+        teams.spawn_child(
+            team_id="team",
+            parent_id="root",
+            child_id=name,
+            agent_id=name,
+            agent_version=1,
+            thread_id=name,
+            requested_grants=(),
+        )
+    IdempotencyLedger(store).reserve(
+        operation_key="one-effect",
+        task_id=task.task_id,
+        operation_type="write",
+        input_fingerprint="fingerprint",
+    )
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO scheduled_jobs VALUES "
+            "('job', 'read', 'date', '{}', '{}', 1, 1, 1, NULL, 't', 't')"
+        )
+    return store, task
+
+
+def _rows(path: Path, table: str):
+    with closing(sqlite3.connect(path)) as db:
+        return db.execute(f'SELECT * FROM "{table}"').fetchall()
+
+
+@pytest.mark.parametrize("existing_empty", [False, True])
+def test_adoption_preserves_authority_rows_and_restart_never_reimports(tmp_path, existing_empty):
+    source = tmp_path / "Стара папка" / "data" / "nika_core.db"
+    target = tmp_path / "Нові дані" / "nika_core.db"
+    old, task = _legacy(source)
+    before = source.read_bytes()
+    tables = (
+        "tasks",
+        "multi_agent_teams",
+        "multi_agent_members",
+        "scheduled_jobs",
+        "idempotency_records",
+    )
+    expected = {table: _rows(source, table) for table in tables}
+    if existing_empty:
+        SQLiteStore(target).initialize()
+    adoption.prepare_default_database(target, [source])
+    assert source.read_bytes() == before
+    for table in tables:
+        assert _rows(target, table) == expected[table]
+    assert TaskQueue(SQLiteStore(target)).get(task.task_id).payload == {"text": "Дані"}
+    new_task = TaskQueue(SQLiteStore(target)).create(
+        workspace_id="w", agent_id="a", payload={"new": 1}
+    )
+    # A different launch directory still checks the original source from the receipt.
+    adoption.prepare_default_database(target, [])
+    assert TaskQueue(SQLiteStore(target)).get(new_task.task_id).payload == {"new": 1}
+    assert len(list((target.parent / "legacy-adoption-backups").glob("*.sqlite3"))) == 2
+    assert old.path.exists()
+
+
+def test_online_snapshot_includes_uncheckpointed_wal(tmp_path):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        assert source.with_name(source.name + "-wal").stat().st_size > 0
+        adoption.prepare_default_database(target, [source])
+        assert json.loads(_rows(target, "tasks")[0][4]) == {"from_wal": True}
+
+
+@pytest.mark.parametrize(
+    "conflict", ["two_sources", "canonical_state", "corrupt", "newer", "empty_file"]
+)
+def test_ambiguous_or_invalid_sources_never_create_empty_success(tmp_path, conflict):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    sources = [source]
+    if conflict == "two_sources":
+        second = tmp_path / "other.db"
+        _legacy(second)
+        sources.append(second)
+    elif conflict == "canonical_state":
+        _legacy(target)
+    elif conflict in {"corrupt", "empty_file"}:
+        source.write_bytes(b"PRIVATE_CORRUPTION_CANARY" if conflict == "corrupt" else b"")
+    else:
+        with closing(sqlite3.connect(source)) as db:
+            db.execute("INSERT INTO schema_migrations VALUES (99, 'future')")
+            db.commit()
+    before = target.read_bytes() if target.exists() else None
+    with pytest.raises(adoption.LegacyDatabaseConflict) as error:
+        adoption.prepare_default_database(target, sources)
+    assert "PRIVATE_CORRUPTION_CANARY" not in str(error.value)
+    assert (target.read_bytes() if target.exists() else None) == before
+
+
+@pytest.mark.parametrize("phase", ["before", "reserved_empty", "after"])
+def test_process_loss_resumes_without_overwriting_newer_canonical_work(
+    tmp_path, monkeypatch, phase
+):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    original = SQLiteRecoveryManager.restore
+
+    def interrupted(self, plan, **kwargs):
+        if plan.target_path != target:
+            return original(self, plan, **kwargs)
+        if phase == "after":
+            original(self, plan, **kwargs)
+        elif phase == "reserved_empty":
+            target.touch()
+        raise ProcessLoss()
+
+    monkeypatch.setattr(SQLiteRecoveryManager, "restore", interrupted)
+    with pytest.raises(ProcessLoss):
+        adoption.prepare_default_database(target, [source])
+    pending = target.with_name(f".{target.name}.legacy-adoption.json")
+    assert pending.exists()
+    new_task = None
+    if phase == "after":
+        new_task = TaskQueue(SQLiteStore(target)).create(
+            workspace_id="w", agent_id="a", payload={"after": 1}
+        )
+    monkeypatch.setattr(SQLiteRecoveryManager, "restore", original)
+    adoption.prepare_default_database(target, [source])
+    assert not pending.exists()
+    assert len(_rows(target, "multi_agent_members")) == 3
+    if new_task:
+        assert TaskQueue(SQLiteStore(target)).get(new_task.task_id).payload == {"after": 1}
+
+
+def test_changed_legacy_after_adoption_requires_recovery_decision(tmp_path):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    store, _ = _legacy(source)
+    adoption.prepare_default_database(target, [source])
+    before = target.read_bytes()
+    TaskQueue(store).create(workspace_id="w", agent_id="a", payload={"later": 1})
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+    assert target.read_bytes() == before
+
+
+def test_source_aliases_are_one_candidate(tmp_path):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    alias = tmp_path / "same.db"
+    try:
+        alias.hardlink_to(source)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    adoption.prepare_default_database(target, [source, alias])
+    adoption.prepare_default_database(target, [alias])
+    assert len(_rows(target, "tasks")) == 1
+
+
+def test_packaged_conflict_is_displayed_before_any_runtime_starts(monkeypatch):
+    from scripts import nika_windows
+
+    def conflict(_cls):
+        raise adoption.LegacyDatabaseConflict("Потрібне відновлення даних Nika.")
+
+    shown = []
+    monkeypatch.setattr(AppConfig, "from_environment", classmethod(conflict))
+    monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", shown.append)
+    monkeypatch.setattr(
+        nika_windows, "build_windows_bridge", lambda *_args: pytest.fail("runtime started")
+    )
+    assert nika_windows.main([]) == 1
+    assert shown == ["Потрібне відновлення даних Nika."]
+
+
+def test_startup_lock_has_one_owner_and_is_released_on_process_scope_exit(tmp_path):
+    target = tmp_path / "nika.db"
+    with adoption._startup_lock(target), pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+    adoption.prepare_default_database(target, [])
+
+
+def test_startup_lock_rejects_indirect_and_nonregular_paths(tmp_path):
+    target = tmp_path / "nika.db"
+    lock = target.with_name(f".{target.name}.startup.lock")
+    sentinel = tmp_path / "unrelated-private-file"
+    sentinel.write_bytes(b"")
+
+    try:
+        lock.symlink_to(sentinel)
+    except (NotImplementedError, OSError):
+        pytest.skip("filesystem does not support symlinks")
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+    assert sentinel.read_bytes() == b""
+    assert not target.exists()
+
+    lock.unlink()
+    lock.mkdir()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+    assert not target.exists()
+
+
+def test_startup_lock_rejects_path_swapped_for_symlink_during_open(
+    tmp_path, monkeypatch
+):
+    import nika_core.reliability.recovery_lease as lease_module
+
+    target = tmp_path / "nika.db"
+    lock = target.with_name(f".{target.name}.startup.lock")
+    sentinel = tmp_path / "must-not-be-modified"
+    sentinel.write_bytes(b"")
+    real_open = lease_module.os.open
+    swapped = False
+
+    def swap_before_open(path, flags, mode=0o777):
+        nonlocal swapped
+        if Path(path) == lock and not swapped:
+            swapped = True
+            try:
+                lock.symlink_to(sentinel)
+            except (NotImplementedError, OSError):
+                pytest.skip("filesystem does not support symlinks")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(lease_module.os, "open", swap_before_open)
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+    assert swapped
+    assert lock.is_symlink()
+    assert sentinel.read_bytes() == b""
+    assert not target.exists()
+
+
+def _valid_pending_payload(source: Path) -> bytes:
+    return json.dumps(
+        {
+            "version": 1,
+            "adoption_id": "a" * 32,
+            "source_path": str(source.resolve()),
+            "source_digest": "b" * 64,
+            "target_was_absent": True,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def test_pending_record_snapshot_rejects_indirect_and_nonregular_paths(tmp_path):
+    pending = tmp_path / ".nika.db.legacy-adoption.json"
+    sentinel = tmp_path / "private-pending"
+    sentinel.write_bytes(_valid_pending_payload(tmp_path / "old.db"))
+    try:
+        pending.symlink_to(sentinel)
+    except (NotImplementedError, OSError):
+        pytest.skip("filesystem does not support symlinks")
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._read_pending_record(pending)
+    assert sentinel.read_bytes() == _valid_pending_payload(tmp_path / "old.db")
+
+    pending.unlink()
+    pending.mkdir()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._read_pending_record(pending)
+
+
+def test_pending_record_snapshot_rejects_path_swap_after_open(tmp_path, monkeypatch):
+    pending = tmp_path / ".nika.db.legacy-adoption.json"
+    pending.write_bytes(_valid_pending_payload(tmp_path / "old.db"))
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(_valid_pending_payload(tmp_path / "other.db"))
+    original_open = adoption._open_readonly_snapshot
+    swapped = False
+
+    def swap_after_open(path):
+        nonlocal swapped
+        fd = original_open(path)
+        if Path(path) == pending and not swapped:
+            swapped = True
+            try:
+                replacement.replace(pending)
+            except OSError:
+                adoption.os.close(fd)
+                pytest.skip("filesystem cannot replace a pending record held open")
+        return fd
+
+    monkeypatch.setattr(adoption, "_open_readonly_snapshot", swap_after_open)
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._read_pending_record(pending)
+    assert swapped
+
+
+def test_present_null_pending_record_is_rejected_not_treated_as_missing(tmp_path):
+    target = tmp_path / "data" / "nika.db"
+    target.parent.mkdir()
+    pending = target.with_name(f".{target.name}.legacy-adoption.json")
+    pending.write_text("null", encoding="utf-8")
+
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+
+    assert pending.read_text(encoding="utf-8") == "null"
+    assert not target.exists()
+
+
+def test_pending_record_snapshot_rejects_oversize_before_json_decode(tmp_path):
+    pending = tmp_path / ".nika.db.legacy-adoption.json"
+    pending.write_bytes(b"x" * (adoption._MAX_PENDING_BYTES + 1))
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._read_pending_record(pending)
+
+
+def test_pending_record_snapshot_reads_exact_valid_record(tmp_path):
+    pending = tmp_path / ".nika.db.legacy-adoption.json"
+    source = tmp_path / "Дані" / "old.db"
+    payload = _valid_pending_payload(source)
+    pending.write_bytes(payload)
+    snapshot = adoption._read_pending_record(pending)
+    assert snapshot is not None
+    record, identity = snapshot
+    assert isinstance(record, dict)
+    assert record["source_path"] == str(source.resolve())
+    assert record["target_was_absent"] is True
+    assert identity == adoption._snapshot_identity(adoption.os.lstat(pending))
+
+
+def test_pending_record_cleanup_rejects_replacement_identity(tmp_path):
+    pending = tmp_path / ".nika.db.legacy-adoption.json"
+    pending.write_bytes(_valid_pending_payload(tmp_path / "old.db"))
+    snapshot = adoption._read_pending_record(pending)
+    assert snapshot is not None
+    _record, identity = snapshot
+    replacement = tmp_path / "replacement.json"
+    replacement_payload = _valid_pending_payload(tmp_path / "other.db")
+    replacement.write_bytes(replacement_payload)
+    replacement.replace(pending)
+
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._remove_pending_record(pending, expected_identity=identity)
+
+    assert pending.read_bytes() == replacement_payload
+
+
+def test_startup_lock_rejects_inode_swap_after_open(tmp_path, monkeypatch):
+    import nika_core.reliability.recovery_lease as lease_module
+
+    target = tmp_path / "nika.db"
+    lock = target.with_name(f".{target.name}.startup.lock")
+    lock.write_bytes(b"original")
+    replacement = tmp_path / "replacement-lock"
+    replacement.write_bytes(b"replacement")
+    real_open = lease_module.os.open
+    swapped = False
+
+    def swap_after_open(path, flags, mode=0o777):
+        nonlocal swapped
+        fd = real_open(path, flags, mode)
+        if Path(path) == lock and not swapped:
+            swapped = True
+            try:
+                replacement.replace(lock)
+            except OSError:
+                lease_module.os.close(fd)
+                pytest.skip("filesystem cannot replace a lock held open")
+        return fd
+
+    monkeypatch.setattr(lease_module.os, "open", swap_after_open)
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+    assert swapped
+    assert lock.read_bytes() == b"replacement"
+    assert not target.exists()
+
+
+@pytest.mark.parametrize("hold_open", [False, True])
+def test_late_wal_writer_is_detected_inside_restore_lock(tmp_path, monkeypatch, hold_open):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    SQLiteStore(target).initialize()
+    original = SQLiteRecoveryManager._copy_database
+    injected = False
+    guard_seen = False
+    original_guard = adoption._require_empty_target
+
+    def observe_guard(db):
+        nonlocal guard_seen
+        guard_seen = True
+        return original_guard(db)
+
+    monkeypatch.setattr(adoption, "_require_empty_target", observe_guard)
+
+    def inject(source_path, destination, **kwargs):
+        nonlocal injected
+        if destination == target and kwargs.get("target_guard") is not None:
+            injected = True
+            with closing(sqlite3.connect(target)) as writer:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute("PRAGMA wal_autocheckpoint=0")
+                writer.execute("INSERT INTO keymap_overrides VALUES ('task.create', 'Ctrl+J', 't')")
+                writer.commit()
+                if hold_open:
+                    return original(source_path, destination, **kwargs)
+        return original(source_path, destination, **kwargs)
+
+    monkeypatch.setattr(SQLiteRecoveryManager, "_copy_database", staticmethod(inject))
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [source])
+    assert injected
+    if not hold_open:
+        assert guard_seen
+    assert _rows(target, "keymap_overrides") == [("task.create", "Ctrl+J", "t")]
+    assert _rows(target, "tasks") == []
+
+
+@pytest.mark.parametrize("alias", ["NIKA_DB_PATH", "NIKA_DATABASE_PATH"])
+def test_explicit_configuration_bypasses_legacy_discovery(tmp_path, monkeypatch, alias):
+    for name in ("NIKA_DB_PATH", "NIKA_DATABASE_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    requested = tmp_path / "chosen.db"
+    monkeypatch.setenv(alias, str(requested))
+    monkeypatch.setattr(
+        adoption, "default_legacy_locations", lambda: pytest.fail("explicit path lost authority")
+    )
+    assert AppConfig.from_environment().database_path == requested
+
+
+def test_default_packaged_startup_adopts_and_source_runtime_does_not(tmp_path, monkeypatch):
+    source = tmp_path / "launch" / "data" / "nika_core.db"
+    target_root = tmp_path / "user-data"
+    _legacy(source)
+    for name in ("NIKA_DB_PATH", "NIKA_DATABASE_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.chdir(source.parent.parent)
+    monkeypatch.setattr("nika_core.config.user_data_path", lambda *_args, **_kwargs: target_root)
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    target = AppConfig.from_environment().database_path
+    assert not target.exists()
+    monkeypatch.setattr(sys, "frozen", True)
+    assert AppConfig.from_environment().database_path == target
+    assert len(_rows(target, "tasks")) == 1
+
+
+@pytest.mark.parametrize("alias_first", [False, True])
+def test_hardlink_alias_with_uncheckpointed_wal_is_ambiguous(tmp_path, alias_first):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    alias = tmp_path / "alias.db"
+    try:
+        alias.hardlink_to(source)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        assert source.with_name(source.name + "-wal").stat().st_size > 0
+        # Repeating an identical path is still one unambiguous WAL source.
+        assert adoption._known_sources(target, [source, source]) == [source.resolve()]
+        before = source.read_bytes()
+        candidates = [alias, source] if alias_first else [source, alias]
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption._known_sources(target, candidates)
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption.prepare_default_database(target, candidates)
+        assert not target.exists()
+        assert source.read_bytes() == before
+        assert json.loads(_rows(source, "tasks")[0][4]) == {"from_wal": True}
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_broken_indirect_sidecar_makes_hardlink_alias_ambiguous(tmp_path, suffix):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    alias = tmp_path / "alias.db"
+    try:
+        alias.hardlink_to(source)
+        alias.with_name(alias.name + suffix).symlink_to(tmp_path / "missing-sidecar")
+    except OSError:
+        pytest.skip("File system does not support hard links or symlinks")
+    original = source.read_bytes()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._known_sources(target, [alias, source])
+    assert not target.exists()
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+@pytest.mark.parametrize("indirect", [False, True])
+def test_unsafe_single_source_sidecar_fails_before_any_backup(tmp_path, suffix, indirect):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    sidecar = source.with_name(source.name + suffix)
+    if indirect:
+        try:
+            sidecar.symlink_to(tmp_path / "missing-sidecar")
+        except OSError:
+            pytest.skip("File system does not support symlinks")
+    else:
+        sidecar.mkdir()
+    original = source.read_bytes()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [source])
+    assert source.read_bytes() == original
+    assert not target.exists()
+    assert not (target.parent / "legacy-adoption-backups").exists()
+
+
+@pytest.mark.parametrize("writer_side", ["canonical", "alias"])
+@pytest.mark.parametrize("candidate_first", [False, True])
+def test_canonical_hardlink_alias_with_live_wal_never_silently_skips(
+    tmp_path, writer_side, candidate_first
+):
+    target = tmp_path / "canonical" / "nika.db"
+    _legacy(target)
+    alias = tmp_path / "legacy-alias.db"
+    try:
+        alias.hardlink_to(target)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    writer = target if writer_side == "canonical" else alias
+    candidates = [target, alias] if candidate_first else [alias, target]
+    with closing(sqlite3.connect(writer)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        wal = writer.with_name(writer.name + "-wal")
+        assert wal.stat().st_size > 0
+        main_before, wal_before = target.read_bytes(), wal.read_bytes()
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption.prepare_default_database(target, candidates)
+        assert target.read_bytes() == main_before
+        assert wal.read_bytes() == wal_before
+        assert json.loads(_rows(writer, "tasks")[0][4]) == {"from_wal": True}
+        assert not (target.parent / "legacy-adoption-backups").exists()
+        assert not target.with_name(f".{target.name}.legacy-adoption.json").exists()
+
+
+def test_canonical_hardlink_without_sidecars_is_not_a_second_database(tmp_path):
+    target = tmp_path / "canonical" / "nika.db"
+    _legacy(target)
+    alias = tmp_path / "legacy-alias.db"
+    try:
+        alias.hardlink_to(target)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    adoption.prepare_default_database(target, [alias, target])
+    assert len(_rows(target, "tasks")) == 1
+    assert not (target.parent / "legacy-adoption-backups").exists()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_canonical_hardlink_rejects_indirect_alias_sidecar(tmp_path, suffix):
+    target = tmp_path / "canonical" / "nika.db"
+    _legacy(target)
+    alias = tmp_path / "legacy-alias.db"
+    try:
+        alias.hardlink_to(target)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    sidecar = alias.with_name(alias.name + suffix)
+    try:
+        sidecar.symlink_to(tmp_path / "nonexistent-sidecar")
+    except (OSError, NotImplementedError):
+        pytest.skip("File system does not support symlinks")
+    before = target.read_bytes()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [alias])
+    assert target.read_bytes() == before
+    assert sidecar.is_symlink()
+    assert not (target.parent / "legacy-adoption-backups").exists()
+
+
+def test_frozen_online_wal_backup_inspection_does_not_create_sidecars(tmp_path):
+    """Archived WAL-header copies are immutable; the live source is not."""
+    source = tmp_path / "old.db"
+    _legacy(source)
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        live_wal = source.with_name(source.name + "-wal")
+        assert live_wal.stat().st_size > 0
+        expected = adoption._inspect(source)
+        assert expected is not None
+        backup = tmp_path / "snapshot.sqlite3"
+        manager = SQLiteRecoveryManager(SQLiteStore(source))
+        artifact = manager.create_backup(backup, record_audit=False)
+        for suffix in ("-wal", "-shm"):
+            assert not backup.with_name(backup.name + suffix).exists()
+        frozen = adoption._inspect(backup, immutable=True)
+        assert frozen is not None and frozen.digest == expected.digest
+        assert manager.verify_backup(backup).sha256 == artifact.sha256
+        for suffix in ("-wal", "-shm"):
+            assert not backup.with_name(backup.name + suffix).exists()
+        assert live_wal.stat().st_size > 0
+        assert adoption._inspect(source).digest == expected.digest
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_immutable_backup_inspection_rejects_unbound_sidecars(tmp_path, suffix):
+    source = tmp_path / "old.db"
+    _legacy(source)
+    backup = tmp_path / "snapshot.sqlite3"
+    SQLiteRecoveryManager(SQLiteStore(source)).create_backup(backup, record_audit=False)
+    sidecar = backup.with_name(backup.name + suffix)
+    sidecar.write_bytes(b"")
+    with pytest.raises(adoption.BackupRecoveryError):
+        adoption._inspect(backup, immutable=True)
+    assert sidecar.exists()
+
+
+def test_wal_adoption_internal_pipeline_preserves_live_wal_and_receipt(tmp_path):
+    """Expose the internal stage of a live-WAL failure without the UI error wrapper."""
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        wal = source.with_name(source.name + "-wal")
+        assert wal.stat().st_size > 0
+        expected = adoption._inspect(source)
+        assert expected is not None
+        with adoption._startup_lock(target):
+            adoption._prepare_locked(target, [source])
+        assert json.loads(_rows(target, "tasks")[0][4]) == {"from_wal": True}
+        assert wal.stat().st_size > 0
+        assert adoption._inspect(source).digest == expected.digest
+        archives = list((target.parent / "legacy-adoption-backups").glob("*.sqlite3"))
+        assert len(archives) == 2
+        for archive in archives:
+            assert not archive.with_name(archive.name + "-wal").exists()
+            assert not archive.with_name(archive.name + "-shm").exists()
+        assert not target.with_name(f".{target.name}.legacy-adoption.json").exists()

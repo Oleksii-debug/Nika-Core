@@ -1,0 +1,361 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+from pathlib import Path
+
+import pytest
+
+from nika_core.packaging import attestation as attestation_module
+from nika_core.packaging.attestation import (
+    build_release_attestation_evidence,
+    write_release_attestation_evidence,
+)
+
+SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
+PRODUCT_VERSION = "1.0.0"
+REPOSITORY = "Oleksii-debug/Nika-Core"
+SIGNER = f"{REPOSITORY}/.github/workflows/m12-prehuman-release-gate.yml"
+SOURCE_REF = "refs/heads/main"
+ARTIFACT_REFERENCE = "./dist/NikaCore-1.0.0-windows-x64.zip"
+ATTESTATION_ID = "123456"
+ATTESTATION_URL = f"https://github.com/{REPOSITORY}/attestations/{ATTESTATION_ID}"
+REQUIRED_TRUE_FIELDS = (
+    "release_manifest_source_sha_bound",
+    "exact_checkout_sha_verified",
+    "core_ci_equivalent",
+    "full_test_suite",
+    "runtime_restart_recovery",
+    "memory_scheduler_resource_regressions",
+    "model_mock_nollm_regressions",
+    "deterministic_brain_regressions",
+    "foundry_local_adapter_regressions",
+    "plugin_workspace_regressions",
+    "security_sandbox_regressions",
+    "integrated_ubuntu",
+    "integrated_windows",
+    "browser_semantic_proof",
+    "windows_uia_semantic_proof",
+    "windows_package_built",
+    "manifest_verified",
+    "third_party_notices_verified",
+    "packaged_uia_keyboard_focus",
+    "machine_readable_sbom_verified",
+    "supply_chain_provenance_verified",
+)
+REQUIRED_FALSE_FIELDS = (
+    "physical_windows_foundry_inference_proven",
+    "human_tested",
+    "nvda_verified",
+    "production_release_ready",
+)
+
+
+def _artifact(tmp_path: Path) -> Path:
+    path = tmp_path / "NikaCore-1.0.0-windows-x64.zip"
+    path.write_bytes(b"exact-final-distributable")
+    return path
+
+
+def _prehuman_evidence(tmp_path: Path, artifact: Path) -> Path:
+    path = tmp_path / "m12-prehuman-evidence.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 4,
+                "product_version": PRODUCT_VERSION,
+                "commit_sha": SOURCE_SHA,
+                "distributable_zip_path": ARTIFACT_REFERENCE,
+                "distributable_zip_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                "distributable_zip_size": artifact.stat().st_size,
+                **{field: True for field in REQUIRED_TRUE_FIELDS},
+                **{field: False for field in REQUIRED_FALSE_FIELDS},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _verification(tmp_path: Path, artifact: Path, *, digest: str | None = None) -> Path:
+    path = tmp_path / "verification.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "verificationResult": {
+                        "statement": {
+                            "predicateType": "https://slsa.dev/provenance/v1",
+                            "subject": [
+                                {
+                                    "name": artifact.name,
+                                    "digest": {
+                                        "sha256": digest
+                                        or hashlib.sha256(artifact.read_bytes()).hexdigest()
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _build(tmp_path: Path):
+    artifact = _artifact(tmp_path)
+    return artifact, _prehuman_evidence(tmp_path, artifact), _verification(tmp_path, artifact)
+
+
+def _kwargs() -> dict[str, str]:
+    return {
+        "source_sha": SOURCE_SHA,
+        "artifact_reference": ARTIFACT_REFERENCE,
+        "expected_product_version": PRODUCT_VERSION,
+        "repository": REPOSITORY,
+        "signer_workflow": SIGNER,
+        "source_ref": SOURCE_REF,
+        "attestation_id": ATTESTATION_ID,
+        "attestation_url": ATTESTATION_URL,
+    }
+
+
+def test_exact_verified_attestation_builds_non_human_sidecar(tmp_path: Path) -> None:
+    artifact, prehuman, verification = _build(tmp_path)
+    evidence = build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
+    assert evidence.commit_sha == SOURCE_SHA
+    assert evidence.artifact_sha256 == hashlib.sha256(artifact.read_bytes()).hexdigest()
+    assert evidence.verification_result_bound is True
+    assert evidence.human_tested is evidence.nvda_verified is evidence.production_release_ready is False
+    output = tmp_path / "m12-attestation-evidence.json"
+    write_release_attestation_evidence(output, evidence)
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["attestation_id"] == ATTESTATION_ID
+    assert payload["predicate_type"] == "https://slsa.dev/provenance/v1"
+
+
+def test_attestation_rejects_tampered_distributable_before_crypto_claim(tmp_path: Path) -> None:
+    artifact, prehuman, verification = _build(tmp_path)
+    artifact.write_bytes(b"tampered-after-prehuman-evidence")
+    with pytest.raises(ValueError, match="pre-human distributable evidence mismatch"):
+        build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
+
+
+def test_attestation_rejects_verified_result_for_other_digest(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    prehuman = _prehuman_evidence(tmp_path, artifact)
+    verification = _verification(tmp_path, artifact, digest="f" * 64)
+    with pytest.raises(ValueError, match="exact artifact digest"):
+        build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_ref", "refs/pull/99/merge", "restricted to integrated main"),
+        ("signer_workflow", "attacker/repo/.github/workflows/build.yml", "canonical M12 workflow"),
+        ("attestation_id", "0", "positive decimal"),
+        ("attestation_url", "https://example.invalid/attestations/123456", "does not match"),
+    ],
+)
+def test_attestation_identity_policy_fails_closed(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
+    artifact, prehuman, verification = _build(tmp_path)
+    kwargs = _kwargs()
+    kwargs[field] = value
+    with pytest.raises(ValueError, match=message):
+        build_release_attestation_evidence(artifact, prehuman, verification, **kwargs)
+
+
+def test_attestation_verification_output_must_be_nonempty_json_array(tmp_path: Path) -> None:
+    artifact = _artifact(tmp_path)
+    prehuman = _prehuman_evidence(tmp_path, artifact)
+    verification = tmp_path / "verification.json"
+    verification.write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="at least one result"):
+        build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
+
+
+def test_m12_workflow_keeps_signing_privilege_on_trusted_main_only() -> None:
+    workflow = Path(".github/workflows/m12-prehuman-release-gate.yml").read_text(encoding="utf-8")
+    assert "attest-main-distributable:" in workflow
+    assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in workflow
+    main_job = workflow.split("  attest-main-distributable:", 1)[1]
+    permission_block = main_job.split("    permissions:\n", 1)[1].split("    steps:\n", 1)[0]
+    assert permission_block == (
+        "      contents: read\n"
+        "      id-token: write\n"
+        "      attestations: write\n"
+    )
+    for expected in (
+        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "--signer-workflow",
+        "--source-digest '${{ github.sha }}'",
+        "--source-ref '${{ github.ref }}'",
+        "--deny-self-hosted-runners",
+    ):
+        assert expected in workflow
+
+
+def test_attestation_refuses_archive_swapped_after_prehuman_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, prehuman, _ = _build(tmp_path)
+    changed_bytes = b"x" * artifact.stat().st_size
+    verification = _verification(
+        tmp_path,
+        artifact,
+        digest=hashlib.sha256(changed_bytes).hexdigest(),
+    )
+    original_verify = attestation_module.verify_distributable_evidence
+    calls = 0
+
+    def swap_after_first_gate(*args: object, **kwargs: object) -> tuple[str, ...]:
+        nonlocal calls
+        findings = original_verify(*args, **kwargs)
+        calls += 1
+        if calls == 1 and not findings:
+            artifact.write_bytes(changed_bytes)
+        return findings
+
+    monkeypatch.setattr(
+        attestation_module,
+        "verify_distributable_evidence",
+        swap_after_first_gate,
+    )
+    with pytest.raises(ValueError, match="attestation artifact changed"):
+        build_release_attestation_evidence(
+            artifact, prehuman, verification, **_kwargs()
+        )
+    assert calls == 1
+
+
+def test_attestation_refuses_coherent_archive_and_prehuman_swap_after_first_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, prehuman, _ = _build(tmp_path)
+    changed_bytes = b"z" * artifact.stat().st_size
+    verification = _verification(
+        tmp_path,
+        artifact,
+        digest=hashlib.sha256(changed_bytes).hexdigest(),
+    )
+    original_verify = attestation_module.verify_distributable_evidence
+    calls = 0
+
+    def swap_pair_after_first_gate(*args: object, **kwargs: object) -> tuple[str, ...]:
+        nonlocal calls
+        findings = original_verify(*args, **kwargs)
+        calls += 1
+        if calls == 1 and not findings:
+            artifact.write_bytes(changed_bytes)
+            assert _prehuman_evidence(tmp_path, artifact) == prehuman
+        return findings
+
+    monkeypatch.setattr(
+        attestation_module,
+        "verify_distributable_evidence",
+        swap_pair_after_first_gate,
+    )
+    with pytest.raises(ValueError, match="attestation artifact changed"):
+        build_release_attestation_evidence(
+            artifact, prehuman, verification, **_kwargs()
+        )
+    assert calls == 1
+
+def test_attestation_refuses_archive_changed_after_second_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, prehuman, verification = _build(tmp_path)
+    changed_bytes = b"x" * artifact.stat().st_size
+    original_verify = attestation_module.verify_distributable_evidence
+    calls = 0
+
+    def change_after_recheck(*args: object, **kwargs: object) -> tuple[str, ...]:
+        nonlocal calls
+        findings = original_verify(*args, **kwargs)
+        calls += 1
+        if calls == 2 and not findings:
+            artifact.write_bytes(changed_bytes)
+        return findings
+
+    monkeypatch.setattr(
+        attestation_module,
+        "verify_distributable_evidence",
+        change_after_recheck,
+    )
+    with pytest.raises(ValueError, match="attestation artifact changed"):
+        build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
+    assert calls == 2
+
+
+def test_attestation_verification_reader_accepts_exact_byte_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limit = 64
+    payload = b'[{"verificationResult":{}}]'
+    payload += b" " * (limit - len(payload))
+    verification = tmp_path / "verification.json"
+    verification.write_bytes(payload)
+    monkeypatch.setattr(attestation_module, "_MAX_ATTESTATION_VERIFICATION_BYTES", limit)
+
+    assert attestation_module._read_verification(verification) == [
+        {"verificationResult": {}}
+    ]
+
+
+def test_attestation_verification_reader_rejects_one_byte_over_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limit = 64
+    payload = b'[{"verificationResult":{}}]'
+    payload += b" " * (limit + 1 - len(payload))
+    verification = tmp_path / "verification.json"
+    verification.write_bytes(payload)
+    monkeypatch.setattr(attestation_module, "_MAX_ATTESTATION_VERIFICATION_BYTES", limit)
+
+    with pytest.raises(ValueError, match="size limit"):
+        attestation_module._read_verification(verification)
+
+
+def test_attestation_verification_reader_rejects_excessive_json_depth(
+    tmp_path: Path,
+) -> None:
+    verification = tmp_path / "verification.json"
+    verification.write_bytes(b"[" * 65 + b"{}" + b"]" * 65)
+
+    with pytest.raises(ValueError, match="structural limits"):
+        attestation_module._read_verification(verification)
+
+
+def test_attestation_verification_reader_accepts_utf8_bom(tmp_path: Path) -> None:
+    verification = tmp_path / "verification.json"
+    verification.write_bytes(b'\xef\xbb\xbf[{"verificationResult":{}}]')
+
+    assert attestation_module._read_verification(verification) == [
+        {"verificationResult": {}}
+    ]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_attestation_verification_reader_refuses_preexisting_writer(tmp_path: Path) -> None:
+    verification = tmp_path / "verification.json"
+    verification.write_text('[{"verificationResult":{}}]', encoding="utf-8")
+
+    with verification.open("r+b"):
+        with pytest.raises(ValueError, match="unreadable, unstable"):
+            attestation_module._read_verification(verification)
