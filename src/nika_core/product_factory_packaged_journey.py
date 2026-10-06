@@ -1023,7 +1023,8 @@ class PackagedProductCommandRouter:
             ) from exc
         except ProductProjectPresentationConsistencyError as exc:
             raise PackagedProductJourneyError(
-                "Product Factory змінився під час читання статусу. Оновіть стан і повторіть команду."
+                "Product Factory змінився під час читання статусу. "
+                "Оновіть стан і повторіть команду."
             ) from exc
 
         components = tuple(
