@@ -61,6 +61,42 @@ class ProcessExecutionResult:
     isolation_class: toolsmith_contracts.IsolationClass
 
 
+def _readmit_sterile_git_plan(plan: object) -> SterileGitPlan:
+    if type(plan) is not SterileGitPlan:
+        raise WorkspaceSecurityError(
+            "private Git plan must use the canonical SterileGitPlan carrier"
+        )
+
+    repository_root = plan.repository_root
+    private_git_dir = plan.private_git_dir
+    worktree_root = plan.worktree_root
+    path_type = type(pathlib.Path())
+    if any(
+        type(value) is not path_type
+        for value in (repository_root, private_git_dir, worktree_root)
+    ):
+        raise WorkspaceSecurityError("private Git plan paths must use canonical Path carriers")
+
+    branch_name = validate_git_branch_name(plan.branch_name)
+    base_sha = validate_git_commit_sha(plan.base_sha)
+    environment = validate_sterile_git_environment(plan.environment)
+    config_args = validate_sterile_git_config_args(plan.config_args)
+    isolation_class = plan.isolation_class
+    if type(isolation_class) is not toolsmith_contracts.IsolationClass:
+        raise WorkspaceSecurityError("private Git isolation carrier is invalid")
+
+    return SterileGitPlan(
+        repository_root=repository_root,
+        private_git_dir=private_git_dir,
+        worktree_root=worktree_root,
+        branch_name=branch_name,
+        base_sha=base_sha,
+        environment=environment,
+        config_args=config_args,
+        isolation_class=isolation_class,
+    )
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class PreparedGitWorkspace:
     plan: SterileGitPlan
@@ -69,12 +105,14 @@ class PreparedGitWorkspace:
     tree_evidence: TreeEvidence
 
     def __post_init__(self) -> None:
+        plan = _readmit_sterile_git_plan(self.plan)
+        object.__setattr__(self, "plan", plan)
         head_sha = validate_git_commit_sha(
             self.head_sha,
             label="private workspace HEAD",
         )
         base_sha = validate_git_commit_sha(
-            self.plan.base_sha,
+            plan.base_sha,
             label="pinned base SHA",
         )
         if head_sha.lower() != base_sha.lower():
@@ -911,24 +949,9 @@ def prepare_private_git_workspace(
     *,
     git_executable: str = "git",
 ) -> PreparedGitWorkspace:
-    repository_root = plan.repository_root
-    private_git_dir = plan.private_git_dir
-    worktree_root = plan.worktree_root
-    branch_name = validate_git_branch_name(plan.branch_name)
-    base_sha = validate_git_commit_sha(plan.base_sha)
-    git_environment = validate_sterile_git_environment(plan.environment)
-    git_config_args = validate_sterile_git_config_args(plan.config_args)
-    isolation_class = plan.isolation_class
-    plan = SterileGitPlan(
-        repository_root=repository_root,
-        private_git_dir=private_git_dir,
-        worktree_root=worktree_root,
-        branch_name=branch_name,
-        base_sha=base_sha,
-        environment=git_environment,
-        config_args=git_config_args,
-        isolation_class=isolation_class,
-    )
+    plan = _readmit_sterile_git_plan(plan)
+    git_environment = plan.environment
+    git_config_args = plan.config_args
     job_root = _private_git_job_root(plan)
     git_admission = _resolve_host_git_executable(git_executable)
     git_executable = str(git_admission.executable)
@@ -1088,6 +1111,7 @@ def prepare_private_git_workspace(
 
 
 def cleanup_private_git_workspace(plan: SterileGitPlan) -> None:
+    plan = _readmit_sterile_git_plan(plan)
     raw_job_root = plan.private_git_dir.parent
     job_root = _private_git_job_root(plan)
 

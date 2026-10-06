@@ -62,11 +62,11 @@ def _make_source_repository(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
 @pytest.mark.parametrize("separator", ("\u0085", "\u2028", "\u2029"))
 def test_branch_name_rejects_unicode_line_boundaries(separator: str) -> None:
     with pytest.raises(WorkspaceSecurityError, match="control data"):
-        execution_module._validate_branch_name(f"toolsmith{separator}branch")
+        execution_module.validate_git_branch_name(f"toolsmith{separator}branch")
 
 
 def test_branch_name_preserves_safe_unicode_identity() -> None:
-    execution_module._validate_branch_name("toolsmith/гілка")
+    execution_module.validate_git_branch_name("toolsmith/гілка")
 
 
 def test_prepare_private_git_workspace_has_no_remote_or_visible_dot_git(
@@ -843,6 +843,68 @@ def test_prepared_git_workspace_readmits_plan_base_sha_and_remotes(
             remotes=[],
             tree_evidence=tree_evidence,
         )
+
+
+def test_prepared_git_workspace_detaches_the_canonical_plan(
+    tmp_path: pathlib.Path,
+) -> None:
+    production = tmp_path / "production-prepared-detach"
+    job_root = tmp_path / "jobs" / "job-prepared-detach"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+    plan = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
+        branch_name="toolsmith/job",
+        base_sha="a" * 40,
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+
+    prepared = execution_module.PreparedGitWorkspace(
+        plan=plan,
+        head_sha="a" * 40,
+        remotes=(),
+        tree_evidence=execution_module.TreeEvidence(
+            files=(),
+            digest="b" * 64,
+            total_bytes=0,
+        ),
+    )
+    object.__setattr__(plan, "base_sha", "0" * 40)
+
+    assert prepared.plan is not plan
+    assert prepared.plan.base_sha == "a" * 40
+
+
+def test_private_git_workspace_rejects_behavioral_plan_subclass(
+    tmp_path: pathlib.Path,
+) -> None:
+    production = tmp_path / "production-plan-subclass"
+    job_root = tmp_path / "jobs" / "job-plan-subclass"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+    canonical = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
+        branch_name="toolsmith/job",
+        base_sha="a" * 40,
+        source_environment={"PATH": os.environ.get("PATH", "")},
+    )
+
+    PlanSubclass = type("PlanSubclass", (type(canonical),), {})
+    behavioral = PlanSubclass(
+        repository_root=canonical.repository_root,
+        private_git_dir=canonical.private_git_dir,
+        worktree_root=canonical.worktree_root,
+        branch_name=canonical.branch_name,
+        base_sha=canonical.base_sha,
+        environment=canonical.environment,
+        config_args=canonical.config_args,
+        isolation_class=canonical.isolation_class,
+    )
+
+    with pytest.raises(WorkspaceSecurityError, match="canonical SterileGitPlan carrier"):
+        prepare_private_git_workspace(behavioral)
 
 
 def test_private_git_workspace_refuses_ambiguous_reuse(tmp_path: pathlib.Path) -> None:
