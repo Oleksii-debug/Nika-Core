@@ -105,8 +105,14 @@ def _require_bounded_runtime_json_depth(content: bytes) -> None:
 
 
 def _read_runtime_evidence_json(path: Path, *, label: str) -> object:
+    descriptor = -1
     try:
-        with path.open("rb") as handle:
+        descriptor = _open_readonly_nofollow_snapshot(path)
+        opened = os.fstat(descriptor)
+        if not _is_regular_non_reparse(opened):
+            raise ValueError("runtime evidence is not a regular non-link file")
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = -1
             content = handle.read(_MAX_RUNTIME_EVIDENCE_JSON_BYTES + 1)
         if len(content) > _MAX_RUNTIME_EVIDENCE_JSON_BYTES:
             raise ValueError("runtime evidence exceeds the byte limit")
@@ -120,6 +126,9 @@ def _read_runtime_evidence_json(path: Path, *, label: str) -> object:
         )
     except (OSError, UnicodeError, ValueError, RecursionError) as exc:
         raise RuntimeError(f"{label} is invalid or oversized JSON") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _stable_file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -140,8 +149,8 @@ def _is_regular_non_reparse(value: os.stat_result) -> bool:
     return not (reparse_flag and attributes & reparse_flag)
 
 
-def _open_release_artifact_source(path: Path) -> int:
-    """Open one final-artifact source while denying Windows write/delete sharing."""
+def _open_readonly_nofollow_snapshot(path: Path) -> int:
+    """Open one authority file without links and deny Windows write/delete sharing."""
 
     if os.name == "nt":
         try:
@@ -209,7 +218,7 @@ def _snapshot_release_artifact(source: Path, snapshot_dir: Path) -> Path:
     temporary: Path | None = None
     target = snapshot_dir / "verified-distributable.zip"
     try:
-        descriptor = _open_release_artifact_source(source)
+        descriptor = _open_readonly_nofollow_snapshot(source)
         opened = os.fstat(descriptor)
         if (
             not _is_regular_non_reparse(opened)
