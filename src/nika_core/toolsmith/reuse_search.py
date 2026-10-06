@@ -26,6 +26,7 @@ class ReuseMetadataSource(Protocol):
 class ReuseSearchResult:
     candidates: tuple[ReuseCandidate, ...]
     attempted_sources: tuple[str, ...]
+    permission_rejected_count: int = 0
 
 
 class ReuseSearchPipeline:
@@ -49,6 +50,7 @@ class ReuseSearchPipeline:
     def search(self, gap: CapabilityGap) -> ReuseSearchResult:
         attempted: list[str] = []
         candidates: list[ReuseCandidate] = []
+        permission_rejected_count = 0
         for source_id in REUSE_SOURCE_ORDER:
             source = self._sources.get(source_id)
             if source is None:
@@ -60,11 +62,18 @@ class ReuseSearchPipeline:
                         f"reuse metadata source {source_id} returned candidate claiming {candidate.source}"
                     )
                 if candidate.capability_id != gap.requested_capability:
-                    continue
+                    raise ValueError(
+                        f"reuse metadata source {source_id} returned mismatched capability identity"
+                    )
                 if not candidate.permissions.issubset(gap.permission_ceiling):
+                    permission_rejected_count += 1
                     continue
                 candidates.append(candidate)
-        return ReuseSearchResult(tuple(candidates), tuple(attempted))
+        return ReuseSearchResult(
+            tuple(candidates),
+            tuple(attempted),
+            permission_rejected_count=permission_rejected_count,
+        )
 
 
 @dataclass(slots=True)

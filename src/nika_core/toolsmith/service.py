@@ -13,11 +13,13 @@ from .contracts import (
     CodingResult,
     CodingWorkerPort,
     GapDisposition,
+    GapKind,
     ReuseCandidate,
     WorkerFailure,
     WorkerFailureKind,
 )
 from .repository import InvalidTransitionError, StaleTransitionError, ToolsmithRepository
+from .reuse_search import ReuseSearchResult
 
 
 class CapabilityEscalationService:
@@ -43,6 +45,8 @@ class CapabilityEscalationService:
         version, state = self._repository.create_escalation(gap)
         if state is not CandidateState.PROPOSED:
             return version, state
+        if gap.kind is GapKind.MISSING_CAPABILITY and gap.permission_ceiling:
+            return version, state
         decision = classify_gap(gap)
         if decision.disposition is GapDisposition.BLOCK:
             self._checkpoint_block(gap, decision.reason)
@@ -60,19 +64,54 @@ class CapabilityEscalationService:
         self,
         *,
         gap: CapabilityGap,
-        candidates: Iterable[ReuseCandidate],
         expected_version: int,
+        search_result: ReuseSearchResult | None = None,
+        candidates: Iterable[ReuseCandidate] | None = None,
     ) -> tuple[int, ReuseCandidate | None]:
-        ordered = tuple(candidates)
-        for candidate in ordered:
-            self._repository.record_search_candidate(task_id=gap.task_id, candidate=candidate)
-        compatible = [
-            candidate
-            for candidate in ordered
-            if candidate.capability_id == gap.requested_capability
-            and candidate.permissions.issubset(gap.permission_ceiling)
-        ]
-        if compatible:
+        if search_result is None:
+            reason = "canonical reuse search result is required before reuse/build dispatch"
+            self._checkpoint_block(gap, reason)
+            version = self._repository.transition(
+                task_id=gap.task_id,
+                capability_id=gap.requested_capability,
+                expected_version=expected_version,
+                target=CandidateState.BLOCKED,
+                evidence={"reason": reason},
+            )
+            return version, None
+        if candidates is not None:
+            raise ValueError("pass canonical search_result instead of separate candidate iterable")
+
+        decision = classify_gap(gap, search_result=search_result)
+        if decision.disposition is GapDisposition.BLOCK:
+            self._checkpoint_block(gap, decision.reason)
+            version = self._repository.transition(
+                task_id=gap.task_id,
+                capability_id=gap.requested_capability,
+                expected_version=expected_version,
+                target=CandidateState.BLOCKED,
+                evidence={
+                    "reason": decision.reason,
+                    "attempted_sources": search_result.attempted_sources,
+                    "permission_rejected_count": search_result.permission_rejected_count,
+                },
+            )
+            return version, None
+
+        if decision.disposition is GapDisposition.REUSE:
+            compatible = tuple(
+                candidate
+                for candidate in search_result.candidates
+                if candidate.capability_id == gap.requested_capability
+                and candidate.permissions.issubset(gap.permission_ceiling)
+            )
+            if not compatible:
+                raise RuntimeError("reuse decision has no compatible canonical candidate")
+            for candidate in compatible:
+                self._repository.record_search_candidate(
+                    task_id=gap.task_id,
+                    candidate=candidate,
+                )
             selected = min(
                 compatible,
                 key=lambda item: (item.source, item.version, item.digest),
@@ -86,15 +125,21 @@ class CapabilityEscalationService:
                     "source": selected.source,
                     "version": selected.version,
                     "digest": selected.digest,
+                    "attempted_sources": search_result.attempted_sources,
                 },
             )
             return version, selected
+
         version = self._repository.transition(
             task_id=gap.task_id,
             capability_id=gap.requested_capability,
             expected_version=expected_version,
             target=CandidateState.BUILD_REQUIRED,
-            evidence={"candidate_count": len(ordered)},
+            evidence={
+                "candidate_count": len(search_result.candidates),
+                "attempted_sources": search_result.attempted_sources,
+                "permission_rejected_count": search_result.permission_rejected_count,
+            },
         )
         return version, None
 

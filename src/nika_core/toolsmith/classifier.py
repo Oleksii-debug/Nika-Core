@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .contracts import CapabilityGap, GapDecision, GapDisposition, GapKind
+from .reuse_search import REUSE_SOURCE_ORDER, ReuseSearchResult
 
 _BLOCKING_KINDS = frozenset(
     {
@@ -13,18 +14,81 @@ _BLOCKING_KINDS = frozenset(
 )
 
 
-def classify_gap(gap: CapabilityGap) -> GapDecision:
+def classify_gap(
+    gap: CapabilityGap,
+    *,
+    search_result: ReuseSearchResult | None = None,
+) -> GapDecision:
     """Return a deterministic escalation decision without invoking a model.
 
-    Only a genuine MISSING_CAPABILITY is eligible for building. Every evidence-quality,
-    upstream-tool, model, or permission failure blocks capability construction instead of
-    disguising an execution failure as a reason to self-modify.
+    ``search_result`` is the canonical reuse-search evidence. When it is supplied, BUILD is
+    allowed only after at least one canonical source was attempted and no compatible capability
+    was found. A discovered compatible candidate wins over a caller's stale/mistaken
+    ``MISSING_CAPABILITY`` label. Conversely, a caller claiming an existing capability while the
+    canonical search cannot currently supply it is blocked as unavailable rather than rebuilt.
+
+    The optional legacy path is retained for current orchestration callers until the Toolsmith
+    service owner wires the canonical ``ReuseSearchResult`` through its owned dispatch seam.
     """
 
-    if gap.kind is GapKind.EXISTING_CAPABILITY_AVAILABLE:
-        return GapDecision(GapDisposition.REUSE, "existing capability is available")
     if gap.kind in _BLOCKING_KINDS:
         return GapDecision(GapDisposition.BLOCK, f"gap kind {gap.kind.value} cannot trigger build")
+
+    if search_result is not None:
+        attempted = search_result.attempted_sources
+        if not attempted:
+            return GapDecision(GapDisposition.BLOCK, "canonical reuse search attempted no sources")
+        if (
+            len(set(attempted)) != len(attempted)
+            or any(source not in REUSE_SOURCE_ORDER for source in attempted)
+            or tuple(source for source in REUSE_SOURCE_ORDER if source in attempted) != attempted
+        ):
+            return GapDecision(GapDisposition.BLOCK, "canonical reuse search provenance is invalid")
+        rejected = search_result.permission_rejected_count
+        if type(rejected) is not int or rejected < 0:
+            return GapDecision(
+                GapDisposition.BLOCK,
+                "canonical reuse search permission rejection evidence is invalid",
+            )
+        if any(
+            candidate.capability_id != gap.requested_capability
+            or candidate.source not in attempted
+            for candidate in search_result.candidates
+        ):
+            return GapDecision(GapDisposition.BLOCK, "canonical reuse search evidence identity mismatch")
+        if any(
+            not candidate.permissions.issubset(gap.permission_ceiling)
+            for candidate in search_result.candidates
+        ):
+            return GapDecision(
+                GapDisposition.BLOCK,
+                "canonical reuse search exposed permission-incompatible candidate",
+            )
+        if search_result.candidates:
+            return GapDecision(GapDisposition.REUSE, "canonical reuse search found compatible capability")
+        if rejected:
+            return GapDecision(
+                GapDisposition.BLOCK,
+                "canonical reuse search found capability metadata rejected by task permission ceiling",
+            )
+        if gap.kind is GapKind.EXISTING_CAPABILITY_AVAILABLE:
+            return GapDecision(
+                GapDisposition.BLOCK,
+                "existing capability is currently unavailable in canonical reuse search",
+            )
+        if gap.kind is not GapKind.MISSING_CAPABILITY:
+            return GapDecision(GapDisposition.BLOCK, "unsupported gap kind")
+        if not gap.permission_ceiling:
+            return GapDecision(GapDisposition.BLOCK, "missing task permission ceiling")
+        return GapDecision(
+            GapDisposition.BUILD,
+            "capability is genuinely missing after canonical deterministic reuse search",
+        )
+
+    # Compatibility path for the current CapabilityEscalationService.begin() owner. The
+    # production integration must pass ReuseSearchResult before relying on BUILD eligibility.
+    if gap.kind is GapKind.EXISTING_CAPABILITY_AVAILABLE:
+        return GapDecision(GapDisposition.REUSE, "existing capability is available")
     if gap.kind is not GapKind.MISSING_CAPABILITY:
         return GapDecision(GapDisposition.BLOCK, "unsupported gap kind")
     if not gap.attempted_methods:
