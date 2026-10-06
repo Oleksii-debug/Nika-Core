@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -83,7 +84,12 @@ class PackagedLocalProductFactoryProgram:
 
 
 @dataclass(frozen=True, slots=True)
-class _ResolvedOllamaBinding:
+class PackagedLocalModelAuthority:
+    """Exact launch-time model authority for delayed contained-local workers."""
+
+    revision: int
+    selection_sha256: str
+    artifact_pin_sha256: str | None
     model: str
     base_url: str
     timeout_seconds: float
@@ -222,7 +228,7 @@ def build_packaged_local_product_factory_program(
     """
 
     _validate_composition_inputs(store, settings, startup)
-    _resolve_ollama_binding(store, settings)
+    model_authority = _resolve_ollama_binding(store, settings)
     from nika_core.product_factory_packaged_bound_local_host import (
         PackagedBoundLocalProductFactoryHost,
     )
@@ -232,6 +238,7 @@ def build_packaged_local_product_factory_program(
             store,
             settings=settings,
             startup=startup,
+            model_authority=model_authority,
         )
     )
 
@@ -242,6 +249,7 @@ def build_repository_bound_packaged_local_product_factory_program(
     settings: V01ModelSettings,
     startup: PackagedLocalProductFactoryStartup,
     repositories: Mapping[str, Path],
+    model_authority: PackagedLocalModelAuthority | None = None,
 ) -> ContainedLocalCodingProgram:
     """Build the incumbent local worker for one already-authorized repository set.
 
@@ -252,7 +260,11 @@ def build_repository_bound_packaged_local_product_factory_program(
 
     _validate_composition_inputs(store, settings, startup)
     copied = _repository_paths(repositories)
-    binding = _resolve_ollama_binding(store, settings)
+    binding = (
+        _resolve_ollama_binding(store, settings)
+        if model_authority is None
+        else _require_model_authority(model_authority)
+    )
 
     gateway = ModelGateway(audit_log=AuditLog(store))
     gateway.register(
@@ -291,10 +303,11 @@ def _validate_composition_inputs(
         raise TypeError("startup carrier is invalid")
 
 
-def _resolve_ollama_binding(
+def resolve_packaged_local_model_authority(
     store: SQLiteStore,
     settings: V01ModelSettings,
-) -> _ResolvedOllamaBinding:
+) -> PackagedLocalModelAuthority:
+    revision_before = _model_revision(settings)
     try:
         selection, artifact_pin = settings.current_binding()
     except ModelSetupError as exc:
@@ -309,6 +322,16 @@ def _resolve_ollama_binding(
         raise PackagedLocalProductFactoryStartupError(
             "contained-local Product Factory startup requires "
             "the persisted Ollama LOCAL route"
+        )
+
+    revision_after = _model_revision(settings)
+    if revision_after != revision_before:
+        raise PackagedLocalProductFactoryStartupError(
+            "model settings changed while resolving contained-local Product Factory"
+        )
+    if artifact_pin is not None and artifact_pin.route_revision != revision_after:
+        raise PackagedLocalProductFactoryStartupError(
+            "persisted model artifact pin does not match the current model revision"
         )
 
     model = _required_route_text(selection.model, "model")
@@ -336,12 +359,48 @@ def _resolve_ollama_binding(
                 "could not be verified"
             ) from exc
 
-    return _ResolvedOllamaBinding(
+    return PackagedLocalModelAuthority(
+        revision=revision_after,
+        selection_sha256=hashlib.sha256(
+            selection.canonical_json().encode("utf-8")
+        ).hexdigest(),
+        artifact_pin_sha256=(
+            artifact_pin.pin_sha256 if artifact_pin is not None else None
+        ),
         model=model,
         base_url=base_url,
         timeout_seconds=selection.timeout_seconds,
         expected_manifest_sha256=expected_manifest_sha256,
     )
+
+
+def _resolve_ollama_binding(
+    store: SQLiteStore,
+    settings: V01ModelSettings,
+) -> PackagedLocalModelAuthority:
+    return resolve_packaged_local_model_authority(store, settings)
+
+
+def _model_revision(settings: V01ModelSettings) -> int:
+    snapshot = settings.snapshot()
+    revision = snapshot.get("revision")
+    if (
+        snapshot.get("status") != "ready"
+        or type(revision) is not int
+        or revision < 1
+    ):
+        raise PackagedLocalProductFactoryStartupError(
+            "contained-local Product Factory model authority is unavailable"
+        )
+    return revision
+
+
+def _require_model_authority(
+    authority: PackagedLocalModelAuthority,
+) -> PackagedLocalModelAuthority:
+    if type(authority) is not PackagedLocalModelAuthority:
+        raise TypeError("model authority carrier is invalid")
+    return authority
 
 
 def _repository_paths(
