@@ -363,6 +363,15 @@ class PackagedLocalBuildExecutionNode:
             evidence_refs=(_receipt_ref(dispatch),),
             completed_at=datetime.now(UTC),
         )
+        cleanup_ok = self._cleanup_job(plan, job_root)
+        if not cleanup_ok:
+            changed_files = ()
+            reason_code = "cleanup_not_proven"
+            result = _failed_result(
+                dispatch,
+                dispatch_digest,
+                reason_code=reason_code,
+            )
         self._write_receipt(
             dispatch,
             dispatch_digest,
@@ -376,7 +385,8 @@ class PackagedLocalBuildExecutionNode:
                 "reason_code": reason_code,
             },
         )
-        self._cleanup_after_receipt(plan, job_root, dispatch)
+        if not cleanup_ok:
+            self._record_cleanup_failure(dispatch)
         return result
 
     def inspect(self, dispatch: BuildExecutionDispatch) -> BuildExecutionResult | None:
@@ -604,12 +614,8 @@ class PackagedLocalBuildExecutionNode:
             raise BuildExecutionPortError("durable local build evidence is corrupt") from None
         return any(event.event_type == _STARTED_EVENT for event in events)
 
-    def _cleanup_after_receipt(
-        self,
-        plan,
-        job_root: pathlib.Path,
-        dispatch: BuildExecutionDispatch,
-    ) -> None:
+    @staticmethod
+    def _cleanup_job(plan, job_root: pathlib.Path) -> bool:
         try:
             cleanup_private_git_workspace(plan)
             temp_root = job_root / "tmp"
@@ -617,17 +623,30 @@ class PackagedLocalBuildExecutionNode:
                 assert_cleanup_tree_safe(temp_root)
                 shutil.rmtree(temp_root)
             job_root.rmdir()
+            return True
         except (OSError, TypeError, ValueError, WorkspaceSecurityError):
-            assert self.audit is not None
-            try:
-                self.audit.append(
-                    event_type=_CLEANUP_EVENT,
-                    entity_type=_ENTITY_TYPE,
-                    entity_id=dispatch.dispatch_id,
-                    payload={"schema": _RECEIPT_SCHEMA},
-                )
-            except Exception:
-                pass
+            return False
+
+    def _record_cleanup_failure(self, dispatch: BuildExecutionDispatch) -> None:
+        assert self.audit is not None
+        try:
+            self.audit.append(
+                event_type=_CLEANUP_EVENT,
+                entity_type=_ENTITY_TYPE,
+                entity_id=dispatch.dispatch_id,
+                payload={"schema": _RECEIPT_SCHEMA},
+            )
+        except Exception:
+            pass
+
+    def _cleanup_after_receipt(
+        self,
+        plan,
+        job_root: pathlib.Path,
+        dispatch: BuildExecutionDispatch,
+    ) -> None:
+        if not self._cleanup_job(plan, job_root):
+            self._record_cleanup_failure(dispatch)
 
     @staticmethod
     def _cleanup_unclaimed(plan, job_root) -> None:
