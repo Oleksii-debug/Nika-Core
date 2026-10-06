@@ -111,10 +111,28 @@ def test_schema_migration_adds_local_repository_binding_table(
             "SELECT sql FROM sqlite_master "
             "WHERE type='table' AND name='product_factory_local_repository_bindings'"
         ).fetchone()
+        generation_table = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' "
+            "AND name='product_factory_local_repository_binding_generations'"
+        ).fetchone()
+        generation_columns = [
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(product_factory_local_repository_binding_generations)"
+            )
+        ]
 
-    assert version == 6
+    assert version == 7
     assert table is not None
     assert "PRIMARY KEY(project_id, repository_id)" in table[0]
+    assert generation_table is not None
+    assert "PRIMARY KEY(project_id, repository_id)" in generation_table[0]
+    assert generation_columns == [
+        "project_id",
+        "repository_id",
+        "last_binding_version",
+    ]
 
 
 def test_binding_survives_restart_and_resolves_exact_plan(
@@ -845,6 +863,151 @@ def test_unbind_rechecks_expected_project_version_after_concurrent_change(
         project.project_id,
         repository.repository_id,
     ) == bound.binding_version
+
+
+def test_binding_generation_migration_backfills_live_version(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=_root(tmp_path, "first migration repository"),
+        expected_binding_version=None,
+    )
+    second = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=_root(tmp_path, "second migration repository"),
+        expected_binding_version=first.binding_version,
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "DROP TABLE product_factory_local_repository_binding_generations"
+        )
+        conn.execute(
+            "DELETE FROM product_project_schema_migrations WHERE version=7"
+        )
+
+    restarted_store = SQLiteStore(tmp_path / "стан Ніки" / "nika.db")
+    restarted_store.initialize()
+    with restarted_store.connection() as conn:
+        generation = conn.execute(
+            "SELECT last_binding_version "
+            "FROM product_factory_local_repository_binding_generations "
+            "WHERE project_id=? AND repository_id=?",
+            (project.project_id, repository.repository_id),
+        ).fetchone()
+
+    assert generation is not None
+    assert generation["last_binding_version"] == second.binding_version
+
+
+def test_unbind_rebind_advances_binding_generation_across_restart(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=_root(tmp_path, "first generation repository"),
+        expected_binding_version=None,
+    )
+    bindings.unbind(
+        project_id=project.project_id,
+        repository_id=repository.repository_id,
+        expected_binding_version=first.binding_version,
+        expected_repository=repository,
+    )
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) is None
+
+    restarted_store = SQLiteStore(tmp_path / "стан Ніки" / "nika.db")
+    restarted_store.initialize()
+    restarted = ProductFactoryLocalRepositoryBindings(restarted_store)
+    second = restarted.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=_root(tmp_path, "second generation repository"),
+        expected_binding_version=None,
+    )
+
+    assert second.binding_version == first.binding_version + 1
+    with restarted_store.connection() as conn:
+        generation = conn.execute(
+            "SELECT last_binding_version "
+            "FROM product_factory_local_repository_binding_generations "
+            "WHERE project_id=? AND repository_id=?",
+            (project.project_id, repository.repository_id),
+        ).fetchone()
+    assert generation is not None
+    assert generation["last_binding_version"] == second.binding_version
+
+
+def test_stale_pre_unbind_version_cannot_mutate_recreated_binding(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=_root(tmp_path, "stale first repository"),
+        expected_binding_version=None,
+    )
+    bindings.unbind(
+        project_id=project.project_id,
+        repository_id=repository.repository_id,
+        expected_binding_version=first.binding_version,
+        expected_repository=repository,
+    )
+    replacement_root = _root(tmp_path, "stale replacement repository")
+    replacement = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=replacement_root,
+        expected_binding_version=None,
+    )
+    assert replacement.binding_version == first.binding_version + 1
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="version changed",
+    ):
+        bindings.unbind(
+            project_id=project.project_id,
+            repository_id=repository.repository_id,
+            expected_binding_version=first.binding_version,
+            expected_repository=repository,
+        )
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="version changed",
+    ):
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=_root(tmp_path, "stale third repository"),
+            expected_binding_version=first.binding_version,
+        )
+
+    current = bindings.require(
+        project.project_id,
+        repository.repository_id,
+    )
+    assert current.binding_version == replacement.binding_version
+    assert current.root == replacement_root.resolve(strict=True)
 
 
 def test_unbind_is_version_fenced_and_removes_authority(

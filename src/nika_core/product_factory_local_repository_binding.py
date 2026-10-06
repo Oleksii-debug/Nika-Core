@@ -153,12 +153,51 @@ class ProductFactoryLocalRepositoryBindings:
                 "WHERE project_id = ? AND repository_id = ?",
                 (project_id, repository.repository_id),
             ).fetchone()
+            generation_row = conn.execute(
+                "SELECT last_binding_version "
+                "FROM product_factory_local_repository_binding_generations "
+                "WHERE project_id = ? AND repository_id = ?",
+                (project_id, repository.repository_id),
+            ).fetchone()
             if row is None:
                 if expected_binding_version is not None:
                     raise ProductFactoryLocalRepositoryBindingError(
                         "local repository binding does not exist at the expected version"
                     )
-                version = 1
+                if generation_row is None:
+                    version = 1
+                    conn.execute(
+                        "INSERT INTO product_factory_local_repository_binding_generations("
+                        "project_id,repository_id,last_binding_version"
+                        ") VALUES (?,?,?)",
+                        (
+                            project_id,
+                            repository.repository_id,
+                            version,
+                        ),
+                    )
+                else:
+                    previous_generation = _stored_positive_int(
+                        generation_row["last_binding_version"],
+                        "last_binding_version",
+                    )
+                    version = previous_generation + 1
+                    conn.execute(
+                        "UPDATE product_factory_local_repository_binding_generations "
+                        "SET last_binding_version=? "
+                        "WHERE project_id=? AND repository_id=? "
+                        "AND last_binding_version=?",
+                        (
+                            version,
+                            project_id,
+                            repository.repository_id,
+                            previous_generation,
+                        ),
+                    )
+                    if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                        raise ProductFactoryLocalRepositoryBindingError(
+                            "local repository binding generation changed"
+                        )
                 conn.execute(
                     "INSERT INTO product_factory_local_repository_bindings("
                     "project_id,repository_id,provider,locator,root_path,root_device,"
@@ -190,6 +229,18 @@ class ProductFactoryLocalRepositoryBindings:
                     raise ProductFactoryLocalRepositoryBindingError(
                         "local repository binding version changed"
                     )
+                if generation_row is None:
+                    raise ProductFactoryLocalRepositoryBindingError(
+                        "local repository binding generation is inconsistent"
+                    )
+                last_generation = _stored_positive_int(
+                    generation_row["last_binding_version"],
+                    "last_binding_version",
+                )
+                if last_generation != current:
+                    raise ProductFactoryLocalRepositoryBindingError(
+                        "local repository binding generation is inconsistent"
+                    )
                 version = current + 1
                 conn.execute(
                     "UPDATE product_factory_local_repository_bindings SET "
@@ -217,6 +268,22 @@ class ProductFactoryLocalRepositoryBindings:
                 if conn.execute("SELECT changes()").fetchone()[0] != 1:
                     raise ProductFactoryLocalRepositoryBindingError(
                         "local repository binding version changed"
+                    )
+                conn.execute(
+                    "UPDATE product_factory_local_repository_binding_generations "
+                    "SET last_binding_version=? "
+                    "WHERE project_id=? AND repository_id=? "
+                    "AND last_binding_version=?",
+                    (
+                        version,
+                        project_id,
+                        repository.repository_id,
+                        current,
+                    ),
+                )
+                if conn.execute("SELECT changes()").fetchone()[0] != 1:
+                    raise ProductFactoryLocalRepositoryBindingError(
+                        "local repository binding generation changed"
                     )
             conn.execute(
                 "INSERT INTO audit_events("
@@ -306,6 +373,19 @@ class ProductFactoryLocalRepositoryBindings:
             if current != expected:
                 raise ProductFactoryLocalRepositoryBindingError(
                     "local repository binding version changed"
+                )
+            generation_row = conn.execute(
+                "SELECT last_binding_version "
+                "FROM product_factory_local_repository_binding_generations "
+                "WHERE project_id=? AND repository_id=?",
+                (project_id, repository_id),
+            ).fetchone()
+            if generation_row is None or _stored_positive_int(
+                generation_row["last_binding_version"],
+                "last_binding_version",
+            ) != current:
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "local repository binding generation is inconsistent"
                 )
             if expected_repository_snapshot is not None:
                 stored_provider = _stored_text(row["provider"], "provider")
