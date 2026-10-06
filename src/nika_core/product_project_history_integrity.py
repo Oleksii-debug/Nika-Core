@@ -1051,12 +1051,15 @@ class ProductProjectHistoricalIntegrityService:
             raise ProductProjectError("product decision mutation lacks idempotency receipt")
         if seen_lifecycle != set(lifecycle_by_version):
             raise ProductProjectError("lifecycle mutation lacks idempotency receipt")
-        spec_receipt_count = self._validate_spec_idempotency(
+        self._validate_spec_idempotency(
             conn,
             project_id,
             spec_rows=spec_rows,
         )
-        return len(rows) + spec_receipt_count
+        # Preserve the public report contract: this count covers the generic
+        # decision/lifecycle mutation ledger; spec receipts are validated above
+        # through their dedicated PF12 ledger but are not included in this field.
+        return len(rows)
 
     @staticmethod
     def _valid_sha256(value: Any) -> bool:
