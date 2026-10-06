@@ -160,14 +160,25 @@ class WorkspacePathPolicy:
     reject_reparse_points: bool = True
 
     def __post_init__(self) -> None:
-        if not self.allowed_roots:
+        if isinstance(self.allowed_roots, (str, bytes)):
+            raise WorkspaceSecurityError("allowed workspace roots must be a path sequence")
+        try:
+            roots = tuple(self.allowed_roots)
+        except TypeError as exc:
+            raise WorkspaceSecurityError(
+                "allowed workspace roots must be a path sequence"
+            ) from exc
+        if not roots:
             raise WorkspaceSecurityError("at least one allowed workspace root is required")
-        for root in self.allowed_roots:
-            normalize_job_relative_path(root)
+        canonical_roots = tuple(
+            normalize_job_relative_path(root).as_posix()
+            for root in roots
+        )
+        object.__setattr__(self, "allowed_roots", canonical_roots)
 
     def allows(self, value: str) -> bool:
         candidate = normalize_job_relative_path(value)
-        roots = tuple(normalize_job_relative_path(root) for root in self.allowed_roots)
+        roots = tuple(pathlib.PurePosixPath(root) for root in self.allowed_roots)
         return any(candidate == root or root in candidate.parents for root in roots)
 
 
@@ -302,11 +313,18 @@ def _executable_identity_key(value: str) -> str:
 
 
 def normalize_job_relative_path(value: str) -> pathlib.PurePosixPath:
+    if type(value) is not str:
+        raise WorkspaceSecurityError("path must be exact text")
     stripped = value.strip()
     if not stripped or stripped != value:
         raise WorkspaceSecurityError("path must be non-empty and must not have outer whitespace")
-    if "\x00" in stripped:
-        raise WorkspaceSecurityError("NUL is forbidden in paths")
+    if any(
+        ord(character) < 32
+        or ord(character) == 127
+        or character in "\u0085\u2028\u2029"
+        for character in stripped
+    ):
+        raise WorkspaceSecurityError("control data is forbidden in paths")
 
     windows = pathlib.PureWindowsPath(stripped)
     normalized_text = stripped.replace("\\", "/")
