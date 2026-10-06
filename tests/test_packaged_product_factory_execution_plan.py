@@ -231,7 +231,7 @@ def test_decode_rejects_url_query_or_fragment_in_repository_locator(
         "Oleksii-debug/Nika-Core?token=must-not-survive",
         "Oleksii-debug/Nika-Core?api_key=must-not-survive",
         "Oleksii-debug/Nika-Core?client_secret=must-not-survive",
-        "Oleksii-debug/Nika-Core?access%5Ftoken=must-not-survive",
+        "Oleksii-debug/Nika-Core?access%5Ftoken%3Dmust-not-survive",
         "Oleksii-debug/Nika-Core?token%253Dmust-not-survive",
         "https%3A%2F%2Ftoken-value%40github.com%2Fexample%2Frepository",
     ],
