@@ -101,6 +101,7 @@ class PackagedProductFactoryBuildLoop:
         )
         work_id = spec.request.work_id
         record = self.build_host.submit(spec)
+        reconciled = False
 
         if record.state in {
             BuildExecutionState.PENDING,
@@ -129,8 +130,12 @@ class PackagedProductFactoryBuildLoop:
             BuildExecutionState.RECONCILE_REQUIRED,
         }:
             record = self.build_host.reconcile(work_id)
+            reconciled = True
 
-        if record.state is BuildExecutionState.RECONCILE_REQUIRED:
+        if (
+            record.state is BuildExecutionState.RECONCILE_REQUIRED
+            and not reconciled
+        ):
             record = self.build_host.reconcile(work_id)
 
         deployment = (
