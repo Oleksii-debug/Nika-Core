@@ -346,6 +346,25 @@ def test_composition_uses_one_canonical_registry_coordinator_and_local_node(tmp_
     assert host.node_port is host.file_evidence_port
 
 
+def test_composition_snapshots_startup_authority_against_caller_mutation(
+    tmp_path,
+) -> None:
+    host, _store, _task_id, startup, _authority_value, _policies = _host(tmp_path)
+    original_workspace = startup.workspace_parent
+    object.__setattr__(
+        startup,
+        "workspace_parent",
+        (tmp_path / "caller-mutated-missing-workspace").resolve(),
+    )
+    host.submit(_spec())
+
+    prepared = host.prepare(WORK_ID)
+
+    assert prepared.state is BuildExecutionState.PREPARED
+    assert host.node_port.startup is not startup
+    assert host.node_port.startup.workspace_parent == original_workspace
+
+
 def test_fresh_submit_and_prepare_are_durable_before_any_node_effect(tmp_path) -> None:
     host, _store, _task_id, _startup_value, _authority_value, _policies = _host(
         tmp_path
