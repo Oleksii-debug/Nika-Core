@@ -11,7 +11,6 @@ from nika_core.product_factory_coordinator import WorkRecord, WorkState
 from nika_core.product_factory_packaged_build_settings import (
     ActivatedPackagedBuildRuntime,
     ConfiguredPackagedReviewedBuildController,
-    PackagedBuildRuntimeSettingsError,
     build_configured_packaged_reviewed_build_controller,
 )
 from nika_core.product_factory_packaged_local_startup import (
@@ -203,11 +202,8 @@ def _preflight_membership(
             raise PackagedAcceptedBuildContinuationError(
                 "accepted work repository identity diverged from graph authority"
             )
-        try:
-            activation.require_component(
-                project_id=project_id,
-                repository_id=component.repository_id,
-                component_id=component.component_id,
-            )
-        except PackagedBuildRuntimeSettingsError:
-            raise
+        activation.require_component(
+            project_id=project_id,
+            repository_id=component.repository_id,
+            component_id=component.component_id,
+        )
