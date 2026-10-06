@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -80,10 +81,14 @@ class PackagedLocalProductFactoryProgram:
     """Packaged composition whose execution host resolves repositories per project."""
 
     multi_repository_host: PackagedBoundLocalProductFactoryHost
+    model_authority: _PackagedLocalOllamaAuthority
 
 
 @dataclass(frozen=True, slots=True)
-class _ResolvedOllamaBinding:
+class _PackagedLocalOllamaAuthority:
+    revision: int
+    selection_sha256: str
+    artifact_pin_sha256: str | None
     model: str
     base_url: str
     timeout_seconds: float
@@ -222,7 +227,7 @@ def build_packaged_local_product_factory_program(
     """
 
     _validate_composition_inputs(store, settings, startup)
-    _resolve_ollama_binding(store, settings)
+    model_authority = _resolve_packaged_local_ollama_authority(store, settings)
     from nika_core.product_factory_packaged_bound_local_host import (
         PackagedBoundLocalProductFactoryHost,
     )
@@ -232,7 +237,9 @@ def build_packaged_local_product_factory_program(
             store,
             settings=settings,
             startup=startup,
-        )
+            model_authority=model_authority,
+        ),
+        model_authority=model_authority,
     )
 
 
@@ -243,16 +250,32 @@ def build_repository_bound_packaged_local_product_factory_program(
     startup: PackagedLocalProductFactoryStartup,
     repositories: Mapping[str, Path],
 ) -> ContainedLocalCodingProgram:
-    """Build the incumbent local worker for one already-authorized repository set.
+    """Build one worker from the current canonical model authority."""
 
-    Callers must resolve repository roots from ProductFactoryLocalRepositoryBindings
-    before crossing this boundary. This helper revalidates shape/path bounds but never
-    reads ProductProject or infers repository authority.
-    """
+    return _build_repository_bound_packaged_local_product_factory_program_with_authority(
+        store,
+        settings=settings,
+        startup=startup,
+        repositories=repositories,
+        model_authority=_resolve_packaged_local_ollama_authority(store, settings),
+    )
+
+
+def _build_repository_bound_packaged_local_product_factory_program_with_authority(
+    store: SQLiteStore,
+    *,
+    settings: V01ModelSettings,
+    startup: PackagedLocalProductFactoryStartup,
+    repositories: Mapping[str, Path],
+    model_authority: _PackagedLocalOllamaAuthority,
+) -> ContainedLocalCodingProgram:
+    """Build one delayed worker from launch-frozen internal model authority."""
 
     _validate_composition_inputs(store, settings, startup)
     copied = _repository_paths(repositories)
-    binding = _resolve_ollama_binding(store, settings)
+    if type(model_authority) is not _PackagedLocalOllamaAuthority:
+        raise TypeError("model_authority carrier is invalid")
+    binding = model_authority
 
     gateway = ModelGateway(audit_log=AuditLog(store))
     gateway.register(
@@ -277,7 +300,6 @@ def build_repository_bound_packaged_local_product_factory_program(
         git_executable=str(startup.git_executable),
     )
 
-
 def _validate_composition_inputs(
     store: SQLiteStore,
     settings: V01ModelSettings,
@@ -291,12 +313,12 @@ def _validate_composition_inputs(
         raise TypeError("startup carrier is invalid")
 
 
-def _resolve_ollama_binding(
+def _resolve_packaged_local_ollama_authority(
     store: SQLiteStore,
     settings: V01ModelSettings,
-) -> _ResolvedOllamaBinding:
+) -> _PackagedLocalOllamaAuthority:
     try:
-        selection, artifact_pin = settings.current_binding()
+        revision, selection, artifact_pin = settings.current_binding_with_revision()
     except ModelSetupError as exc:
         raise PackagedLocalProductFactoryStartupError(
             "select a local Ollama model before enabling contained-local Product Factory"
@@ -336,7 +358,14 @@ def _resolve_ollama_binding(
                 "could not be verified"
             ) from exc
 
-    return _ResolvedOllamaBinding(
+    return _PackagedLocalOllamaAuthority(
+        revision=revision,
+        selection_sha256=hashlib.sha256(
+            selection.canonical_json().encode("utf-8")
+        ).hexdigest(),
+        artifact_pin_sha256=(
+            artifact_pin.pin_sha256 if artifact_pin is not None else None
+        ),
         model=model,
         base_url=base_url,
         timeout_seconds=selection.timeout_seconds,
