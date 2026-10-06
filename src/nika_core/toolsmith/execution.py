@@ -444,6 +444,10 @@ class _PinnedExecutableLaunchGuard:
                     raise ProcessExecutionError(
                         "pinned runtime executable changed before process launch"
                     )
+                if not os.access(readmitted, os.X_OK):
+                    raise ProcessExecutionError(
+                        "pinned runtime executable is not executable"
+                    )
                 snapshot_descriptor = _snapshot_posix_executable(
                     descriptor,
                     byte_count=descriptor_stat.st_size,
