@@ -122,13 +122,17 @@ class OpenHandsRuntimeApiSandboxProvider:
         config: OpenHandsRuntimeApiConfig,
         *,
         control_client_factory: Callable[[], httpx.Client],
+        agent_client_factory: Callable[[str, str], httpx.Client] | None = None,
     ) -> None:
         if type(config) is not OpenHandsRuntimeApiConfig:
             raise TypeError("config must be OpenHandsRuntimeApiConfig")
         if not callable(control_client_factory):
             raise TypeError("control_client_factory must be callable")
+        if agent_client_factory is not None and not callable(agent_client_factory):
+            raise TypeError("agent_client_factory must be callable")
         self._config = config
         self._control_client_factory = control_client_factory
+        self._agent_client_factory = agent_client_factory or _default_agent_client
 
     async def acquire(self, job: CodingJob) -> OpenHandsSandboxEndpoint:
         if type(job) is not CodingJob:
@@ -176,14 +180,54 @@ class OpenHandsRuntimeApiSandboxProvider:
                     "OpenHands runtime is not available for bound-session recovery"
                 )
             self._require_bound_session(session, endpoint)
+            self._verify_agent_server_health(session)
             session_key = session.session_api_key
 
-        return httpx.Client(
-            base_url=endpoint.host,
-            headers={_SESSION_API_KEY_HEADER: session_key},
-            timeout=httpx.Timeout(10.0),
-            follow_redirects=False,
-        )
+        return self._agent_client(endpoint.host, session_key)
+
+    def _agent_client(self, base_url: str, session_key: str) -> httpx.Client:
+        try:
+            client = self._agent_client_factory(base_url, session_key)
+        except Exception as exc:  # noqa: BLE001 - authenticated client authority boundary
+            raise OpenHandsRuntimeApiError(
+                "Agent Server authenticated client could not be acquired"
+            ) from exc
+        if not isinstance(client, httpx.Client):
+            raise OpenHandsRuntimeApiError(
+                "Agent Server client factory must return an httpx.Client"
+            )
+        if str(client.base_url).rstrip("/") != base_url.rstrip("/"):
+            client.close()
+            raise OpenHandsRuntimeApiError(
+                "Agent Server client is bound to a different endpoint"
+            )
+        header = client.headers.get(_SESSION_API_KEY_HEADER)
+        if header != session_key:
+            client.close()
+            raise OpenHandsRuntimeApiError(
+                "Agent Server client authentication disagrees with Runtime API authority"
+            )
+        return client
+
+    def _verify_agent_server_health(self, session: _RuntimeSession) -> None:
+        client = self._agent_client(session.url, session.session_api_key)
+        try:
+            try:
+                response = client.get("/health", timeout=5.0, follow_redirects=False)
+            except httpx.HTTPError as exc:
+                raise OpenHandsRuntimeApiError(
+                    "Agent Server health probe transport failed"
+                ) from exc
+            if not 200 <= response.status_code < 300:
+                raise OpenHandsRuntimeApiError(
+                    f"Agent Server health probe returned HTTP {response.status_code}"
+                )
+            if len(response.content) > _MAX_CONTROL_RESPONSE_BYTES:
+                raise OpenHandsRuntimeApiError(
+                    "Agent Server health response exceeded the control-plane limit"
+                )
+        finally:
+            client.close()
 
     def _acquire_sync(self, session_id: str) -> OpenHandsSandboxEndpoint:
         runtime_id: str | None = None
@@ -231,6 +275,7 @@ class OpenHandsRuntimeApiSandboxProvider:
                     fresh_workspace=True,
                 )
                 self._require_endpoint(endpoint)
+                self._verify_agent_server_health(session)
                 return endpoint
             except Exception:  # noqa: BLE001 - failed provisioning must attempt cleanup
                 if runtime_id is not None:
@@ -488,6 +533,15 @@ class OpenHandsRuntimeApiSandboxProvider:
             )
         except Exception:  # noqa: BLE001 - cleanup is best-effort after failed acquire
             pass
+
+
+def _default_agent_client(base_url: str, session_key: str) -> httpx.Client:
+    return httpx.Client(
+        base_url=base_url,
+        headers={_SESSION_API_KEY_HEADER: session_key},
+        timeout=httpx.Timeout(10.0),
+        follow_redirects=False,
+    )
 
 
 def _json_object(response: httpx.Response, operation: str) -> dict[str, object]:
