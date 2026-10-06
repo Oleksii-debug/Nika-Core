@@ -249,9 +249,14 @@ def _open_read_authority(path: Path) -> int:
     if os.name == "nt":
         return _open_windows_read_authority(path)
 
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise PackagedExecutionPlanFileError(
+            "platform does not provide no-follow execution-plan file opens"
+        )
     flags = os.O_RDONLY
     flags |= int(getattr(os, "O_BINARY", 0))
-    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(nofollow)
     flags |= int(getattr(os, "O_NONBLOCK", 0))
     try:
         return os.open(path, flags)
