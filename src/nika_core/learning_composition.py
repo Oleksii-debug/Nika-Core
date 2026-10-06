@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+from nika_core.learned_skill import LearnedSkillService
 from nika_core.learning_cognition import (
     CognitionCandidate,
     CognitionCandidateKind,
     CognitionEvidenceRef,
 )
 from nika_core.learning_comparison import ExperienceMemoryComparison
+from nika_core.learning_memory import LearningMemoryApplier
+from nika_core.learning_self_model import LearningSelfModelApplier
+from nika_core.learning_semantic_update import LearningSemanticUpdateRouter
+from nika_core.learning_skill import LearningSkillApplier
+from nika_core.learning_world_model import LearningWorldModelApplier
+from nika_core.memory.service import MemoryService
+from nika_core.self_model import SelfModelService
+from nika_core.world_model import WorldModelService
 
 _MAX_COMPARISONS = 64
 _COMPARISON_SOURCE_TYPE = "experience_memory_comparison"
@@ -112,3 +121,17 @@ def cognition_candidate_from_comparisons(
         statement=statement,
         evidence=evidence,
     )
+
+def build_learning_semantic_update_router(
+    memory: MemoryService,
+) -> LearningSemanticUpdateRouter:
+    """Compose canonical Loop-B target owners over one shared memory authority."""
+    if type(memory) is not MemoryService:
+        raise TypeError("memory must be the canonical MemoryService")
+    return LearningSemanticUpdateRouter(
+        memory=LearningMemoryApplier(memory),
+        world_model=LearningWorldModelApplier(WorldModelService(memory)),
+        self_model=LearningSelfModelApplier(SelfModelService(memory)),
+        skill=LearningSkillApplier(LearnedSkillService(memory)),
+    )
+
