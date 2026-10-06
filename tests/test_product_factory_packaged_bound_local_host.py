@@ -1550,6 +1550,7 @@ async def test_worker_recovery_revalidates_binding_after_durable_state_read(
     assert inspected.phase == "manual_reconcile_required"
     assert terminal_storage_reads == []
 
+
 @pytest.mark.asyncio
 async def test_worker_revalidates_binding_after_private_git_source_copy(
     tmp_path: pathlib.Path,
