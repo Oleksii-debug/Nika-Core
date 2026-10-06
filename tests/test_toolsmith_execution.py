@@ -411,6 +411,48 @@ def test_posix_typed_runner_survives_same_inode_mutation_at_popen(
     assert "mutated-at-popen" in executable.read_text(encoding="utf-8")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_launch_guard_fallback_snapshot_survives_same_inode_mutation(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text(
+        "#!/bin/sh\nprintf 'trusted-fallback\\n'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    monkeypatch.setattr(execution_module.os, "memfd_create", None, raising=False)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with guard as launch_executable:
+        before = executable.stat()
+        with executable.open("r+b", buffering=0) as writer:
+            writer.truncate(0)
+            writer.write(b"#!/bin/sh\nprintf 'mutated-fallback\\n'\n")
+        after = executable.stat()
+        assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+
+        result = subprocess.run(
+            (str(executable),),
+            executable=str(launch_executable),
+            pass_fds=guard.pass_fds,
+            cwd=tmp_path,
+            env=sterile_git_environment({"PATH": os.environ.get("PATH", "")}),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "trusted-fallback"
+    assert "mutated-fallback" in executable.read_text(encoding="utf-8")
+
+
 def test_typed_runner_rejects_same_path_replacement_after_runtime_admission(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,

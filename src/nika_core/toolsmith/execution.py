@@ -184,6 +184,9 @@ def _open_posix_executable_snapshot(
                 | fcntl.F_SEAL_SEAL
             )
             fcntl.fcntl(snapshot_descriptor, fcntl.F_ADD_SEALS, seals)
+            applied_seals = fcntl.fcntl(snapshot_descriptor, fcntl.F_GET_SEALS)
+            if applied_seals & seals != seals:
+                raise OSError("executable snapshot seals were not applied")
             return snapshot_descriptor
         except ProcessExecutionError:
             if snapshot_descriptor is not None:
@@ -207,15 +210,18 @@ def _open_posix_executable_snapshot(
                 pathlib.Path("/dev/fd"),
             ):
                 temporary_path = descriptor_root / str(temporary_descriptor)
+                snapshot_descriptor: int | None = None
                 try:
                     launch_stat = temporary_path.stat()
                     snapshot_descriptor = os.open(
                         temporary_path,
                         os.O_RDONLY | getattr(os, "O_CLOEXEC", 0),
                     )
+                    snapshot_stat = os.fstat(snapshot_descriptor)
                 except OSError:
+                    if snapshot_descriptor is not None:
+                        os.close(snapshot_descriptor)
                     continue
-                snapshot_stat = os.fstat(snapshot_descriptor)
                 if (
                     launch_stat.st_dev == temporary_stat.st_dev
                     and launch_stat.st_ino == temporary_stat.st_ino
