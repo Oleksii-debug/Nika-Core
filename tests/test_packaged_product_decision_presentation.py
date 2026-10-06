@@ -237,6 +237,49 @@ def test_bounded_state_refresh_preserves_mixed_counts_and_restart(
     assert restarted == first
 
 
+def test_bounded_state_refresh_rejects_project_change_during_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _router, provider = _build(tmp_path / "bounded race.db")
+    _add_pending(
+        service,
+        repository,
+        package_id="research-race",
+        option_id="option-race",
+        decision_id="decision-race",
+        expected_row_version=0,
+    )
+    original = ProductDecisionRepository.summarize_latest
+    moved = False
+
+    def summarize_then_move(
+        decisions: ProductDecisionRepository,
+        project_id: str,
+    ):
+        nonlocal moved
+        summary = original(decisions, project_id)
+        if not moved:
+            current = repository.get(project_id)
+            repository.update_spec(
+                project_id,
+                current.spec,
+                expected_row_version=current.row_version,
+                change_reason="bounded presentation concurrency regression",
+            )
+            moved = True
+        return summary
+
+    monkeypatch.setattr(
+        ProductDecisionRepository,
+        "summarize_latest",
+        summarize_then_move,
+    )
+
+    with pytest.raises(PackagedProductJourneyError, match="refresh required"):
+        provider()
+
+
 def test_bounded_state_refresh_validates_hidden_corrupt_decision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
