@@ -337,6 +337,9 @@ class PackagedVoiceModelSetup:
         except (OSError, RuntimeError):
             terminal_status = "failed"
             terminal_message = "Не вдалося безпечно встановити локальну голосову модель."
+        except Exception:  # noqa: BLE001 - packaged worker must fail closed
+            terminal_status = "failed"
+            terminal_message = "Не вдалося безпечно встановити локальну голосову модель."
         else:
             terminal_status = "restart_required"
             terminal_message = (
