@@ -953,10 +953,12 @@ class PackagedProductCommandRouter:
         if decision_query is not None:
             query, identity = decision_query
             if query == "show":
-                assert isinstance(identity, str)
+                if type(identity) is not str:
+                    raise PackagedProductJourneyError("invalid ProductDecision query identity")
                 return self._describe_product_decision(identity)
             if query == "list":
-                assert isinstance(identity, int)
+                if type(identity) is not int:
+                    raise PackagedProductJourneyError("invalid ProductDecision page identity")
                 return self._list_pending_product_decisions(identity)
             raise PackagedProductJourneyError("unsupported ProductDecision query")
         decision_action = packaged_product_decision_action(command)
