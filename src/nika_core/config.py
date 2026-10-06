@@ -26,7 +26,7 @@ class AppConfig(BaseSettings):
     v01_source_b: Path | None = None
     log_level: str = "INFO"
     model_provider: str = "mock"
-    product_factory_local_startup_json: str | None = None
+    product_factory_local_startup_json: str | None = Field(default=None, repr=False)
 
     model_config = SettingsConfigDict(
         env_prefix="NIKA_",
