@@ -363,7 +363,7 @@ def test_shell_loaded_timeout_never_runs_recovery_and_destroys_hidden_host(
     class ShownEvent:
         @staticmethod
         def is_set() -> bool:
-            return True
+            return False
 
     class Events:
         loaded = LoadedEvent()
@@ -423,7 +423,7 @@ def test_shell_post_recovery_reload_timeout_never_exposes_stale_state(
     class ShownEvent:
         @staticmethod
         def is_set() -> bool:
-            return True
+            return False
 
     class Events:
         loaded = LoadedEvent()
@@ -481,7 +481,7 @@ def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
     class ShownEvent:
         @staticmethod
         def is_set() -> bool:
-            return True
+            return False
 
     class Events:
         loaded = LoadedEvent()
