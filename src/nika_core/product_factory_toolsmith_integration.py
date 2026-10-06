@@ -453,10 +453,18 @@ def _validate_registered_identity(
     checkpoint: ComponentCapabilityGap,
     registered: dict[str, str],
 ) -> None:
+    if type(registered) is not dict:
+        raise ProductFactoryToolsmithError(
+            "Toolsmith resume identity must be an exact dictionary"
+        )
     required = {"task_id", "capability_id", "version", "digest"}
     if set(registered) != required:
         raise ProductFactoryToolsmithError(
             "Toolsmith resume identity has unexpected fields"
+        )
+    if any(type(registered[key]) is not str for key in required):
+        raise ProductFactoryToolsmithError(
+            "Toolsmith resume identity values must be text"
         )
     if registered["task_id"] != checkpoint.task_id:
         raise ProductFactoryToolsmithError(
