@@ -80,10 +80,12 @@ class PackagedLocalProductFactoryProgram:
     """Packaged composition whose execution host resolves repositories per project."""
 
     multi_repository_host: PackagedBoundLocalProductFactoryHost
+    model_authority: PackagedLocalOllamaAuthority
 
 
 @dataclass(frozen=True, slots=True)
-class _ResolvedOllamaBinding:
+class PackagedLocalOllamaAuthority:
+    revision: int
     model: str
     base_url: str
     timeout_seconds: float
@@ -222,7 +224,7 @@ def build_packaged_local_product_factory_program(
     """
 
     _validate_composition_inputs(store, settings, startup)
-    _resolve_ollama_binding(store, settings)
+    model_authority = resolve_packaged_local_ollama_authority(store, settings)
     from nika_core.product_factory_packaged_bound_local_host import (
         PackagedBoundLocalProductFactoryHost,
     )
@@ -232,7 +234,9 @@ def build_packaged_local_product_factory_program(
             store,
             settings=settings,
             startup=startup,
-        )
+            model_authority=model_authority,
+        ),
+        model_authority=model_authority,
     )
 
 
@@ -242,6 +246,7 @@ def build_repository_bound_packaged_local_product_factory_program(
     settings: V01ModelSettings,
     startup: PackagedLocalProductFactoryStartup,
     repositories: Mapping[str, Path],
+    model_authority: PackagedLocalOllamaAuthority | None = None,
 ) -> ContainedLocalCodingProgram:
     """Build the incumbent local worker for one already-authorized repository set.
 
@@ -252,7 +257,11 @@ def build_repository_bound_packaged_local_product_factory_program(
 
     _validate_composition_inputs(store, settings, startup)
     copied = _repository_paths(repositories)
-    binding = _resolve_ollama_binding(store, settings)
+    if model_authority is None:
+        model_authority = resolve_packaged_local_ollama_authority(store, settings)
+    elif type(model_authority) is not PackagedLocalOllamaAuthority:
+        raise TypeError("model_authority carrier is invalid")
+    binding = model_authority
 
     gateway = ModelGateway(audit_log=AuditLog(store))
     gateway.register(
@@ -291,12 +300,12 @@ def _validate_composition_inputs(
         raise TypeError("startup carrier is invalid")
 
 
-def _resolve_ollama_binding(
+def resolve_packaged_local_ollama_authority(
     store: SQLiteStore,
     settings: V01ModelSettings,
-) -> _ResolvedOllamaBinding:
+) -> PackagedLocalOllamaAuthority:
     try:
-        selection, artifact_pin = settings.current_binding()
+        revision, selection, artifact_pin = settings.current_binding_with_revision()
     except ModelSetupError as exc:
         raise PackagedLocalProductFactoryStartupError(
             "select a local Ollama model before enabling contained-local Product Factory"
@@ -336,7 +345,8 @@ def _resolve_ollama_binding(
                 "could not be verified"
             ) from exc
 
-    return _ResolvedOllamaBinding(
+    return PackagedLocalOllamaAuthority(
+        revision=revision,
         model=model,
         base_url=base_url,
         timeout_seconds=selection.timeout_seconds,
