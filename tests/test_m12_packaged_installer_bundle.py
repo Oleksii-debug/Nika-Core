@@ -97,7 +97,7 @@ def test_staging_rejects_source_changed_between_lstat_and_open(
     bundle = tmp_path / "bundle"
     bundle.mkdir()
 
-    real_open = m11_release._open_canonical_installer_source
+    real_open = m11_release._open_readonly_nofollow_snapshot
     swapped = False
 
     def swapping_open(path: Path) -> int:
@@ -107,7 +107,7 @@ def test_staging_rejects_source_changed_between_lstat_and_open(
             canonical.write_bytes(b"changed installer bytes\n")
         return real_open(path)
 
-    monkeypatch.setattr(m11_release, "_open_canonical_installer_source", swapping_open)
+    monkeypatch.setattr(m11_release, "_open_readonly_nofollow_snapshot", swapping_open)
     with pytest.raises(RuntimeError, match="changed during staging"):
         _stage_canonical_installer(project_root, bundle)
     assert not (bundle / "install_nika_core.ps1").exists()
@@ -146,7 +146,7 @@ def test_installer_source_snapshot_holds_write_delete_fence_until_close(
     renamed = tmp_path / "renamed-installer.ps1"
     canonical.write_bytes(b"canonical installer\n")
 
-    descriptor = m11_release._open_canonical_installer_source(canonical)
+    descriptor = m11_release._open_readonly_nofollow_snapshot(canonical)
     try:
         assert os.read(descriptor, len(b"canonical installer\n")) == b"canonical installer\n"
         with pytest.raises(OSError):
