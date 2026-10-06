@@ -166,6 +166,76 @@ def test_controller_recovers_before_dispatch_through_packaged_submitter() -> Non
     ]
 
 
+def test_controller_runs_async_post_dispatch_after_pf4_dispatch() -> None:
+    plan = _plan()
+    preparation = _Preparation()
+    host = _Host()
+    events: list[tuple[str, object]] = []
+
+    class _OrderedHost(_Host):
+        async def recover_running(self, **kwargs):
+            events.append(("recover", kwargs["state"]))
+            return await super().recover_running(**kwargs)
+
+        async def dispatch_ready(self, **kwargs):
+            events.append(("dispatch", kwargs["state"]))
+            return await super().dispatch_ready(**kwargs)
+
+    ordered_host = _OrderedHost()
+
+    async def post_dispatch(prepared: PreparedProductFactory) -> None:
+        events.append(("post_dispatch", prepared))
+
+    controller = PackagedProductFactoryExecutionController(
+        preparation=cast(Any, preparation),
+        host=cast(Any, ordered_host),
+        resolve_plan=lambda _project_id: plan,
+        submit=_ImmediateSubmitter(),
+        post_dispatch=post_dispatch,
+    )
+
+    result = controller.start(_PROJECT_ID)
+
+    assert result.status == "completed"
+    assert events == [
+        ("recover", preparation.prepared.state),
+        ("dispatch", preparation.prepared.state),
+        ("post_dispatch", preparation.prepared),
+    ]
+
+
+def test_controller_rejects_noncallable_post_dispatch_hook() -> None:
+    with pytest.raises(TypeError, match="post-dispatch"):
+        PackagedProductFactoryExecutionController(
+            preparation=cast(Any, _Preparation()),
+            host=cast(Any, _Host()),
+            resolve_plan=lambda _project_id: _plan(),
+            submit=_ImmediateSubmitter(),
+            post_dispatch=cast(Any, object()),
+        )
+
+
+def test_controller_propagates_post_dispatch_failure_into_background_future() -> None:
+    preparation = _Preparation()
+    submitter = _ImmediateSubmitter()
+
+    async def post_dispatch(_prepared: PreparedProductFactory) -> None:
+        raise RuntimeError("private continuation diagnostic")
+
+    controller = PackagedProductFactoryExecutionController(
+        preparation=cast(Any, preparation),
+        host=cast(Any, _Host()),
+        resolve_plan=lambda _project_id: _plan(),
+        submit=submitter,
+        post_dispatch=post_dispatch,
+    )
+
+    result = controller.start(_PROJECT_ID)
+
+    assert result.status == "completed"
+    assert submitter.calls == 1
+
+
 def test_controller_rejects_concurrent_start_for_same_project() -> None:
     preparation = _Preparation()
     host = _Host()
