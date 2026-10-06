@@ -216,6 +216,56 @@ def test_continuation_advances_each_accepted_component_in_snapshot_order(
     assert all(state is prepared.state for state, _component_id in calls)
 
 
+def test_continuation_default_bound_allows_second_pf4_wave(
+    tmp_path,
+    monkeypatch,
+):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    component_count = 33
+    configured = {
+        (PROJECT_ID, f"repo-{index}", f"component-{index}")
+        for index in range(component_count)
+    }
+    continuation = PackagedReviewedBuildContinuation(
+        store,
+        _startup(tmp_path),
+        _activated(configured),
+    )
+    calls = []
+
+    class Controller:
+        def advance_component(self, *, state, component_id):
+            calls.append(component_id)
+            return SimpleNamespace(
+                state=BuildExecutionState.SUCCEEDED,
+                spec=SimpleNamespace(
+                    request=SimpleNamespace(
+                        project_id=PROJECT_ID,
+                        work_id=f"pf5-{component_id}",
+                    )
+                ),
+            )
+
+    monkeypatch.setattr(
+        continuation_module,
+        "build_configured_packaged_reviewed_build_controller",
+        lambda *_args, **_kwargs: Controller(),
+    )
+    records = [
+        _record(
+            f"component-{index}",
+            f"repo-{index}",
+            WorkState.ACCEPTED,
+        )
+        for index in range(component_count)
+    ]
+
+    continuation._advance(_prepared(records))
+
+    assert calls == [f"component-{index}" for index in range(component_count)]
+
+
 def test_continuation_rejects_accepted_batch_over_bound_before_pf5(
     tmp_path,
     monkeypatch,
@@ -262,7 +312,7 @@ def test_continuation_rejects_accepted_batch_over_bound_before_pf5(
     assert built is False
 
 
-@pytest.mark.parametrize("value", [0, 257, True, 1.5])
+@pytest.mark.parametrize("value", [0, 129, True, 1.5])
 def test_continuation_rejects_invalid_component_bound(tmp_path, value):
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()

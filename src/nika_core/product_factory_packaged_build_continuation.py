@@ -33,7 +33,7 @@ class PackagedReviewedBuildContinuation:
     store: SQLiteStore
     startup: PackagedLocalProductFactoryStartup
     activated: ActivatedPackagedBuildRuntime
-    max_components: int = 32
+    max_components: int = 128
 
     def __post_init__(self) -> None:
         if type(self.store) is not SQLiteStore:
@@ -49,9 +49,9 @@ class PackagedReviewedBuildContinuation:
         self.startup.__post_init__()
         if (
             type(self.max_components) is not int
-            or not 1 <= self.max_components <= 256
+            or not 1 <= self.max_components <= 128
         ):
-            raise ValueError("PF5 continuation max_components must be an exact 1..256 integer")
+            raise ValueError("PF5 continuation max_components must be an exact 1..128 integer")
 
     async def __call__(self, prepared: PreparedProductFactory) -> None:
         if type(prepared) is not PreparedProductFactory:
