@@ -291,8 +291,9 @@ def test_completed_execution_replays_all_targets_without_second_effect(
             payload=payload,
             address=address,
         )
+        _reopened_store, _reopened_memory, reopened_executor = _runtime(tmp_path)
         replay = _apply(
-            executor,
+            reopened_executor,
             task_id=task_id,
             intent=intent,
             candidate=candidate,
