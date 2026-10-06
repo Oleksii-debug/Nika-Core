@@ -15,11 +15,14 @@ def test_packaged_command_help_preserves_intelligence_and_targeted_task_controls
     html = HTML.read_text(encoding="utf-8")
 
     assert (
-        'aria-describedby="execution-mode command-intelligence-help task-control-help"'
+        'aria-describedby="execution-mode command-intelligence-help '
+        'task-control-help product-decision-help"'
         in html
     )
     assert 'id="command-intelligence-help"' in html
     assert 'id="task-control-help"' in html
+    assert 'id="product-decision-help"' in html
+    assert "покажи поточне рішення ProductProject" in html
     assert "режим інтелекту deterministic" in html
     assert "task status &lt;task_id&gt;" in html
 
