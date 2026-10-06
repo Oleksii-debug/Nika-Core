@@ -618,6 +618,50 @@ def test_require_rejects_binding_changed_during_filesystem_validation(
     assert "changed while resolving" in str(errors[0])
 
 
+def test_require_rejects_filesystem_identity_changed_after_durable_reread(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = _root(tmp_path, "repository")
+    moved = tmp_path / "moved after durable reread"
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    binding = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    original_binding_from_row = binding_module._binding_from_row
+    row_reads = 0
+
+    def swapping_binding_from_row(row: object):
+        nonlocal row_reads
+        current = original_binding_from_row(row)
+        row_reads += 1
+        if row_reads == 2:
+            binding.root.rename(moved)
+            binding.root.mkdir()
+            (binding.root / ".git").mkdir()
+        return current
+
+    monkeypatch.setattr(
+        binding_module,
+        "_binding_from_row",
+        swapping_binding_from_row,
+    )
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="filesystem identity changed",
+    ):
+        bindings.require(project.project_id, repository.repository_id)
+
+    assert row_reads == 2
+
+
 def test_require_rejects_relative_persisted_root_path(
     tmp_path: pathlib.Path,
 ) -> None:
