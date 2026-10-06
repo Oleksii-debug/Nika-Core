@@ -76,10 +76,22 @@ class PackagedLocalProductFactoryStartup:
 
 
 @dataclass(frozen=True, slots=True)
+class PackagedLocalProductFactoryModelAuthority:
+    """Exact launch-time model authority for delayed contained-local composition."""
+
+    revision: int
+    model: str
+    base_url: str
+    timeout_seconds: float
+    expected_manifest_sha256: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class PackagedLocalProductFactoryProgram:
     """Packaged composition whose execution host resolves repositories per project."""
 
     multi_repository_host: PackagedBoundLocalProductFactoryHost
+    model_authority: PackagedLocalProductFactoryModelAuthority
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +234,10 @@ def build_packaged_local_product_factory_program(
     """
 
     _validate_composition_inputs(store, settings, startup)
-    _resolve_ollama_binding(store, settings)
+    model_authority = capture_packaged_local_product_factory_model_authority(
+        store,
+        settings,
+    )
     from nika_core.product_factory_packaged_bound_local_host import (
         PackagedBoundLocalProductFactoryHost,
     )
@@ -232,7 +247,9 @@ def build_packaged_local_product_factory_program(
             store,
             settings=settings,
             startup=startup,
-        )
+            model_authority=model_authority,
+        ),
+        model_authority=model_authority,
     )
 
 
@@ -242,6 +259,7 @@ def build_repository_bound_packaged_local_product_factory_program(
     settings: V01ModelSettings,
     startup: PackagedLocalProductFactoryStartup,
     repositories: Mapping[str, Path],
+    model_authority: PackagedLocalProductFactoryModelAuthority | None = None,
 ) -> ContainedLocalCodingProgram:
     """Build the incumbent local worker for one already-authorized repository set.
 
@@ -252,15 +270,23 @@ def build_repository_bound_packaged_local_product_factory_program(
 
     _validate_composition_inputs(store, settings, startup)
     copied = _repository_paths(repositories)
-    binding = _resolve_ollama_binding(store, settings)
+    if model_authority is None:
+        model_authority = capture_packaged_local_product_factory_model_authority(
+            store,
+            settings,
+        )
+    elif type(model_authority) is not PackagedLocalProductFactoryModelAuthority:
+        raise TypeError("model_authority carrier is invalid")
 
     gateway = ModelGateway(audit_log=AuditLog(store))
     gateway.register(
         OllamaProvider(
-            default_model=binding.model,
-            base_url=binding.base_url,
+            default_model=model_authority.model,
+            base_url=model_authority.base_url,
             think=False,
-            expected_manifest_sha256=binding.expected_manifest_sha256,
+            expected_manifest_sha256=(
+                model_authority.expected_manifest_sha256
+            ),
         ),
         default=True,
     )
@@ -271,9 +297,9 @@ def build_repository_bound_packaged_local_product_factory_program(
         gateway=gateway,
         provider_id="ollama",
         provider_kind=ProviderKind.LOCAL,
-        model=binding.model,
+        model=model_authority.model,
         policy=startup.policy,
-        model_timeout_seconds=binding.timeout_seconds,
+        model_timeout_seconds=model_authority.timeout_seconds,
         git_executable=str(startup.git_executable),
     )
 
@@ -289,6 +315,44 @@ def _validate_composition_inputs(
         raise TypeError("settings must be V01ModelSettings")
     if type(startup) is not PackagedLocalProductFactoryStartup:
         raise TypeError("startup carrier is invalid")
+
+
+def capture_packaged_local_product_factory_model_authority(
+    store: SQLiteStore,
+    settings: V01ModelSettings,
+) -> PackagedLocalProductFactoryModelAuthority:
+    """Capture one revision-stable local model/artifact authority."""
+
+    if type(store) is not SQLiteStore:
+        raise TypeError("store must be SQLiteStore")
+    if type(settings) is not V01ModelSettings:
+        raise TypeError("settings must be V01ModelSettings")
+    before = settings.snapshot()
+    revision = before.get("revision")
+    if (
+        before.get("status") != "ready"
+        or type(revision) is not int
+        or revision < 1
+    ):
+        raise PackagedLocalProductFactoryStartupError(
+            "contained-local Product Factory model authority is unavailable"
+        )
+    binding = _resolve_ollama_binding(store, settings)
+    after = settings.snapshot()
+    if (
+        after.get("status") != "ready"
+        or after.get("revision") != revision
+    ):
+        raise PackagedLocalProductFactoryStartupError(
+            "contained-local Product Factory model authority changed while resolving"
+        )
+    return PackagedLocalProductFactoryModelAuthority(
+        revision=revision,
+        model=binding.model,
+        base_url=binding.base_url,
+        timeout_seconds=binding.timeout_seconds,
+        expected_manifest_sha256=binding.expected_manifest_sha256,
+    )
 
 
 def _resolve_ollama_binding(
