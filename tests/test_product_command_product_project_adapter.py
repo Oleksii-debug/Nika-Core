@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from _product_decision_test_support import ApprovedProductProjectCommandService
-
 from dataclasses import replace
 
 import pytest
 
+from _product_decision_test_support import ApprovedProductProjectCommandService
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_command.contracts import ProductStatusKind
 from nika_core.product_command.product_project_adapter import (
