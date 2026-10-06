@@ -36,8 +36,8 @@ class TimeSlice:
     events: tuple[MarketEvent, ...]
 
     def __post_init__(self) -> None:
-        if self.index < 0:
-            raise TradingResearchError("slice index must be non-negative")
+        if type(self.index) is not int or self.index < 0:
+            raise TradingResearchError("slice index must be a non-negative integer")
         at = require_aware_utc(self.at, "at")
         if any(event.time.available_at > at for event in self.events):
             raise TradingResearchError("time slice cannot contain future-unavailable market data")
