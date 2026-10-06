@@ -150,3 +150,61 @@ def test_candidate_tokenization_evidence_is_required() -> None:
             match="lacks canonical tokenization evidence",
         ):
             proof._require_candidate_tokenization_sha256(manifest)
+
+def test_candidate_evidence_snapshot_rejects_manifest_path_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proof = _proof_module()
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate_bytes = b"exact-physical-proof-candidate"
+    candidate.write_bytes(candidate_bytes)
+
+    def mutating_manifest(path: Path) -> dict[str, object]:
+        Path(path).write_bytes(b"mutated-during-manifest-read")
+        return {}
+
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", mutating_manifest)
+
+    with pytest.raises(proof.ProofError):
+        proof._verified_candidate_evidence_from_snapshot(
+            candidate,
+            candidate_bytes,
+        )
+
+
+def test_candidate_evidence_snapshot_rejects_tensor_path_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proof = _proof_module()
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate_bytes = b"exact-physical-proof-candidate"
+    candidate.write_bytes(candidate_bytes)
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", lambda _path: {})
+
+    import safetensors
+
+    class MutatingSafeOpen:
+        def __enter__(self):
+            candidate.write_bytes(b"mutated-during-tensor-read")
+            return SimpleNamespace(
+                keys=lambda: ("tensor",),
+                get_tensor=lambda _name: SimpleNamespace(numel=lambda: 1),
+            )
+
+        def __exit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+    monkeypatch.setattr(
+        safetensors,
+        "safe_open",
+        lambda *_args, **_kwargs: MutatingSafeOpen(),
+    )
+
+    with pytest.raises(proof.ProofError):
+        proof._verified_candidate_evidence_from_snapshot(
+            candidate,
+            candidate_bytes,
+        )
+
