@@ -380,7 +380,7 @@ class ModelGateway:
             retryable=False,
             failure_effect=ModelFailureEffect.UNKNOWN,
         )
-        if not isinstance(response, ModelResponse):
+        if type(response) is not ModelResponse:
             return None, invalid_error
 
         try:
@@ -391,7 +391,7 @@ class ModelGateway:
             model = response.model
             raw_usage = response.usage
             latency_ms = response.latency_ms
-            if not isinstance(raw_usage, ModelUsage):
+            if type(raw_usage) is not ModelUsage:
                 return None, invalid_error
             input_tokens = raw_usage.input_tokens
             output_tokens = raw_usage.output_tokens
