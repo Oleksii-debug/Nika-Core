@@ -405,6 +405,51 @@ def test_factory_status_command_reports_prepared_authority_and_survives_restart(
     assert after == before
 
 
+def test_factory_status_command_bounds_large_component_summary(tmp_path: Path) -> None:
+    store, repository, project, plan, preparation, center = _fixture(tmp_path)
+    components = tuple(
+        ProductComponent(
+            component_id=f"component-{index}",
+            repository_id="repo-core",
+            paths=(f"src/component-{index}",),
+            test_commands=(("python", "-m", "pytest", f"tests/component-{index}"),),
+        )
+        for index in range(10)
+    )
+    wide_plan = PackagedProductFactoryExecutionPlan(
+        project_id=project.project_id,
+        expected_spec_version=project.spec_version,
+        expected_row_version=project.row_version,
+        graph=ProductRepositoryGraph(
+            project_id=project.project_id,
+            repositories=plan.graph.repositories,
+            components=components,
+        ),
+        graph_version=1,
+        base_shas=dict(plan.base_shas),
+        component_goals={
+            item.component_id: f"Implement {item.component_id}" for item in components
+        },
+        permission_ceiling=plan.permission_ceiling,
+    )
+    preparation.prepare(wide_plan)
+    router = _status_router(
+        store=store,
+        repository=repository,
+        project_id=project.project_id,
+        center=center,
+    )
+
+    result = router.create({"command": "Show current Product Factory status"})
+
+    assert "компонентів 10" in result.message
+    assert "показано 8 з 10 компонентів" in result.message
+    assert "component-0=ready" in result.message
+    assert "component-7=ready" in result.message
+    assert "component-8=ready" not in result.message
+    assert "component-9=ready" not in result.message
+
+
 def test_factory_status_command_reports_unprepared_current_version(tmp_path: Path) -> None:
     store, repository, project, _plan, _preparation, center = _fixture(tmp_path)
     router = _status_router(
