@@ -136,12 +136,24 @@ class ModelGateway:
             )
             self._authorize_cloud_effect(attempt_request, capabilities)
 
-            response: ModelResponse | None = None
+            canonical_response: ModelResponse | None = None
+            response_error: ModelGatewayError | None = None
+            missing_response = False
             terminal_error: ModelGatewayError | None = None
             cancelled = False
             try:
                 async with asyncio.timeout(remaining):
-                    response = await provider.complete(attempt_request)
+                    provider_task = asyncio.create_task(
+                        self._invoke_provider_complete(
+                            provider,
+                            attempt_request,
+                            trusted_provider_id=capabilities.provider_id,
+                            trusted_provider_kind=capabilities.kind,
+                        )
+                    )
+                    canonical_response, response_error, missing_response = (
+                        await provider_task
+                    )
             except TimeoutError:
                 error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
@@ -156,12 +168,24 @@ class ModelGateway:
                     continue
                 terminal_error = error
             except asyncio.CancelledError:
-                self._audit(
-                    event_type="model.cancelled",
-                    request=request,
-                    payload={"provider_id": capabilities.provider_id},
-                )
-                cancelled = True
+                current_task = asyncio.current_task()
+                if current_task is not None and current_task.cancelling():
+                    self._audit(
+                        event_type="model.cancelled",
+                        request=request,
+                        payload={"provider_id": capabilities.provider_id},
+                    )
+                    cancelled = True
+                else:
+                    error = ModelGatewayError(
+                        ModelErrorCode.PROVIDER_ERROR,
+                        "model provider failed without a typed Nika error",
+                        provider_id=capabilities.provider_id,
+                        retryable=False,
+                        failure_effect=ModelFailureEffect.UNKNOWN,
+                    )
+                    self._audit_failure(request, capabilities.provider_id, error)
+                    terminal_error = error
             except ModelGatewayError as raw_error:
                 error = self._normalize_provider_error(
                     raw_error, capabilities.provider_id
@@ -187,7 +211,7 @@ class ModelGateway:
                 raise asyncio.CancelledError()
             if terminal_error is not None:
                 raise terminal_error
-            if response is None:
+            if missing_response:
                 error = ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
                     "model provider completed without a response",
@@ -197,12 +221,6 @@ class ModelGateway:
                 self._audit_failure(request, capabilities.provider_id, error)
                 raise error
 
-            canonical_response, response_error = self._snapshot_success_response(
-                response=response,
-                request=request,
-                trusted_provider_id=capabilities.provider_id,
-                trusted_provider_kind=capabilities.kind,
-            )
             if response_error is not None:
                 self._audit_failure(
                     request,
@@ -233,6 +251,25 @@ class ModelGateway:
             "model fallback route was exhausted",
             retryable=True,
         )
+
+    @staticmethod
+    async def _invoke_provider_complete(
+        provider: ModelProvider,
+        request: ModelRequest,
+        *,
+        trusted_provider_id: str,
+        trusted_provider_kind: ProviderKind,
+    ) -> tuple[ModelResponse | None, ModelGatewayError | None, bool]:
+        response = await provider.complete(request)
+        if response is None:
+            return None, None, True
+        canonical_response, response_error = ModelGateway._snapshot_success_response(
+            response=response,
+            request=request,
+            trusted_provider_id=trusted_provider_id,
+            trusted_provider_kind=trusted_provider_kind,
+        )
+        return canonical_response, response_error, False
 
     def _authorize_cloud_effect(
         self,
@@ -443,28 +480,52 @@ class ModelGateway:
     def _normalize_provider_error(
         error: ModelGatewayError, provider_id: str
     ) -> ModelGatewayError:
-        if not isinstance(error.code, ModelErrorCode):
+        if type(error) is not ModelGatewayError:
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an invalid typed error carrier",
+                provider_id=provider_id,
+                retryable=False,
+                failure_effect=ModelFailureEffect.UNKNOWN,
+            )
+        if type(error.code) is not ModelErrorCode:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an invalid error code",
                 provider_id=provider_id,
                 retryable=False,
             )
-        if not isinstance(error.retryable, bool):
+        if error.code is ModelErrorCode.CANCELLED:
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider cannot assert caller cancellation",
+                provider_id=provider_id,
+                retryable=False,
+                failure_effect=ModelFailureEffect.UNKNOWN,
+            )
+        if type(error.retryable) is not bool:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an invalid retryable flag",
                 provider_id=provider_id,
                 retryable=False,
             )
-        if not isinstance(error.failure_effect, ModelFailureEffect):
+        if type(error.failure_effect) is not ModelFailureEffect:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an invalid failure effect state",
                 provider_id=provider_id,
                 retryable=False,
             )
-        if error.provider_id is not None and error.provider_id != provider_id:
+        error_provider_id = error.provider_id
+        if error_provider_id is not None and type(error_provider_id) is not str:
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an invalid provider identity",
+                provider_id=provider_id,
+                retryable=False,
+            )
+        if error_provider_id is not None and error_provider_id != provider_id:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an error for another provider identity",
