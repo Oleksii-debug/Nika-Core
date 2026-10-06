@@ -1075,13 +1075,28 @@ class PackagedProductCommandRouter:
             if len(shown) == len(components)
             else f"; показано {len(shown)} з {len(components)} компонентів"
         )
+        builds = tuple(
+            item
+            for item in detail.statuses
+            if item.item_id.startswith("pf5-build:")
+        )
+        build_state_counts: dict[str, int] = {}
+        for item in builds:
+            build_state_counts[item.state] = build_state_counts.get(item.state, 0) + 1
+        build_summary = ""
+        if builds:
+            states = ", ".join(
+                f"{state}={count}"
+                for state, count in sorted(build_state_counts.items())
+            )
+            build_summary = f"; PF5 buildів {len(builds)}; стани PF5: {states}"
         return UIResult(
             request_id="desktop-handler",
             status="completed",
             message=(
                 f"Статус Product Factory для {project_id}: "
                 f"компонентів {len(components)}; блокерів {detail.summary.blocker_count}; "
-                f"{component_summary}{truncation}."
+                f"{component_summary}{truncation}{build_summary}."
             ),
             focus_id="product-project-operator-heading",
         )
