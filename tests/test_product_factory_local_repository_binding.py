@@ -490,6 +490,31 @@ def test_require_rejects_relative_persisted_root_path(
         bindings.require(project.project_id, repository.repository_id)
 
 
+def test_binding_version_survives_missing_root_for_safe_repair(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = _root(tmp_path)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    moved = tmp_path / "repository moved away"
+    root.rename(moved)
+
+    assert (
+        bindings.binding_version(project.project_id, repository.repository_id)
+        == bound.binding_version
+    )
+    with pytest.raises(ProductFactoryLocalRepositoryBindingError):
+        bindings.require(project.project_id, repository.repository_id)
+
+
 def test_binding_rejects_inline_repository_credentials(
     tmp_path: pathlib.Path,
 ) -> None:
