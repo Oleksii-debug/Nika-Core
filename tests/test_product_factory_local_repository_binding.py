@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import pathlib
 import sqlite3
 import threading
@@ -377,6 +378,116 @@ def test_zero_inode_identity_does_not_alias_distinct_repository_roots(
 
     assert not binding_module._same_physical_repository(first, second)
     assert binding_module._same_physical_repository(first, same_path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor identity regression")
+def test_gitfile_metadata_read_binds_descriptor_to_path_on_posix(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    git_directory = tmp_path / "git-directory"
+    git_directory.mkdir()
+    metadata = root / ".git"
+    metadata.write_text(
+        f"gitdir: {git_directory}\n",
+        encoding="utf-8",
+    )
+    replacement = tmp_path / "replacement-gitfile"
+    replacement.write_text(
+        f"gitdir: {git_directory}\n",
+        encoding="utf-8",
+    )
+    original_open = binding_module.os.open
+
+    def redirected_open(path, flags, *args, **kwargs):
+        if pathlib.Path(path) == metadata:
+            return original_open(replacement, flags, *args, **kwargs)
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(binding_module.os, "open", redirected_open)
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="file changed while reading",
+    ):
+        binding_module._filesystem_identity(root)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow regression")
+def test_metadata_read_fails_closed_without_posix_nofollow(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = tmp_path / "metadata"
+    metadata.write_text("gitdir: target\n", encoding="utf-8")
+    monkeypatch.setattr(binding_module.os, "O_NOFOLLOW", 0)
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="stable no-follow read support is unavailable",
+    ):
+        binding_module._read_held_metadata_file(
+            metadata,
+            label=".git metadata",
+        )
+
+
+def test_gitfile_and_commondir_reads_use_held_descriptor_bytes(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repository"
+    root.mkdir()
+    git_directory = tmp_path / "git-directory"
+    git_directory.mkdir()
+    common_directory = tmp_path / "common-directory"
+    common_directory.mkdir()
+    gitfile_raw = f"gitdir: {git_directory}\n".encode("utf-8")
+    commondir_raw = f"{common_directory}\n".encode("utf-8")
+    (root / ".git").write_bytes(gitfile_raw)
+    (git_directory / "commondir").write_bytes(commondir_raw)
+
+    def forbidden_path_read_bytes(_path: pathlib.Path) -> bytes:
+        raise AssertionError("metadata authority must use the held descriptor")
+
+    monkeypatch.setattr(pathlib.Path, "read_bytes", forbidden_path_read_bytes)
+
+    identity = binding_module._filesystem_identity(root)
+
+    assert identity.gitfile_sha256 == binding_module.hashlib.sha256(
+        gitfile_raw
+    ).hexdigest()
+    assert identity.git_commondir_sha256 == binding_module.hashlib.sha256(
+        commondir_raw
+    ).hexdigest()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_windows_metadata_descriptor_denies_writer_and_delete_share(
+    tmp_path: pathlib.Path,
+) -> None:
+    metadata = tmp_path / "metadata"
+    renamed = tmp_path / "renamed"
+    metadata.write_text("gitdir: target\n", encoding="utf-8")
+
+    descriptor = binding_module._open_metadata_descriptor(
+        metadata,
+        label=".git metadata",
+    )
+    try:
+        with pytest.raises(OSError):
+            metadata.write_text("replacement\n", encoding="utf-8")
+        with pytest.raises(OSError):
+            metadata.replace(renamed)
+    finally:
+        os.close(descriptor)
+
+    metadata.replace(renamed)
+    renamed.replace(metadata)
+    metadata.write_text("replacement\n", encoding="utf-8")
+    assert metadata.read_text(encoding="utf-8") == "replacement\n"
 
 
 def test_binding_update_requires_exact_version(
