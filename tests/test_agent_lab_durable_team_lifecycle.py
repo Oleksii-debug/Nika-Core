@@ -132,7 +132,6 @@ def _compiler() -> AgentCompiler:
     return AgentCompiler(
         tools=(ToolSpec("web.read", "Read web content", ToolRisk.READ_ONLY),),
         model_profiles={"test"},
-        permission_catalog={"web.read": frozenset({"example.com"})},
     )
 
 

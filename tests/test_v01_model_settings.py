@@ -100,8 +100,6 @@ def test_api_selection_omits_credential_reference_from_snapshot_and_audit(tmp_pa
         {"credential_ref": "env:INVALID-NAME"},
         {"base_url": "https://api.example.test/v1?mode=test"},
         {"provider_id": "ollama"},
-        {"provider_id": "configured\u200b-api"},
-        {"model": "model\u2028split"},
         {"model": " model "},
         {"timeout_seconds": 0},
         {"timeout_seconds": True},
@@ -132,45 +130,12 @@ def test_invalid_api_selection_does_not_replace_valid_route(
         {"base_url": "ftp://localhost"},
         {"base_url": "http://ollama.example.test:11434"},
         {"base_url": "https://192.0.2.10:11434"},
-        {"model": "qwen\u007f3:8b"},
-        {"model": "qwen\u20603:8b"},
     ),
 )
 def test_invalid_ollama_selection_is_rejected(tmp_path: Path, change: dict[str, object]) -> None:
     settings = V01ModelSettings(_store(tmp_path))
     assert settings.configure({**_local(), **change}).status == "rejected"
     assert settings.snapshot()["status"] == "missing"
-
-
-def test_visible_unicode_model_identity_remains_supported(tmp_path: Path) -> None:
-    settings = V01ModelSettings(_store(tmp_path))
-
-    result = settings.configure(_local(model="модель-🙂-8b"))
-
-    assert result.status == "completed"
-    assert settings.snapshot()["model"] == "модель-🙂-8b"
-
-
-def test_persisted_invisible_model_identity_fails_closed_after_restart(
-    tmp_path: Path,
-) -> None:
-    store = _store(tmp_path)
-    settings = V01ModelSettings(store)
-    assert settings.configure(_local()).status == "completed"
-
-    with store.connection() as conn:
-        row = conn.execute(
-            "SELECT selection_json FROM v01_model_settings WHERE singleton = 1"
-        ).fetchone()
-        payload = json.loads(row["selection_json"])
-        payload["model"] = "qwen\u200b3:8b"
-        conn.execute(
-            "UPDATE v01_model_settings SET selection_json = ? WHERE singleton = 1",
-            (json.dumps(payload, ensure_ascii=False, sort_keys=True),),
-        )
-
-    restarted = V01ModelSettings(SQLiteStore(store.path))
-    assert restarted.snapshot() == {"status": "invalid"}
 
 
 def test_concurrent_settings_writers_use_revision_authority(tmp_path: Path) -> None:

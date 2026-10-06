@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from _product_decision_test_support import ApprovedProductDecisionRepository
-
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -55,7 +53,7 @@ def _repos(tmp_path) -> tuple[SQLiteStore, ProductProjectRepository, ProductDeci
         spec=_spec(),
         idempotency_key="create:p1",
     )
-    return store, projects, ApprovedProductDecisionRepository(store)
+    return store, projects, ProductDecisionRepository(store)
 
 
 def _handoff(
@@ -103,7 +101,7 @@ def test_decision_is_durable_idempotent_and_restart_safe(tmp_path) -> None:
     assert projects.get("p1").row_version == 1
     restarted_store = SQLiteStore(store.path)
     restarted_store.initialize()
-    restarted = ApprovedProductDecisionRepository(restarted_store)
+    restarted = ProductDecisionRepository(restarted_store)
     assert restarted.get("p1", "decision-1") == stored
     assert restarted.list("p1") == (stored,)
 
@@ -257,7 +255,7 @@ def test_concurrent_identical_decision_write_replays_one_canonical_result(tmp_pa
     barrier = Barrier(2)
 
     def write() -> tuple[int, str, tuple[str, ...]]:
-        repository = ApprovedProductDecisionRepository(store)
+        repository = ProductDecisionRepository(store)
         barrier.wait()
         stored = repository.record(
             "p1",
@@ -278,7 +276,7 @@ def test_concurrent_identical_decision_write_replays_one_canonical_result(tmp_pa
     assert results[0][0] == 1
     assert results[0][2] == ("research-1",)
     assert projects.get("p1").row_version == 1
-    assert len(ApprovedProductDecisionRepository(store).history("p1", "decision-1")) == 1
+    assert len(ProductDecisionRepository(store).history("p1", "decision-1")) == 1
 
 
 def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) -> None:
@@ -287,7 +285,7 @@ def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) 
     barrier = Barrier(2)
 
     def write(rationale: str) -> str:
-        repository = ApprovedProductDecisionRepository(store)
+        repository = ProductDecisionRepository(store)
         barrier.wait()
         try:
             repository.record(
@@ -306,7 +304,7 @@ def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) 
 
     assert sorted(results) == ["conflict", "recorded"]
     assert projects.get("p1").row_version == 1
-    assert len(ApprovedProductDecisionRepository(store).history("p1", "decision-1")) == 1
+    assert len(ProductDecisionRepository(store).history("p1", "decision-1")) == 1
 
 
 def test_writer_lock_contention_is_normalized_without_partial_mutation(
@@ -326,7 +324,7 @@ def test_writer_lock_contention_is_normalized_without_partial_mutation(
     monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", short_timeout_connect)
     try:
         with pytest.raises(ProductProjectError, match="temporarily busy"):
-            ApprovedProductDecisionRepository(store).record(
+            ProductDecisionRepository(store).record(
                 "p1",
                 _decision(),
                 expected_row_version=0,
@@ -380,7 +378,7 @@ def test_reader_lock_commit_contention_is_normalized_without_partial_mutation(
     monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", short_timeout_connect)
     try:
         with pytest.raises(ProductProjectError, match="temporarily busy"):
-            ApprovedProductDecisionRepository(store).record(
+            ProductDecisionRepository(store).record(
                 "p1",
                 _decision(),
                 expected_row_version=0,
@@ -423,18 +421,12 @@ def test_non_lock_commit_operational_error_is_not_reclassified(
     class CommitFailureConnection:
         def __init__(self, conn: sqlite3.Connection) -> None:
             self._conn = conn
-            self._fail_commit = False
 
         def execute(self, *args, **kwargs):
-            result = self._conn.execute(*args, **kwargs)
-            if args and args[0] == "BEGIN IMMEDIATE":
-                self._fail_commit = True
-            return result
+            return self._conn.execute(*args, **kwargs)
 
         def commit(self) -> None:
-            if self._fail_commit:
-                raise sqlite3.OperationalError("synthetic non-lock commit failure")
-            self._conn.commit()
+            raise sqlite3.OperationalError("synthetic non-lock commit failure")
 
         def rollback(self) -> None:
             self._conn.rollback()
@@ -456,7 +448,7 @@ def test_non_lock_commit_operational_error_is_not_reclassified(
 
     monkeypatch.setattr(store, "connection", failing_connection)
     with pytest.raises(sqlite3.OperationalError, match="synthetic non-lock commit failure"):
-        ApprovedProductDecisionRepository(store).record(
+        ProductDecisionRepository(store).record(
             "p1",
             _decision(),
             expected_row_version=0,
@@ -490,22 +482,11 @@ def test_non_lock_operational_error_is_not_reclassified_as_contention(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store, _, _ = _repos(tmp_path)
-
-    class EmptyReplayCursor:
-        @staticmethod
-        def fetchone():
-            return None
+    store, _, decisions = _repos(tmp_path)
 
     class NonLockFailureConnection:
         @staticmethod
-        def execute(statement: str, *_args: object):
-            if statement == "BEGIN":
-                return None
-            if statement.startswith(
-                "SELECT project_id,operation_kind,entity_id,entity_version,"
-            ):
-                return EmptyReplayCursor()
+        def execute(statement: str, *_args: object) -> None:
             assert statement == "BEGIN IMMEDIATE"
             raise sqlite3.OperationalError("synthetic non-lock failure")
 
@@ -516,12 +497,9 @@ def test_non_lock_operational_error_is_not_reclassified_as_contention(
     )
 
     with pytest.raises(sqlite3.OperationalError, match="synthetic non-lock failure"):
-        ProductDecisionRepository(store).record(
+        decisions.record(
             "p1",
-            _decision(
-                state=ProductDecisionState.PROPOSED,
-                rationale="Writer-error boundary",
-            ),
+            _decision(),
             expected_row_version=0,
             idempotency_key="decision:non-lock",
         )

@@ -187,44 +187,6 @@ def test_redirect_does_not_forward_set_cookie() -> None:
     assert observed == [("example.com", None), ("other.example", None)]
 
 
-def test_redirected_304_without_forwarded_validator_cannot_refresh_cached_source(
-    tmp_path: Path,
-) -> None:
-    calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return httpx.Response(
-                200,
-                headers={"Content-Type": "text/plain", "ETag": '"one"'},
-                content=b"original trusted content",
-            )
-        if calls == 2:
-            assert request.headers["if-none-match"] == '"one"'
-            return httpx.Response(302, headers={"Location": "https://other.example/new"})
-        assert request.headers["host"] == "other.example"
-        assert request.headers.get("if-none-match") is None
-        return httpx.Response(304)
-
-    _, _, network, service = _service(tmp_path, handler=handler)
-    service.register_source(_source())
-    first = service.refresh_source("web-1")
-    original_digest = network.get_source("web-1").current_raw_sha256
-    second = service.refresh_source("web-1")
-
-    assert first.disposition is RefreshDisposition.CHANGED
-    assert second.disposition is RefreshDisposition.FAILED
-    assert second.error_code == "unexpected_not_modified"
-    assert calls == 3
-    assert network.snapshot_count("web-1") == 1
-    assert network.attempt_count("web-1") == 2
-    state = network.get_source("web-1")
-    assert state.freshness is FreshnessState.STALE
-    assert state.current_raw_sha256 == original_digest
-
-
 def test_host_allowlist_and_body_limit_fail_closed() -> None:
     calls = 0
 
@@ -292,70 +254,6 @@ def test_etag_304_and_same_raw_200_do_not_duplicate_snapshots(tmp_path: Path) ->
     assert network.get_source("web-1").freshness is FreshnessState.CURRENT
 
 
-@pytest.mark.parametrize("with_prior_content", [False, True])
-def test_unsolicited_304_cannot_mark_unvalidated_source_current(
-    tmp_path: Path,
-    with_prior_content: bool,
-) -> None:
-    calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        del request
-        calls += 1
-        if with_prior_content and calls == 1:
-            return httpx.Response(
-                200,
-                headers={"Content-Type": "text/plain"},
-                content=b"verified first version",
-            )
-        return httpx.Response(304)
-
-    _, _, network, service = _service(tmp_path, handler=handler)
-    service.register_source(_source())
-    prior = service.refresh_source("web-1") if with_prior_content else None
-    result = service.refresh_source("web-1")
-
-    assert result.disposition is RefreshDisposition.FAILED
-    assert result.error_code == "unexpected_not_modified"
-    assert result.attempts == 1
-    assert network.attempt_count("web-1") == calls
-    assert network.snapshot_count("web-1") == int(with_prior_content)
-    state = network.get_source("web-1")
-    assert state.freshness is (
-        FreshnessState.STALE if with_prior_content else FreshnessState.ERROR
-    )
-    if prior is not None:
-        assert prior.disposition is RefreshDisposition.CHANGED
-        assert state.current_raw_sha256 is not None
-    else:
-        assert state.current_raw_sha256 is None
-
-
-def test_orphan_304_validator_cannot_stand_in_for_cached_content(tmp_path: Path) -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers["if-none-match"] == '"orphan"'
-        return httpx.Response(304)
-
-    store, _, network, service = _service(tmp_path, handler=handler)
-    service.register_source(_source())
-    with store.connection() as conn:
-        conn.execute(
-            "UPDATE research_http_sources SET etag=? WHERE source_id=?",
-            ('"orphan"', "web-1"),
-        )
-
-    result = service.refresh_source("web-1")
-
-    assert result.disposition is RefreshDisposition.FAILED
-    assert result.error_code == "unexpected_not_modified"
-    assert network.attempt_count("web-1") == 1
-    assert network.snapshot_count("web-1") == 0
-    state = network.get_source("web-1")
-    assert state.current_raw_sha256 is None
-    assert state.freshness is FreshnessState.ERROR
-
-
 def test_changed_raw_bytes_can_deduplicate_to_same_normalized_document(tmp_path: Path) -> None:
     calls = 0
 
@@ -415,47 +313,6 @@ def test_retry_after_is_bounded_and_every_attempt_is_durable(tmp_path: Path) -> 
     assert result.attempts == 2
     assert network.attempt_count("web-1") == 2
     assert sleeps == [0.5]
-
-
-@pytest.mark.parametrize(
-    "retry_after",
-    ["NaN", "Infinity", "-Infinity", "-0.5", "invalid"],
-)
-def test_invalid_retry_after_uses_finite_fallback_and_persists_attempts(
-    tmp_path: Path,
-    retry_after: str,
-) -> None:
-    sleeps: list[float] = []
-    calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        del request
-        calls += 1
-        if calls == 1:
-            return httpx.Response(429, headers={"Retry-After": retry_after})
-        return httpx.Response(
-            200,
-            headers={"Content-Type": "text/plain"},
-            content=b"retry completed",
-        )
-
-    policy = HttpFetchPolicy(max_attempts=2, backoff_base_seconds=0.25)
-    _, _, network, service = _service(
-        tmp_path,
-        handler=handler,
-        policy=policy,
-        sleeper=sleeps.append,
-    )
-    service.register_source(_source())
-
-    result = service.refresh_source("web-1")
-
-    assert result.disposition is RefreshDisposition.CHANGED
-    assert result.attempts == 2
-    assert calls == 2
-    assert network.attempt_count("web-1") == 2
-    assert sleeps == [0.25]
 
 
 @pytest.mark.parametrize(

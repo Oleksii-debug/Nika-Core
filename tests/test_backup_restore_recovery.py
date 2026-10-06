@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from contextlib import closing
 from datetime import UTC, datetime
@@ -12,6 +13,7 @@ import pytest
 from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
+from nika_core.reliability import backup as backup_module
 from nika_core.reliability.backup import (
     BackupVerificationError,
     InterruptedRestoreDisposition,
@@ -336,38 +338,32 @@ def test_process_loss_during_corrupt_replacement_is_recovered_on_restart(
     database.write_bytes(b"destroyed-header" * 257)
     plan = manager.prepare_restore(backup)
 
-    real_publish = SQLiteRecoveryManager._publish_database_no_clobber
+    real_replace = os.replace
 
-    def process_loss_publish(
-        cls: type[SQLiteRecoveryManager],
-        staged: Path,
-        target: Path,
-    ) -> None:
+    def process_loss_replace(source, destination) -> None:
+        source_path = Path(source)
+        destination_path = Path(destination)
         is_stage_install = (
-            ".restore-stage." in staged.name
-            and target.resolve() == database.resolve()
+            ".restore-stage." in source_path.name
+            and destination_path.resolve() == database.resolve()
         )
         if is_stage_install:
             raise _SimulatedProcessLoss()
-        real_publish(staged, target)
+        real_replace(source, destination)
 
-    with monkeypatch.context() as crash_patch:
-        crash_patch.setattr(
-            SQLiteRecoveryManager,
-            "_publish_database_no_clobber",
-            classmethod(process_loss_publish),
+    monkeypatch.setattr(backup_module.os, "replace", process_loss_replace)
+    with pytest.raises(_SimulatedProcessLoss):
+        manager.restore(
+            plan,
+            confirmation_fingerprint=plan.confirmation_fingerprint,
+            allow_replace_unrecoverable_current=True,
         )
-        with pytest.raises(_SimulatedProcessLoss):
-            manager.restore(
-                plan,
-                confirmation_fingerprint=plan.confirmation_fingerprint,
-                allow_replace_unrecoverable_current=True,
-            )
 
     marker_path = manager._restore_marker_path(database)
     assert marker_path.exists()
     assert not database.exists()
 
+    monkeypatch.setattr(backup_module.os, "replace", real_replace)
     restarted = SQLiteRecoveryManager(SQLiteStore(database))
     recovered = restarted.recover_interrupted_restore()
 
@@ -392,37 +388,20 @@ def test_post_copy_validation_failure_rolls_back_safety_backup(
     _set_task_value(database, "task", "must-survive-failed-restore")
     plan = manager.prepare_restore(backup)
 
-    real_validate = SQLiteRecoveryManager._validate_connection
+    real_validate = SQLiteRecoveryManager._validate_database
     fired = False
 
-    def fail_once(
-        cls: type[SQLiteRecoveryManager],
-        connection: sqlite3.Connection,
-        *,
-        require_supported: bool,
-    ) -> int:
+    def fail_once(path: Path, *, require_supported: bool) -> int:
         nonlocal fired
-        main_path: Path | None = None
-        for _seq, name, path in connection.execute("PRAGMA database_list"):
-            if name == "main" and path:
-                main_path = Path(str(path)).resolve()
-                break
-        if (
-            main_path == database.resolve()
-            and require_supported
-            and not fired
-        ):
+        if Path(path).resolve() == database.resolve() and not fired:
             fired = True
             raise BackupVerificationError("injected post-copy validation failure")
-        return real_validate(
-            connection,
-            require_supported=require_supported,
-        )
+        return real_validate(path, require_supported=require_supported)
 
     monkeypatch.setattr(
         SQLiteRecoveryManager,
-        "_validate_connection",
-        classmethod(fail_once),
+        "_validate_database",
+        staticmethod(fail_once),
     )
     with pytest.raises(BackupVerificationError, match="injected post-copy"):
         manager.restore(

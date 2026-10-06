@@ -4,7 +4,6 @@ import socket
 from collections.abc import Callable
 from dataclasses import dataclass
 from ipaddress import ip_address
-from math import isfinite
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -58,16 +57,6 @@ class HttpFetchPolicy:
         )
         if any(value <= 0 for value in positive):
             raise ValueError("HTTP policy limits must be positive")
-        timing = (
-            self.connect_timeout_seconds,
-            self.read_timeout_seconds,
-            self.write_timeout_seconds,
-            self.pool_timeout_seconds,
-            self.backoff_base_seconds,
-            self.max_backoff_seconds,
-        )
-        if any(not isfinite(value) for value in timing):
-            raise ValueError("HTTP policy timing must be finite")
         if self.max_redirects < 0:
             raise ValueError("max_redirects must not be negative")
         if self.backoff_base_seconds < 0:
@@ -155,7 +144,7 @@ def _retry_after(headers: httpx.Headers, *, maximum: float) -> float | None:
         seconds = float(value.strip())
     except ValueError:
         return None
-    if not isfinite(seconds) or seconds < 0:
+    if seconds < 0:
         return None
     return min(seconds, maximum)
 
@@ -378,18 +367,6 @@ class HttpxResearchFetcher:
                         headers.pop("If-Modified-Since", None)
                         continue
                     if status == 304:
-                        if not (
-                            headers.get("If-None-Match")
-                            or headers.get("If-Modified-Since")
-                        ):
-                            return HttpFetchResult(
-                                RefreshDisposition.FAILED,
-                                requested_url,
-                                current_url,
-                                status,
-                                error_code="unexpected_not_modified",
-                                message="HTTP 304 without conditional request headers",
-                            )
                         return HttpFetchResult(
                             RefreshDisposition.NOT_MODIFIED,
                             requested_url,

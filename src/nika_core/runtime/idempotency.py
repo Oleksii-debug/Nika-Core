@@ -189,83 +189,6 @@ class IdempotencyLedger:
             (operation_key,),
         )
 
-    def complete_pending_if_matches(
-        self,
-        *,
-        operation_key: str,
-        task_id: str,
-        operation_type: str,
-        input_fingerprint: str,
-        created_at: str,
-        result: Mapping[str, Any] | None = None,
-    ) -> IdempotencyRecord:
-        """Complete only the exact still-pending reservation created by the caller."""
-        with self._store.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            self._require_matching_pending_with_connection(
-                conn,
-                operation_key=operation_key,
-                task_id=task_id,
-                operation_type=operation_type,
-                input_fingerprint=input_fingerprint,
-                created_at=created_at,
-            )
-            return self._set_status_with_connection(
-                conn,
-                operation_key,
-                IdempotencyStatus.COMPLETED,
-                result,
-            )
-
-    def mark_pending_uncertain_if_matches(
-        self,
-        *,
-        operation_key: str,
-        task_id: str,
-        operation_type: str,
-        input_fingerprint: str,
-        created_at: str,
-    ) -> IdempotencyRecord:
-        """Mark uncertainty only for the exact still-pending reservation."""
-        with self._store.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            self._require_matching_pending_with_connection(
-                conn,
-                operation_key=operation_key,
-                task_id=task_id,
-                operation_type=operation_type,
-                input_fingerprint=input_fingerprint,
-                created_at=created_at,
-            )
-            return self._set_status_with_connection(
-                conn,
-                operation_key,
-                IdempotencyStatus.UNCERTAIN,
-                None,
-            )
-
-    def release_pending_if_matches(
-        self,
-        *,
-        operation_key: str,
-        task_id: str,
-        operation_type: str,
-        input_fingerprint: str,
-        created_at: str,
-    ) -> None:
-        """Delete only the exact still-pending reservation owned by the caller."""
-        with self._store.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            self._require_matching_pending_with_connection(
-                conn,
-                operation_key=operation_key,
-                task_id=task_id,
-                operation_type=operation_type,
-                input_fingerprint=input_fingerprint,
-                created_at=created_at,
-            )
-            self.release_pending_with_connection(conn, operation_key)
-
     def reconcile_completed(
         self,
         operation_key: str,
@@ -346,33 +269,6 @@ class IdempotencyLedger:
                 ),
             ).fetchall()
         return tuple(sorted(row["operation_key"] for row in rows))
-
-    @classmethod
-    def _require_matching_pending_with_connection(
-        cls,
-        conn: sqlite3.Connection,
-        *,
-        operation_key: str,
-        task_id: str,
-        operation_type: str,
-        input_fingerprint: str,
-        created_at: str,
-    ) -> IdempotencyRecord:
-        current = cls._require_with_connection(conn, operation_key)
-        if (
-            current.task_id != task_id
-            or current.operation_type != operation_type
-            or current.input_fingerprint != input_fingerprint
-            or current.created_at != created_at
-        ):
-            raise IdempotencyConflictError(
-                "operation reservation identity changed before durable finalization"
-            )
-        if current.status != IdempotencyStatus.PENDING:
-            raise IdempotencyConflictError(
-                "only the exact pending reservation may be finalized"
-            )
-        return current
 
     def _set_status(
         self,

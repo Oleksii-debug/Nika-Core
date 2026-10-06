@@ -11,23 +11,15 @@ from nika_core.intelligence.contracts import (
     PlanStep,
     WorldState,
 )
-from nika_core.intelligence.plan_provenance import seal_plan_provenance
 
 
 class UnifiedPlanningAdapter:
     """Adapter from Nika boolean-fact planning contracts to Unified Planning."""
 
-    planner_id = "unified-planning"
-    planner_version = "nika-adapter/v1"
-
     def __init__(self, *, engine_name: str = "aries") -> None:
         if not engine_name.strip():
             raise ValueError("engine_name must not be empty")
         self._engine_name = engine_name
-
-    @property
-    def planner_strategy(self) -> str:
-        return f"oneshot:{self._engine_name}"
 
     def plan(
         self,
@@ -37,13 +29,7 @@ class UnifiedPlanningAdapter:
         actions: tuple[DeterministicAction, ...],
     ) -> DeterministicPlan:
         if self._goal_satisfied(state, goal):
-            return seal_plan_provenance(
-                DeterministicPlan(steps=()),
-                state=state,
-                goal=goal,
-                actions=actions,
-                planner=self,
-            )
+            return DeterministicPlan(steps=())
 
         unreachable_fact = self._obviously_unreachable_fact(state, goal, actions)
         if unreachable_fact is not None:
@@ -142,17 +128,10 @@ class UnifiedPlanningAdapter:
                     code=DeterministicErrorCode.PLANNER_FAILURE,
                 )
             planned_actions.append(definition)
-        plan = self._validated_plan(
+        return self._validated_plan(
             state=state,
             goal=goal,
             planned_actions=tuple(planned_actions),
-        )
-        return seal_plan_provenance(
-            plan,
-            state=state,
-            goal=goal,
-            actions=actions,
-            planner=self,
         )
 
     @classmethod

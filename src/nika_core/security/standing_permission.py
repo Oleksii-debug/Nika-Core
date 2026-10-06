@@ -4,8 +4,7 @@ import hashlib
 import json
 import re
 import sqlite3
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -64,8 +63,6 @@ class StandingPermissionBinding:
     network_host: str | None
 
     def __post_init__(self) -> None:
-        if type(self.context) is not PermissionContext:
-            raise TypeError("binding context must be an exact PermissionContext value")
         _permission_id(self.permission_id)
         _identity(self.subject_id, "subject_id")
         _identity(self.target, "target")
@@ -89,10 +86,6 @@ class StandingPermissionScope:
     expires_at: datetime
 
     def __post_init__(self) -> None:
-        if type(self.context) is not PermissionContext:
-            raise TypeError("scope context must be an exact PermissionContext value")
-        if type(self.risk_ceiling) is not ToolRisk:
-            raise TypeError("risk ceiling must be an exact ToolRisk value")
         _identity(self.subject_id, "subject_id")
         _action(self.action_class)
         if self.risk_ceiling is ToolRisk.HIGH_IMPACT:
@@ -108,14 +101,6 @@ class StandingPermissionScope:
         object.__setattr__(self, "expires_at", expires_at)
 
 
-def standing_permission_scope_fingerprint(scope: StandingPermissionScope) -> str:
-    """Return the canonical fingerprint for one exact standing-permission scope."""
-
-    if type(scope) is not StandingPermissionScope:
-        raise TypeError("scope fingerprint requires an exact StandingPermissionScope value")
-    return _material(_snapshot_scope(scope)).fingerprint
-
-
 @dataclass(frozen=True, slots=True)
 class StandingPermissionUse:
     subject_id: str
@@ -124,10 +109,6 @@ class StandingPermissionUse:
     resource_id: str
 
     def __post_init__(self) -> None:
-        if type(self.context) is not PermissionContext:
-            raise TypeError("use context must be an exact PermissionContext value")
-        if type(self.intent) is not ActionIntent:
-            raise TypeError("standing permission intent must be an exact ActionIntent value")
         _identity(self.subject_id, "subject_id")
         _action(self.intent.tool_id)
         _identity(self.intent.target, "target")
@@ -182,54 +163,6 @@ class StoredStandingPermission:
     _scope: _ScopeRecord
 
 
-class _StandingPermissionCursor:
-    """Cursor results without an escape hatch to the owning connection."""
-
-    __slots__ = ("__cursor",)
-
-    def __init__(self, cursor: sqlite3.Cursor) -> None:
-        self.__cursor = cursor
-
-    def fetchone(self) -> sqlite3.Row | None:
-        return self.__cursor.fetchone()
-
-    def fetchall(self) -> list[sqlite3.Row]:
-        return self.__cursor.fetchall()
-
-
-class _StandingPermissionTransaction:
-    """Execute-only view of a store-owned authority transaction."""
-
-    __slots__ = ("__connection",)
-
-    def __init__(self, connection: sqlite3.Connection) -> None:
-        self.__connection = connection
-
-    @staticmethod
-    def _authorizer(
-        action_code: int,
-        _arg1: str | None,
-        _arg2: str | None,
-        _database: str | None,
-        _trigger: str | None,
-    ) -> int:
-        if action_code == sqlite3.SQLITE_TRANSACTION:
-            return sqlite3.SQLITE_DENY
-        return sqlite3.SQLITE_OK
-
-    def execute(
-        self,
-        sql: str,
-        parameters: tuple[object, ...] = (),
-    ) -> _StandingPermissionCursor:
-        self.__connection.set_authorizer(self._authorizer)
-        try:
-            cursor = self.__connection.execute(sql, parameters)
-        finally:
-            self.__connection.set_authorizer(None)
-        return _StandingPermissionCursor(cursor)
-
-
 class StandingPermissionStore:
     """Durable bounded authority; not a replacement for mandatory per-action approval."""
 
@@ -243,44 +176,17 @@ class StandingPermissionStore:
                 "CREATE TABLE IF NOT EXISTS standing_permission_schema_migrations ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
-            self._validate_schema_shape(conn, require_permissions=False)
             row = conn.execute(
-                "SELECT MAX(version) AS version, "
-                "typeof(MAX(version)) AS version_type "
-                "FROM standing_permission_schema_migrations"
+                "SELECT MAX(version) AS version FROM standing_permission_schema_migrations"
             ).fetchone()
-            raw_version = row["version"]
-            if raw_version is None:
-                if row["version_type"] != "null":
-                    raise StandingPermissionIntegrityError(
-                        "standing permission schema version has invalid storage type"
-                    )
-                version = 0
-            else:
-                if row["version_type"] != "integer" or type(raw_version) is not int:
-                    raise StandingPermissionIntegrityError(
-                        "standing permission schema version has invalid storage type"
-                    )
-                version = raw_version
+            version = int(row["version"] or 0)
             if version > 1:
                 raise RuntimeError(
                     f"standing permission schema {version} is newer than supported 1"
                 )
-            if version < 0:
-                raise StandingPermissionIntegrityError(
-                    "standing permission schema version is invalid"
-                )
             if version == 0:
-                preexisting_permissions = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-                    ("standing_permissions",),
-                ).fetchone()
-                if preexisting_permissions is not None:
-                    raise StandingPermissionIntegrityError(
-                        "standing permission table exists without schema version"
-                    )
                 conn.execute(
-                    """CREATE TABLE standing_permissions (
+                    """CREATE TABLE IF NOT EXISTS standing_permissions (
                         permission_id TEXT PRIMARY KEY,
                         parent_permission_id TEXT,
                         scope_json TEXT NOT NULL,
@@ -299,97 +205,6 @@ class StandingPermissionStore:
                     "VALUES (1, ?)",
                     (datetime.now(UTC).isoformat(),),
                 )
-            self._validate_schema_shape(conn)
-            self._validate_migration_history(conn)
-
-    @staticmethod
-    def _validate_migration_history(conn: sqlite3.Connection) -> None:
-        rows = conn.execute(
-            "SELECT version, typeof(version) AS version_type, "
-            "applied_at, typeof(applied_at) AS applied_at_type "
-            "FROM standing_permission_schema_migrations ORDER BY version"
-        ).fetchall()
-        if (
-            len(rows) != 1
-            or rows[0]["version_type"] != "integer"
-            or rows[0]["version"] != 1
-        ):
-            raise StandingPermissionIntegrityError(
-                "standing permission migration history is invalid"
-            )
-        applied_at = rows[0]["applied_at"]
-        if (
-            rows[0]["applied_at_type"] != "text"
-            or not _is_canonical_utc_timestamp(applied_at)
-        ):
-            raise StandingPermissionIntegrityError(
-                "standing permission migration timestamp is invalid"
-            )
-
-    @staticmethod
-    def _validate_schema_shape(
-        conn: sqlite3.Connection,
-        *,
-        require_permissions: bool = True,
-    ) -> None:
-        expected = {
-            "standing_permission_schema_migrations": (
-                ("version", "INTEGER", 0, 1),
-                ("applied_at", "TEXT", 1, 0),
-            ),
-        }
-        if require_permissions:
-            expected["standing_permissions"] = (
-                ("permission_id", "TEXT", 0, 1),
-                ("parent_permission_id", "TEXT", 0, 0),
-                ("scope_json", "TEXT", 1, 0),
-                ("scope_fingerprint", "TEXT", 1, 0),
-                ("revoked_at", "TEXT", 0, 0),
-            )
-        for table_name, expected_columns in expected.items():
-            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-            actual = tuple(
-                (
-                    row["name"],
-                    str(row["type"]).upper(),
-                    int(row["notnull"]),
-                    int(row["pk"]),
-                )
-                for row in rows
-            )
-            if actual != expected_columns:
-                raise StandingPermissionIntegrityError(
-                    f"standing permission schema shape is invalid for {table_name}"
-                )
-        if require_permissions:
-            foreign_keys = conn.execute(
-                "PRAGMA foreign_key_list(standing_permissions)"
-            ).fetchall()
-            actual_foreign_keys = tuple(
-                (
-                    row["table"],
-                    row["from"],
-                    row["to"],
-                    row["on_update"],
-                    row["on_delete"],
-                    row["match"],
-                )
-                for row in foreign_keys
-            )
-            expected_foreign_keys = (
-                (
-                    "standing_permissions",
-                    "parent_permission_id",
-                    "permission_id",
-                    "NO ACTION",
-                    "NO ACTION",
-                    "NONE",
-                ),
-            )
-            if actual_foreign_keys != expected_foreign_keys:
-                raise StandingPermissionIntegrityError(
-                    "standing permission parent authority foreign key is invalid"
-                )
 
     def grant(
         self,
@@ -398,70 +213,25 @@ class StandingPermissionStore:
         scope: StandingPermissionScope,
     ) -> StoredStandingPermission:
         """Persist a root scope already granted through canonical user authority."""
-        material = self._grant_material(permission_id=permission_id, scope=scope)
-        with self._store.connection() as conn:
-            return self._grant_with_connection(
-                conn,
-                permission_id=permission_id,
-                material=material,
-            )
-
-    @contextmanager
-    def grant_transaction(
-        self,
-        *,
-        permission_id: str,
-        scope: StandingPermissionScope,
-    ) -> Iterator[tuple[_StandingPermissionTransaction, StoredStandingPermission]]:
-        """Grant and expose one execute-only serialized dependent-write transaction.
-
-        Any exception raised by the caller while the context is active rolls back both the
-        standing-permission grant/audit and the dependent write. The store retains transaction
-        control; callers cannot commit, roll back or close the underlying SQLite connection.
-        """
-
-        material = self._grant_material(permission_id=permission_id, scope=scope)
-        with self._store.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            record = self._grant_with_connection(
-                conn,
-                permission_id=permission_id,
-                material=material,
-            )
-            yield _StandingPermissionTransaction(conn), record
-
-    @staticmethod
-    def _grant_material(
-        *,
-        permission_id: str,
-        scope: StandingPermissionScope,
-    ) -> _ScopeRecord:
         _permission_id(permission_id)
-        return _material(_snapshot_scope(scope))
-
-    def _grant_with_connection(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        permission_id: str,
-        material: _ScopeRecord,
-    ) -> StoredStandingPermission:
-        existing = self._get(conn, permission_id)
-        if existing is not None:
-            return self._same_authority_or_conflict(
-                existing,
+        material = _material(scope)
+        with self._store.connection() as conn:
+            existing = self._get(conn, permission_id)
+            if existing is not None:
+                return self._same_authority_or_conflict(
+                    existing,
+                    parent_permission_id=None,
+                    scope_fingerprint=material.fingerprint,
+                )
+            record, created = self._insert(conn, permission_id, None, material)
+            record = self._same_authority_or_conflict(
+                record,
                 parent_permission_id=None,
                 scope_fingerprint=material.fingerprint,
             )
-        record, created = self._insert(conn, permission_id, None, material)
-        record = self._same_authority_or_conflict(
-            record,
-            parent_permission_id=None,
-            scope_fingerprint=material.fingerprint,
-        )
-        if created:
-            self._audit(conn, "standing_permission.granted", record)
-        return record
+            if created:
+                self._audit(conn, "standing_permission.granted", record)
+            return record
 
     def delegate(
         self,
@@ -474,10 +244,9 @@ class StandingPermissionStore:
         _permission_id(parent_permission_id)
         _permission_id(permission_id)
         _identity(delegated_by_subject_id, "delegated_by_subject_id")
-        child_scope = _snapshot_scope(scope)
         if parent_permission_id == permission_id:
             raise PermissionError("permission cannot delegate to itself")
-        child = _material(child_scope)
+        child = _material(scope)
         with self._store.connection() as conn:
             existing = self._get(conn, permission_id)
             if existing is not None:
@@ -487,7 +256,7 @@ class StandingPermissionStore:
                     scope_fingerprint=child.fingerprint,
                 )
             parent = self._require(conn, parent_permission_id)
-            self._active(parent, child_scope.granted_at)
+            self._active(parent, scope.granted_at)
             if _hash(delegated_by_subject_id) != parent._scope.subject_hash:
                 raise PermissionError("delegator is not the parent permission subject")
             self._child_subset(parent._scope, child)
@@ -511,51 +280,18 @@ class StandingPermissionStore:
         instant = _utc(revoked_at or datetime.now(UTC), "revoked_at")
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            return self._revoke_with_connection(
-                conn,
-                permission_id=permission_id,
-                instant=instant,
+            current = self._require(conn, permission_id)
+            if current.revoked_at is not None:
+                return current
+            if instant < current.granted_at:
+                raise ValueError("revocation time cannot precede grant time")
+            conn.execute(
+                "UPDATE standing_permissions SET revoked_at = ? WHERE permission_id = ?",
+                (instant.isoformat(), permission_id),
             )
-
-    @contextmanager
-    def revoke_transaction(
-        self,
-        permission_id: str,
-        *,
-        revoked_at: datetime | None = None,
-    ) -> Iterator[tuple[_StandingPermissionTransaction, StoredStandingPermission]]:
-        """Revoke while a dependent binding precondition shares the same write lock."""
-
-        _permission_id(permission_id)
-        instant = _utc(revoked_at or datetime.now(UTC), "revoked_at")
-        with self._store.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            revoked = self._revoke_with_connection(
-                conn,
-                permission_id=permission_id,
-                instant=instant,
-            )
-            yield _StandingPermissionTransaction(conn), revoked
-
-    def _revoke_with_connection(
-        self,
-        conn: sqlite3.Connection,
-        *,
-        permission_id: str,
-        instant: datetime,
-    ) -> StoredStandingPermission:
-        current = self._require(conn, permission_id)
-        if current.revoked_at is not None:
-            return current
-        if instant < current.granted_at:
-            raise ValueError("revocation time cannot precede grant time")
-        conn.execute(
-            "UPDATE standing_permissions SET revoked_at = ? WHERE permission_id = ?",
-            (instant.isoformat(), permission_id),
-        )
-        revoked = self._require(conn, permission_id)
-        self._audit(conn, "standing_permission.revoked", revoked)
-        return revoked
+            revoked = self._require(conn, permission_id)
+            self._audit(conn, "standing_permission.revoked", revoked)
+            return revoked
 
     def authorize(
         self,
@@ -565,8 +301,6 @@ class StandingPermissionStore:
         now: datetime | None = None,
     ) -> StoredStandingPermission:
         _permission_id(permission_id)
-        if type(use) is not StandingPermissionUse:
-            raise TypeError("authorization use must be an exact StandingPermissionUse value")
         instant = _utc(now or datetime.now(UTC), "now")
         try:
             with self._store.connection() as conn:
@@ -700,73 +434,27 @@ class StandingPermissionStore:
         permission_id: str,
     ) -> StoredStandingPermission | None:
         row = conn.execute(
-            "SELECT permission_id, typeof(permission_id) AS permission_id_type, "
-            "parent_permission_id, typeof(parent_permission_id) AS parent_permission_id_type, "
-            "scope_json, typeof(scope_json) AS scope_json_type, "
-            "scope_fingerprint, typeof(scope_fingerprint) AS scope_fingerprint_type, "
-            "revoked_at, typeof(revoked_at) AS revoked_at_type "
+            "SELECT permission_id, parent_permission_id, scope_json, scope_fingerprint, revoked_at "
             "FROM standing_permissions WHERE permission_id = ?",
             (permission_id,),
         ).fetchone()
         if row is None:
             return None
-        if (
-            row["permission_id_type"] != "text"
-            or row["scope_json_type"] != "text"
-            or row["scope_fingerprint_type"] != "text"
-            or (
-                row["parent_permission_id"] is None
-                and row["parent_permission_id_type"] != "null"
-            )
-            or (
-                row["parent_permission_id"] is not None
-                and row["parent_permission_id_type"] != "text"
-            )
-            or (row["revoked_at"] is None and row["revoked_at_type"] != "null")
-            or (row["revoked_at"] is not None and row["revoked_at_type"] != "text")
-        ):
-            raise StandingPermissionIntegrityError(
-                "standing permission row has invalid storage type"
-            )
         try:
-            stored_permission_id = row["permission_id"]
-            _permission_id(stored_permission_id)
-            if stored_permission_id != permission_id:
-                raise StandingPermissionIntegrityError(
-                    "standing permission row identity mismatch"
-                )
-            parent_permission_id = row["parent_permission_id"]
-            if parent_permission_id is not None:
-                _permission_id(parent_permission_id)
             scope = _scope_from_json(row["scope_json"])
-            fingerprint = row["scope_fingerprint"]
-            if not _is_hash(fingerprint):
-                raise StandingPermissionIntegrityError(
-                    "standing permission scope fingerprint is malformed"
-                )
-            revoked_raw = row["revoked_at"]
+            fingerprint = str(row["scope_fingerprint"])
             revoked_at = (
                 None
-                if revoked_raw is None
-                else _utc(datetime.fromisoformat(revoked_raw), "revoked_at")
+                if row["revoked_at"] is None
+                else _utc(datetime.fromisoformat(row["revoked_at"]), "revoked_at")
             )
-            if revoked_at is not None and revoked_at.isoformat() != revoked_raw:
-                raise StandingPermissionIntegrityError(
-                    "standing permission revocation time is non-canonical"
-                )
-        except StandingPermissionIntegrityError:
-            raise
         except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
             raise StandingPermissionIntegrityError("standing permission row is malformed") from exc
         if fingerprint != scope.fingerprint:
             raise StandingPermissionIntegrityError("standing permission scope fingerprint mismatch")
-        if revoked_at is not None and revoked_at < scope.granted_at:
-            raise StandingPermissionIntegrityError(
-                "standing permission revocation predates grant"
-            )
         return StoredStandingPermission(
-            permission_id=stored_permission_id,
-            parent_permission_id=parent_permission_id,
+            permission_id=row["permission_id"],
+            parent_permission_id=row["parent_permission_id"],
             scope_fingerprint=fingerprint,
             granted_at=scope.granted_at,
             expires_at=scope.expires_at,
@@ -842,27 +530,8 @@ class StandingPermissionPolicy:
         *,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if type(binding) is not StandingPermissionBinding:
-            raise TypeError(
-                "standing policy binding must be an exact StandingPermissionBinding value"
-            )
-        context = binding.context
-        if type(context) is not PermissionContext:
-            raise TypeError("binding context must be an exact PermissionContext value")
-        binding_snapshot = StandingPermissionBinding(
-            permission_id=binding.permission_id,
-            subject_id=binding.subject_id,
-            context=PermissionContext(
-                user_id=context.user_id,
-                project_id=context.project_id,
-                task_id=context.task_id,
-            ),
-            target=binding.target,
-            resource_id=binding.resource_id,
-            network_host=binding.network_host,
-        )
         self._permissions = permissions
-        self._binding = binding_snapshot
+        self._binding = binding
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def __call__(self, spec: ToolSpec, call: ToolCall) -> ToolAuthorization:
@@ -934,32 +603,6 @@ class StandingPermissionPolicy:
         )
 
 
-def _snapshot_context(value: object) -> PermissionContext:
-    if type(value) is not PermissionContext:
-        raise TypeError("scope context must be an exact PermissionContext value")
-    return PermissionContext(
-        user_id=value.user_id,
-        project_id=value.project_id,
-        task_id=value.task_id,
-    )
-
-
-def _snapshot_scope(value: object) -> StandingPermissionScope:
-    if type(value) is not StandingPermissionScope:
-        raise TypeError("scope must be an exact StandingPermissionScope value")
-    return StandingPermissionScope(
-        subject_id=value.subject_id,
-        context=_snapshot_context(value.context),
-        action_class=value.action_class,
-        targets=value.targets,
-        sites=value.sites,
-        resources=value.resources,
-        risk_ceiling=value.risk_ceiling,
-        granted_at=value.granted_at,
-        expires_at=value.expires_at,
-    )
-
-
 def _material(scope: StandingPermissionScope) -> _ScopeRecord:
     return _ScopeRecord(
         subject_hash=_hash(scope.subject_id),
@@ -977,52 +620,23 @@ def _material(scope: StandingPermissionScope) -> _ScopeRecord:
 
 
 def _scope_from_json(payload: str) -> _ScopeRecord:
-    if type(payload) is not str:
-        raise StandingPermissionIntegrityError(
-            "standing permission scope must use text storage"
-        )
     value = json.loads(payload)
-    if type(value) is not dict:
+    if not isinstance(value, dict):
         raise StandingPermissionIntegrityError("standing permission scope is malformed")
-    expected_keys = {
-        "action_class",
-        "expires_at",
-        "granted_at",
-        "project_hash",
-        "resource_hashes",
-        "risk_ceiling",
-        "site_hashes",
-        "subject_hash",
-        "target_hashes",
-        "task_hash",
-        "user_hash",
-    }
-    if set(value) != expected_keys:
-        raise StandingPermissionIntegrityError(
-            "standing permission scope has unexpected durable fields"
-        )
     try:
         scope = _ScopeRecord(
-            subject_hash=_json_text(value["subject_hash"], "subject_hash"),
-            user_hash=_json_text(value["user_hash"], "user_hash"),
-            project_hash=_json_text(value["project_hash"], "project_hash"),
-            task_hash=_json_text(value["task_hash"], "task_hash"),
-            action_class=_json_text(value["action_class"], "action_class"),
-            risk_ceiling=ToolRisk(_json_text(value["risk_ceiling"], "risk_ceiling")),
-            target_hashes=_json_text_tuple(value["target_hashes"], "target_hashes"),
-            site_hashes=_json_text_tuple(value["site_hashes"], "site_hashes"),
-            resource_hashes=_json_text_tuple(value["resource_hashes"], "resource_hashes"),
-            granted_at=_utc(
-                datetime.fromisoformat(_json_text(value["granted_at"], "granted_at")),
-                "granted_at",
-            ),
-            expires_at=_utc(
-                datetime.fromisoformat(_json_text(value["expires_at"], "expires_at")),
-                "expires_at",
-            ),
+            subject_hash=str(value["subject_hash"]),
+            user_hash=str(value["user_hash"]),
+            project_hash=str(value["project_hash"]),
+            task_hash=str(value["task_hash"]),
+            action_class=str(value["action_class"]),
+            risk_ceiling=ToolRisk(value["risk_ceiling"]),
+            target_hashes=tuple(value["target_hashes"]),
+            site_hashes=tuple(value["site_hashes"]),
+            resource_hashes=tuple(value["resource_hashes"]),
+            granted_at=_utc(datetime.fromisoformat(value["granted_at"]), "granted_at"),
+            expires_at=_utc(datetime.fromisoformat(value["expires_at"]), "expires_at"),
         )
-    except StandingPermissionIntegrityError:
-        raise
     except (TypeError, ValueError, KeyError) as exc:
         raise StandingPermissionIntegrityError("standing permission scope is malformed") from exc
     if not all(_is_hash(item) for item in _scope_hashes(scope)):
@@ -1037,27 +651,7 @@ def _scope_from_json(payload: str) -> _ScopeRecord:
     _action(scope.action_class)
     if scope.risk_ceiling is ToolRisk.HIGH_IMPACT or scope.expires_at <= scope.granted_at:
         raise StandingPermissionIntegrityError("standing permission scope violates policy")
-    if _json(scope.payload) != payload:
-        raise StandingPermissionIntegrityError(
-            "standing permission scope serialization is non-canonical"
-        )
     return scope
-
-
-def _json_text(value: object, label: str) -> str:
-    if type(value) is not str:
-        raise StandingPermissionIntegrityError(
-            f"standing permission {label} must be durable text"
-        )
-    return value
-
-
-def _json_text_tuple(value: object, label: str) -> tuple[str, ...]:
-    if type(value) is not list or any(type(item) is not str for item in value):
-        raise StandingPermissionIntegrityError(
-            f"standing permission {label} must be a durable text array"
-        )
-    return tuple(value)
 
 
 def _scope_hashes(scope: _ScopeRecord) -> tuple[str, ...]:
@@ -1074,7 +668,7 @@ def _scope_hashes(scope: _ScopeRecord) -> tuple[str, ...]:
 
 def _permission_id(value: str) -> None:
     if (
-        type(value) is not str
+        not isinstance(value, str)
         or _SAFE_ID_RE.fullmatch(value) is None
         or value.casefold() in _BROAD
     ):
@@ -1082,21 +676,21 @@ def _permission_id(value: str) -> None:
 
 
 def _action(value: str) -> None:
-    if type(value) is not str or _ACTION_RE.fullmatch(value) is None:
+    if not isinstance(value, str) or _ACTION_RE.fullmatch(value) is None:
         raise ValueError("action class must be one exact canonical class")
     if value.casefold() in _BROAD:
         raise ValueError("action class cannot contain broad or wildcard authority")
 
 
 def _identity(value: str, label: str) -> None:
-    if type(value) is not str or not value or value != value.strip() or len(value) > 512:
+    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 512:
         raise ValueError(f"{label} must be a non-empty canonical identity")
     if value.casefold() in _BROAD or "*" in value or any(ord(char) < 32 for char in value):
         raise ValueError(f"{label} cannot contain broad or wildcard authority")
 
 
 def _ids(values: tuple[str, ...], label: str, *, required: bool) -> tuple[str, ...]:
-    if type(values) is not tuple or (required and not values):
+    if not isinstance(values, tuple) or (required and not values):
         raise ValueError(f"{label} scope must be an explicit non-empty tuple")
     for value in values:
         _identity(value, label)
@@ -1112,29 +706,15 @@ def _site(value: str) -> str:
 
 
 def _sites(values: tuple[str, ...]) -> tuple[str, ...]:
-    if type(values) is not tuple:
+    if not isinstance(values, tuple):
         raise TypeError("site scope must be an explicit tuple")
     return tuple(sorted({_site(value) for value in values}))
 
 
 def _utc(value: datetime, label: str) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label} must be timezone-aware")
     return value.astimezone(UTC)
-
-
-def _is_canonical_utc_timestamp(value: object) -> bool:
-    if type(value) is not str:
-        return False
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return False
-    return (
-        parsed.tzinfo is not None
-        and parsed.utcoffset() is not None
-        and parsed.astimezone(UTC).isoformat() == value
-    )
 
 
 def _hash(value: str) -> str:

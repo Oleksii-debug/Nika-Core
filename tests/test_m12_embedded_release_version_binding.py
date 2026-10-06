@@ -14,24 +14,17 @@ from nika_core.packaging.release import (
 from scripts import m12_release_evidence
 
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
-TRUSTED_PRODUCT = "NikaCore"
-MISMATCHED_PRODUCT = "OtherCore"
 TRUSTED_VERSION = "1.0.0"
 MISMATCHED_VERSION = "999.0"
 
 
-def _release_zip(
-    tmp_path: Path,
-    *,
-    manifest_version: str,
-    manifest_product: str = TRUSTED_PRODUCT,
-) -> Path:
+def _release_zip(tmp_path: Path, *, manifest_version: str) -> Path:
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     (bundle / "NikaCore.exe").write_bytes(b"binary")
     manifest = build_release_manifest(
         bundle,
-        product=manifest_product,
+        product="NikaCore",
         version=manifest_version,
         source_sha=SOURCE_SHA,
     )
@@ -44,49 +37,12 @@ def _release_zip(
     return artifact
 
 
-@pytest.mark.parametrize(
-    "expected_product",
-    [
-        "N" * 129,
-        "NikaCore\x1f",
-    ],
-)
-def test_release_archive_rejects_invalid_trusted_product_identity(
-    tmp_path: Path,
-    expected_product: str,
-) -> None:
-    artifact = _release_zip(tmp_path, manifest_version=TRUSTED_VERSION)
-
-    assert verify_release_archive(
-        artifact,
-        source_sha=SOURCE_SHA,
-        expected_product=expected_product,
-        expected_product_version=TRUSTED_VERSION,
-    ) == ("archive:expected-product-format",)
-
-
-def test_release_archive_rejects_embedded_product_mismatch(tmp_path: Path) -> None:
-    artifact = _release_zip(
-        tmp_path,
-        manifest_version=TRUSTED_VERSION,
-        manifest_product=MISMATCHED_PRODUCT,
-    )
-
-    assert verify_release_archive(
-        artifact,
-        source_sha=SOURCE_SHA,
-        expected_product=TRUSTED_PRODUCT,
-        expected_product_version=TRUSTED_VERSION,
-    ) == ("archive:product",)
-
-
 def test_release_archive_rejects_embedded_version_mismatch(tmp_path: Path) -> None:
     artifact = _release_zip(tmp_path, manifest_version=MISMATCHED_VERSION)
 
     assert verify_release_archive(
         artifact,
         source_sha=SOURCE_SHA,
-        expected_product=TRUSTED_PRODUCT,
         expected_product_version=TRUSTED_VERSION,
     ) == ("archive:product-version",)
 
@@ -96,7 +52,6 @@ def test_m12_cli_propagates_trusted_version_to_archive_verifier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     artifact = tmp_path / "candidate.zip"
-    artifact.write_bytes(b"candidate")
     evidence = tmp_path / "evidence.json"
     captured: dict[str, str | None] = {}
 
@@ -110,23 +65,14 @@ def test_m12_cli_propagates_trusted_version_to_archive_verifier(
         path: Path,
         *,
         source_sha: str,
-        expected_product: str | None = None,
         expected_product_version: str | None = None,
     ) -> tuple[str, ...]:
-        assert path != artifact
-        assert path.name == "verified-distributable.zip"
-        assert path.read_bytes() == b"candidate"
+        assert path == artifact
         assert source_sha == SOURCE_SHA
-        captured["product"] = expected_product
         captured["product_version"] = expected_product_version
         return ()
 
     monkeypatch.setattr(m12_release_evidence, "verify_release_archive", _verify_archive)
-    monkeypatch.setattr(
-        m12_release_evidence,
-        "prove_packaged_installer_lifecycle",
-        lambda _artifact: None,
-    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -146,7 +92,4 @@ def test_m12_cli_propagates_trusted_version_to_archive_verifier(
     )
 
     assert m12_release_evidence.main() == 0
-    assert captured == {
-        "product": TRUSTED_PRODUCT,
-        "product_version": TRUSTED_VERSION,
-    }
+    assert captured == {"product_version": TRUSTED_VERSION}

@@ -215,10 +215,6 @@ def _compiler() -> AgentCompiler:
             ToolSpec("web.read", "Read web source", ToolRisk.READ_ONLY),
         ),
         model_profiles={"test"},
-        permission_catalog={
-            "file.read": {"workspace"},
-            "web.read": {"example.com"},
-        },
     )
 
 

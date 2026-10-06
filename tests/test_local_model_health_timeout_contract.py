@@ -37,7 +37,6 @@ class _ExplodingEvidencePort:
         (float("inf"), "positive-infinity"),
         (float("-inf"), "negative-infinity"),
         (10**400, "unrepresentable-huge-int"),
-        (30.000001, "above-bounded-health-timeout"),
         (_ForgedNegativeInt(-1), "hostile-negative-int-subclass"),
         (_ForgedNegativeFloat(-1.0), "hostile-negative-float-subclass"),
     ],

@@ -52,9 +52,8 @@ def _validate_windows_component(component: str, *, label: str) -> None:
 
 
 def _normalize_workspace_relative(value: str, *, label: str) -> PurePosixPath:
-    if not isinstance(value, str) or not value or not value.strip():
+    if not value or not value.strip():
         raise ValueError(f"{label} must stay inside a workspace-relative scope")
-    _require_utf8(value, label=label)
     windows_path = PureWindowsPath(value)
     normalized = PurePosixPath(value.replace("\\", "/"))
     if (
@@ -74,7 +73,6 @@ def _normalize_workspace_relative(value: str, *, label: str) -> PurePosixPath:
 
 def _executable_scope(value: str) -> tuple[str, str, str]:
     """Return (scope kind, normalized identity, case-folded basename)."""
-    _require_utf8(value, label="process executable")
     stripped = value.strip()
     if not stripped:
         raise ValueError("process executable must not be empty")
@@ -119,22 +117,12 @@ def _executable_scope(value: str) -> tuple[str, str, str]:
     return ("posix-path", posix_path.as_posix(), basename.casefold())
 
 
-def _require_utf8(value: str, *, label: str) -> str:
-    if not isinstance(value, str):
-        raise ValueError(f"{label} must be text")  # noqa: TRY004
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise ValueError(f"{label} must be valid UTF-8 text") from exc
-    return value
-
-
 def _normalize_text(value: str, *, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must not be empty")
     if value != value.strip():
         raise ValueError(f"{label} must not contain surrounding whitespace")
-    return _require_utf8(unicodedata.normalize("NFC", value), label=label)
+    return unicodedata.normalize("NFC", value)
 
 
 def _normalize_optional_text(value: str | None, *, label: str) -> str | None:
@@ -152,65 +140,18 @@ def _normalize_host(value: str | None, *, label: str) -> str | None:
     return normalized
 
 
-# Admission bounds protect approval hashing and the Windows task/effect path from
-# cyclic, deeply nested or unbounded tool-provided JSON carriers.
-_MAX_ARGUMENT_DEPTH = 64
-_MAX_ARGUMENT_NODES = 20_000
-_MAX_ARGUMENT_UTF8_BYTES = 8 * 1024 * 1024
-
-
-@dataclass(slots=True)
-class _ArgumentLimits:
-    nodes_left: int = _MAX_ARGUMENT_NODES
-    bytes_left: int = _MAX_ARGUMENT_UTF8_BYTES
-
-    def visit(self, *, path: str, depth: int) -> None:
-        if depth > _MAX_ARGUMENT_DEPTH:
-            raise ValueError(f"{path} exceeds maximum argument nesting depth")
-        if self.nodes_left == 0:
-            raise ValueError("arguments exceed maximum argument node count")
-        self.nodes_left -= 1
-
-    def charge(self, text: str, *, path: str) -> str:
-        # A code-point count is a cheap lower bound before allocating UTF-8 bytes.
-        if len(text) > self.bytes_left:
-            raise ValueError("arguments exceed maximum argument byte size")
-        encoded = _require_utf8(text, label=path).encode("utf-8")
-        if len(encoded) > self.bytes_left:
-            raise ValueError("arguments exceed maximum argument byte size")
-        self.bytes_left -= len(encoded)
-        return text
-
-    def normalize(self, text: str, *, path: str) -> str:
-        # Reject oversized raw strings before NFC allocates a normalized copy.
-        if len(text) > self.bytes_left:
-            raise ValueError("arguments exceed maximum argument byte size")
-        return self.charge(unicodedata.normalize("NFC", text), path=path)
-
-
-def _normalize_json_value(
-    value: object,
-    *,
-    path: str = "arguments",
-    depth: int = 0,
-    limits: _ArgumentLimits,
-) -> object:
-    limits.visit(path=path, depth=depth)
+def _normalize_json_value(value: object, *, path: str = "arguments") -> object:
     if value is None or isinstance(value, (bool, int)):
-        limits.charge(json.dumps(value), path=path)
         return value
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError(f"{path} must not contain NaN or infinity")
-        limits.charge(json.dumps(value), path=path)
         return value
     if isinstance(value, str):
-        return limits.normalize(value, path=path)
+        return unicodedata.normalize("NFC", value)
     if isinstance(value, (list, tuple)):
         return [
-            _normalize_json_value(
-                item, path=f"{path}[{index}]", depth=depth + 1, limits=limits
-            )
+            _normalize_json_value(item, path=f"{path}[{index}]")
             for index, item in enumerate(value)
         ]
     if isinstance(value, Mapping):
@@ -218,13 +159,10 @@ def _normalize_json_value(
         for raw_key, raw_value in value.items():
             if not isinstance(raw_key, str):
                 raise TypeError(f"{path} keys must be strings")
-            limits.visit(path=f"{path} key", depth=depth + 1)
-            key = limits.normalize(raw_key, path=f"{path} key")
+            key = unicodedata.normalize("NFC", raw_key)
             if key in normalized:
                 raise ValueError(f"{path} contains duplicate normalized key {key!r}")
-            normalized[key] = _normalize_json_value(
-                raw_value, path=f"{path}.{key}", depth=depth + 1, limits=limits
-            )
+            normalized[key] = _normalize_json_value(raw_value, path=f"{path}.{key}")
         return normalized
     raise ValueError(f"{path} contains unsupported value type {type(value).__name__}")
 
@@ -238,7 +176,7 @@ def _freeze_json_value(value: object) -> object:
 
 
 def _canonical_arguments(arguments: Mapping[str, object]) -> tuple[str, Mapping[str, object]]:
-    normalized = _normalize_json_value(arguments, limits=_ArgumentLimits())
+    normalized = _normalize_json_value(arguments)
     if not isinstance(normalized, dict):
         raise TypeError("arguments must be a mapping")
     encoded = json.dumps(
@@ -248,11 +186,6 @@ def _canonical_arguments(arguments: Mapping[str, object]) -> tuple[str, Mapping[
         sort_keys=True,
         separators=(",", ":"),
     )
-    if (
-        len(encoded) > _MAX_ARGUMENT_UTF8_BYTES
-        or len(encoded.encode("utf-8")) > _MAX_ARGUMENT_UTF8_BYTES
-    ):
-        raise ValueError("arguments exceed maximum argument byte size")
     frozen = _freeze_json_value(normalized)
     assert isinstance(frozen, Mapping)
     return encoded, frozen
@@ -277,8 +210,6 @@ class SandboxPolicy:
             for relative in self.writable_roots
         )
         object.__setattr__(self, "writable_roots", normalized_roots)
-        for host in self.allowed_network_hosts:
-            _require_utf8(host, label="allowed network host")
         for executable in self.allowed_executables:
             _executable_scope(executable)
 
@@ -299,10 +230,6 @@ class SandboxPolicy:
         return candidate
 
     def authorize_network(self, host: str) -> None:
-        try:
-            _require_utf8(host, label="network host")
-        except ValueError as exc:
-            raise PermissionError("network host is not allowed") from exc
         normalized = host.strip().lower().rstrip(".")
         allowed = {item.strip().lower().rstrip(".") for item in self.allowed_network_hosts}
         if not normalized or normalized not in allowed:
@@ -334,9 +261,8 @@ class ExecutionBudget:
     max_process_launches: int = 0
 
     def __post_init__(self) -> None:
-        values = (self.max_write_bytes, self.max_network_calls, self.max_process_launches)
-        if any(type(value) is not int or value < 0 for value in values):
-            raise ValueError("execution budgets must be non-negative integers")
+        if min(self.max_write_bytes, self.max_network_calls, self.max_process_launches) < 0:
+            raise ValueError("execution budgets must be non-negative")
 
 
 @dataclass(slots=True)
@@ -348,13 +274,6 @@ class ExecutionBudgetLedger:
     _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def _next_usage_unlocked(self, intent: ActionIntent) -> tuple[int, int, int]:
-        # The counters are intentionally mutable, so validate again under the
-        # reservation lock. NaN would otherwise bypass every maximum comparison.
-        if type(self.budget) is not ExecutionBudget:
-            raise ValueError("budget ledger requires a canonical ExecutionBudget")
-        counters = (self.write_bytes, self.network_calls, self.process_launches)
-        if any(type(value) is not int or value < 0 for value in counters):
-            raise ValueError("budget usage counters must be non-negative integers")
         next_write = self.write_bytes + intent.write_bytes
         next_network = self.network_calls + int(intent.network_host is not None)
         next_process = self.process_launches + int(intent.executable is not None)
@@ -397,10 +316,6 @@ class ActionIntent:
     _executable_identity: str | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if type(self.risk) is not ToolRisk:
-            raise ValueError("risk must be a ToolRisk value")
-        if type(self.approval_required) is not bool:
-            raise ValueError("approval_required must be a boolean")
         object.__setattr__(self, "action_id", _normalize_text(self.action_id, label="action_id"))
         object.__setattr__(self, "tool_id", _normalize_text(self.tool_id, label="tool_id"))
         object.__setattr__(self, "target", _normalize_text(self.target, label="target"))
@@ -430,8 +345,8 @@ class ActionIntent:
             "authority_version",
             _normalize_text(self.authority_version, label="authority_version"),
         )
-        if type(self.write_bytes) is not int or self.write_bytes < 0:
-            raise ValueError("write_bytes must be a non-negative integer")
+        if self.write_bytes < 0:
+            raise ValueError("write_bytes must be non-negative")
         if self.write_bytes and self.write_path is None:
             raise ValueError("write_bytes require write_path")
         if self.write_path is not None:

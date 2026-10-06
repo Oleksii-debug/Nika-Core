@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -47,12 +47,8 @@ from nika_core.runtime.contracts import (
     RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
-from nika_core.security.model_cloud_authority import (
-    StandingPermissionCloudEffectAuthorizer,
-    StandingPermissionExecutionAuthority,
-)
 from nika_core.tools import ToolRisk, ToolSpec
-from nika_core.v01_model_settings import V01BoundModelRuntimeFactory, V01ModelSettings
+from nika_core.v01_model_settings import V01BoundModelRuntimeFactory
 from nika_core.v01_source_settings import MAX_SOURCE_BYTES, V01SourceSettings
 from nika_core.v01_three_agent_supervisor import (
     V01ChildAssignment,
@@ -81,32 +77,15 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         store: SQLiteStore,
         config: AppConfig,
         source_settings: V01SourceSettings | None = None,
-        model_settings: V01ModelSettings | None = None,
         model_runtime_factory: V01BoundModelRuntimeFactory | None = None,
-        cloud_effect_authorizer: StandingPermissionCloudEffectAuthorizer | None = None,
-        cloud_execution_authority_resolver: (
-            Callable[[str], StandingPermissionExecutionAuthority | None] | None
-        ) = None,
     ) -> None:
-        if model_runtime_factory is not None and (
-            cloud_effect_authorizer is not None
-            or cloud_execution_authority_resolver is not None
-        ):
-            raise TypeError(
-                "cloud authority must be configured on either the packaged runtime "
-                "or the custom model runtime factory, not both"
-            )
         self._sqlite = store
         self._sources = source_settings or V01SourceSettings(store, config)
         self._multi_store = MultiAgentStore(store)
         self._definitions = AgentDefinitionRepository(store)
-        self._model_settings = model_settings or V01ModelSettings(store)
         self._model_factory = model_runtime_factory or V01BoundModelRuntimeFactory(
             store=store,
             definitions=self._definitions,
-            settings=self._model_settings,
-            cloud_effect_authorizer=cloud_effect_authorizer,
-            cloud_execution_authority_resolver=cloud_execution_authority_resolver,
         )
         self._model_runtimes: dict[str, ModelGatewayAgentRuntime] = {}
         self._coordinator = MultiAgentSupervisor(
@@ -583,7 +562,6 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         compiler = AgentCompiler(
             tools=(ToolSpec("file.read", "Read declared source", ToolRisk.READ_ONLY),),
             model_profiles={_MODEL_PROFILE},
-            permission_catalog={"file.read": {"workspace"}},
         )
         for agent_id in (_CHECKER_ID, _WORKER_A_ID, _WORKER_B_ID):
             definition = AgentDefinition(

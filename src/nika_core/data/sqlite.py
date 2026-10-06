@@ -15,7 +15,6 @@ from nika_core.product_project_schema import (
     PRODUCT_PROJECT_MIGRATIONS,
     PRODUCT_PROJECT_SCHEMA_VERSION,
 )
-from nika_core.research.knowledge_schema import initialize_knowledge_schema
 
 
 class SQLiteStore:
@@ -61,7 +60,6 @@ class SQLiteStore:
                 )
             self._initialize_multi_agent_state_schema(conn)
             self._initialize_product_project_schema(conn)
-            initialize_knowledge_schema(conn)
 
     @staticmethod
     def _initialize_multi_agent_state_schema(conn: sqlite3.Connection) -> None:
@@ -129,11 +127,4 @@ class SQLiteStore:
     def schema_version(self) -> int:
         with self.connection() as conn:
             row = conn.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()
-        return int(row["version"] or 0)
-
-    def knowledge_schema_version(self) -> int:
-        with self.connection() as conn:
-            row = conn.execute(
-                "SELECT MAX(version) AS version FROM knowledge_schema_migrations"
-            ).fetchone()
         return int(row["version"] or 0)

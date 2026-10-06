@@ -3,7 +3,6 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import urlsplit
 
 import httpx
 
@@ -18,23 +17,8 @@ from nika_core.model_gateway.contracts import (
 )
 
 
-def _require_provider_text(name: str, value: object) -> str:
-    if type(value) is not str:
-        raise TypeError(f"{name} must be exact text")
-    if not value:
-        raise ValueError(f"{name} must not be empty")
-    if value != value.strip():
-        raise ValueError(f"{name} must not contain surrounding whitespace")
-    if any(not char.isprintable() for char in value):
-        raise ValueError(f"{name} must not contain control characters")
-    return value
-
-
 class DeterministicMockProvider:
     def __init__(self, *, provider_id: str = "mock", prefix: str = "mock") -> None:
-        provider_id = _require_provider_text("provider_id", provider_id)
-        if type(prefix) is not str:
-            raise TypeError("prefix must be exact text")
         self._capabilities = ProviderCapabilities(
             provider_id=provider_id,
             kind=ProviderKind.NO_LLM,
@@ -70,19 +54,8 @@ class OpenAICompatibleProvider:
         supports_hard_cancellation: bool = False,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     ) -> None:
-        provider_id = _require_provider_text("provider_id", provider_id)
-        base_url = _require_provider_text("base_url", base_url)
-        default_model = _require_provider_text("default_model", default_model)
-        if type(kind) is not ProviderKind:
-            raise TypeError("kind must be a ProviderKind")
         if kind is ProviderKind.NO_LLM:
             raise ValueError("HTTP provider cannot be no_llm")
-        if api_key is not None and type(api_key) is not str:
-            raise TypeError("api_key must be exact text when supplied")
-        if type(supports_private_data) is not bool:
-            raise TypeError("supports_private_data must be an exact boolean")
-        if type(supports_hard_cancellation) is not bool:
-            raise TypeError("supports_hard_cancellation must be an exact boolean")
         self._capabilities = ProviderCapabilities(
             provider_id=provider_id,
             kind=kind,
@@ -144,29 +117,10 @@ class OpenAICompatibleProvider:
             ) from exc
 
         try:
-            if not isinstance(body, dict) or "error" in body:
-                raise ValueError("model provider did not return a successful object")
-            choice = body["choices"][0]
-            # This adapter returns text, not partial generations or tool calls.
-            # Some compatible providers omit finish_reason; when supplied,
-            # a nonterminal reason must never become a successful result.
-            if "finish_reason" in choice and choice["finish_reason"] != "stop":
-                raise ValueError("model response is not a completed text answer")
-            message = choice["message"]
-            if not isinstance(message, dict):
-                raise TypeError("message must be an object")
-            # A legacy compatible endpoint may omit role, but an explicitly
-            # non-assistant message must not be treated as the model's answer.
-            if "role" in message and message["role"] != "assistant":
-                raise ValueError("model response is not an assistant message")
-            raw_text = message["content"]
+            raw_text = body["choices"][0]["message"]["content"]
             if not isinstance(raw_text, str):
                 raise TypeError("message content must be text")
-            # The provider must positively attest its model identity. Never
-            # manufacture evidence from the outbound request or default.
-            model = body["model"]
-            if type(model) is not str or not model or model != model.strip():
-                raise ValueError("provider model identity is invalid")
+            model = str(body.get("model") or request.model or self._default_model)
             raw_usage = body.get("usage")
             if raw_usage is None:
                 raw_usage = {}
@@ -204,8 +158,7 @@ class OllamaProvider:
     GPT-OSS. The reasoning trace is still not copied into Nika's shared
     response contract. Client cancellation is not represented as hard
     server-side inference cancellation because the native Ollama API does not
-    provide that guarantee. Redirect following is explicitly disabled so the
-    LOCAL privacy boundary cannot escape to another HTTP origin.
+    provide that guarantee.
     """
 
     def __init__(
@@ -216,30 +169,10 @@ class OllamaProvider:
         think: bool | str = False,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     ) -> None:
-        default_model = _require_provider_text("default_model", default_model)
-        base_url = _require_provider_text("base_url", base_url)
-        if "\\" in base_url:
-            raise ValueError("Ollama base_url contains unsafe characters")
-        try:
-            parsed = urlsplit(base_url)
-            hostname = parsed.hostname
-            port = parsed.port
-        except ValueError:
-            raise ValueError("Ollama base_url is invalid") from None
-        if parsed.scheme.lower() not in {"http", "https"} or not hostname:
-            raise ValueError("Ollama base_url requires an HTTP(S) loopback host")
-        if hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
-            raise ValueError("Ollama local route must use a loopback host")
-        if "%" in parsed.netloc or port == 0 or parsed.netloc.endswith(":"):
-            raise ValueError("Ollama base_url has an invalid authority")
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("Ollama base_url must not contain userinfo")
-        if (
-            parsed.path not in {"", "/"}
-            or "?" in base_url
-            or "#" in base_url
-        ):
-            raise ValueError("Ollama base_url must not contain path, query, or fragment")
+        if not default_model.strip():
+            raise ValueError("default_model must not be empty")
+        if not base_url.strip():
+            raise ValueError("base_url must not be empty")
         self._capabilities = ProviderCapabilities(
             provider_id="ollama",
             kind=ProviderKind.LOCAL,
@@ -271,16 +204,9 @@ class OllamaProvider:
 
         started = time.perf_counter()
         try:
-            async with self._client_factory(
-                timeout=request.timeout_seconds,
-                trust_env=False,
-                follow_redirects=False,
-            ) as client:
+            async with self._client_factory(timeout=request.timeout_seconds) as client:
                 response = await client.post(f"{self._base_url}/api/chat", json=payload)
                 response.raise_for_status()
-                media_type = response.headers.get("content-type", "").partition(";")[0]
-                if media_type.strip().casefold() != "application/json":
-                    raise ValueError("Ollama must return a JSON response")
                 body = response.json()
         except httpx.TimeoutException as exc:
             raise ModelGatewayError(
@@ -306,21 +232,13 @@ class OllamaProvider:
             ) from exc
 
         try:
-            if not isinstance(body, dict) or "error" in body:
-                raise ValueError("Ollama did not return a successful object")
-            if body.get("done") is not True:
-                raise ValueError("Ollama returned an incomplete response")
-            if "done_reason" in body and body["done_reason"] != "stop":
-                raise ValueError("Ollama response was not completed normally")
-            response_model = body["model"]
-            if not isinstance(response_model, str) or response_model != model:
-                raise ValueError("Ollama response model differs from requested model")
             raw_message = body["message"]
-            if not isinstance(raw_message, dict) or raw_message.get("role") != "assistant":
-                raise TypeError("message must be an assistant object")
+            if not isinstance(raw_message, dict):
+                raise TypeError("message must be an object")
             text = raw_message["content"]
             if not isinstance(text, str):
                 raise TypeError("message content must be text")
+            response_model = str(body.get("model") or model)
             prompt_tokens = _optional_int(body.get("prompt_eval_count"))
             output_tokens = _optional_int(body.get("eval_count"))
             usage = ModelUsage(
@@ -358,9 +276,9 @@ def _classify_http_status(status: int) -> tuple[ModelErrorCode, bool]:
 
 
 def _normalize_ollama_think(value: bool | str) -> bool | str:
-    if type(value) is bool:
+    if isinstance(value, bool):
         return value
-    if type(value) is not str:
+    if not isinstance(value, str):
         raise TypeError("think must be a boolean or an Ollama thinking level")
     level = value.strip().lower()
     if level not in {"low", "medium", "high"}:

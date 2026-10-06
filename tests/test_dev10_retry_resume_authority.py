@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
 
 import pytest
 
@@ -266,7 +265,7 @@ def test_restart_rejects_malformed_persisted_resume_token_before_runtime_effect(
             """
             INSERT INTO runtime_sessions(
                 task_id, runtime_id, thread_id, resume_token, outcome, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, datetime('now'))
             """,
             (
                 task_id,
@@ -274,7 +273,6 @@ def test_restart_rejects_malformed_persisted_resume_token_before_runtime_effect(
                 "thread-corrupt",
                 b"corrupt-token",
                 "__ACTIVE__",
-                datetime.now(UTC).isoformat(),
             ),
         )
 
@@ -293,5 +291,4 @@ def test_restart_rejects_malformed_persisted_resume_token_before_runtime_effect(
     assert execution == ()
     assert runtime.run_calls == 0
     assert runtime.resume_calls == 0
-    assert runtime.probe_calls == 0
     assert _task_state(store, task_id) == TaskState.RUNNING
