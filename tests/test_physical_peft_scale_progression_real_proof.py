@@ -121,6 +121,25 @@ def test_prepare_tier0_upgrades_canonical_preparation_once(
         proof.prepare_tier0(tmp_path)
 
 
+
+def test_read_object_rejects_duplicate_and_nonfinite_json(
+    proof: ModuleType,
+    tmp_path: Path,
+) -> None:
+    duplicate = tmp_path / "duplicate.json"
+    duplicate.write_text(
+        '{"schema_version":1,"schema_version":2}',
+        encoding="utf-8",
+    )
+    with pytest.raises(proof.ProofError, match="duplicate JSON key"):
+        proof._read_object(duplicate)
+
+    nonfinite = tmp_path / "nonfinite.json"
+    nonfinite.write_text('{"value":NaN}', encoding="utf-8")
+    with pytest.raises(proof.ProofError, match="non-finite JSON constant"):
+        proof._read_object(nonfinite)
+
+
 def test_prepare_tier0_rejects_wrong_frozen_package_digest(
     proof: ModuleType,
     tmp_path: Path,
@@ -140,7 +159,7 @@ def test_prepare_tier0_rejects_wrong_frozen_package_digest(
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="trusted learning-package digest mismatch"):
+    with pytest.raises(ValueError, match="trusted learning-package digest mismatch"):
         proof.prepare_tier0(tmp_path)
 
 
