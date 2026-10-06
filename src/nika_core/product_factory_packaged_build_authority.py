@@ -592,8 +592,7 @@ class PackagedBuildAuthorityStore:
         conn: sqlite3.Connection,
         dispatch: BuildExecutionDispatch,
     ) -> None:
-        if type(conn) is not sqlite3.Connection:
-            raise TypeError("effect authority marker requires exact SQLite connection")
+        self._store.require_transaction_connection(conn)
         if type(dispatch) is not BuildExecutionDispatch:
             raise TypeError("dispatch must be exact BuildExecutionDispatch")
         row = conn.execute(
@@ -841,6 +840,11 @@ class PackagedTrustedExecutionAuthorityPort:
         init=False,
         repr=False,
     )
+    _historical_recovery_active: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+    )
 
     @contextmanager
     def historical_recovery(self, work_ids: frozenset[str]) -> Iterator[None]:
@@ -848,15 +852,17 @@ class PackagedTrustedExecutionAuthorityPort:
             type(work_id) is not str or not work_id.strip() for work_id in work_ids
         ):
             raise TypeError("historical recovery work ids must be exact canonical frozenset")
-        if self._historical_recovery_work_ids:
+        if self._historical_recovery_active:
             raise PackagedBuildAuthorityError(
                 "nested PF5 historical recovery authority is not allowed"
             )
+        self._historical_recovery_active = True
         self._historical_recovery_work_ids = work_ids
         try:
             yield
         finally:
             self._historical_recovery_work_ids = frozenset()
+            self._historical_recovery_active = False
 
     def mark_effect_started_with_connection(
         self,
