@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+M5_PROOF = ROOT / "scripts" / "m5_uia_proof.ps1"
+WRAPPER = ROOT / "scripts" / "v01_autostart_uia_proof.ps1"
+M11 = ROOT / ".github" / "workflows" / "m11-windows-release.yml"
+M12 = ROOT / ".github" / "workflows" / "m12-prehuman-release-gate.yml"
+
+
+def test_packaged_factory_operator_is_exercised_by_physical_m5_uia_proof() -> None:
+    source = M5_PROOF.read_text(encoding="utf-8")
+    product_command = (
+        "$productCommand = 'Створи застосунок для контрольованої UIA перевірки'"
+    )
+    status_command = (
+        "Set-BoundControlValue $commandControl "
+        "'покажи поточний статус Product Factory'"
+    )
+
+    assert product_command in source
+    assert "Wait-BoundTextEvidence 'Оператор Product Factory'" in source
+    assert "Wait-BoundTextEvidence $productId" in source
+    for evidence in (
+        "'unassigned'",
+        "'active'",
+        "'none'",
+        "'not_started'",
+        "'inspect_project'",
+    ):
+        assert evidence in source
+    assert status_command in source
+    assert (
+        "поточна версія ProductProject ще не має підготовленого execution authority."
+        in source
+    )
+    assert "SELECT COUNT(*) FROM tasks" in source
+    assert "operator/status proof unexpectedly created a task" in source
+    assert source.index(product_command) < source.index(
+        "$sourceRootControl = Wait-DescendantName"
+    )
+
+
+def test_release_gates_execute_factory_operator_proof_on_packaged_exe() -> None:
+    wrapper = WRAPPER.read_text(encoding="utf-8")
+    assert "$proof = Join-Path $PSScriptRoot 'm5_uia_proof.ps1'" in wrapper
+    assert wrapper.count("-VerifySourceSetup") >= 2
+
+    m11 = M11.read_text(encoding="utf-8")
+    m12 = M12.read_text(encoding="utf-8")
+    wrapper_name = "v01_autostart_uia_proof.ps1"
+    assert wrapper_name in m11
+    assert wrapper_name in m12
+    assert m11.count('      - "scripts/m5_uia_proof.ps1"') == 2
