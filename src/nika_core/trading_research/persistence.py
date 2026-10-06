@@ -114,6 +114,14 @@ class TradingStateRepository:
                 actual = tuple(existing[name] for name in _FILL_EVIDENCE_COLUMNS)
                 if actual != evidence:
                     raise RuntimeError("conflicting durable fill identity")
+                account = _validated_account_row(conn, workspace_id, run_id)
+                assert account is not None
+                _decode_account_payload(str(account["payload"]))
+                if (
+                    str(account["last_fill_id"]) == fill.fill_id
+                    and str(account["payload"]) != payload
+                ):
+                    raise RuntimeError("conflicting durable account state")
                 return False
             conn.execute(
                 "INSERT INTO trading_research_run_fills("
@@ -158,34 +166,49 @@ class TradingStateRepository:
         _validate_scope(workspace_id, run_id)
         with self._store.connection() as conn:
             conn.execute("BEGIN")
-            row = conn.execute(
-                "SELECT payload, last_fill_id FROM trading_research_run_account_state "
-                "WHERE workspace_id = ? AND run_id = ?",
-                (workspace_id, run_id),
-            ).fetchone()
+            row = _validated_account_row(conn, workspace_id, run_id)
             if row is None:
-                fill_row = conn.execute(
-                    "SELECT 1 FROM trading_research_run_fills "
-                    "WHERE workspace_id = ? AND run_id = ? LIMIT 1",
-                    (workspace_id, run_id),
-                ).fetchone()
-                if fill_row is not None:
-                    raise RuntimeError("durable trading fills exist without account state")
                 return None
-            last_fill = conn.execute(
-                "SELECT 1 FROM trading_research_run_fills "
-                "WHERE workspace_id = ? AND run_id = ? AND fill_id = ?",
-                (workspace_id, run_id, str(row["last_fill_id"])),
-            ).fetchone()
-            if last_fill is None:
-                raise RuntimeError("durable trading account state references missing fill")
             payload = str(row["payload"])
-        value = json.loads(payload)
-        if not isinstance(value, dict):
-            raise TypeError("invalid durable trading account payload")
-        return value
+        return _decode_account_payload(payload)
 
 
+
+
+def _validated_account_row(
+    conn: sqlite3.Connection,
+    workspace_id: str,
+    run_id: str,
+) -> sqlite3.Row | None:
+    row = conn.execute(
+        "SELECT payload, last_fill_id FROM trading_research_run_account_state "
+        "WHERE workspace_id = ? AND run_id = ?",
+        (workspace_id, run_id),
+    ).fetchone()
+    if row is None:
+        fill_row = conn.execute(
+            "SELECT 1 FROM trading_research_run_fills "
+            "WHERE workspace_id = ? AND run_id = ? LIMIT 1",
+            (workspace_id, run_id),
+        ).fetchone()
+        if fill_row is not None:
+            raise RuntimeError("durable trading fills exist without account state")
+        return None
+    last_fill = conn.execute(
+        "SELECT 1 FROM trading_research_run_fills "
+        "WHERE workspace_id = ? AND run_id = ? AND fill_id = ?",
+        (workspace_id, run_id, str(row["last_fill_id"])),
+    ).fetchone()
+    if last_fill is None:
+        raise RuntimeError("durable trading account state references missing fill")
+    return row
+
+
+def _decode_account_payload(payload: str) -> dict[str, object]:
+    value = json.loads(payload)
+    if not isinstance(value, dict):
+        raise TypeError("invalid durable trading account payload")
+    return value
 
 
 def _fill_evidence(fill: SimulatedFill) -> tuple[object, ...]:
