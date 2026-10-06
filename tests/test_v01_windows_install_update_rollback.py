@@ -64,6 +64,9 @@ def _run(
     if bundle is not None:
         command.extend(["-BundlePath", str(bundle)])
     environment = os.environ.copy()
+    for key in tuple(environment):
+        if key.casefold() in {"nika_db_path", "nika_database_path"}:
+            environment.pop(key)
     if env_overrides:
         environment.update(env_overrides)
     return subprocess.run(
@@ -521,4 +524,91 @@ def test_equal_database_environment_aliases_preserve_install_compatibility(
 
     assert installed.returncode == 0, installed.stderr or installed.stdout
     assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+@pytest.mark.parametrize("variant", ["dot", "slash", "case"])
+def test_runtime_equivalent_database_alias_spellings_are_installer_compatible(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "bundle", "v1")
+    destination = tmp_path / "install" / "Nika Core"
+    database = tmp_path / "Data Root" / "nika_core.db"
+    primary = str(database)
+    if variant == "dot":
+        compatibility = str(database.parent) + "\\.\\" + database.name
+    elif variant == "slash":
+        compatibility = primary.replace("\\", "/")
+    else:
+        compatibility = primary.upper()
+
+    installed = _run(
+        shell,
+        mode="Install",
+        destination=destination,
+        bundle=bundle,
+        env_overrides={
+            "NIKA_DB_PATH": primary,
+            "NIKA_DATABASE_PATH": compatibility,
+        },
+    )
+
+    assert installed.returncode == 0, installed.stderr or installed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_equal_relative_database_aliases_fail_before_install_mutation(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "bundle", "v1")
+    destination = tmp_path / "install" / "Nika Core"
+
+    rejected = _run(
+        shell,
+        mode="Install",
+        destination=destination,
+        bundle=bundle,
+        env_overrides={
+            "NIKA_DB_PATH": "relative\\nika_core.db",
+            "NIKA_DATABASE_PATH": "relative\\nika_core.db",
+        },
+    )
+
+    assert rejected.returncode != 0, rejected.stdout
+    assert "must be fully qualified" in rejected.stderr
+    assert not destination.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_case_insensitive_database_alias_name_conflict_fails_before_mutation(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "bundle", "v1")
+    destination = tmp_path / "install" / "Nika Core"
+
+    rejected = _run(
+        shell,
+        mode="Install",
+        destination=destination,
+        bundle=bundle,
+        env_overrides={
+            "nika_db_path": str(tmp_path / "one" / "nika_core.db"),
+            "NIKA_DATABASE_PATH": str(tmp_path / "two" / "nika_core.db"),
+        },
+    )
+
+    assert rejected.returncode != 0, rejected.stdout
+    assert "Conflicting Nika Core database path environment aliases." in rejected.stderr
+    assert not destination.exists()
 
