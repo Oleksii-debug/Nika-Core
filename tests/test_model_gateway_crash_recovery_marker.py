@@ -23,6 +23,7 @@ from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.runtime.contracts import (
     RuntimeCapability,
+    RuntimeErrorCode,
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResumeProbeStatus,
@@ -467,3 +468,35 @@ def test_hard_cancel_claim_requires_observed_task_cancellation(tmp_path: Path) -
 
     asyncio.run(scenario())
 
+def test_completed_provider_task_still_owns_active_key_until_run_releases_it(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "nika.db")
+        store.initialize()
+        definitions = _definitions(store)
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        release.set()
+        gateway = ModelGateway()
+        gateway.register(_BarrierLocalProvider(entered, release), default=True)
+        runtime = _runtime(gateway=gateway, definitions=definitions)
+        request = _request("linearization-task")
+
+        completed_provider_task = asyncio.create_task(asyncio.sleep(0))
+        await completed_provider_task
+        runtime._active[(request.task_id, request.thread_id)] = (
+            completed_provider_task,
+            False,
+            False,
+        )
+
+        result = await runtime.run(request)
+
+        assert result.outcome is RuntimeOutcome.FAILED
+        assert result.error_code is RuntimeErrorCode.DUPLICATE_ACTIVE
+        assert entered.is_set() is False
+        runtime._active.pop((request.task_id, request.thread_id), None)
+
+    asyncio.run(scenario())
