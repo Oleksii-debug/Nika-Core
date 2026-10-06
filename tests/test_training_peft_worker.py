@@ -3935,7 +3935,6 @@ def test_final_candidate_rejects_transient_tensor_source_substitution(
     assert not candidate.exists()
 
 
-
 @pytest.mark.parametrize(
     "relative_name",
     [peft._CANDIDATE_FILE, "adapter_config.json"],
