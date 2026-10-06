@@ -1,0 +1,482 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import sys
+from pathlib import Path
+from typing import NoReturn
+
+from nika_core.learning_package import FrozenLearningPackage
+from nika_core.model_engineering import EvaluationCase, EvaluationPurpose, EvaluationSet
+from nika_core.model_gateway.contracts import ModelMessage, PrivacyClass
+from nika_core.training_peft_worker import candidate_artifact_path
+from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
+
+_MODEL_REPOSITORY = "amakhov/tiny-random-llama"
+_MODEL_REVISION = "fbf68d33cf68a9d1d4b71b3d098ae82c8c14443b"
+_MODEL_SOURCE_REFERENCE = (
+    "https://huggingface.co/amakhov/tiny-random-llama/tree/" + _MODEL_REVISION
+)
+_MODEL_LICENSE_REFERENCE = "https://www.apache.org/licenses/LICENSE-2.0"
+_EVALUATOR_REPOSITORY = "https://github.com/Oleksii-debug/Nika-Core"
+_EVALUATOR_LICENSE_REFERENCE = "project-internal:Nika-Core"
+_HELD_OUT_PROVENANCE = "generated:physical-old-new-proof-v1"
+_HELD_OUT_LICENSE = "CC0-1.0"
+_HELD_OUT_FILE = "held-out-evaluation.json"
+_RUNTIME_FILE = "physical-evaluation-runtime.json"
+_EVALUATION_CONFIG_FILE = "physical-evaluation.json"
+_EVALUATION_REPORT_FILE = "physical-old-new-evaluation-report.json"
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_MAX_JSON_BYTES = 1024 * 1024
+
+
+class ProofError(RuntimeError):
+    """The observed real old-vs-new physical evaluation proof is invalid."""
+
+
+def _fail(message: str) -> NoReturn:
+    raise ProofError(message)
+
+
+def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_constant(value: str) -> NoReturn:
+    raise ValueError(f"non-finite JSON constant: {value}")
+
+
+def _load_object(path: Path) -> dict[str, object]:
+    raw = path.read_bytes()
+    if not raw or len(raw) > _MAX_JSON_BYTES:
+        _fail(f"JSON authority has invalid size: {path.name}")
+    try:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise ProofError(f"invalid JSON authority: {path.name}") from exc
+    if type(value) is not dict:
+        _fail(f"JSON authority must be an object: {path.name}")
+    return value
+
+
+def _canonical_json(payload: object) -> str:
+    return json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    temporary = path.with_name(path.name + ".tmp")
+    if temporary.exists():
+        _fail(f"stale temporary file exists: {temporary.name}")
+    encoded = text.encode("utf-8", errors="strict")
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _sha256_file(path: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    total = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            total += len(chunk)
+            digest.update(chunk)
+    return digest.hexdigest(), total
+
+
+def _evaluation_set() -> tuple[EvaluationSet, dict[str, object]]:
+    case = EvaluationCase(
+        case_id="held-out-physical-001",
+        messages=(
+            ModelMessage(
+                role="user",
+                content=(
+                    "Held-out qualification prompt. Emit a short deterministic continuation "
+                    "for the phrase: ultraviolet horizon"
+                ),
+            ),
+        ),
+        expected_text="held-out-reference-not-present-in-training",
+        pass_score=1.0,
+        weight=1.0,
+    )
+    evaluation = EvaluationSet(
+        evaluation_set_id="physical-old-new-proof",
+        version="1",
+        provenance_ref=_HELD_OUT_PROVENANCE,
+        license_ref=_HELD_OUT_LICENSE,
+        purpose=EvaluationPurpose.HELD_OUT,
+        privacy=PrivacyClass.PRIVATE,
+        cases=(case,),
+    )
+    payload = {
+        "evaluation_set_id": evaluation.evaluation_set_id,
+        "version": evaluation.version,
+        "provenance_ref": evaluation.provenance_ref,
+        "license_ref": evaluation.license_ref,
+        "purpose": evaluation.purpose.value,
+        "privacy": evaluation.privacy.value,
+        "cases": [
+            {
+                "case_id": case.case_id,
+                "messages": [
+                    {"role": message.role, "content": message.content}
+                    for message in case.messages
+                ],
+                "expected_text": case.expected_text,
+                "pass_score": float(case.pass_score),
+                "weight": float(case.weight),
+            }
+        ],
+    }
+    return evaluation, payload
+
+
+def prepare(root: Path) -> None:
+    root = root.resolve(strict=True)
+    pilot_config_path = root / "physical-pilot.json"
+    package_path = root / "frozen-package.json"
+    if not pilot_config_path.is_file() or not package_path.is_file():
+        _fail("run physical_peft_real_proof.py prepare before evaluation preparation")
+
+    pilot_config = _load_object(pilot_config_path)
+    package = FrozenLearningPackage.from_json(package_path.read_bytes())
+    configured_package = Path(str(pilot_config.get("frozen_package_path", "")))
+    if configured_package.resolve(strict=True) != package_path:
+        _fail("physical pilot config points at a different frozen package")
+
+    evaluation, evaluation_payload = _evaluation_set()
+    replacement = FrozenLearningPackage.freeze(
+        package_id=package.package_id,
+        package_version=package.package_version,
+        base_artifact_sha256=package.base_artifact_sha256,
+        selection_policy_sha256=package.selection_policy_sha256,
+        verification_sha256=package.verification_sha256,
+        evaluation_set_sha256=evaluation.content_sha256,
+        shards=package.shards,
+    )
+    evaluation_path = root / _HELD_OUT_FILE
+    if evaluation_path.exists():
+        _fail("held-out evaluation authority already exists")
+    _atomic_write(evaluation_path, _canonical_json(evaluation_payload) + "\n")
+    _atomic_write(package_path, replacement.to_json())
+
+    pilot_config["frozen_package_sha256"] = replacement.manifest_sha256
+    _atomic_write(
+        pilot_config_path,
+        json.dumps(
+            pilot_config,
+            allow_nan=False,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    prepared = {
+        "evaluation_set_sha256": evaluation.content_sha256,
+        "frozen_package_sha256": replacement.manifest_sha256,
+        "model_repository": _MODEL_REPOSITORY,
+        "model_revision": _MODEL_REVISION,
+        "schema": "nika-physical-old-new-proof-preparation-v1",
+    }
+    _atomic_write(root / "evaluation-prepared.json", _canonical_json(prepared) + "\n")
+    print(evaluation.content_sha256)
+
+
+def configure(root: Path, evaluator_script: Path) -> None:
+    root = root.resolve(strict=True)
+    evaluator_script = evaluator_script.resolve(strict=True)
+    if evaluator_script.suffix.casefold() != ".py":
+        _fail("evaluator command file must be a Python source file")
+    if os.name != "nt":
+        _fail("physical evaluation configuration must be created on Windows")
+    python_executable = Path(sys.executable).resolve(strict=True)
+    if python_executable.suffix.casefold() != ".exe":
+        _fail("physical evaluator executable must be a Windows .exe")
+
+    pilot_config = _load_object(root / "physical-pilot.json")
+    raw_report = (root / "run" / "physical-pilot-report.json").read_text(
+        encoding="utf-8",
+        errors="strict",
+    )
+    report = PhysicalTrainingPilotReport.from_json(raw_report)
+    candidate = candidate_artifact_path(root / "run", report.candidate_artifact_ref)
+    candidate = candidate.resolve(strict=True)
+    candidate_sha256, candidate_size = _sha256_file(candidate)
+    if (
+        candidate_sha256 != report.candidate_sha256
+        or candidate_size != report.candidate_byte_count
+    ):
+        _fail("trained candidate bytes do not match physical pilot evidence")
+
+    evaluation, _ = _evaluation_set()
+    package = FrozenLearningPackage.from_json(
+        (root / "frozen-package.json").read_bytes(),
+        expected_manifest_sha256=report.frozen_package_sha256,
+    )
+    if package.evaluation_set_sha256 != evaluation.content_sha256:
+        _fail("physical pilot was not bound to the held-out evaluation authority")
+
+    source_sha = os.environ.get("NIKA_CANDIDATE_SHA", "")
+    if _SHA_RE.fullmatch(source_sha) is None:
+        _fail("NIKA_CANDIDATE_SHA must identify the exact 40-hex repository head")
+    evaluator_source = (
+        f"{_EVALUATOR_REPOSITORY}/blob/{source_sha}/"
+        "scripts/physical_peft_real_evaluator.py"
+    )
+
+    scratch_root = root / "evaluation-scratch"
+    scratch_root.mkdir()
+    runtime = {
+        "schema_version": 1,
+        "model_dir": os.fspath((root / "model").resolve(strict=True)),
+        "model_dir_manifest_sha256": report.model_dir_manifest_sha256,
+        "base_gguf_path": os.fspath((root / "base.gguf").resolve(strict=True)),
+        "base_gguf_sha256": report.base_sha256,
+        "scratch_root": os.fspath(scratch_root.resolve(strict=True)),
+        "max_new_tokens": 4,
+        "torch_num_threads": 2,
+    }
+    runtime_path = root / _RUNTIME_FILE
+    if runtime_path.exists():
+        _fail("physical evaluator runtime authority already exists")
+    _atomic_write(runtime_path, _canonical_json(runtime) + "\n")
+
+    descriptor = pilot_config.get("candidate_descriptor")
+    if type(descriptor) is not dict:
+        _fail("physical pilot config is missing candidate descriptor metadata")
+    for field in ("model_id", "source_reference", "license_reference"):
+        if type(descriptor.get(field)) is not str or not descriptor[field]:
+            _fail(f"candidate descriptor is missing {field}")
+
+    evaluation_config = {
+        "schema_version": 1,
+        "workspace_id": pilot_config["workspace_id"],
+        "project_id": pilot_config["project_id"],
+        "owner_id": pilot_config["owner_id"],
+        "physical_pilot_output_root": os.fspath((root / "run").resolve(strict=True)),
+        "frozen_package_path": os.fspath(
+            (root / "frozen-package.json").resolve(strict=True)
+        ),
+        "base_artifact_ref": pilot_config["base_artifact_ref"],
+        "base_model_path": os.fspath((root / "base.gguf").resolve(strict=True)),
+        "candidate_model_path": os.fspath(candidate),
+        "base_model": {
+            "provider_id": "hf-gguf-local",
+            "model_id": "amakhov-tiny-random-llama",
+            "model_version": _MODEL_REVISION,
+            "source_reference": _MODEL_SOURCE_REFERENCE,
+            "license_reference": _MODEL_LICENSE_REFERENCE,
+            "capabilities": ["text"],
+        },
+        "candidate_model": {
+            "model_id": descriptor["model_id"],
+            "source_reference": descriptor["source_reference"],
+            "license_reference": descriptor["license_reference"],
+        },
+        "evaluator": {
+            "executable": os.fspath(python_executable),
+            "command_files": [
+                os.fspath(evaluator_script),
+                os.fspath(runtime_path.resolve(strict=True)),
+            ],
+            "switches": [],
+            "provenance_ref": evaluator_source,
+            "license_ref": _EVALUATOR_LICENSE_REFERENCE,
+        },
+        "evaluation_set_path": os.fspath((root / _HELD_OUT_FILE).resolve(strict=True)),
+        "experiment_id": "physical-old-new-real-proof-v1",
+        "permission_fingerprint": "physical-evaluation-read-only-v1",
+        "benchmark": {
+            "timeout_seconds": 300.0,
+            "temperature": 0.0,
+            "scorer_id": "exact-match-nfc-v1",
+        },
+        "policy": {
+            "primary_metric": "model_quality_score",
+            "minimum_improvement": 0.000001,
+            "minimum_replays": 1,
+            "primary_higher_is_better": True,
+            "guardrails": [
+                {
+                    "metric": "model_task_pass",
+                    "higher_is_better": True,
+                    "max_regression": 1.0,
+                }
+            ],
+        },
+    }
+    config_path = root / _EVALUATION_CONFIG_FILE
+    if config_path.exists():
+        _fail("physical evaluation config already exists")
+    _atomic_write(
+        config_path,
+        json.dumps(
+            evaluation_config,
+            allow_nan=False,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+    )
+    print(config_path)
+
+
+def verify(root: Path) -> None:
+    root = root.resolve(strict=True)
+    pilot_report_path = root / "run" / "physical-pilot-report.json"
+    evaluation_report_path = root / "run" / _EVALUATION_REPORT_FILE
+    report = PhysicalTrainingPilotReport.from_json(
+        pilot_report_path.read_text(encoding="utf-8", errors="strict")
+    )
+    evaluation_report = _load_object(evaluation_report_path)
+    evaluation, _ = _evaluation_set()
+
+    required = {
+        "schema_version": 2,
+        "schema": "nika-physical-old-new-evaluation-report-v2",
+        "physical_pilot_evidence_sha256": report.evidence_sha256,
+        "evaluation_set_sha256": evaluation.content_sha256,
+    }
+    for key, expected in required.items():
+        if evaluation_report.get(key) != expected:
+            _fail(f"physical evaluation report has wrong {key}")
+
+    status = evaluation_report.get("experiment_status")
+    if status not in {"completed", "promoted"}:
+        _fail("old-vs-new evaluation did not reach a canonical terminal state")
+    observation_count = evaluation_report.get("observation_count")
+    if type(observation_count) is not int or observation_count < 2:
+        _fail("old-vs-new evaluation did not persist both model observations")
+    for key in (
+        "comparison_evidence_sha256",
+        "training_binding_sha256",
+        "champion_binding_sha256",
+        "champion_benchmark_sha256",
+        "challenger_benchmark_sha256",
+        "definition_sha256",
+        "observations_sha256",
+        "attestor_sha256",
+    ):
+        value = evaluation_report.get(key)
+        if (
+            type(value) is not str
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            _fail(f"physical evaluation report has invalid {key}")
+    if not evaluation_report.get("attestor_id"):
+        _fail("physical evaluation report is missing attestor identity")
+
+    candidate = candidate_artifact_path(root / "run", report.candidate_artifact_ref)
+    candidate = candidate.resolve(strict=True)
+    candidate_sha256, candidate_size = _sha256_file(candidate)
+    if (
+        candidate_sha256 != report.candidate_sha256
+        or candidate_size != report.candidate_byte_count
+    ):
+        _fail("candidate bytes changed after old-vs-new evaluation")
+
+    report_sha256, report_size = _sha256_file(evaluation_report_path)
+    if report_size <= 0:
+        _fail("physical evaluation report is empty")
+    source_sha = os.environ.get("NIKA_CANDIDATE_SHA", "")
+    if _SHA_RE.fullmatch(source_sha) is None:
+        _fail("NIKA_CANDIDATE_SHA must identify the exact proof source head")
+    summary = {
+        "attestor_id": evaluation_report["attestor_id"],
+        "attestor_sha256": evaluation_report["attestor_sha256"],
+        "candidate_sha256": candidate_sha256,
+        "comparison_evidence_sha256": evaluation_report["comparison_evidence_sha256"],
+        "evaluation_report_sha256": report_sha256,
+        "evaluation_set_sha256": evaluation.content_sha256,
+        "experiment_status": status,
+        "model_repository": _MODEL_REPOSITORY,
+        "model_revision": _MODEL_REVISION,
+        "observation_count": observation_count,
+        "physical_pilot_evidence_sha256": report.evidence_sha256,
+        "proof_source_sha": source_sha,
+        "schema": "nika-physical-old-new-real-proof-v1",
+    }
+
+    evidence_dir = root / "evaluation-evidence"
+    evidence_dir.mkdir()
+    shutil.copyfile(pilot_report_path, evidence_dir / "physical-pilot-report.json")
+    shutil.copyfile(evaluation_report_path, evidence_dir / _EVALUATION_REPORT_FILE)
+    shutil.copyfile(candidate, evidence_dir / "adapter_model.safetensors")
+    shutil.copyfile(
+        root / "staged-assets.json",
+        evidence_dir / "staged-assets.json",
+    )
+    _atomic_write(
+        evidence_dir / "physical-old-new-proof-summary.json",
+        _canonical_json(summary) + "\n",
+    )
+    print(evaluation_report["comparison_evidence_sha256"])
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Prepare/configure/verify the real Windows old-vs-new PEFT proof."
+    )
+    commands = parser.add_subparsers(dest="command", required=True)
+    prepare_parser = commands.add_parser("prepare")
+    prepare_parser.add_argument("--root", required=True, type=Path)
+    configure_parser = commands.add_parser("configure")
+    configure_parser.add_argument("--root", required=True, type=Path)
+    configure_parser.add_argument("--evaluator-script", required=True, type=Path)
+    verify_parser = commands.add_parser("verify")
+    verify_parser.add_argument("--root", required=True, type=Path)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        if args.command == "prepare":
+            prepare(args.root)
+        elif args.command == "configure":
+            configure(args.root, args.evaluator_script)
+        else:
+            verify(args.root)
+    except (
+        KeyError,
+        OSError,
+        ProofError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        print(f"physical old-vs-new proof failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
