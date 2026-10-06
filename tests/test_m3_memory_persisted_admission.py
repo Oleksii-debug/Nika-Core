@@ -231,7 +231,7 @@ def test_fake_user_scope_cannot_bypass_write_approval(
 
 @pytest.mark.parametrize("operation", ["get", "list", "delete"])
 def test_fake_scope_cannot_read_or_delete_memory(tmp_path: Path, operation: str) -> None:
-    store, memory = _memory(tmp_path)
+    _store, memory = _memory(tmp_path)
     _put(memory, scope=MemoryScope.USER)
     fake_scope = SimpleNamespace(value="user")
     with pytest.raises(ValueError, match="scope must be a MemoryScope"):
