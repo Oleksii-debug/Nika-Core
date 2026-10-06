@@ -201,7 +201,7 @@ class PackagedVoiceModelSetup:
             cancel_event=cancel_event,
         )
         try:
-            self._submit(coroutine)
+            future = self._submit(coroutine)
         except Exception:  # noqa: BLE001 - bounded packaged submit failure
             coroutine.close()
             with self._lock:
@@ -214,6 +214,13 @@ class PackagedVoiceModelSetup:
                 "failed",
                 "Не вдалося запустити фоновий імпорт голосової моделі.",
             )
+        future.add_done_callback(
+            lambda done: self._submission_done(
+                done,
+                generation=generation,
+                cancel_event=cancel_event,
+            )
+        )
 
         return UIResult(
             request_id="desktop-handler",
@@ -221,6 +228,33 @@ class PackagedVoiceModelSetup:
             message="Імпорт локальної голосової моделі розпочато.",
             focus_id="voice-model-cancel",
         )
+
+    def _submission_done(
+        self,
+        future: Future[Any],
+        *,
+        generation: int,
+        cancel_event: Event,
+    ) -> None:
+        try:
+            interrupted = future.cancelled()
+            error = None if interrupted else future.exception()
+        except Exception:  # noqa: BLE001 - host future inspection fails closed
+            interrupted = True
+            error = None
+        if not interrupted and error is None:
+            return
+
+        cancel_event.set()
+        with self._lock:
+            if generation != self._generation or not self._active:
+                return
+            self._active = False
+            self._cancelling = False
+            self._cancel_event = None
+            self._restart_required = False
+            self._last_status = "failed"
+            self._last_message = "Фоновий імпорт голосової моделі було перервано."
 
     def cancel(self, payload: dict[str, Any]) -> UIResult:
         if type(payload) is not dict:
