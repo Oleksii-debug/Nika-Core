@@ -224,6 +224,7 @@ def test_reviewed_candidate_becomes_bounded_pf5_spec_without_plan_argv_authority
     assert reviewed_candidate_fingerprint(
         authority=_authority(graph),
         record=record,
+        trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
     ) in spec.request.work_id
 
 
@@ -243,6 +244,30 @@ def test_accepted_candidate_without_build_release_permission_cannot_enter_pf5() 
     )
 
     with pytest.raises(ReviewedBuildAdmissionError, match="build_release"):
+        _spec(coordinator, graph)
+
+
+def test_build_release_cannot_be_added_after_independent_review() -> None:
+    graph = _graph()
+    coordinator = _coordinator(
+        graph,
+        permissions=frozenset({"read_source", "write_source", "run_tests"}),
+    )
+    record = coordinator.snapshot().records[0]
+    coordinator._records[COMPONENT_ID] = WorkRecord(
+        request=replace(
+            record.request,
+            permission_ceiling=frozenset(
+                {"read_source", "write_source", "run_tests", "build_release"}
+            ),
+        ),
+        state=record.state,
+        result=record.result,
+        review=record.review,
+        blocker=record.blocker,
+    )
+
+    with pytest.raises(ReviewedBuildAdmissionError, match="trusted plan"):
         _spec(coordinator, graph)
 
 
@@ -377,10 +402,12 @@ def test_build_work_identity_is_bound_to_independent_review_evidence() -> None:
     first_fingerprint = reviewed_candidate_fingerprint(
         authority=_authority(graph),
         record=first_record,
+        trusted_plan_fingerprint=first.trusted_plan_fingerprint,
     )
     second_fingerprint = reviewed_candidate_fingerprint(
         authority=_authority(graph),
         record=second.snapshot().records[0],
+        trusted_plan_fingerprint=second.trusted_plan_fingerprint,
     )
 
     assert first_fingerprint != second_fingerprint
@@ -406,6 +433,7 @@ def test_reviewed_build_policy_rejects_noncanonical_scope_carriers(
     fingerprint = reviewed_candidate_fingerprint(
         authority=_authority(graph),
         record=record,
+        trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
     )
     kwargs = {
         "project_id": PROJECT_ID,
