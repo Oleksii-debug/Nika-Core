@@ -17,6 +17,7 @@ from nika_core.model_gateway.contracts import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ModelUsage,
     PrivacyClass,
     ProviderCapabilities,
     ProviderKind,
@@ -535,6 +536,7 @@ def test_real_caller_cancellation_still_propagates_and_is_audited(tmp_path: Path
         "model.requested",
         "model.cancelled",
     ]
+
 
 def _definitions(store: SQLiteStore) -> AgentDefinitionRepository:
     repository = AgentDefinitionRepository(store)
