@@ -2999,6 +2999,57 @@ def test_final_candidate_rejects_extra_hardlink_alias(
     assert not candidate.exists()
     assert alias.exists()
 
+def test_final_candidate_rejects_transient_tensor_source_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    checkpoint = peft._checkpoint_dir(peft._job_root(config, request), 1)
+    adapter_file = checkpoint / "adapter" / peft._CANDIDATE_FILE
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    adapter_reads = 0
+
+    class _SubstitutedReader(_FakeSafeTensorReader):
+        def get_tensor(self, name: str) -> _FakeTensor:
+            assert name == "lora.weight"
+            return _FakeTensor(b"transient-substituted-tensor-state")
+
+    def _substituting_safe_open(
+        path: str,
+        *,
+        framework: str,
+        device: str,
+    ) -> _FakeSafeTensorReader:
+        nonlocal adapter_reads
+        if Path(path) == adapter_file:
+            adapter_reads += 1
+            if adapter_reads == 3:
+                return _SubstitutedReader(path)
+        return _fake_safe_open(path, framework=framework, device=device)
+
+    def _substituting_stack() -> tuple[object, ...]:
+        values = list(_fake_stack())
+        values[5] = _substituting_safe_open
+        return tuple(values)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _substituting_stack)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="candidate_tensor_source_mismatch",
+    ):
+        peft._train_one_step(request, config, consumed)
+
+    assert adapter_reads == 3
+    assert not candidate.exists()
+
+
 def test_final_candidate_rejects_checkpoint_change_during_materialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
