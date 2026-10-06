@@ -185,7 +185,6 @@ class PackagedLocalRepositoryOperator:
                         binding_version=binding.binding_version,
                     )
                 )
-            self._bindings.validate_plan(plan)
             message = (
                 "Виберіть репозиторій з поточного плану та явно вкажіть "
                 "його локальний Git-корінь."
@@ -195,6 +194,7 @@ class PackagedLocalRepositoryOperator:
                     " Недійсні прив’язки можна безпечно замінити, вказавши "
                     "новий шлях; поточна CAS-версія збережена без розкриття старого шляху."
                 )
+            self._bindings.validate_plan(plan)
             return {
                 "status": "ready",
                 "project_id": plan.project_id,
@@ -209,6 +209,13 @@ class PackagedLocalRepositoryOperator:
                 "repositories": [],
                 "message": "Стан локальних прив’язок Product Factory недоступний.",
             }
+
+    def _repository_for(
+        self,
+        project_id: str,
+        repository_id: str,
+    ) -> RepositoryRef:
+        return self._repository_from_plan(self._plan(project_id), repository_id)
 
     @staticmethod
     def _repository_from_plan(
