@@ -91,11 +91,6 @@ class ProductProjectCommandService:
         detail, _credential_refs = self.inspect_project_context(project_id)
         return detail
 
-    def inspect_project_metadata(self, project_id: str) -> ProductProjectDetail:
-        """Read ProductProject metadata/statuses without reading ProductDecision rows."""
-
-        return project_detail(self._repository.get(project_id))
-
     def inspect_project_context(
         self,
         project_id: str,

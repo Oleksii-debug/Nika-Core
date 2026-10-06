@@ -237,6 +237,49 @@ def test_bounded_state_refresh_preserves_mixed_counts_and_restart(
     assert restarted == first
 
 
+def test_bounded_state_refresh_rejects_project_change_during_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _router, provider = _build(tmp_path / "bounded race.db")
+    _add_pending(
+        service,
+        repository,
+        package_id="research-race",
+        option_id="option-race",
+        decision_id="decision-race",
+        expected_row_version=0,
+    )
+    original = ProductDecisionRepository.summarize_latest
+    moved = False
+
+    def summarize_then_move(
+        decisions: ProductDecisionRepository,
+        project_id: str,
+    ):
+        nonlocal moved
+        summary = original(decisions, project_id)
+        if not moved:
+            current = repository.get(project_id)
+            repository.update_spec(
+                project_id,
+                current.spec,
+                expected_row_version=current.row_version,
+                change_reason="bounded presentation concurrency regression",
+            )
+            moved = True
+        return summary
+
+    monkeypatch.setattr(
+        ProductDecisionRepository,
+        "summarize_latest",
+        summarize_then_move,
+    )
+
+    with pytest.raises(PackagedProductJourneyError, match="refresh required"):
+        provider()
+
+
 def test_bounded_state_refresh_validates_hidden_corrupt_decision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -313,11 +356,11 @@ def test_current_product_decision_command_is_read_only_and_restart_safe(
     assert restarted_repository.get(_PROJECT_ID) == before
 
 
-def test_current_productproject_command_does_not_read_decision_rows(
+def test_current_productproject_command_uses_bounded_decision_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    service, repository, router, _provider = _build(tmp_path / "metadata only.db")
+    service, repository, router, _provider = _build(tmp_path / "bounded metadata.db")
     for index in range(5):
         _add_pending(
             service,
@@ -329,7 +372,7 @@ def test_current_productproject_command_does_not_read_decision_rows(
         )
 
     def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("current ProductProject must not read ProductDecision rows")
+        raise AssertionError("current ProductProject must not materialize decision list()")
 
     monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
 
@@ -337,6 +380,17 @@ def test_current_productproject_command_does_not_read_decision_rows(
 
     assert result.status == "completed"
     assert _PROJECT_ID in result.message
+
+    store = SQLiteStore(tmp_path / "bounded metadata.db")
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_decisions SET decision_id=? "
+            "WHERE project_id=? AND decision_id=?",
+            ("decision-metadata\ncontrol", _PROJECT_ID, "decision-metadata-04"),
+        )
+    with pytest.raises(ValueError, match="safe presentation identity"):
+        router.create({"command": "show current productproject"})
 
 
 def test_multiple_pending_decisions_are_not_auto_selected_in_packaged_ui(
