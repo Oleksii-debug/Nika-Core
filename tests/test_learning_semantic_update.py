@@ -458,3 +458,38 @@ def test_router_rejects_noncanonical_target_before_dispatch(tmp_path: Path) -> N
                 key="fact-1",
             ),
         )
+
+def test_router_receipt_does_not_expose_semantic_payload(tmp_path: Path) -> None:
+    router, _memory = _router(tmp_path)
+    candidate = _candidate()
+    verification = _verification(candidate)
+    secret = "semantic-private-value"
+    payload = ('{"note":"' + secret + '"}').encode()
+    intent = _intent(
+        candidate=candidate,
+        verification=verification,
+        target=LearningUpdateTarget.SKILL,
+        target_ref_sha256=learned_skill_target_ref_sha256(
+            workspace_id=candidate.workspace_id,
+            agent_id=candidate.agent_id,
+            skill_id="privacy-check",
+        ),
+        update_schema=SKILL_UPDATE_SCHEMA,
+        payload=payload,
+    )
+
+    receipt = _apply(
+        router,
+        intent=intent,
+        candidate=candidate,
+        verification=verification,
+        payload=payload,
+        address=SkillUpdateAddress(
+            workspace_id=candidate.workspace_id,
+            agent_id=candidate.agent_id,
+            skill_id="privacy-check",
+        ),
+    )
+
+    assert secret not in repr(receipt)
+
