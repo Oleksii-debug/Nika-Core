@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pytest
@@ -20,6 +20,12 @@ from nika_core.product_factory_build_execution import (
     BuildExecutionScopeRequest,
     BuildExecutionSpec,
     ProjectExecutionAuthority,
+)
+from nika_core.product_factory_ansible_staging import (
+    AnsibleRunnerConfig,
+    AuthorizedAnsibleStagingAdapter,
+    AuthorizedStagingTarget,
+    RunnerExecution,
 )
 from nika_core.product_factory_build_execution_host import (
     BuildOutputPolicy,
@@ -110,6 +116,50 @@ class HandoffAuthorityPort:
     def resolve(self, *, project_id: str, repository_id: str, work_id: str):
         self.calls += 1
         return self.value
+
+
+@dataclass
+class RecordingRunner:
+    calls: list[dict[str, object]] = field(default_factory=list)
+
+    def execute(
+        self,
+        *,
+        private_data_dir,
+        playbook: str,
+        inventory: str,
+        ident: str,
+        extravars,
+    ) -> RunnerExecution:
+        payload = dict(extravars)
+        self.calls.append(
+            {
+                "private_data_dir": private_data_dir,
+                "playbook": playbook,
+                "inventory": inventory,
+                "ident": ident,
+                "extravars": payload,
+            }
+        )
+        operation = payload["nika_pf3_operation"]
+        if operation == "deploy":
+            contract = {"applied": True}
+        elif operation == "health":
+            contract = {
+                "release_version": payload["nika_release_version"],
+                "release_sha": payload["nika_release_sha"],
+                "artifact_digest": payload["nika_artifact_digest"],
+                "healthy": True,
+                "observed_at": NOW.isoformat(),
+            }
+        else:
+            raise AssertionError(f"unexpected staging operation: {operation}")
+        return RunnerExecution(
+            "successful",
+            0,
+            contract,
+            f"runner://{operation}",
+        )
 
 
 class HealthyProvider:
@@ -364,6 +414,58 @@ def test_successful_handoff_survives_full_host_restart_without_replay(tmp_path) 
 
     assert repeated == first
     assert restarted_provider.deploy_calls == 0
+
+
+def test_handoff_drives_canonical_authorized_staging_adapter_exactly(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "project-1"},
+    )
+    build_host = _new_build_host(store, task.task_id)
+    _finish_build(build_host)
+
+    runner = RecordingRunner()
+    adapter = AuthorizedAnsibleStagingAdapter(
+        AuthorizedStagingTarget(
+            "project-1",
+            "staging-local",
+            "local-staging-provider",
+            "inventory-staging.ini",
+            "approval://staging-1",
+        ),
+        AnsibleRunnerConfig(tmp_path.resolve()),
+        runner,
+    )
+    deployment = DurableDeploymentFabric(
+        adapter,
+        checkpoint_host=ProductFactoryDeploymentCheckpointHost(store),
+        host_task_id=task.task_id,
+        project_id="project-1",
+    )
+    deployed = BuildDeploymentHandoff(
+        build_host,
+        deployment,
+        HandoffAuthorityPort(_handoff_authority()),
+    ).deploy_staging("work-1")
+
+    assert deployed.state is DeploymentState.HEALTHY
+    assert len(runner.calls) == 2
+    for call in runner.calls:
+        extravars = call["extravars"]
+        assert isinstance(extravars, dict)
+        assert extravars["nika_project_id"] == "project-1"
+        assert extravars["nika_environment_id"] == "staging-local"
+        assert extravars["nika_release_version"] == "1.0.0"
+        assert extravars["nika_release_sha"] == SOURCE_SHA
+        assert extravars["nika_artifact_digest"] == ARTIFACT_DIGEST
+        assert extravars["nika_authorization_ref"] == "approval://staging-1"
+    assert [call["extravars"]["nika_pf3_operation"] for call in runner.calls] == [
+        "deploy",
+        "health",
+    ]
 
 
 def test_nonterminal_build_is_rejected_before_deployment_effect(tmp_path) -> None:
