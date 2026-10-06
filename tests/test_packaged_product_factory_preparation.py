@@ -511,6 +511,71 @@ def test_stale_running_project_version_blocks_recovery_effect(
     assert worker.recover_calls == 0
 
 
+@pytest.mark.parametrize("operation", ("dispatch_ready", "recover_running"))
+def test_effect_admission_uses_pre_wait_project_version_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    (
+        store,
+        repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    prepared = service.prepare(plan)
+    program_type = type(service._host._program)
+
+    async def tamper_after_outer_assert(program, **kwargs):
+        latest = repository.get(project.project_id)
+        current = repository.update_spec(
+            latest.project_id,
+            replace(
+                latest.spec,
+                desired_outcome="Concurrent revision during async effect admission",
+            ),
+            expected_row_version=latest.row_version,
+            change_reason="regression: mutate bound carrier after outer state assertion",
+        )
+        object.__setattr__(
+            prepared.state.binding.project,
+            "spec_version",
+            current.spec_version,
+        )
+        object.__setattr__(
+            prepared.state.binding.project,
+            "row_version",
+            current.row_version,
+        )
+        object.__setattr__(prepared.state.binding.project, "spec", current.spec)
+        precondition = kwargs["effect_admission_precondition"]
+        with store.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            precondition(connection)
+        return ()
+
+    monkeypatch.setattr(program_type, operation, tamper_after_outer_assert)
+    call = getattr(service._host, operation)
+    kwargs = {
+        "host_task_id": prepared.host_task_id,
+        "state": prepared.state,
+        "max_parallel": 1,
+    }
+    if operation == "dispatch_ready":
+        kwargs["max_count"] = 1
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        asyncio.run(call(**kwargs))
+
+
 def test_execution_plan_snapshots_mutable_graph_and_mapping_inputs(tmp_path: Path) -> None:
     (
         _store,
