@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import stat
 from dataclasses import dataclass
@@ -22,6 +23,10 @@ from nika_core.toolsmith.workspace_security import (
 
 _MAX_TEXT_BYTES = 2048
 _MAX_GITFILE_BYTES = 4096
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _SENSITIVE_LOCATOR_MARKERS = (
     "access_token",
     "refresh_token",
@@ -752,36 +757,193 @@ def _gitfile_target_identity(
     return resolved_target, str(target_stat.st_dev), str(target_stat.st_ino)
 
 
+def _metadata_stat_fingerprint(value: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_mode),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+    )
+
+
+def _metadata_path_matches_descriptor(
+    path_stat: os.stat_result,
+    descriptor_stat: os.stat_result,
+) -> bool:
+    if (
+        not stat.S_ISREG(path_stat.st_mode)
+        or not stat.S_ISREG(descriptor_stat.st_mode)
+        or _is_reparse_point(path_stat)
+        or _is_reparse_point(descriptor_stat)
+        or path_stat.st_dev != descriptor_stat.st_dev
+    ):
+        return False
+    if path_stat.st_ino != 0 and descriptor_stat.st_ino != 0:
+        return path_stat.st_ino == descriptor_stat.st_ino
+    if os.name != "nt":
+        return False
+    return (
+        path_stat.st_size == descriptor_stat.st_size
+        and path_stat.st_mtime_ns == descriptor_stat.st_mtime_ns
+        and path_stat.st_ctime_ns == descriptor_stat.st_ctime_ns
+    )
+
+
+def _open_metadata_descriptor(
+    path: pathlib.Path,
+    *,
+    label: str,
+) -> int:
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise ProductFactoryLocalRepositoryBindingError(
+                f"Product Factory {label} stable read support is unavailable"
+            ) from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY
+                | int(getattr(os, "O_BINARY", 0))
+                | int(getattr(os, "O_NOINHERIT", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if type(nofollow) is not int or nofollow == 0:
+        raise ProductFactoryLocalRepositoryBindingError(
+            f"Product Factory {label} stable no-follow read support is unavailable"
+        )
+    flags = os.O_RDONLY | nofollow
+    for flag_name in ("O_CLOEXEC", "O_NONBLOCK"):
+        flags |= int(getattr(os, flag_name, 0))
+    return os.open(path, flags)
+
+
+def _read_held_metadata_file(
+    path: pathlib.Path,
+    *,
+    label: str,
+) -> tuple[bytes, os.stat_result]:
+    try:
+        descriptor = _open_metadata_descriptor(path, label=label)
+    except ProductFactoryLocalRepositoryBindingError:
+        raise
+    except OSError as exc:
+        raise ProductFactoryLocalRepositoryBindingError(
+            f"Product Factory {label} file is unreadable"
+        ) from exc
+
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or _is_reparse_point(before):
+            raise ProductFactoryLocalRepositoryBindingError(
+                f"Product Factory {label} must be a regular non-indirect file"
+            )
+        try:
+            path_before = path.lstat()
+        except OSError as exc:
+            raise ProductFactoryLocalRepositoryBindingError(
+                f"Product Factory {label} file changed while reading"
+            ) from exc
+        if not _metadata_path_matches_descriptor(path_before, before):
+            raise ProductFactoryLocalRepositoryBindingError(
+                f"Product Factory {label} file changed while reading"
+            )
+
+        raw = bytearray()
+        remaining = _MAX_GITFILE_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 4096))
+            if not chunk:
+                break
+            raw.extend(chunk)
+            remaining -= len(chunk)
+
+        after = os.fstat(descriptor)
+        try:
+            path_after = path.lstat()
+        except OSError as exc:
+            raise ProductFactoryLocalRepositoryBindingError(
+                f"Product Factory {label} file changed while reading"
+            ) from exc
+        if (
+            _metadata_stat_fingerprint(after) != _metadata_stat_fingerprint(before)
+            or not _metadata_path_matches_descriptor(path_after, after)
+        ):
+            raise ProductFactoryLocalRepositoryBindingError(
+                f"Product Factory {label} file changed while reading"
+            )
+    except ProductFactoryLocalRepositoryBindingError:
+        raise
+    except OSError as exc:
+        raise ProductFactoryLocalRepositoryBindingError(
+            f"Product Factory {label} file is unreadable"
+        ) from exc
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+    payload = bytes(raw)
+    if not payload or len(payload) > _MAX_GITFILE_BYTES:
+        raise ProductFactoryLocalRepositoryBindingError(
+            f"Product Factory {label} file is invalid"
+        )
+    return payload, before
+
+
 def _commondir_identity(
     git_directory: pathlib.Path,
 ) -> tuple[str | None, str | None, str | None]:
     marker = git_directory / "commondir"
     try:
-        marker_stat = marker.lstat()
+        marker.lstat()
     except FileNotFoundError:
         return None, None, None
     except OSError as exc:
         raise ProductFactoryLocalRepositoryBindingError(
             "Product Factory commondir metadata is unreadable"
         ) from exc
-    if (
-        stat.S_ISLNK(marker_stat.st_mode)
-        or _is_reparse_point(marker_stat)
-        or not stat.S_ISREG(marker_stat.st_mode)
-    ):
-        raise ProductFactoryLocalRepositoryBindingError(
-            "Product Factory commondir metadata must be a regular non-indirect file"
-        )
-    try:
-        raw = marker.read_bytes()
-    except OSError as exc:
-        raise ProductFactoryLocalRepositoryBindingError(
-            "Product Factory commondir metadata is unreadable"
-        ) from exc
-    if not raw or len(raw) > _MAX_GITFILE_BYTES:
-        raise ProductFactoryLocalRepositoryBindingError(
-            "Product Factory commondir metadata file is invalid"
-        )
+    raw, _ = _read_held_metadata_file(
+        marker,
+        label="commondir metadata",
+    )
     target_text = _pointer_line(raw, label="commondir metadata")
     resolved_target = _resolved_pointer_directory(
         base=git_directory,
@@ -823,16 +985,10 @@ def _filesystem_identity(root: pathlib.Path) -> _FilesystemIdentity:
         git_directory = metadata.resolve(strict=True)
     elif stat.S_ISREG(metadata_stat.st_mode):
         kind = "file"
-        try:
-            raw = metadata.read_bytes()
-        except OSError as exc:
-            raise ProductFactoryLocalRepositoryBindingError(
-                "Product Factory .git metadata file is unreadable"
-            ) from exc
-        if not raw or len(raw) > _MAX_GITFILE_BYTES:
-            raise ProductFactoryLocalRepositoryBindingError(
-                "Product Factory .git metadata file is invalid"
-            )
+        raw, metadata_stat = _read_held_metadata_file(
+            metadata,
+            label=".git metadata",
+        )
         gitfile_sha256 = hashlib.sha256(raw).hexdigest()
         (
             git_directory,
