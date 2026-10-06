@@ -40,18 +40,17 @@ from nika_core.product_factory_local_repository_operator import (
     PackagedLocalRepositoryOperator,
 )
 from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
+from nika_core.product_factory_packaged_build_settings import (
+    PackagedBuildRuntimeSettings,
+    activate_packaged_build_runtime,
+    decode_packaged_build_runtime_config,
+)
 from nika_core.product_factory_packaged_execution import (
     PackagedProductFactoryExecutionController,
     ProductFactoryExecutionPlanResolver,
 )
 from nika_core.product_factory_packaged_execution_plan_file import (
     PackagedProductFactoryExecutionPlanFileSource,
-)
-from nika_core.product_factory_packaged_build_settings import (
-    PackagedBuildRuntimeSettings,
-    PackagedBuildRuntimeSettingsError,
-    activate_packaged_build_runtime,
-    decode_packaged_build_runtime_config,
 )
 from nika_core.product_factory_packaged_local_settings import (
     PackagedLocalProductFactorySettings,
@@ -514,7 +513,7 @@ def build_windows_bridge(
                 startup=local_product_factory_startup,
                 config=packaged_build_runtime_config,
             )
-        except PackagedBuildRuntimeSettingsError as exc:
+        except Exception as exc:  # noqa: BLE001 - optional PF5 backend must fail closed
             logging.getLogger(__name__).error(
                 "Packaged PF5 build runtime activation failed: exception_type=%s",
                 type(exc).__name__,
@@ -756,7 +755,8 @@ def build_windows_bridge(
                 runtime_status="not_configured"
             )
             build_runtime_expected = (
-                packaged_build_runtime_pass is not None
+                packaged_build_runtime_settings_invalid
+                or packaged_build_runtime_pass is not None
                 or build_snapshot.get("configured") is True
             )
             build_status = packaged_build_runtime_status()
