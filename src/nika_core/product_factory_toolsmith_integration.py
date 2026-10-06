@@ -327,6 +327,7 @@ class ProductFactoryToolsmithBridge:
             return self._resume_with_repair_authority(
                 bindings=bindings,
                 durable=durable,
+                coordinator=coordinator,
                 record=record,
                 checkpoint=checkpoint,
                 registered=registered,
@@ -376,6 +377,7 @@ class ProductFactoryToolsmithBridge:
         *,
         bindings: ProductFactoryToolsmithBindingRepository,
         durable: ComponentCapabilityBinding,
+        coordinator: ProductFactoryCoordinator,
         record: WorkRecord,
         checkpoint: ComponentCapabilityGap,
         registered: dict[str, str],
@@ -430,6 +432,11 @@ class ProductFactoryToolsmithBridge:
         if committed != next_request:
             raise ProductFactoryToolsmithError(
                 "canonical Product Factory repair commit differs from its preview"
+            )
+        current = _record_for_component(coordinator, checkpoint.component_id)
+        if current.state is not WorkState.READY or current.request != committed:
+            raise ProductFactoryToolsmithError(
+                "canonical Product Factory repair commit did not publish expected ready state"
             )
 
         try:

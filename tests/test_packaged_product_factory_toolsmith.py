@@ -36,6 +36,10 @@ from nika_core.product_factory_toolsmith_integration import (
     ProductFactoryToolsmithBridge,
     ProductFactoryToolsmithError,
 )
+from nika_core.product_factory_toolsmith_state import (
+    ProductFactoryToolsmithBindingError,
+    ProductFactoryToolsmithBindingRepository,
+)
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
 from nika_core.toolsmith.contracts import (
     CandidateState,
@@ -782,3 +786,64 @@ def test_project_revision_between_repair_preview_and_commit_fails_closed(
 
     assert prepared.state.coordinator.snapshot() == before
     assert prepared.state.coordinator.snapshot().records[0].request == request
+
+
+def test_toolsmith_resume_recovers_after_factory_checkpoint_before_binding_finalize(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _repository, preparation, prepared, request, plan = _fixture(
+        tmp_path,
+        canonical_failure=True,
+    )
+    toolsmith, bridge = _real_toolsmith(store)
+    packaged = PackagedProductFactoryToolsmithService(
+        preparation=preparation,
+        bridge=bridge,
+    )
+    checkpoint = packaged.begin_gap(plan)
+    _register_reuse(toolsmith, checkpoint)
+
+    def fail_consumed(_self, _binding):
+        raise ProductFactoryToolsmithBindingError(
+            "simulated binding finalization outage"
+        )
+
+    monkeypatch.setattr(
+        ProductFactoryToolsmithBindingRepository,
+        "mark_consumed",
+        fail_consumed,
+    )
+    with pytest.raises(
+        PackagedProductFactoryToolsmithError,
+        match="resume was rejected",
+    ):
+        packaged.resume_registered_gap(plan)
+
+    # Factory lineage/checkpoint is already authoritative even though the Toolsmith
+    # two-phase binding deliberately remains RESUME_PREPARED.
+    assert prepared.state.coordinator.snapshot().records[0].state.value == "ready"
+
+    monkeypatch.undo()
+    restarted, final_host, final_preparation, _toolsmith, packaged = (
+        _restart_packaged_service(store)
+    )
+    resumed = packaged.resume_registered_gap(plan)
+    assert resumed is not None
+    assert resumed.previous_work_id == request.work_id
+    assert resumed.next_request.attempt == 2
+    assert resumed.next_request.base_sha == SHA_B
+
+    final = final_preparation.restore(plan.project_id)
+    lineage = final_host.repair_lineage(
+        host_task_id=final.host_task_id,
+        state=final.state,
+    )
+    assert len(lineage) == 1
+    assert lineage[0].to_work_id == resumed.next_request.work_id
+
+    binding = ProductFactoryToolsmithBindingRepository(restarted).require(
+        host_task_id=final.host_task_id,
+        work_id=request.work_id,
+    )
+    assert binding.state.value == "consumed"
