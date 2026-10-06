@@ -237,6 +237,6 @@ class WindowsOwnerPresenceObserver:
             raise TypeError("presence clock must return exact built-in datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("presence clock must return timezone-aware datetime")
-        if value.utcoffset().total_seconds() != 0:
+        if value.tzinfo is not UTC:
             raise ValueError("presence clock must use UTC")
         return value
