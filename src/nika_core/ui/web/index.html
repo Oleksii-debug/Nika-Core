@@ -358,6 +358,53 @@
           </button>
         </div>
       </div>
+      <div aria-labelledby="product-factory-repository-binding-heading">
+        <h3 id="product-factory-repository-binding-heading" tabindex="-1">
+          Локальні репозиторії Product Factory
+        </h3>
+        <p id="product-factory-repository-binding-help">
+          Спочатку завантажте JSON-план для поточного ProductProject. Репозиторій
+          вибирається лише з цього перевіреного плану. Введіть повний шлях до
+          локального Git-репозиторію; provider, locator, облікові дані та інша
+          authority не приймаються з цього поля.
+        </p>
+        <label for="product-factory-repository-id">
+          Репозиторій з поточного плану
+        </label>
+        <select
+          id="product-factory-repository-id"
+          aria-describedby="product-factory-repository-binding-help product-factory-repository-binding-status"
+          disabled
+        >
+          <option value="">Репозиторій недоступний</option>
+        </select>
+        <label for="product-factory-repository-root">
+          Локальний Git-репозиторій — повний шлях
+        </label>
+        <input
+          id="product-factory-repository-root"
+          type="text"
+          maxlength="32767"
+          spellcheck="false"
+          autocomplete="off"
+          aria-describedby="product-factory-repository-binding-help product-factory-repository-binding-status"
+          disabled
+        >
+        <p id="product-factory-repository-binding-status">
+          Завантажте актуальний JSON-план і виберіть ProductProject.
+        </p>
+        <div class="actions">
+          <button
+            type="button"
+            id="product-factory-repository-bind"
+            data-action-id="product.factory.repository.bind"
+            data-error-focus-target="product-factory-repository-root"
+            disabled
+          >
+            Зберегти прив’язку репозиторію
+          </button>
+        </div>
+      </div>
       <div id="product-project-statuses" hidden>
         <h3 id="product-project-statuses-heading" tabindex="-1">Статус ProductProject</h3>
         <p id="product-project-statuses-empty">Статусних записів немає.</p>

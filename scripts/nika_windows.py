@@ -33,6 +33,9 @@ from nika_core.packaged_agent_builder import (
 from nika_core.packaged_intelligence_mode import PackagedIntelligenceModeCommandAdapter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
+from nika_core.product_factory_local_repository_binding import (
+    ProductFactoryLocalRepositoryBindings,
+)
 from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
 from nika_core.product_factory_packaged_execution import (
     PackagedProductFactoryExecutionController,
@@ -63,6 +66,9 @@ from nika_core.product_factory_packaged_planning import (
 )
 from nika_core.product_factory_packaged_preparation import (
     PackagedProductFactoryPreparationService,
+)
+from nika_core.product_factory_packaged_repository_binding import (
+    PackagedProductFactoryRepositoryBindingController,
 )
 from nika_core.product_factory_packaged_status import (
     PACKAGED_PRODUCT_FACTORY_WORKSPACE_ID,
@@ -567,6 +573,21 @@ def build_windows_bridge(
         )
         else None
     )
+    product_factory_repository_binding = (
+        PackagedProductFactoryRepositoryBindingController(
+            bindings=ProductFactoryLocalRepositoryBindings(
+                store,
+                product_repository,
+            ),
+            projects=product_repository,
+            resolve_plan=product_factory_execution_plan_files.resolve,
+        )
+        if (
+            local_product_factory_runtime_active
+            and product_factory_execution_plan_files is not None
+        )
+        else None
+    )
     products = ProductProjectCommandService(
         product_repository,
         approval_verifier=decision_approval_authority.verifier(),
@@ -689,6 +710,13 @@ def build_windows_bridge(
             if product_factory_execution_plan_files is not None
             else None
         )
+        state["product_factory_repository_bindings"] = (
+            product_factory_repository_binding.snapshot(
+                product_router.active_project_id,
+            )
+            if product_factory_repository_binding is not None
+            else None
+        )
         return agent_builder_state.decorate(state)
 
     def refresh_local_product_factory_settings(
@@ -744,6 +772,22 @@ def build_windows_bridge(
             )
         return product_factory_execution_plan_files.load(payload)
 
+    def bind_product_factory_repository(payload: Mapping[str, Any]) -> UIResult:
+        if product_factory_repository_binding is None:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=(
+                    "Прив’язка локального репозиторію доступна лише для "
+                    "активного packaged локального Product Factory."
+                ),
+                focus_id="product-factory-repository-root",
+            )
+        return product_factory_repository_binding.bind(
+            product_router.active_project_id,
+            payload,
+        )
+
     bridge = UIActionBridge(
         actions,
         keymap,
@@ -759,6 +803,7 @@ def build_windows_bridge(
             "voice.model.import": voice_model_setup.start,
             "voice.model.cancel": voice_model_setup.cancel,
             "product.factory.execution_plan.load": load_product_factory_execution_plan,
+            "product.factory.repository.bind": bind_product_factory_repository,
             "settings.product_factory_local.configure": (
                 local_product_factory_settings.configure
             ),

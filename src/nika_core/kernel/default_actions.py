@@ -32,6 +32,12 @@ def build_default_action_registry() -> ActionRegistry:
             None,
         ),
         ActionDefinition(
+            "product.factory.repository.bind",
+            "Зберегти локальний репозиторій Product Factory",
+            "Product Factory",
+            None,
+        ),
+        ActionDefinition(
             "settings.product_factory_local.configure",
             "Зберегти локальний Product Factory",
             "Product Factory",
