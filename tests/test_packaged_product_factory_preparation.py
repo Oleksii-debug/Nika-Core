@@ -12,9 +12,17 @@ from nika_core.product_factory_multi_repository import (
     RepositoryGraphIntegrityError,
 )
 from nika_core.product_factory_orchestration import (
+    ComponentBrief,
+    DynamicTeamComposer,
     ProductComponent,
     ProductRepositoryGraph,
+    ProjectScale,
     RepositoryRef,
+    TeamCompositionRequest,
+)
+from nika_core.product_factory_review_authority import (
+    reviewer_principal_bindings_ref,
+    team_plan_fingerprint_ref,
 )
 from nika_core.product_factory_packaged_preparation import (
     PRODUCT_FACTORY_HOST_AGENT_ID,
@@ -25,6 +33,11 @@ from nika_core.product_factory_packaged_preparation import (
 )
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
 from nika_core.toolsmith.contracts import RecoveryState
+
+
+class AllowReviewAuthority:
+    def verify(self, subject, evidence_refs: tuple[str, ...]) -> bool:
+        return bool(subject.project_id and evidence_refs)
 
 
 class NeverDispatchWorker:
@@ -331,3 +344,81 @@ def test_execution_plan_rejects_digest_length_as_repository_base_sha(
             component_goals={"core": "Implement the exact accepted ProductProject work"},
             permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
         )
+
+
+def test_preparation_preserves_persisted_team_review_authority(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "trusted review preparation.db")
+    store.initialize()
+    repository = ProductProjectRepository(store)
+    locator = "Oleksii-debug/Nika-Core"
+    permissions = frozenset({"read_source", "write_source", "run_tests"})
+    team_plan = DynamicTeamComposer().compose(
+        TeamCompositionRequest(
+            project_id="product-team-preparation",
+            components=(ComponentBrief("core", "backend"),),
+            acceptance_criteria=("Independent review is required",),
+            permission_ceiling=permissions,
+            scale=ProjectScale.SMALL,
+        )
+    )
+    reviewer_role = next(role for role in team_plan.roles if role.independent_review)
+    reviewer_principals = ((reviewer_role.role_id, "reviewer-actor"),)
+    project = repository.create(
+        project_id=team_plan.project_id,
+        name="Trusted review Product Factory preparation",
+        spec=ProductProjectSpec(
+            goal="Prepare reviewed component work",
+            desired_outcome="Trusted review authority survives Product Factory preparation",
+            repository_refs=(locator,),
+            team_refs=(
+                team_plan.plan_id,
+                team_plan_fingerprint_ref(team_plan),
+                reviewer_principal_bindings_ref(team_plan, reviewer_principals),
+            ),
+        ),
+        idempotency_key="create:product-team-preparation",
+    )
+    graph = ProductRepositoryGraph(
+        project_id=project.project_id,
+        repositories=(RepositoryRef("repo-core", "github", locator, "main"),),
+        components=(
+            ProductComponent(
+                component_id="core",
+                repository_id="repo-core",
+                paths=("src/nika_core",),
+                test_commands=(("python", "-m", "pytest", "tests"),),
+            ),
+        ),
+    )
+    evidence_authority = AllowReviewAuthority()
+    host = MultiRepositoryProductFactoryHost(
+        store,
+        NeverDispatchWorker(),
+        team_plan=team_plan,
+        review_evidence_authority=evidence_authority,
+        reviewer_principals=reviewer_principals,
+    )
+    service = PackagedProductFactoryPreparationService(
+        repository=repository,
+        tasks=TaskQueue(store),
+        host=host,
+        workspace_id="packaged.product-factory",
+    )
+    plan = PackagedProductFactoryExecutionPlan(
+        project_id=project.project_id,
+        expected_spec_version=project.spec_version,
+        expected_row_version=project.row_version,
+        graph=graph,
+        graph_version=1,
+        base_shas={"repo-core": "c" * 40},
+        component_goals={"core": "Implement reviewed work"},
+        permission_ceiling=permissions,
+    )
+
+    prepared = service.prepare(plan)
+    restored = service.restore(project.project_id)
+
+    assert prepared.state.binding.has_trusted_review_authority is True
+    assert restored.state.binding.has_trusted_review_authority is True
+    assert restored.state.binding.team_plan == team_plan
+    assert restored.state.binding.reviewer_principals == reviewer_principals

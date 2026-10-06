@@ -24,6 +24,11 @@ from nika_core.product_factory_orchestration import (
     ProductRepositoryGraph,
     RepositoryGraphError,
     RepositoryRef,
+    TeamPlan,
+)
+from nika_core.product_factory_review_authority import (
+    ProductFactoryReviewAuthorityPort,
+    ReviewerPrincipalBindings,
 )
 from nika_core.product_factory_program_host import (
     ProductFactoryProgramHost,
@@ -157,6 +162,12 @@ class MultiRepositoryProductFactoryHost:
 
     store: SQLiteStore
     worker: ProductFactoryProgramWorkerPort
+    team_plan: TeamPlan | None = None
+    review_evidence_authority: ProductFactoryReviewAuthorityPort | None = field(
+        default=None,
+        repr=False,
+    )
+    reviewer_principals: ReviewerPrincipalBindings = field(default=(), repr=False)
     _program: ProductFactoryProgramHost = field(init=False, repr=False)
     _coordinator_checkpoints: ProductFactoryCheckpointHost = field(
         init=False,
@@ -164,7 +175,11 @@ class MultiRepositoryProductFactoryHost:
     )
 
     def __post_init__(self) -> None:
-        self._program = ProductFactoryProgramHost(self.store, self.worker)
+        self._program = ProductFactoryProgramHost(
+            self.store,
+            self.worker,
+            review_evidence_authority=self.review_evidence_authority,
+        )
         self._coordinator_checkpoints = ProductFactoryCheckpointHost(self.store)
 
     def initialize(
@@ -180,7 +195,7 @@ class MultiRepositoryProductFactoryHost:
     ) -> MultiRepositoryExecutionState:
         """Bind one immutable graph authority and create the first durable work checkpoint."""
 
-        binding = ProductProjectCoordinatorBinding(project, graph)
+        binding = self._binding(project, graph)
         authority = self._bind_graph(
             host_task_id=host_task_id,
             project=project,
@@ -365,6 +380,19 @@ class MultiRepositoryProductFactoryHost:
         self._validate_lineage_records(state=state, lineage=lineage)
         return lineage
 
+    def _binding(
+        self,
+        project: ProductProject,
+        graph: ProductRepositoryGraph,
+    ) -> ProductProjectCoordinatorBinding:
+        return ProductProjectCoordinatorBinding(
+            project,
+            graph,
+            team_plan=self.team_plan,
+            review_evidence_authority=self.review_evidence_authority,
+            reviewer_principals=self.reviewer_principals,
+        )
+
     def _bind_graph(
         self,
         *,
@@ -383,7 +411,7 @@ class MultiRepositoryProductFactoryHost:
             raise MultiRepositoryExecutionError(
                 "repository graph does not belong to ProductProject"
             )
-        ProductProjectCoordinatorBinding(project, graph)
+        self._binding(project, graph)
 
         graph_payload = _encode_graph(graph)
         graph_digest = _sha256(_canonical(graph_payload))
@@ -607,7 +635,7 @@ class MultiRepositoryProductFactoryHost:
             raise RepositoryGraphIntegrityError(
                 "versioned dependency edge evidence disagrees with repository graph"
             )
-        ProductProjectCoordinatorBinding(project, graph)
+        self._binding(project, graph)
         return RepositoryGraphAuthority(
             checkpoint_id=str(row["checkpoint_id"]),
             project_id=project.project_id,
