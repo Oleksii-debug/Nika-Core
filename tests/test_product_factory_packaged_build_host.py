@@ -494,6 +494,50 @@ def test_restart_rejects_trusted_execution_authority_drift(tmp_path) -> None:
         )
 
 
+def test_missing_pinned_build_executable_blocks_before_dispatch(tmp_path) -> None:
+    store, task_id = _store_and_task(tmp_path)
+    workspace = tmp_path / "PF5 pinned executable workspaces"
+    workspace.mkdir()
+    git = tmp_path / ("git-ready.exe" if os.name == "nt" else "git-ready")
+    build = tmp_path / ("builder.exe" if os.name == "nt" else "builder")
+    git.write_bytes(b"git-placeholder")
+    build.write_bytes(b"builder-placeholder")
+    if os.name != "nt":
+        git.chmod(0o755)
+        build.chmod(0o755)
+    startup = PackagedLocalProductFactoryStartup(
+        workspace_parent=workspace.resolve(),
+        policy=ContainedLocalCodingPolicy(
+            allowed_executables=(str(build.resolve()),),
+            resource_budget=ResourceBudget(
+                timeout_seconds=30,
+                max_output_bytes=100_000,
+                max_changed_files=8,
+            ),
+            lease_seconds=120,
+        ),
+        git_executable=git.resolve(),
+    )
+    host = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task_id,
+        project_id=PROJECT_ID,
+        node=_node(),
+        startup=startup,
+        trusted_authority=_authority(),
+        output_policies=_policy(),
+    )
+    build.unlink()
+    host.submit(_spec())
+
+    record = host.prepare(WORK_ID)
+
+    assert record.state is BuildExecutionState.WAITING_FOR_NODE
+    assert record.dispatch is None
+    assert record.evidence is None
+    assert host.checkpoints.latest().snapshot.sequence == 2
+
+
 def test_missing_git_marks_local_node_unavailable_without_effect(tmp_path) -> None:
     host, _store, _task_id, startup, _authority_value, _policies = _host(tmp_path)
     startup.git_executable.unlink()
