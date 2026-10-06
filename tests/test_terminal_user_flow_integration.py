@@ -90,8 +90,14 @@ def test_product_decision_and_accessible_task_pages_share_one_packaged_state(
     first = bridge.get_state()
     assert first["ok"] is True
     first_state = first["state"]
-    assert first_state["product_project"]["current_decision"]["decision_id"] == (
-        "decision-combined-flow"
+    project_state = first_state["product_project"]
+    assert project_state["current_decision"]["decision_id"] == "decision-combined-flow"
+    assert isinstance(project_state["status_items"], list)
+    assert isinstance(project_state["status_items_truncated"], bool)
+    assert len(project_state["status_items"]) <= 24
+    assert len(project_state["status_items"]) <= project_state["status_count"]
+    assert project_state["status_items_truncated"] is (
+        len(project_state["status_items"]) < project_state["status_count"]
     )
     assert first_state["task_page"] == {
         "schema": "nika.task-page:v1",
@@ -116,8 +122,10 @@ def test_product_decision_and_accessible_task_pages_share_one_packaged_state(
     second_state = bridge.get_state()["state"]
     assert second_state["task_page"]["offset"] == 50
     assert len(second_state["tasks"]) == 5
-    assert second_state["product_project"]["current_decision"] == (
-        first_state["product_project"]["current_decision"]
+    assert second_state["product_project"]["current_decision"] == project_state["current_decision"]
+    assert second_state["product_project"]["status_items"] == project_state["status_items"]
+    assert second_state["product_project"]["status_items_truncated"] is (
+        project_state["status_items_truncated"]
     )
 
     selected_task_id = second_state["tasks"][0]["task_id"]
@@ -133,7 +141,9 @@ def test_product_decision_and_accessible_task_pages_share_one_packaged_state(
     assert queue.get(selected_task_id).state is TaskState.PAUSED
 
     final_state = bridge.get_state()["state"]
-    assert final_state["product_project"]["current_decision"] == (
-        first_state["product_project"]["current_decision"]
+    assert final_state["product_project"]["current_decision"] == project_state["current_decision"]
+    assert final_state["product_project"]["status_items"] == project_state["status_items"]
+    assert final_state["product_project"]["status_items_truncated"] is (
+        project_state["status_items_truncated"]
     )
     assert final_state["product_project"]["decision_count"] == 1
