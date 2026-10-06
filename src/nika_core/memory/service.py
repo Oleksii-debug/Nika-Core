@@ -174,10 +174,6 @@ class MemoryService:
             body.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise ValueError("memory JSON contains invalid Unicode") from exc
-        # Every mutation that assigns updated_at shares one writer boundary.
-        # This prevents an unconditional writer from deriving a revision from a
-        # stale pre-CAS snapshot and reusing another committed revision token.
-        conn.execute("BEGIN IMMEDIATE")
         existing = conn.execute(
             "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
             "AND namespace = ? AND memory_key = ?",
