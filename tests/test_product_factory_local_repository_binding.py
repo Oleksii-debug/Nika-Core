@@ -141,6 +141,49 @@ def test_binding_survives_restart_and_resolves_exact_plan(
     assert resolved == {repository.repository_id: root.resolve(strict=True)}
 
 
+def test_plan_aware_bind_rejects_stale_project_with_same_locator(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    plan = _plan(project, repository)
+    projects = ProductProjectRepository(store)
+    updated = projects.update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed after the execution plan was loaded",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="stale local-binding plan regression",
+        idempotency_key="update:product-1:stale-binding-plan",
+    )
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    root = _root(tmp_path)
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="execution plan is stale",
+    ):
+        bindings.bind_for_plan(
+            plan=plan,
+            repository_id=repository.repository_id,
+            root=root,
+            expected_binding_version=None,
+        )
+    assert bindings.binding_version(project.project_id, repository.repository_id) is None
+
+    rebound = bindings.bind_for_plan(
+        plan=_plan(updated, repository),
+        repository_id=repository.repository_id,
+        root=root,
+        expected_binding_version=None,
+    )
+    assert rebound.binding_version == 1
+
+
 def test_binding_update_requires_exact_version(
     tmp_path: pathlib.Path,
 ) -> None:

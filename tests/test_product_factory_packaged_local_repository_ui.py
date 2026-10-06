@@ -172,6 +172,44 @@ def test_bind_uses_loaded_plan_identity_without_projecting_local_path(
     assert bound.root == root
 
 
+def test_bind_rejects_stale_product_project_plan_without_mutation(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, (repository,))
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    plan_box = {"plan": _plan(project, repository)}
+    active_box: dict[str, str | None] = {"project_id": project.project_id}
+    commands = _commands(bindings, plan_box=plan_box, active_box=active_box)
+    stale = commands.snapshot()
+    updated = ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed while the loaded plan stayed stale",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="stale accessible binding plan regression",
+        idempotency_key="update:product-1:stale-accessible-binding",
+    )
+    root = _root(tmp_path, "stale plan target")
+
+    rejected = commands.bind(_bind_payload(stale, root))
+
+    assert rejected.status == "rejected"
+    assert rejected.focus_id == "product-factory-local-repository-path"
+    assert "актуальність ProductProject" in rejected.message
+    assert bindings.binding_version(project.project_id, repository.repository_id) is None
+
+    plan_box["plan"] = _plan(updated, repository)
+    current = commands.snapshot()
+    completed = commands.bind(_bind_payload(current, root))
+    assert completed.status == "completed"
+    assert bindings.binding_version(project.project_id, repository.repository_id) == 1
+
+
 def test_bind_rejects_stale_repository_identity_token(
     tmp_path: pathlib.Path,
 ) -> None:
