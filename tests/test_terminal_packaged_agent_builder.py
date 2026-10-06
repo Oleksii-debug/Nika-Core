@@ -270,6 +270,12 @@ def test_windows_composition_creates_and_replays_builder_draft_without_task(
     assert replayed["tasks"] == []
     assert replayed["agent_builder_definitions"] == [definition]
 
+    store = SQLiteStore(path)
+    store.initialize()
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM product_projects").fetchone()[0] == 0
+
 
 def test_ambiguous_agent_command_invokes_no_handler(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "ambiguous.db")
@@ -350,3 +356,45 @@ def test_state_projection_fails_closed_on_persisted_risk_corruption(
 
     with pytest.raises(PermissionError, match="risk metadata"):
         projector.decorate({"agents": []})
+
+
+def test_real_windows_builder_preserves_selected_product_project(
+    tmp_path: Path,
+) -> None:
+    path = (tmp_path / "builder with product.db").resolve()
+    config = AppConfig(database_path=path)
+    bridge, _products = nika_windows.build_windows_bridge(
+        config,
+        start_startup_recovery=False,
+    )
+
+    product = bridge.dispatch(
+        {
+            "request_id": "product-before-builder",
+            "action_id": "task.create",
+            "payload": {
+                "command": "Create an accessible Windows application for expense tracking"
+            },
+        }
+    )
+    before = bridge.get_state()
+    assert product["status"] == "completed"
+    assert before["ok"] is True
+    selected = before["state"]["product_project"]
+    assert selected is not None
+
+    builder = bridge.dispatch(
+        {
+            "request_id": "builder-after-product",
+            "action_id": "task.create",
+            "payload": {"command": "Create an agent for accessible report triage"},
+        }
+    )
+    after = bridge.get_state()
+
+    assert builder["status"] == "completed"
+    assert builder["focus_id"] == "agents-heading"
+    assert after["ok"] is True
+    assert after["state"]["product_project"]["project_id"] == selected["project_id"]
+    assert after["state"]["tasks"] == []
+    assert len(after["state"]["agent_builder_definitions"]) == 1
