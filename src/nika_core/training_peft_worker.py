@@ -2810,30 +2810,63 @@ def _existing_candidate_sha256(
         or before.st_nlink != 1
     ):
         _fail("candidate_replay_invalid")
+
+    authority_fd: int | None = None
     try:
+        authority_fd = _open_readonly_snapshot(candidate)
+        opened = os.fstat(authority_fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or _stable_stat_identity(opened) != _stable_stat_identity(before)
+            or opened.st_nlink != 1
+        ):
+            _fail("candidate_replay_changed")
+
         observed_manifest = candidate_adapter_manifest(candidate)
-    except (PeftTrainerError, OSError, RuntimeError, TypeError, ValueError):
+        middle_open = os.fstat(authority_fd)
+        middle_path = _require_regular_unlinked(
+            candidate,
+            code="candidate_replay_changed",
+        )
+        if (
+            _stable_stat_identity(middle_open) != _stable_stat_identity(opened)
+            or _stable_stat_identity(middle_path) != _stable_stat_identity(opened)
+            or middle_open.st_nlink != 1
+            or middle_path.st_nlink != 1
+        ):
+            _fail("candidate_replay_changed")
+        if observed_manifest != expected_manifest:
+            _fail("candidate_replay_identity_mismatch")
+
+        digest, size = _hash_regular_snapshot(
+            candidate,
+            code="candidate_replay_changed",
+        )
+        after_open = os.fstat(authority_fd)
+        after_path = _require_regular_unlinked(
+            candidate,
+            code="candidate_replay_changed",
+        )
+        if (
+            size <= 0
+            or _stable_stat_identity(after_open) != _stable_stat_identity(opened)
+            or _stable_stat_identity(after_path) != _stable_stat_identity(opened)
+            or after_open.st_nlink != 1
+            or after_path.st_nlink != 1
+        ):
+            _fail("candidate_replay_changed")
+        return digest
+    except PeftTrainerError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError):
         _fail("candidate_replay_invalid")
-    if observed_manifest != expected_manifest:
-        _fail("candidate_replay_identity_mismatch")
-    middle = _require_regular_unlinked(candidate, code="candidate_replay_changed")
-    if (
-        (middle.st_dev, middle.st_ino) != (before.st_dev, before.st_ino)
-        or middle.st_nlink != 1
-    ):
-        _fail("candidate_replay_changed")
-    digest, size = _hash_regular_snapshot(
-        candidate,
-        code="candidate_replay_changed",
-    )
-    after = _require_regular_unlinked(candidate, code="candidate_replay_changed")
-    if (
-        size <= 0
-        or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
-        or after.st_nlink != 1
-    ):
-        _fail("candidate_replay_changed")
-    return digest
+    finally:
+        if authority_fd is not None:
+            try:
+                os.close(authority_fd)
+            except OSError:
+                pass
 
 
 def _train_one_step(
