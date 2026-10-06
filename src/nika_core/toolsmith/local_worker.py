@@ -942,6 +942,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
 
         process_lock: _JobExecutionLock | None = None
         try:
+            self._require_repository_authority(exact.repository.repository_id)
             try:
                 process_lock = _JobExecutionLock(self.ensure_workspace_root(exact.job_id))
                 if not process_lock.acquire():
