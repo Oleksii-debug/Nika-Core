@@ -67,6 +67,25 @@ class WorkspaceSecurityError(ValueError):
     """Raised when a workspace or process request cannot be proven policy-safe."""
 
 
+def validate_git_branch_name(branch_name: object) -> str:
+    if type(branch_name) is not str:
+        raise WorkspaceSecurityError("branch name is empty, ambiguous or contains control data")
+    if (
+        not branch_name
+        or branch_name != branch_name.strip()
+        or branch_name.startswith("-")
+        or "\x00" in branch_name
+        or any(
+            ord(character) < 32
+            or ord(character) == 127
+            or character in "\u0085\u2028\u2029"
+            for character in branch_name
+        )
+    ):
+        raise WorkspaceSecurityError("branch name is empty, ambiguous or contains control data")
+    return branch_name
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class WorkspacePathPolicy:
     allowed_roots: tuple[str, ...]
@@ -96,8 +115,7 @@ class SterileGitPlan:
     isolation_class: toolsmith_contracts.IsolationClass = toolsmith_contracts.IsolationClass.POLICY_ONLY
 
     def __post_init__(self) -> None:
-        if not self.branch_name.strip():
-            raise WorkspaceSecurityError("branch_name must not be empty")
+        validate_git_branch_name(self.branch_name)
         if len(self.base_sha) != 40 or any(
             character not in "0123456789abcdef" for character in self.base_sha.lower()
         ):
