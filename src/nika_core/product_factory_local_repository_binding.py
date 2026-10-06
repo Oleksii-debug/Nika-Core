@@ -241,13 +241,45 @@ class ProductFactoryLocalRepositoryBindings:
         project_id: str,
         repository_id: str,
         expected_binding_version: int,
+        expected_project_spec_version: int | None = None,
+        expected_project_row_version: int | None = None,
     ) -> None:
         project_id = _canonical_text(project_id, "project_id")
         repository_id = _canonical_text(repository_id, "repository_id")
         expected = _positive_int(expected_binding_version, "expected_binding_version")
+        expected_spec_version = (
+            None
+            if expected_project_spec_version is None
+            else _positive_int(
+                expected_project_spec_version,
+                "expected_project_spec_version",
+            )
+        )
+        expected_row_version = (
+            None
+            if expected_project_row_version is None
+            else _non_negative_int(
+                expected_project_row_version,
+                "expected_project_row_version",
+            )
+        )
+        if expected_spec_version is not None or expected_row_version is not None:
+            project = self._projects.get(project_id)
+            _require_expected_project_versions(
+                project,
+                expected_spec_version=expected_spec_version,
+                expected_row_version=expected_row_version,
+            )
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if expected_spec_version is not None or expected_row_version is not None:
+                current_project = self._projects.get(project_id)
+                _require_expected_project_versions(
+                    current_project,
+                    expected_spec_version=expected_spec_version,
+                    expected_row_version=expected_row_version,
+                )
             row = conn.execute(
                 "SELECT binding_version FROM product_factory_local_repository_bindings "
                 "WHERE project_id=? AND repository_id=?",
@@ -403,6 +435,10 @@ def _require_plan_project(
         or project.spec_version != plan.expected_spec_version
         or project.row_version != plan.expected_row_version
         or project.status != "active"
+        or any(
+            repository.locator not in project.spec.repository_refs
+            for repository in plan.graph.repositories
+        )
     ):
         raise ProductFactoryLocalRepositoryBindingError(
             "execution plan is stale for the current ProductProject"

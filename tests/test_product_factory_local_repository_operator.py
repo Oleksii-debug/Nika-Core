@@ -162,6 +162,51 @@ def test_explicit_bind_and_version_fenced_unbind_round_trip(
     assert operator.snapshot(project.project_id)["repositories"][0]["bound"] is False
 
 
+def test_unbind_rejects_stale_execution_plan_without_removing_binding(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    operator = _operator(store, plan)
+    root = _root(tmp_path)
+    assert operator.bind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "root_path": str(root),
+            "expected_binding_version": None,
+        }
+    ).status == "completed"
+
+    ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed before stale unbind",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="stale unbind regression",
+        idempotency_key="update:product-1:stale-unbind",
+    )
+
+    result = operator.unbind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "expected_binding_version": 1,
+        }
+    )
+
+    assert result.status == "rejected"
+    assert ProductFactoryLocalRepositoryBindings(store).current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) == 1
+
+
 def test_binding_projection_survives_restart_without_exposing_root(
     tmp_path: pathlib.Path,
 ) -> None:
