@@ -167,7 +167,7 @@ class TaskQueue:
             "typeof(state) != 'text' "
             f"OR state NOT IN ({canonical_placeholders}) "
             "THEN 0 ELSE 1 END, "
-            "updated_at DESC, created_at DESC LIMIT ? OFFSET ?"
+            "updated_at DESC, created_at DESC, task_id DESC LIMIT ? OFFSET ?"
         )
         parameters = (
             *tuple(state.value for state in unique_states),

@@ -56,6 +56,22 @@ def test_task_state_filter_supports_bounded_offset_and_validates_it(tmp_path: Pa
     backend.close()
 
 
+def test_task_state_pages_have_deterministic_tie_order(tmp_path: Path) -> None:
+    backend, queue = _backend(tmp_path)
+    task_ids = [_ready(queue, index) for index in range(55)]
+    with queue.store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET created_at = ?, updated_at = ?",
+            ("2026-10-06T00:00:00+00:00", "2026-10-06T00:00:00+00:00"),
+        )
+
+    first = queue.list_by_states((TaskState.READY,), limit=50, offset=0)
+    second = queue.list_by_states((TaskState.READY,), limit=50, offset=50)
+
+    assert [item.task_id for item in (*first, *second)] == sorted(task_ids, reverse=True)
+    backend.close()
+
+
 def test_backend_pages_all_unfinished_task_ids_without_unbounded_snapshot(
     tmp_path: Path,
 ) -> None:
