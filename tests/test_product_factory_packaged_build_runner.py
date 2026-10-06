@@ -335,10 +335,16 @@ def test_runner_admits_accepted_candidate_and_drives_incumbent_pf5_host(
     assert outcome.candidate_work_id != outcome.build_work_id
     assert outcome.state is BuildExecutionState.SUCCEEDED
     assert outcome.artifact_digest == "f" * 64
-    assert host.spec.grant if hasattr(host.spec, "grant") else True
     assert host.spec.scope.command_id == "build"
     assert host.spec.scope.network_scopes == ()
     assert host.spec.scope.credential_refs == ()
+    execution = runner._authority.trusted_execution.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=outcome.build_work_id,
+    )
+    assert execution.commands[0].argv == _template().argv
+    assert execution.commands[0].argv != _graph().components[0].build_commands[0]
     assert host.calls == [
         "submit",
         f"prepare:{outcome.build_work_id}",
