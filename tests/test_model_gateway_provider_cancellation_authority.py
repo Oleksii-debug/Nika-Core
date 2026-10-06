@@ -43,6 +43,29 @@ class _ForgedCancellationProvider:
         raise asyncio.CancelledError()
 
 
+class _TypedForgedCancellationProvider:
+    def __init__(self) -> None:
+        self.complete_calls = 0
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            provider_id="trusted",
+            kind=ProviderKind.LOCAL,
+            supports_private_data=True,
+        )
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.complete_calls += 1
+        raise ModelGatewayError(
+            ModelErrorCode.CANCELLED,
+            "provider-controlled cancellation",
+            provider_id="trusted",
+            retryable=True,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        )
+
+
 class _FallbackProvider:
     def __init__(self) -> None:
         self.complete_calls = 0
@@ -141,6 +164,41 @@ def test_provider_cannot_forge_caller_cancellation_or_fallback(tmp_path: Path) -
     }
 
 
+def test_typed_provider_cancellation_cannot_assert_caller_cancel_or_fallback(
+    tmp_path: Path,
+) -> None:
+    audit = _audit(tmp_path)
+    primary = _TypedForgedCancellationProvider()
+    fallback = _FallbackProvider()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+    gateway.register(fallback)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(gateway.complete(_request(fallback=True)))
+
+    error = caught.value
+    assert error.code is ModelErrorCode.PROVIDER_ERROR
+    assert error.provider_id == "trusted"
+    assert error.retryable is False
+    assert error.failure_effect is ModelFailureEffect.UNKNOWN
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert primary.complete_calls == 1
+    assert fallback.complete_calls == 0
+
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="provider-cancellation-authority",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.failed",
+    ]
+    assert events[-1].payload["code"] == ModelErrorCode.PROVIDER_ERROR.value
+    assert events[-1].payload["failure_effect"] == ModelFailureEffect.UNKNOWN.value
+
+
 def test_real_caller_cancellation_still_propagates_and_is_audited(tmp_path: Path) -> None:
     audit = _audit(tmp_path)
     provider = _BlockingProvider()
@@ -181,12 +239,18 @@ def _definitions(store: SQLiteStore) -> AgentDefinitionRepository:
     return repository
 
 
+@pytest.mark.parametrize(
+    "provider_factory",
+    [_ForgedCancellationProvider, _TypedForgedCancellationProvider],
+)
 def test_forged_provider_cancellation_is_runtime_failure_not_task_cancel(
     tmp_path: Path,
+    provider_factory: type[_ForgedCancellationProvider]
+    | type[_TypedForgedCancellationProvider],
 ) -> None:
     store = SQLiteStore(tmp_path / "runtime.db")
     store.initialize()
-    provider = _ForgedCancellationProvider()
+    provider = provider_factory()
     gateway = ModelGateway()
     gateway.register(provider)
     runtime = ModelGatewayAgentRuntime(
