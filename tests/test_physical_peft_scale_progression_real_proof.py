@@ -85,8 +85,13 @@ def test_scale_plan_expands_only_full_step_budget(
         "tier_id": "pilot",
     }
     assert tiers[1] == {
-        **{key: value for key, value in tiers[0].items() if key != "max_steps"},
+        **{
+            key: value
+            for key, value in tiers[0].items()
+            if key not in {"max_steps", "tier_id"}
+        },
         "max_steps": 3,
+        "tier_id": "scale-1",
     }
 
 
