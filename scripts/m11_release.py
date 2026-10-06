@@ -145,18 +145,22 @@ def _pf11_stat_identity(snapshot: os.stat_result) -> tuple[int, int, int, int]:
     )
 
 
+def _is_regular_non_reparse_snapshot(snapshot: os.stat_result) -> bool:
+    attributes = int(getattr(snapshot, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return (
+        stat.S_ISREG(snapshot.st_mode)
+        and not stat.S_ISLNK(snapshot.st_mode)
+        and not bool(attributes & reparse_flag)
+    )
+
+
 def _pf11_regular_snapshot(path: Path) -> os.stat_result:
     try:
         snapshot = path.lstat()
     except OSError as exc:
         raise RuntimeError("packaged PF11 proof evidence file is missing or unreadable") from exc
-    attributes = int(getattr(snapshot, "st_file_attributes", 0))
-    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-    if (
-        not stat.S_ISREG(snapshot.st_mode)
-        or stat.S_ISLNK(snapshot.st_mode)
-        or bool(attributes & reparse_flag)
-    ):
+    if not _is_regular_non_reparse_snapshot(snapshot):
         raise RuntimeError("packaged PF11 proof evidence must be a regular non-link file")
     return snapshot
 
@@ -287,7 +291,7 @@ def _stage_canonical_installer(project_root: Path, bundle_dir: Path) -> Path:
         raise RuntimeError(
             f"canonical Windows installer is missing or unsafe: {source}"
         ) from exc
-    if not stat.S_ISREG(before.st_mode):
+    if not _is_regular_non_reparse_snapshot(before):
         raise RuntimeError(f"canonical Windows installer is missing or unsafe: {source}")
     if not bundle_dir.is_dir() or bundle_dir.is_symlink():
         raise RuntimeError(f"Windows release bundle is missing or unsafe: {bundle_dir}")
@@ -302,7 +306,7 @@ def _stage_canonical_installer(project_root: Path, bundle_dir: Path) -> Path:
         descriptor = _open_readonly_nofollow_snapshot(source)
         opened = os.fstat(descriptor)
         if (
-            not stat.S_ISREG(opened.st_mode)
+            not _is_regular_non_reparse_snapshot(opened)
             or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
             != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
         ):
@@ -325,7 +329,7 @@ def _stage_canonical_installer(project_root: Path, bundle_dir: Path) -> Path:
 
         current = source.lstat()
         if (
-            not stat.S_ISREG(current.st_mode)
+            not _is_regular_non_reparse_snapshot(current)
             or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
             != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
             or (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
