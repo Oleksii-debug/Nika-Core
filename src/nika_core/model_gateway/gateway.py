@@ -462,6 +462,14 @@ class ModelGateway:
                 provider_id=provider_id,
                 retryable=False,
             )
+        if error.code is ModelErrorCode.CANCELLED:
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider cannot assert caller cancellation",
+                provider_id=provider_id,
+                retryable=False,
+                failure_effect=ModelFailureEffect.UNKNOWN,
+            )
         if not isinstance(error.retryable, bool):
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
