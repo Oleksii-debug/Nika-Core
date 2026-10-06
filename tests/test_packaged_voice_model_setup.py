@@ -198,6 +198,51 @@ def test_voice_model_setup_background_host_future_interruption_recovers_state(
     assert not (data_root / "voice" / "whisper").exists()
 
 
+@pytest.mark.parametrize("future_mode", ["failed", "cancelled"])
+def test_voice_model_setup_host_interruption_after_publish_requires_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    future_mode: str,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[Coroutine[Any, Any, Any]] = []
+    future: Future[Any] = Future()
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        submitted.append(coroutine)
+        return future
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+    started = setup.start({"source_root": str(source)})
+    assert setup.snapshot()["status"] == "importing"
+
+    target = data_root / "voice" / "whisper"
+    target.mkdir(parents=True)
+    for name in ("encoder.onnx", "decoder.onnx", "tokens.txt"):
+        (target / name).write_bytes(b"published-model")
+
+    if future_mode == "failed":
+        future.set_exception(RuntimeError("PRIVATE HOST DETAIL"))
+    else:
+        assert future.cancel()
+
+    try:
+        terminal = setup.snapshot()
+    finally:
+        submitted[0].close()
+
+    assert started.status == "accepted"
+    assert terminal["status"] == "restart_required"
+    assert terminal["active"] is False
+    assert terminal["installed"] is True
+    assert terminal["can_import"] is False
+    assert terminal["restart_required"] is True
+    assert "PRIVATE" not in repr(terminal)
+
+
 def test_voice_model_setup_background_cancel_is_cooperative(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
