@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1486,3 +1487,125 @@ def test_insufficient_static_storage_fails_before_durable_output(
         driver.run_physical_pilot_from_config(config)
 
     assert not config.output_root.exists()
+
+
+def test_static_storage_preflight_holds_parent_lock_across_free_space_query(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_parent = tmp_path / "output-volume"
+    output_parent.mkdir()
+    output_root, parent_snapshot = driver._preflight_output_root(
+        output_parent / "pilot-output"
+    )
+    base = tmp_path / "base.gguf"
+    base.write_bytes(b"GGUF")
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "tokenizer.json").write_bytes(b"{}")
+    manifest_sha256 = driver.model_directory_manifest_sha256(model_dir)
+    events: list[str] = []
+
+    def open_lock(path: Path, expected: os.stat_result) -> int:
+        assert path == output_parent
+        assert (expected.st_dev, expected.st_ino) == (
+            parent_snapshot.st_dev,
+            parent_snapshot.st_ino,
+        )
+        events.append("open")
+        return 91
+
+    def disk_usage(path: object) -> SimpleNamespace:
+        assert Path(path) == output_parent
+        assert events == ["open"]
+        events.append("usage")
+        return SimpleNamespace(free=1_000_000)
+
+    def close_lock(handle: int | None) -> None:
+        assert handle == 91
+        events.append("close")
+
+    monkeypatch.setattr(
+        driver,
+        "_open_windows_output_parent_stability_lock",
+        open_lock,
+    )
+    monkeypatch.setattr(
+        driver,
+        "_close_windows_output_parent_stability_lock",
+        close_lock,
+    )
+    monkeypatch.setattr(driver.shutil, "disk_usage", disk_usage)
+
+    driver._preflight_static_storage(
+        output_root=output_root,
+        expected_parent=parent_snapshot,
+        base_gguf_path=base,
+        model_dir=model_dir,
+        model_dir_manifest_sha256=manifest_sha256,
+        initial_adapter_path=None,
+    )
+
+    assert events == ["open", "usage", "close"]
+    assert not output_root.exists()
+
+
+def test_static_storage_preflight_releases_parent_lock_on_telemetry_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_parent = tmp_path / "output-volume"
+    output_parent.mkdir()
+    output_root, parent_snapshot = driver._preflight_output_root(
+        output_parent / "pilot-output"
+    )
+    base = tmp_path / "base.gguf"
+    base.write_bytes(b"GGUF")
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "tokenizer.json").write_bytes(b"{}")
+    manifest_sha256 = driver.model_directory_manifest_sha256(model_dir)
+    events: list[str] = []
+
+    def open_lock(path: Path, expected: os.stat_result) -> int:
+        assert path == output_parent
+        events.append("open")
+        return 92
+
+    def disk_usage(path: object) -> object:
+        assert Path(path) == output_parent
+        assert events == ["open"]
+        events.append("usage")
+        raise OSError("synthetic telemetry failure")
+
+    def close_lock(handle: int | None) -> None:
+        assert handle == 92
+        events.append("close")
+
+    monkeypatch.setattr(
+        driver,
+        "_open_windows_output_parent_stability_lock",
+        open_lock,
+    )
+    monkeypatch.setattr(
+        driver,
+        "_close_windows_output_parent_stability_lock",
+        close_lock,
+    )
+    monkeypatch.setattr(driver.shutil, "disk_usage", disk_usage)
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="free space could not be inspected",
+    ):
+        driver._preflight_static_storage(
+            output_root=output_root,
+            expected_parent=parent_snapshot,
+            base_gguf_path=base,
+            model_dir=model_dir,
+            model_dir_manifest_sha256=manifest_sha256,
+            initial_adapter_path=None,
+        )
+
+    assert events == ["open", "usage", "close"]
+    assert not output_root.exists()
