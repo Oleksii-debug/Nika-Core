@@ -125,6 +125,7 @@ def test_ollama_switch_is_durable_and_cannot_rebind_already_accepted_task(
     assert frozen.provider_id == "ollama"
     assert frozen.model == "qwen3:8b"
     assert frozen.base_url == "http://localhost:11434"
+    assert frozen.private_data_allowed is True
     assert ordinary.calls == []
 
 

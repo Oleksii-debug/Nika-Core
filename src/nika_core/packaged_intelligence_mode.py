@@ -169,7 +169,7 @@ class PackagedIntelligenceModeCommandAdapter:
         common: dict[str, object] = {
             "schema_version": 1,
             "credential_ref": None,
-            "private_data_allowed": False,
+            "private_data_allowed": True,
             "timeout_seconds": 60.0,
         }
 
