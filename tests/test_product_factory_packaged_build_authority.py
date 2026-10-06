@@ -610,6 +610,31 @@ def test_historical_authority_is_effect_bound_and_recovery_scoped(
     assert row["effect_dispatch_id"] == dispatch.dispatch_id
 
 
+def test_effect_marker_requires_owned_active_authority_transaction(
+    tmp_path: Path,
+) -> None:
+    store, _startup_value, _node_value, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    dispatch = _dispatch_for(runtime, spec)
+
+    with store.connection() as conn:
+        with pytest.raises(ValueError, match="active caller-owned transaction"):
+            runtime.trusted_execution.mark_effect_started_with_connection(
+                conn,
+                dispatch,
+            )
+
+    other = SQLiteStore(tmp_path / "foreign.db")
+    other.initialize()
+    with other.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(ValueError, match="connection"):
+            runtime.trusted_execution.mark_effect_started_with_connection(
+                conn,
+                dispatch,
+            )
+
+
 def test_missing_historical_template_payload_fails_closed_after_effect_marker(
     tmp_path: Path,
 ) -> None:
