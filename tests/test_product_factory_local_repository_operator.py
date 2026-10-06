@@ -376,3 +376,66 @@ def test_missing_plan_snapshot_and_actions_fail_closed(
         }
     )
     assert result.status == "rejected"
+
+
+def test_unbind_rechecks_loaded_plan_inside_decisive_binding_transaction(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    operator = PackagedLocalRepositoryOperator(
+        bindings=bindings,
+        resolve_plan=lambda project_id: plan
+        if project_id == plan.project_id
+        else (_ for _ in ()).throw(KeyError(project_id)),
+    )
+    root = _root(tmp_path)
+    assert operator.bind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "root_path": str(root),
+            "expected_binding_version": None,
+        }
+    ).status == "completed"
+
+    original_unbind = bindings.unbind
+    raced = False
+
+    def race_after_plan_admission(**kwargs: object) -> None:
+        nonlocal raced
+        if not raced:
+            raced = True
+            ProductProjectRepository(store).update_spec(
+                project.project_id,
+                ProductProjectSpec(
+                    goal="Changed after operator plan admission",
+                    desired_outcome=project.spec.desired_outcome,
+                    repository_refs=project.spec.repository_refs,
+                ),
+                expected_row_version=project.row_version,
+                change_reason="operator unbind transaction race regression",
+                idempotency_key="update:product-1:operator-unbind-race",
+            )
+        original_unbind(**kwargs)
+
+    monkeypatch.setattr(bindings, "unbind", race_after_plan_admission)
+
+    result = operator.unbind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "expected_binding_version": 1,
+        }
+    )
+
+    assert raced is True
+    assert result.status == "rejected"
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) == 1
