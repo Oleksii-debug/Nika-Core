@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import nika_core.training_physical_pilot_driver as driver
+import nika_core.training_scale as scale
 
 
 def _payload(tmp_path: Path) -> dict[str, object]:
@@ -53,6 +55,117 @@ def _payload(tmp_path: Path) -> dict[str, object]:
             "seed": 1729,
         },
     }
+
+
+def _payload_v2(tmp_path: Path) -> dict[str, object]:
+    payload = _payload(tmp_path)
+    payload["schema_version"] = 2
+    payload["scale_plan"] = {
+        "plan_id": "physical-scale",
+        "tiers": [
+            {
+                "tier_id": "pilot",
+                "max_training_records": 10,
+                "max_training_bytes": 4096,
+                "max_validation_records": 10,
+                "max_validation_bytes": 4096,
+                "max_steps": 2,
+            },
+            {
+                "tier_id": "small",
+                "max_training_records": 100,
+                "max_training_bytes": 65536,
+                "max_validation_records": 20,
+                "max_validation_bytes": 8192,
+                "max_steps": 8,
+            },
+        ],
+    }
+    return payload
+
+
+def _progression_payload(
+    *,
+    plan_sha256: str = "a" * 64,
+    candidate_sha256: str = "b" * 64,
+    evaluation_set_sha256: str = "e" * 64,
+) -> dict[str, object]:
+    return {
+        "authorization_sha256": "1" * 64,
+        "base_artifact_ref": "models/base",
+        "base_sha256": "2" * 64,
+        "candidate_artifact_ref": "models/pilot-candidate",
+        "candidate_sha256": candidate_sha256,
+        "comparison_evidence_sha256": "3" * 64,
+        "evaluation_set_sha256": evaluation_set_sha256,
+        "execution_plan_sha256": "4" * 64,
+        "frozen_package_sha256": "5" * 64,
+        "job_fingerprint": "6" * 64,
+        "job_id": "pilot-job",
+        "plan_sha256": plan_sha256,
+        "tier_index": 0,
+        "training_material_sha256": "7" * 64,
+    }
+
+
+def _payload_v3(tmp_path: Path) -> dict[str, object]:
+    payload = _payload_v2(tmp_path)
+    payload["schema_version"] = 3
+    payload["job_id"] = "small-job"
+    payload["base_artifact_ref"] = "models/pilot-candidate"
+    payload["candidate_artifact_ref"] = "models/small-candidate"
+    payload["initial_adapter_path"] = str(tmp_path / "promoted.safetensors")
+    payload["scale_tier_id"] = "small"
+    payload["progression_proof"] = _progression_payload()
+    return payload
+
+def _trusted_progression_proof(
+    *,
+    plan: driver.TrainingScalePlan,
+    candidate_sha256: str,
+) -> driver.TrainingScaleProgressionProof:
+    payload = _progression_payload(
+        plan_sha256=plan.plan_sha256,
+        candidate_sha256=candidate_sha256,
+        evaluation_set_sha256=plan.evaluation_set_sha256,
+    )
+    return scale._build_progression_proof(
+        plan_sha256=payload["plan_sha256"],
+        tier_index=payload["tier_index"],
+        authorization_sha256=payload["authorization_sha256"],
+        job_id=payload["job_id"],
+        job_fingerprint=payload["job_fingerprint"],
+        base_artifact_ref=payload["base_artifact_ref"],
+        base_sha256=payload["base_sha256"],
+        candidate_artifact_ref=payload["candidate_artifact_ref"],
+        candidate_sha256=payload["candidate_sha256"],
+        frozen_package_sha256=payload["frozen_package_sha256"],
+        training_material_sha256=payload["training_material_sha256"],
+        execution_plan_sha256=payload["execution_plan_sha256"],
+        comparison_evidence_sha256=payload["comparison_evidence_sha256"],
+        evaluation_set_sha256=payload["evaluation_set_sha256"],
+    )
+
+
+def _trusted_v3_config(
+    tmp_path: Path,
+    *,
+    plan: driver.TrainingScalePlan,
+    candidate_sha256: str,
+) -> driver.PhysicalPilotConfig:
+    base = driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v2(tmp_path)))
+    return replace(
+        base,
+        job_id="small-job",
+        base_artifact_ref="models/pilot-candidate",
+        candidate_artifact_ref="models/small-candidate",
+        scale_tier_id="small",
+        initial_adapter_path=tmp_path / "promoted.safetensors",
+        progression_proof=_trusted_progression_proof(
+            plan=plan,
+            candidate_sha256=candidate_sha256,
+        ),
+    )
 
 
 def _write_minimal_pe(path: Path) -> None:
@@ -125,6 +238,266 @@ def test_config_parses_exact_runtime_and_resource_authority(tmp_path: Path) -> N
     assert config.trainer_parameters.lora_target_modules == ("q_proj", "v_proj")
     assert config.output_root == tmp_path / "pilot-output"
 
+
+def test_config_v1_preserves_legacy_implicit_scale_plan(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    assert config.scale_plan is None
+
+
+def test_config_v2_accepts_canonical_multi_tier_scale_plan(tmp_path: Path) -> None:
+    payload = _payload_v2(tmp_path)
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+    assert config.scale_plan is not None
+    assert config.scale_plan.plan_id == "physical-scale"
+    assert tuple(tier.tier_id for tier in config.scale_plan.tiers) == (
+        "pilot",
+        "small",
+    )
+    assert tuple(tier.max_steps for tier in config.scale_plan.tiers) == (2, 8)
+
+
+def test_config_v2_rejects_non_monotonic_scale_plan(tmp_path: Path) -> None:
+    payload = _payload_v2(tmp_path)
+    plan = payload["scale_plan"]
+    assert isinstance(plan, dict)
+    tiers = plan["tiers"]
+    assert isinstance(tiers, list)
+    second = tiers[1]
+    assert isinstance(second, dict)
+    second["max_training_records"] = 1
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="scale_plan is invalid"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_v2_requires_exact_scale_plan_fields(tmp_path: Path) -> None:
+    payload = _payload_v2(tmp_path)
+    plan = payload["scale_plan"]
+    assert isinstance(plan, dict)
+    plan["unexpected"] = True
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="scale_plan fields"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("schema_version", (True, 1.0, "1"))
+def test_config_rejects_non_integer_schema_version(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
+    payload = _payload(tmp_path)
+    payload["schema_version"] = schema_version
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="unsupported"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_v2_requires_scale_plan(tmp_path: Path) -> None:
+    payload = _payload_v2(tmp_path)
+    del payload["scale_plan"]
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="fields are invalid"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_configured_multi_tier_plan_binds_frozen_evaluation_set(tmp_path: Path) -> None:
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v2(tmp_path)))
+
+    plan = driver._scale_plan_for_physical_pilot(
+        config,
+        evaluation_set_sha256="e" * 64,
+        training_records=3,
+        training_bytes=1024,
+        validation_records=2,
+        validation_bytes=512,
+    )
+
+    assert plan.evaluation_set_sha256 == "e" * 64
+    assert plan.plan_id == "physical-scale"
+    assert tuple(tier.tier_id for tier in plan.tiers) == ("pilot", "small")
+    assert plan.tiers[0].max_steps == 2
+    assert plan.tiers[1].max_steps == 8
+
+
+def test_legacy_scale_plan_uses_observed_pilot_bounds(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    plan = driver._scale_plan_for_physical_pilot(
+        config,
+        evaluation_set_sha256="e" * 64,
+        training_records=3,
+        training_bytes=1024,
+        validation_records=2,
+        validation_bytes=512,
+    )
+
+    assert plan.plan_id == "physical-pilot"
+    assert len(plan.tiers) == 1
+    assert plan.tiers[0].tier_id == "pilot"
+    assert plan.tiers[0].max_training_records == 3
+    assert plan.tiers[0].max_training_bytes == 1024
+    assert plan.tiers[0].max_validation_records == 2
+    assert plan.tiers[0].max_validation_bytes == 512
+    assert plan.tiers[0].max_steps == 2
+
+
+def test_config_v3_rejects_self_authenticated_progression_claim(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="trusted prior-run and comparison authority",
+    ):
+        driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v3(tmp_path)))
+
+
+def test_config_v3_rejects_first_tier_as_progression_target(tmp_path: Path) -> None:
+    payload = _payload_v3(tmp_path)
+    payload["scale_tier_id"] = "pilot"
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="declared higher tier",
+    ):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_v3_rejects_skipped_progression_proof(tmp_path: Path) -> None:
+    payload = _payload_v3(tmp_path)
+    proof = payload["progression_proof"]
+    assert isinstance(proof, dict)
+    proof["tier_index"] = 1
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="previous scale tier",
+    ):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_v3_rejects_promoted_reference_mismatch(tmp_path: Path) -> None:
+    payload = _payload_v3(tmp_path)
+    proof = payload["progression_proof"]
+    assert isinstance(proof, dict)
+    proof["candidate_artifact_ref"] = "models/other-candidate"
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="promoted candidate",
+    ):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_higher_tier_preflight_binds_plan_package_and_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial_adapter = tmp_path / "promoted.safetensors"
+    initial_adapter.write_bytes(b"promoted-adapter")
+    adapter_sha256 = driver._stable_file_sha256(
+        initial_adapter,
+        name="test promoted adapter",
+    )
+    preliminary = driver.PhysicalPilotConfig.from_json(
+        json.dumps(_payload_v2(tmp_path))
+    )
+    plan = driver._scale_plan_for_physical_pilot(
+        preliminary,
+        evaluation_set_sha256="e" * 64,
+        training_records=3,
+        training_bytes=1024,
+        validation_records=2,
+        validation_bytes=512,
+    )
+    config = _trusted_v3_config(
+        tmp_path,
+        plan=plan,
+        candidate_sha256=adapter_sha256,
+    )
+    monkeypatch.setattr(
+        driver,
+        "candidate_adapter_manifest",
+        lambda _: {"candidate_artifact_ref": config.base_artifact_ref},
+    )
+
+    tier_index, tier = driver._selected_scale_tier(config, plan)
+    proof = driver._preflight_higher_tier(
+        config,
+        plan=plan,
+        tier_index=tier_index,
+        initial_adapter_path=initial_adapter,
+        material_base_sha256=adapter_sha256,
+    )
+
+    assert tier_index == 1
+    assert tier.tier_id == "small"
+    assert proof is not None
+    assert proof.proof_sha256 == config.progression_proof.proof_sha256
+
+
+def test_higher_tier_preflight_rejects_adapter_package_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    initial_adapter = tmp_path / "promoted.safetensors"
+    initial_adapter.write_bytes(b"promoted-adapter")
+    preliminary = driver.PhysicalPilotConfig.from_json(
+        json.dumps(_payload_v3(tmp_path))
+    )
+    plan = driver._scale_plan_for_physical_pilot(
+        preliminary,
+        evaluation_set_sha256="e" * 64,
+        training_records=3,
+        training_bytes=1024,
+        validation_records=2,
+        validation_bytes=512,
+    )
+    config = _trusted_v3_config(
+        tmp_path,
+        plan=plan,
+        candidate_sha256="d" * 64,
+    )
+    tier_index, _ = driver._selected_scale_tier(config, plan)
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="initial_adapter_path does not match",
+    ):
+        driver._preflight_higher_tier(
+            config,
+            plan=plan,
+            tier_index=tier_index,
+            initial_adapter_path=initial_adapter,
+            material_base_sha256="d" * 64,
+        )
+
+
+def test_stable_file_sha256_rejects_mutation_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "candidate.safetensors"
+    path.write_bytes(b"candidate")
+    real_lstat = driver.os.lstat
+    calls = 0
+
+    def changing_lstat(target: Path) -> object:
+        nonlocal calls
+        value = real_lstat(target)
+        calls += 1
+        if calls == 2:
+            path.write_bytes(b"changed-candidate")
+            value = real_lstat(target)
+        return value
+
+    monkeypatch.setattr(driver.os, "lstat", changing_lstat)
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="changed while",
+    ):
+        driver._stable_file_sha256(path, name="candidate")
 
 def test_config_rejects_unknown_top_level_field(tmp_path: Path) -> None:
     payload = _payload(tmp_path)

@@ -4,6 +4,7 @@ import hashlib
 
 import pytest
 
+import nika_core.training_scale as scale
 from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit, LearningShard
 from nika_core.training_materials import (
     TrainingMaterialEvidence,
@@ -109,6 +110,35 @@ def _pilot_authorization(evidence: TrainingMaterialSetEvidence):
     )
 
 
+def test_scale_plan_canonical_payload_round_trip_preserves_authority() -> None:
+    evidence = _material_evidence()
+    plan = _plan(evidence)
+
+    restored = TrainingScalePlan.from_canonical_payload(plan.canonical_payload())
+
+    assert restored == plan
+    assert restored.canonical_payload() == plan.canonical_payload()
+    assert restored.plan_sha256 == plan.plan_sha256
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda value: value.update({"unexpected": "field"}),
+        lambda value: value.pop("plan_id"),
+        lambda value: value.update({"tiers": tuple(value["tiers"])}),
+        lambda value: value["tiers"][0].update({"unexpected": "field"}),
+        lambda value: value["tiers"][0].update({"max_steps": True}),
+    ),
+)
+def test_scale_plan_rehydration_rejects_noncanonical_payload(mutate: object) -> None:
+    payload = _plan(_material_evidence()).canonical_payload()
+    mutate(payload)  # type: ignore[operator]
+
+    with pytest.raises(TrainingScaleError):
+        TrainingScalePlan.from_canonical_payload(payload)
+
+
 def test_scale_plan_rejects_decreasing_limits() -> None:
     evidence = _material_evidence()
     training = next(
@@ -184,6 +214,151 @@ def test_scale_authorization_rejects_package_above_tier_bound() -> None:
             material_evidence=evidence,
             execution_plan_sha256=_sha(b"plan"),
             max_steps=1,
+        )
+
+
+def _progression_payload(plan: TrainingScalePlan) -> dict[str, object]:
+    return {
+        "authorization_sha256": _sha(b"authorization"),
+        "base_artifact_ref": "models/base",
+        "base_sha256": _sha(b"base"),
+        "candidate_artifact_ref": "models/pilot-candidate",
+        "candidate_sha256": _sha(b"candidate"),
+        "comparison_evidence_sha256": _sha(b"comparison"),
+        "evaluation_set_sha256": plan.evaluation_set_sha256,
+        "execution_plan_sha256": _sha(b"execution-plan"),
+        "frozen_package_sha256": _sha(b"frozen-package"),
+        "job_fingerprint": _sha(b"job-fingerprint"),
+        "job_id": "pilot-job",
+        "plan_sha256": plan.plan_sha256,
+        "tier_index": 0,
+        "training_material_sha256": _sha(b"training-material"),
+    }
+
+
+def _trusted_progression_proof(
+    plan: TrainingScalePlan,
+) -> TrainingScaleProgressionProof:
+    payload = _progression_payload(plan)
+    return scale._build_progression_proof(
+        plan_sha256=payload["plan_sha256"],
+        tier_index=payload["tier_index"],
+        authorization_sha256=payload["authorization_sha256"],
+        job_id=payload["job_id"],
+        job_fingerprint=payload["job_fingerprint"],
+        base_artifact_ref=payload["base_artifact_ref"],
+        base_sha256=payload["base_sha256"],
+        candidate_artifact_ref=payload["candidate_artifact_ref"],
+        candidate_sha256=payload["candidate_sha256"],
+        frozen_package_sha256=payload["frozen_package_sha256"],
+        training_material_sha256=payload["training_material_sha256"],
+        execution_plan_sha256=payload["execution_plan_sha256"],
+        comparison_evidence_sha256=payload["comparison_evidence_sha256"],
+        evaluation_set_sha256=payload["evaluation_set_sha256"],
+    )
+
+
+def test_progression_payload_cannot_restore_authority_without_trusted_inputs() -> None:
+    plan = _plan(_material_evidence())
+
+    with pytest.raises(TypeError):
+        TrainingScaleProgressionProof.from_canonical_payload(
+            _progression_payload(plan)
+        )
+
+
+def test_progression_serialized_claim_validation_is_shape_only() -> None:
+    plan = _plan(_material_evidence())
+    payload = _progression_payload(plan)
+
+    validated = TrainingScaleProgressionProof.validate_serialized_claim(payload)
+
+    assert validated == payload
+    assert validated is not payload
+    with pytest.raises(TypeError):
+        TrainingScaleProgressionProof.from_canonical_payload(validated)
+
+
+def test_progression_restoration_returns_only_independently_rebuilt_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan(_material_evidence())
+    trusted = _trusted_progression_proof(plan)
+    authorization = object()
+    run = object()
+    comparison = object()
+
+    def rebuild(**kwargs: object) -> TrainingScaleProgressionProof:
+        assert kwargs == {
+            "plan": plan,
+            "authorization": authorization,
+            "run": run,
+            "comparison": comparison,
+        }
+        return trusted
+
+    monkeypatch.setattr(scale, "build_scale_progression_proof", rebuild)
+
+    restored = TrainingScaleProgressionProof.from_canonical_payload(
+        trusted.canonical_payload(),
+        plan=plan,
+        authorization=authorization,  # type: ignore[arg-type]
+        run=run,  # type: ignore[arg-type]
+        comparison=comparison,  # type: ignore[arg-type]
+    )
+
+    assert restored is trusted
+    assert restored.proof_sha256 == trusted.proof_sha256
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda value: value.update({"unexpected": "field"}),
+        lambda value: value.pop("authorization_sha256"),
+        lambda value: value.update({"tier_index": True}),
+        lambda value: value.update({"candidate_sha256": "A" * 64}),
+        lambda value: value.update({"job_id": " bad "}),
+    ),
+)
+def test_progression_proof_rehydration_rejects_noncanonical_payload(
+    mutate: object,
+) -> None:
+    plan = _plan(_material_evidence())
+    payload = _progression_payload(plan)
+    mutate(payload)  # type: ignore[operator]
+
+    with pytest.raises(TrainingScaleError):
+        TrainingScaleProgressionProof.from_canonical_payload(
+            payload,
+            plan=plan,
+            authorization=object(),  # type: ignore[arg-type]
+            run=object(),  # type: ignore[arg-type]
+            comparison=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_progression_restoration_rejects_payload_not_matching_trusted_proof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _plan(_material_evidence())
+    trusted = _trusted_progression_proof(plan)
+    payload = trusted.canonical_payload()
+    payload["comparison_evidence_sha256"] = "0" * 64
+
+    monkeypatch.setattr(
+        scale,
+        "build_scale_progression_proof",
+        lambda **_: trusted,
+    )
+
+    with pytest.raises(TrainingScaleError, match="trusted prior-run authority"):
+        TrainingScaleProgressionProof.from_canonical_payload(
+            payload,
+            plan=plan,
+            authorization=object(),  # type: ignore[arg-type]
+            run=object(),  # type: ignore[arg-type]
+            comparison=object(),  # type: ignore[arg-type]
         )
 
 
