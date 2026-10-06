@@ -55,6 +55,11 @@ _TRAINING_RUNTIME_METADATA_KEYS = {
 _MAX_MODEL_DIR_FILES = 10_000
 _MAX_MODEL_DIR_BYTES = 16 * 1024 * 1024 * 1024
 _MODEL_SNAPSHOT_DIR = "model-snapshot"
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 
 class PeftTrainerError(RuntimeError):
@@ -125,18 +130,61 @@ def _fail(code: str) -> NoReturn:
     raise PeftTrainerError(code)
 
 
+def _open_readonly_snapshot(path: Path) -> int:
+    """Open one file for authority reads while denying Windows write/delete sharing."""
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows authority snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(getattr(os, "O_NONBLOCK", 0))
+    return os.open(path, flags)
+
+
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            while True:
-                chunk = handle.read(_READ_CHUNK_BYTES)
-                if not chunk:
-                    break
-                digest.update(chunk)
-    except OSError:
-        _fail("file_read_failed")
-    return digest.hexdigest()
+    digest, _ = _hash_regular_snapshot(path, code="file_read_failed")
+    return digest
 
 
 def trainer_implementation_sha256() -> str:
@@ -457,9 +505,8 @@ def _hash_model_directory_file(
     if expected is not None and _stable_stat_identity(before) != _stable_stat_identity(expected):
         raise ValueError("model_dir entry changed before hashing")
 
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = _open_readonly_snapshot(path)
     except OSError as exc:
         raise ValueError("model_dir entry changed before hashing") from exc
 
@@ -900,9 +947,8 @@ def _copy_model_snapshot_file(
     before = _require_regular_unlinked(source, code="model_dir_source_changed")
     if before.st_size != expected_size:
         _fail("model_dir_source_changed")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(source, flags)
+        fd = _open_readonly_snapshot(source)
     except OSError:
         _fail("model_dir_source_changed")
     total = 0
@@ -1051,9 +1097,8 @@ def _require_directory_unlinked(path: Path, *, code: str) -> os.stat_result:
 
 def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
     before = _require_regular_unlinked(path, code=code)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = _open_readonly_snapshot(path)
     except OSError:
         _fail(code)
     digest = hashlib.sha256()
@@ -1107,9 +1152,8 @@ def _read_regular_snapshot(
     if type(max_bytes) is not int or max_bytes <= 0:
         raise ValueError("max_bytes must be a positive exact integer")
     before = _require_regular_unlinked(path, code=code)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = _open_readonly_snapshot(path)
     except OSError:
         _fail(code)
     chunks: list[bytes] = []
@@ -1249,9 +1293,8 @@ def _consume_material(
     before = _require_regular_unlinked(material.path, code="material_not_regular")
     if before.st_size != material.byte_count:
         _fail("material_size_mismatch")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(material.path, flags)
+        fd = _open_readonly_snapshot(material.path)
     except OSError:
         _fail("material_open_failed")
     digest = hashlib.sha256()
@@ -1383,7 +1426,7 @@ def _env_float(name: str, default: float, minimum: float, maximum: float) -> flo
     return value
 
 
-def _absolute_env_path(name: str, *, file: bool) -> Path:
+def _absolute_env_location(name: str) -> Path:
     raw = os.environ.get(name)
     if raw is None:
         _fail(f"{name.lower()}_missing")
@@ -1391,15 +1434,6 @@ def _absolute_env_path(name: str, *, file: bool) -> Path:
     path = Path(text)
     if not path.is_absolute():
         _fail(f"{name.lower()}_not_absolute")
-    if file:
-        _require_regular_unlinked(path, code=f"{name.lower()}_invalid")
-    else:
-        try:
-            value = os.lstat(path)
-        except OSError:
-            _fail(f"{name.lower()}_invalid")
-        if stat.S_ISLNK(value.st_mode) or _is_reparse(value) or not stat.S_ISDIR(value.st_mode):
-            _fail(f"{name.lower()}_invalid")
     return path
 
 
@@ -1411,19 +1445,13 @@ def _read_config() -> TrainerConfig:
     )
     if trainer_implementation_sha256() != expected_implementation_sha256:
         _fail("nika_trainer_implementation_mismatch")
-    base_gguf = _absolute_env_path("NIKA_TRAINER_BASE_GGUF", file=True)
+    base_gguf = _absolute_env_location("NIKA_TRAINER_BASE_GGUF")
     if base_gguf.suffix.casefold() != ".gguf":
         _fail("nika_trainer_base_gguf_invalid")
     base_gguf_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_BASE_GGUF_SHA256"),
         field="nika_trainer_base_gguf_sha256",
     )
-    observed_base_gguf_sha256, _ = _hash_regular_snapshot(
-        base_gguf,
-        code="nika_trainer_base_gguf_changed",
-    )
-    if observed_base_gguf_sha256 != base_gguf_sha256:
-        _fail("nika_trainer_base_gguf_digest_mismatch")
     initial_adapter_raw = os.environ.get("NIKA_TRAINER_INITIAL_ADAPTER_PATH")
     initial_adapter_sha256_raw = os.environ.get(
         "NIKA_TRAINER_INITIAL_ADAPTER_SHA256"
@@ -1433,9 +1461,8 @@ def _read_config() -> TrainerConfig:
     initial_adapter: Path | None = None
     initial_adapter_sha256: str | None = None
     if initial_adapter_raw is not None:
-        initial_adapter = _absolute_env_path(
-            "NIKA_TRAINER_INITIAL_ADAPTER_PATH",
-            file=True,
+        initial_adapter = _absolute_env_location(
+            "NIKA_TRAINER_INITIAL_ADAPTER_PATH"
         )
         if initial_adapter.suffix.casefold() != ".safetensors":
             _fail("nika_trainer_initial_adapter_invalid")
@@ -1443,23 +1470,11 @@ def _read_config() -> TrainerConfig:
             initial_adapter_sha256_raw,
             field="nika_trainer_initial_adapter_sha256",
         )
-        observed_initial_adapter_sha256, _ = _hash_regular_snapshot(
-            initial_adapter,
-            code="nika_trainer_initial_adapter_changed",
-        )
-        if observed_initial_adapter_sha256 != initial_adapter_sha256:
-            _fail("nika_trainer_initial_adapter_digest_mismatch")
-    model_dir = _absolute_env_path("NIKA_TRAINER_MODEL_DIR", file=False)
+    model_dir = _absolute_env_location("NIKA_TRAINER_MODEL_DIR")
     model_dir_manifest_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256"),
         field="nika_trainer_model_dir_manifest_sha256",
     )
-    try:
-        live_model_dir_manifest = model_directory_manifest_sha256(model_dir)
-    except ValueError:
-        _fail("nika_trainer_model_dir_manifest_invalid")
-    if live_model_dir_manifest != model_dir_manifest_sha256:
-        _fail("nika_trainer_model_dir_manifest_mismatch")
     output_root_raw = os.environ.get("NIKA_TRAINER_OUTPUT_ROOT")
     if output_root_raw is None:
         _fail("nika_trainer_output_root_missing")
@@ -1583,9 +1598,8 @@ def _copy_initial_adapter_snapshot(
         source,
         code="initial_adapter_source_changed",
     )
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        source_fd = os.open(source, flags)
+        source_fd = _open_readonly_snapshot(source)
     except OSError:
         _fail("initial_adapter_source_changed")
     temporary: Path | None = None
@@ -1918,6 +1932,28 @@ def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root:
         or request.base_artifact_sha256 != logical_base_sha256
     ):
         _fail("logical_base_digest_mismatch")
+    target_dir = job_root / "base"
+    target = target_dir / "base.gguf"
+    try:
+        os.lstat(target)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        _fail("staged_base_invalid")
+    else:
+        _ensure_child_directory(
+            job_root,
+            "base",
+            code="staged_base_directory_invalid",
+        )
+        target_sha256, _ = _hash_regular_snapshot(
+            target,
+            code="staged_base_invalid",
+        )
+        if target_sha256 != config.base_gguf_sha256:
+            _fail("staged_base_digest_mismatch")
+        return target
+
     source_sha256, _ = _hash_regular_snapshot(
         source,
         code="base_gguf_digest_mismatch",
@@ -1930,14 +1966,6 @@ def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root:
         code="staged_base_directory_invalid",
     )
     target = target_dir / "base.gguf"
-    if target.exists():
-        target_sha256, _ = _hash_regular_snapshot(
-            target,
-            code="staged_base_invalid",
-        )
-        if target_sha256 != config.base_gguf_sha256:
-            _fail("staged_base_digest_mismatch")
-        return target
     temporary = target_dir / ".base.gguf.tmp"
     try:
         source_stat = _require_regular_unlinked(
@@ -2307,9 +2335,8 @@ def _copy_checkpoint_snapshot_file(
     before = _require_regular_unlinked(source, code="resume_checkpoint_changed")
     if before.st_size != expected_size:
         _fail("resume_checkpoint_changed")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(source, flags)
+        fd = _open_readonly_snapshot(source)
     except OSError:
         _fail("resume_checkpoint_changed")
     total = 0
