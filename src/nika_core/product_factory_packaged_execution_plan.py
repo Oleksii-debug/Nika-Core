@@ -436,12 +436,11 @@ def _exact_list(value: object, label: str) -> list[object]:
 def _canonical_text(value: object, label: str) -> str:
     if (
         type(value) is not str
-        or not value
+        or not value.strip()
         or value != value.strip()
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
         raise PackagedExecutionPlanAdmissionError(
-            f"{label} must be canonical non-empty text"
+            f"{label} must be normalized non-empty text"
         )
     try:
         encoded = value.encode("utf-8")
