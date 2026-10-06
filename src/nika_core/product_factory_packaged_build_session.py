@@ -67,9 +67,11 @@ class PackagedBuildRuntimeSession:
     def execution_focus(self) -> str | None:
         current = self._raw_snapshot()
         status = self._runtime_status(current)
+        if status == "invalid":
+            return _BUILD_RUNTIME_FOCUS
         configured_now = current.get("configured") is True
         if (
-            status in {"restart_required", "invalid", "product_factory_required"}
+            status in {"restart_required", "product_factory_required"}
             and (configured_now or self.launch_config_json is not None)
         ):
             return _BUILD_RUNTIME_FOCUS
