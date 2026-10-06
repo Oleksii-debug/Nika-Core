@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+from _product_decision_test_support import ApprovedProductDecisionRepository
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
@@ -431,5 +432,53 @@ def test_history_rejects_lifecycle_idempotency_timestamp_drift(tmp_path) -> None
             ("2030-01-01T00:00:00+00:00",),
         )
     with pytest.raises(ProductProjectError, match="lifecycle idempotency timestamp drift"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+def test_history_accepts_trusted_approved_decision_writer_fingerprint(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _research(projects)
+    current = projects.get("project-1")
+    stored = ApprovedProductDecisionRepository(store).record(
+        "project-1",
+        ProductDecision(
+            decision_id="decision-approved",
+            option_id="option-1",
+            state=ProductDecisionState.APPROVED,
+            rationale="Approve the evidence-backed option",
+            decided_by_ref="user://owner",
+        ),
+        expected_row_version=current.row_version,
+        idempotency_key="decision:approved:history-integrity",
+    )
+
+    assert stored.decision.decided_by_ref.startswith("approval://")
+    report = ProductProjectHistoricalIntegrityService(store).validate("project-1")
+    assert report.mutation_idempotency_count == 1
+
+
+def test_history_rejects_approved_decision_actor_drift(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _research(projects)
+    current = projects.get("project-1")
+    ApprovedProductDecisionRepository(store).record(
+        "project-1",
+        ProductDecision(
+            decision_id="decision-approved",
+            option_id="option-1",
+            state=ProductDecisionState.APPROVED,
+            rationale="Approve the evidence-backed option",
+            decided_by_ref="user://owner",
+        ),
+        expected_row_version=current.row_version,
+        idempotency_key="decision:approved:actor-drift",
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_decisions SET decided_by_ref=? "
+            "WHERE project_id='project-1' AND decision_id='decision-approved'",
+            ("approval://" + "0" * 64,),
+        )
+
+    with pytest.raises(ProductProjectError, match="decision audit actor drift"):
         ProductProjectHistoricalIntegrityService(store).validate("project-1")
 
