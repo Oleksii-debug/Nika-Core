@@ -1123,6 +1123,66 @@ def test_output_root_cannot_mutate_input_authority(
 
 
 
+def test_output_root_creation_preserves_preflight_parent_identity(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "trusted-parent"
+    parent.mkdir()
+    output = parent / "pilot-output"
+
+    target, parent_snapshot = driver._preflight_output_root(output)
+
+    assert driver._create_output_root(
+        target,
+        expected_parent=parent_snapshot,
+    ) == output
+    assert output.is_dir()
+
+
+def test_output_root_rejects_parent_replacement_after_preflight(
+    tmp_path: Path,
+) -> None:
+    parent = tmp_path / "trusted-parent"
+    parent.mkdir()
+    output = parent / "pilot-output"
+    target, parent_snapshot = driver._preflight_output_root(output)
+
+    displaced = tmp_path / "displaced-parent"
+    parent.rename(displaced)
+    parent.mkdir()
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="output_root parent"):
+        driver._create_output_root(
+            target,
+            expected_parent=parent_snapshot,
+        )
+
+    assert not output.exists()
+    assert not (displaced / "pilot-output").exists()
+
+
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows directory-share semantics")
+def test_output_root_parent_lock_denies_rename_until_closed(tmp_path: Path) -> None:
+    parent = tmp_path / "trusted-parent"
+    parent.mkdir()
+    output = parent / "pilot-output"
+    _, parent_snapshot = driver._preflight_output_root(output)
+    moved = tmp_path / "moved-parent"
+
+    handle = driver._open_windows_output_parent_stability_lock(
+        parent,
+        parent_snapshot,
+    )
+    try:
+        with pytest.raises(OSError):
+            parent.rename(moved)
+    finally:
+        driver._close_windows_output_parent_stability_lock(handle)
+
+    parent.rename(moved)
+    assert moved.is_dir()
+
+
 def test_candidate_descriptor_uses_only_completed_digest_and_materialized_size(
     tmp_path: Path,
 ) -> None:
