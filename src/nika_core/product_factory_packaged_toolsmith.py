@@ -184,7 +184,7 @@ class PackagedProductFactoryToolsmithService:
 def _snapshot_plan(
     plan: object,
 ) -> PackagedProductFactoryCapabilityGapPlan:
-    """Re-admit current plan fields so frozen-dataclass tampering cannot cross the effect boundary."""
+    """Re-admit current fields so frozen-plan tampering cannot cross the effect boundary."""
 
     if type(plan) is not PackagedProductFactoryCapabilityGapPlan:
         raise TypeError("plan must be PackagedProductFactoryCapabilityGapPlan")
