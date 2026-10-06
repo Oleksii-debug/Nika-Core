@@ -425,6 +425,32 @@ def test_prepare_revalidates_tampered_frozen_execution_plan_before_effect(
     assert _task_count(store) == 0
 
 
+
+def test_prepare_normalizes_hostile_mapping_snapshot_failure_before_effect(
+    tmp_path: Path,
+) -> None:
+    class ExplodingMapping(dict):
+        def items(self):
+            raise RuntimeError("untrusted mapping iterator failure")
+
+    store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
+        _fixture(tmp_path)
+    )
+    object.__setattr__(
+        plan,
+        "base_shas",
+        ExplodingMapping({"repo-core": "a" * 40}),
+    )
+
+    with pytest.raises(
+        PackagedProductFactoryPreparationError,
+        match="base_shas could not be snapshotted safely",
+    ):
+        service.prepare(plan)
+
+    assert _task_count(store) == 0
+
+
 def test_prepare_rejects_structurally_deleted_execution_plan_before_effect(
     tmp_path: Path,
 ) -> None:

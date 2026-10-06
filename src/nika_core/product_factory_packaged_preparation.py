@@ -528,8 +528,19 @@ def _exact_command_tuple(
 def _text_mapping(value: Mapping[str, str], label: str) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise PackagedProductFactoryPreparationError(f"{label} must be a mapping")
+    try:
+        raw_items = tuple(value.items())
+    except Exception as exc:  # noqa: BLE001
+        raise PackagedProductFactoryPreparationError(
+            f"{label} could not be snapshotted safely"
+        ) from exc
     result: dict[str, str] = {}
-    for key, item in value.items():
+    for pair in raw_items:
+        if type(pair) is not tuple or len(pair) != 2:
+            raise PackagedProductFactoryPreparationError(
+                f"{label} items must be key/value pairs"
+            )
+        key, item = pair
         key_text = _plain_text(key, f"{label} key")
         item_text = _plain_text(item, f"{label} value")
         if key_text in result:
