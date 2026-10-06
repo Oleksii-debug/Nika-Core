@@ -852,7 +852,7 @@ print('Packaged intelligence-mode commands changed canonical model settings with
         # keyboard/UIA path used by a real Windows user. This creates only one controlled
         # durable ProductProject; it does not prepare or dispatch Product Factory work.
         $productCommand = 'Створи застосунок для контрольованої UIA перевірки'
-        $normalizedProductGoal = (($productCommand -split '\\s+') -join ' ').Trim()
+        $normalizedProductGoal = $productCommand
         $sha256 = [System.Security.Cryptography.SHA256]::Create()
         try {
             $productBytes = [System.Text.Encoding]::UTF8.GetBytes($normalizedProductGoal)
