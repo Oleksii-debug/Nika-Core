@@ -181,6 +181,22 @@ def test_sha256_file_binds_digest_to_held_path_identity(
     assert size == len(payload)
 
 
+def test_sha256_file_rejects_foundation_above_preparation_bound(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "base.gguf"
+    path.write_bytes(b"foundation")
+    monkeypatch.setattr(proof, "_MAX_FOUNDATION_BYTES", 4)
+
+    with pytest.raises(
+        proof.ProofError,
+        match="file type or size is invalid",
+    ):
+        proof._sha256_file(path)
+
+
 def test_sha256_file_rejects_wrong_held_identity(
     proof: ModuleType,
     tmp_path: Path,
@@ -215,6 +231,11 @@ def test_scale_verify_preserves_admitted_tier1_package_bytes_for_evidence() -> N
         "        tier1_package_bytes,"
         in source
     )
+    assert (
+        "tier0_package.base_artifact_sha256 != base_gguf_sha256"
+        in source
+    )
+    assert '"foundation_model_sha256": base_gguf_sha256' in source
 
 
 def test_frozen_package_snapshot_rejects_wrong_held_identity(
