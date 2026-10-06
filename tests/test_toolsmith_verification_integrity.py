@@ -389,6 +389,58 @@ def test_registration_cleanup_requires_durable_rolled_back_state(tmp_path: Path)
     assert resume["status"] == "ready"
 
 
+def test_restart_does_not_publish_resume_for_inactive_registry_identity(
+    tmp_path: Path,
+) -> None:
+    task_id, store, repository, service = _service(tmp_path)
+    gap, version = _verified(task_id=task_id, repository=repository, service=service)
+    service.register(
+        gap=gap,
+        expected_version=version,
+        manifest=_manifest(VERIFIED_DIGEST),
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE capability_registry SET active = 0 "
+            "WHERE capability_id = ? AND version = ? AND digest = ?",
+            (CAPABILITY_ID, "1.0.0", VERIFIED_DIGEST),
+        )
+        conn.execute(
+            "DELETE FROM capability_resume_bindings "
+            "WHERE task_id = ? AND capability_id = ?",
+            (task_id, CAPABILITY_ID),
+        )
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    restarted_repository = ToolsmithRepository(restarted_store)
+    restarted_service = CapabilityEscalationService(
+        repository=restarted_repository,
+        checkpoints=CheckpointService(restarted_store),
+        worker=DeterministicCodingWorker(lambda job: CodingResult(job_id=job.job_id)),
+    )
+
+    assert restarted_service.reconcile_resume(
+        task_id=task_id,
+        capability_id=CAPABILITY_ID,
+    ) is None
+    with restarted_store.connection() as conn:
+        resume = conn.execute(
+            "SELECT 1 FROM capability_resume_bindings "
+            "WHERE task_id = ? AND capability_id = ?",
+            (task_id, CAPABILITY_ID),
+        ).fetchone()
+        registry = conn.execute(
+            "SELECT active FROM capability_registry "
+            "WHERE capability_id = ? AND version = ? AND digest = ?",
+            (CAPABILITY_ID, "1.0.0", VERIFIED_DIGEST),
+        ).fetchone()
+    assert resume is None
+    assert registry is not None
+    assert int(registry["active"]) == 0
+
+
 def test_verified_digest_survives_restart_before_registration(tmp_path: Path) -> None:
     task_id, store, repository, service = _service(tmp_path)
     gap, version = _verified(task_id=task_id, repository=repository, service=service)

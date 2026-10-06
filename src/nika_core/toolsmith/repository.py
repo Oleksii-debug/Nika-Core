@@ -400,6 +400,15 @@ class ToolsmithRepository:
             digest = authoritative["pinned_digest"]
             if not version or not digest:
                 raise RuntimeError("registered escalation is missing exact pinned capability identity")
+            registry = conn.execute(
+                "SELECT active FROM capability_registry "
+                "WHERE capability_id = ? AND version = ? AND digest = ?",
+                (capability_id, version, digest),
+            ).fetchone()
+            if registry is None or int(registry["active"]) != 1:
+                raise StaleTransitionError(
+                    "registered escalation has no active registry identity"
+                )
             conn.execute(
                 "INSERT INTO capability_resume_bindings("
                 "task_id, capability_id, version, digest, status, updated_at) "
