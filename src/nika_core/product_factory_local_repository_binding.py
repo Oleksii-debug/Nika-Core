@@ -294,6 +294,25 @@ class ProductFactoryLocalRepositoryBindings:
             )
         return binding
 
+    def binding_version(
+        self,
+        project_id: str,
+        repository_id: str,
+    ) -> int | None:
+        """Read only the optimistic-lock version, even when root recovery is needed."""
+
+        project_id = _canonical_text(project_id, "project_id")
+        repository_id = _canonical_text(repository_id, "repository_id")
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT binding_version FROM product_factory_local_repository_bindings "
+                "WHERE project_id=? AND repository_id=?",
+                (project_id, repository_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return _stored_positive_int(row["binding_version"], "binding_version")
+
     def resolve_for_plan(
         self,
         plan: PackagedProductFactoryExecutionPlan,
