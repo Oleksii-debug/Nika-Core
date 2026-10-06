@@ -164,6 +164,37 @@ def test_new_productproject_version_never_reuses_stale_factory_status(tmp_path: 
     assert current.statuses == ()
 
 
+
+
+def test_status_change_during_pf5_composition_fails_closed(tmp_path: Path) -> None:
+    _store, repository, project, plan, preparation, _center = _fixture(tmp_path)
+    prepared = preparation.prepare(plan)
+    stable = prepared.state.coordinator.snapshot()
+
+    class ChangingStatusReader:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def read(self, project_id: str):
+            assert project_id == project.project_id
+            self.calls += 1
+            return stable if self.calls == 1 else None
+
+    reader = ChangingStatusReader()
+    center = PackagedProductCommandCenter(
+        products=ProductProjectCommandService(repository),
+        status_reader=reader,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(
+        ProductProjectPresentationConsistencyError,
+        match="status changed while PF5",
+    ):
+        center.inspect_project(project.project_id)
+
+    assert reader.calls == 2
+
+
 def test_existing_host_without_checkpoint_fails_closed(tmp_path: Path) -> None:
     store, _repository, project, _plan, _preparation, center = _fixture(tmp_path)
     task_id = product_factory_host_task_identity(

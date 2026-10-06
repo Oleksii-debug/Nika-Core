@@ -129,8 +129,14 @@ class PackagedProductCommandCenter:
     def inspect_project(self, project_id: str) -> ProductProjectDetail:
         try:
             coordinator = self._status_reader.read(project_id)
+            detail = self._base.inspect_project(project_id, coordinator=coordinator)
+            confirmed = self._status_reader.read(project_id)
         except PackagedProductFactoryStatusError as exc:
             raise ProductProjectPresentationConsistencyError(
                 "durable Product Factory status failed trusted projection"
             ) from exc
-        return self._base.inspect_project(project_id, coordinator=coordinator)
+        if coordinator != confirmed:
+            raise ProductProjectPresentationConsistencyError(
+                "Product Factory status changed while PF5 was composing presentation; retry"
+            )
+        return detail
