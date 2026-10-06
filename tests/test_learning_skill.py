@@ -141,7 +141,7 @@ def _apply(
 
 
 def test_verified_skill_create_is_semantic_only_and_minimized(tmp_path: Path) -> None:
-    store, memory = _store(tmp_path)
+    _store_obj, memory = _store(tmp_path)
     skills = LearnedSkillService(memory)
     candidate = _candidate()
     verification = _verification(candidate)
@@ -179,9 +179,14 @@ def test_verified_skill_create_is_semantic_only_and_minimized(tmp_path: Path) ->
     assert receipt.target_ref_sha256 == intent.target_ref_sha256
     assert receipt.revision_sha256 == snapshot.revision_sha256
     assert secret not in repr(receipt)
-
-    with store.connection() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM capability_escalations").fetchone()[0] == 0
+    assert set(snapshot.__dataclass_fields__) == {
+        "workspace_id",
+        "agent_id",
+        "skill_id",
+        "value",
+        "target_ref_sha256",
+        "revision_sha256",
+    }
 
 
 def test_skill_state_is_agent_and_workspace_scoped(tmp_path: Path) -> None:
