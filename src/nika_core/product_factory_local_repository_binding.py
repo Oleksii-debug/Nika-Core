@@ -100,6 +100,17 @@ class ProductFactoryLocalRepositoryBindings:
 
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            alias_rows = conn.execute(
+                "SELECT * FROM product_factory_local_repository_bindings "
+                "WHERE project_id = ? AND repository_id <> ?",
+                (project_id, repository.repository_id),
+            ).fetchall()
+            for alias_row in alias_rows:
+                _, alias_identity = _binding_from_row(alias_row)
+                if _same_physical_repository(identity, alias_identity):
+                    raise ProductFactoryLocalRepositoryBindingError(
+                        "local repository root is already bound to another repository identity"
+                    )
             row = conn.execute(
                 "SELECT binding_version FROM product_factory_local_repository_bindings "
                 "WHERE project_id = ? AND repository_id = ?",
@@ -391,6 +402,20 @@ def _require_filesystem_identity(
         raise ProductFactoryLocalRepositoryBindingError(
             "bound local repository filesystem identity changed"
         )
+
+
+def _same_physical_repository(
+    first: _FilesystemIdentity,
+    second: _FilesystemIdentity,
+) -> bool:
+    return (
+        first.root_device == second.root_device
+        and first.root_inode == second.root_inode
+        and first.git_metadata_kind == second.git_metadata_kind
+        and first.git_metadata_device == second.git_metadata_device
+        and first.git_metadata_inode == second.git_metadata_inode
+        and first.gitfile_sha256 == second.gitfile_sha256
+    )
 
 
 def _binding_from_row(row: object) -> tuple[
