@@ -369,6 +369,8 @@ def test_windows_release_packages_voice_dependencies(tmp_path: Path) -> None:
     web = tmp_path / "src" / "nika_core" / "ui" / "web"
     web.mkdir(parents=True)
     (web / "index.html").write_text("<main></main>\n", encoding="utf-8")
+    (web / "app.js").write_text('"use strict";\n', encoding="utf-8")
+    (web / "styles.css").write_text("body {}\n", encoding="utf-8")
     args = default_windows_plan(tmp_path).pyinstaller_args()
     for module_name in ("numpy", "sounddevice"):
         index = args.index(module_name)
