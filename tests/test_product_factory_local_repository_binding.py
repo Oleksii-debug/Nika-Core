@@ -619,3 +619,60 @@ def test_unbind_is_version_fenced_and_removes_authority(
     )
     with pytest.raises(KeyError):
         bindings.require(project.project_id, repository.repository_id)
+
+
+def test_unbind_expected_project_versions_reject_stale_plan_without_delete(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    plan = _plan(project, repository)
+    root = _root(tmp_path)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    updated = ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed before stale repository unbind",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="stale local repository unbind plan",
+        idempotency_key="update:product-1:stale-unbind-plan",
+    )
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="execution plan is stale",
+    ):
+        bindings.unbind(
+            project_id=project.project_id,
+            repository_id=repository.repository_id,
+            expected_binding_version=bound.binding_version,
+            expected_project_spec_version=plan.expected_spec_version,
+            expected_project_row_version=plan.expected_row_version,
+        )
+
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) == bound.binding_version
+
+    bindings.unbind(
+        project_id=project.project_id,
+        repository_id=repository.repository_id,
+        expected_binding_version=bound.binding_version,
+        expected_project_spec_version=updated.spec_version,
+        expected_project_row_version=updated.row_version,
+    )
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) is None
