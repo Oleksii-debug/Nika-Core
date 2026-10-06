@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import re
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -140,6 +141,11 @@ class SelfModelService:
             raise TypeError("memory must be the canonical MemoryService")
         self._memory = memory
 
+    @property
+    def sqlite_store(self):
+        """Return the canonical SQLite authority backing this self model."""
+        return self._memory.sqlite_store
+
     def get(
         self,
         *,
@@ -174,10 +180,52 @@ class SelfModelService:
         value: object,
         expected_revision_sha256: str | None,
     ) -> SelfModelSnapshot:
+        return self._compare_and_put(
+            None,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            facet=facet,
+            value=value,
+            expected_revision_sha256=expected_revision_sha256,
+        )
+
+    def compare_and_put_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        agent_id: str,
+        facet: str,
+        value: object,
+        expected_revision_sha256: str | None,
+    ) -> SelfModelSnapshot:
+        """Update self state inside a caller-owned canonical SQLite transaction."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        return self._compare_and_put(
+            conn,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            facet=facet,
+            value=value,
+            expected_revision_sha256=expected_revision_sha256,
+        )
+
+    def _compare_and_put(
+        self,
+        conn: sqlite3.Connection | None,
+        *,
+        workspace_id: str,
+        agent_id: str,
+        facet: str,
+        value: object,
+        expected_revision_sha256: str | None,
+    ) -> SelfModelSnapshot:
         canonical_workspace = _require_token(workspace_id, field="workspace_id")
         canonical_agent = _require_token(agent_id, field="agent_id")
         canonical_facet = _require_token(facet, field="facet")
         expected_updated_at: datetime | None
+        key = _workspace_key(canonical_workspace, canonical_facet)
 
         if expected_revision_sha256 is None:
             expected_updated_at = None
@@ -186,12 +234,21 @@ class SelfModelService:
                 expected_revision_sha256,
                 field="expected_revision_sha256",
             )
-            current = self._memory.get(
-                scope=MemoryScope.AGENT,
-                owner_id=canonical_agent,
-                namespace=SELF_MODEL_NAMESPACE,
-                key=_workspace_key(canonical_workspace, canonical_facet),
-            )
+            if conn is None:
+                current = self._memory.get(
+                    scope=MemoryScope.AGENT,
+                    owner_id=canonical_agent,
+                    namespace=SELF_MODEL_NAMESPACE,
+                    key=key,
+                )
+            else:
+                current = self._memory.get_with_connection(
+                    conn,
+                    scope=MemoryScope.AGENT,
+                    owner_id=canonical_agent,
+                    namespace=SELF_MODEL_NAMESPACE,
+                    key=key,
+                )
             if current is None:
                 raise MemoryConflictError("self-model target no longer exists")
             actual_revision = _self_model_revision_sha256(
@@ -204,15 +261,27 @@ class SelfModelService:
                 raise MemoryConflictError("self-model revision changed")
             expected_updated_at = current.updated_at
 
-        committed = self._memory.compare_and_put(
-            scope=MemoryScope.AGENT,
-            owner_id=canonical_agent,
-            namespace=SELF_MODEL_NAMESPACE,
-            key=_workspace_key(canonical_workspace, canonical_facet),
-            value=value,
-            expected_updated_at=expected_updated_at,
-            user_approved=False,
-        )
+        if conn is None:
+            committed = self._memory.compare_and_put(
+                scope=MemoryScope.AGENT,
+                owner_id=canonical_agent,
+                namespace=SELF_MODEL_NAMESPACE,
+                key=key,
+                value=value,
+                expected_updated_at=expected_updated_at,
+                user_approved=False,
+            )
+        else:
+            committed = self._memory.compare_and_put_with_connection(
+                conn,
+                scope=MemoryScope.AGENT,
+                owner_id=canonical_agent,
+                namespace=SELF_MODEL_NAMESPACE,
+                key=key,
+                value=value,
+                expected_updated_at=expected_updated_at,
+                user_approved=False,
+            )
         return self._snapshot(
             committed,
             workspace_id=canonical_workspace,
