@@ -228,7 +228,7 @@ class MultiRepositoryProductFactoryHost:
         """Reconstruct exact graph + coordinator state without caller-supplied graph bytes."""
 
         authority = self._load_graph(host_task_id=host_task_id, project=project)
-        binding = ProductProjectCoordinatorBinding(project, authority.graph)
+        binding = self._binding(project, authority.graph)
         coordinator = self._program.restore_latest(
             host_task_id=host_task_id,
             binding=binding,
