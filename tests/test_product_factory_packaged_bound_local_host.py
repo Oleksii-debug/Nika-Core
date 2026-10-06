@@ -306,6 +306,8 @@ def test_admitted_entry_keeps_frozen_model_if_revision_changes_after_recheck(
     entry = host._entry_for("admitted-host-task", project, resolved)
     frozen = observed["model_authority"]
     assert getattr(frozen, "revision") == 1
+    assert len(getattr(frozen, "selection_sha256")) == 64
+    assert getattr(frozen, "artifact_pin_sha256") is None
     assert getattr(frozen, "model") == "qwen3:8b"
     assert settings.snapshot()["revision"] == 2
     assert entry.program.worker.repositories
@@ -360,7 +362,7 @@ def test_rebind_after_host_composition_fails_closed_before_worker_reuse(
         PackagedBoundLocalProductFactoryHostError,
         match="changed after host composition",
     ):
-        host._entry_for("host-task", changed)
+        host._entry_for("host-task", project, changed)
 
 
 def test_fresh_host_after_restart_uses_latest_durable_binding(
