@@ -314,6 +314,7 @@ class ProductFactoryLocalRepositoryBindings:
                     now,
                 ),
             )
+            _require_filesystem_identity(root, identity)
 
         current = self.require(project_id, repository.repository_id)
         if current.binding_version != version:
