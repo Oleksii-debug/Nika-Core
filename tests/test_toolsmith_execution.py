@@ -444,6 +444,9 @@ def test_posix_launch_snapshot_falls_back_without_memfd(
 
     guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
     with guard as launch_executable:
+        assert len(guard.pass_fds) == 1
+        with pytest.raises(OSError):
+            os.pwrite(guard.pass_fds[0], b"x", 0)
         result = subprocess.run(
             (str(executable),),
             executable=str(launch_executable),

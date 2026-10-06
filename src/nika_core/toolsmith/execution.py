@@ -149,6 +149,36 @@ def _open_posix_executable_snapshot() -> tuple[int, bool]:
         ) from exc
 
 
+def _reopen_posix_snapshot_read_only(descriptor: int) -> int:
+    source_stat = os.fstat(descriptor)
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    for descriptor_root in (
+        pathlib.Path("/proc/self/fd"),
+        pathlib.Path("/dev/fd"),
+    ):
+        descriptor_path = descriptor_root / str(descriptor)
+        try:
+            reopened = os.open(descriptor_path, flags)
+        except OSError:
+            continue
+        try:
+            reopened_stat = os.fstat(reopened)
+            if (
+                reopened_stat.st_dev == source_stat.st_dev
+                and reopened_stat.st_ino == source_stat.st_ino
+            ):
+                return reopened
+        except OSError:
+            pass
+        try:
+            os.close(reopened)
+        except OSError:
+            pass
+    raise ProcessExecutionError(
+        "read-only runtime executable snapshot descriptor is unavailable"
+    )
+
+
 def _seal_posix_executable_snapshot(descriptor: int) -> None:
     try:
         import fcntl
@@ -226,6 +256,19 @@ def _snapshot_posix_executable(
         os.fchmod(snapshot_descriptor, 0o500)
         if requires_sealing:
             _seal_posix_executable_snapshot(snapshot_descriptor)
+        else:
+            read_descriptor = _reopen_posix_snapshot_read_only(
+                snapshot_descriptor
+            )
+            try:
+                os.close(snapshot_descriptor)
+            except OSError:
+                try:
+                    os.close(read_descriptor)
+                except OSError:
+                    pass
+                raise
+            snapshot_descriptor = read_descriptor
 
         os.lseek(snapshot_descriptor, 0, os.SEEK_SET)
         if (
