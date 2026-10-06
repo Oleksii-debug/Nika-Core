@@ -918,7 +918,6 @@ print('Packaged intelligence-mode commands changed canonical model settings with
             "ProductProject створено або відкрито: $productId; spec version 1."
         )
         Wait-BoundTextEvidence $expectedProductCreated
-        $factoryOperatorHeading = Wait-DescendantName 'Оператор Product Factory' ([System.Windows.Automation.ControlType]::Text)
         Wait-BoundTextEvidence 'Оператор Product Factory'
         Wait-BoundTextEvidence $productId
         Wait-BoundTextEvidence $productCommand
@@ -982,6 +981,7 @@ print('Packaged Product Factory planning persisted one team plan without worker 
         Wait-BoundTextEvidence $productId
         Set-BoundControlFocus $commandControl
         Wait-FocusName $commandControl
+        $factoryOperatorHeading = Wait-DescendantName 'Оператор Product Factory' ([System.Windows.Automation.ControlType]::Text)
 
         Set-BoundControlValue $commandControl 'покажи поточний статус Product Factory'
         Set-BoundControlFocus $startControl

@@ -20,11 +20,11 @@ def test_packaged_factory_operator_is_exercised_by_physical_m5_uia_proof() -> No
     )
 
     assert product_command in source
-    assert (
+    heading_capture = (
         "$factoryOperatorHeading = Wait-DescendantName 'Оператор Product Factory' "
         "([System.Windows.Automation.ControlType]::Text)"
-        in source
     )
+    assert heading_capture in source
     assert "Wait-BoundTextEvidence 'Оператор Product Factory'" in source
     assert "Wait-BoundTextEvidence $productId" in source
     for evidence in (
@@ -48,7 +48,8 @@ def test_packaged_factory_operator_is_exercised_by_physical_m5_uia_proof() -> No
     assert "pf-team-plan:v1:" in source
     assert "planning unexpectedly created a task" in source
     assert status_command in source
-    assert source.index(planning_command) < source.index(status_command)
+    assert source.index(planning_command) < source.index(heading_capture)
+    assert source.index(heading_capture) < source.index(status_command)
     assert (
         "поточна версія ProductProject ще не має підготовленого execution authority."
         in source
