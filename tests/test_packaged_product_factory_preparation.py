@@ -861,6 +861,96 @@ def test_repair_lineage_uses_pre_tamper_project_version_snapshot(
     )
 
 
+def test_direct_restore_rejects_stale_product_project_version(
+    tmp_path: Path,
+) -> None:
+    (
+        _store,
+        repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    prepared = service.prepare(plan)
+    latest = repository.get(project.project_id)
+    repository.update_spec(
+        latest.project_id,
+        replace(
+            latest.spec,
+            desired_outcome="Concurrent revision before direct Factory restore",
+        ),
+        expected_row_version=latest.row_version,
+        change_reason="regression: revise before direct Factory restore",
+    )
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        service._host.restore(
+            host_task_id=prepared.host_task_id,
+            project=project,
+        )
+
+
+def test_initial_checkpoint_uses_bound_graph_project_version_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        store,
+        repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    host_type = type(service._host)
+    original_bind_graph = host_type._bind_graph
+
+    def bind_then_revise(host, **kwargs):
+        authority = original_bind_graph(host, **kwargs)
+        project_carrier = kwargs["project"]
+        latest = repository.get(project.project_id)
+        current = repository.update_spec(
+            latest.project_id,
+            replace(
+                latest.spec,
+                desired_outcome="Concurrent revision after graph authority publication",
+            ),
+            expected_row_version=latest.row_version,
+            change_reason="regression: mutate project carrier after graph binding",
+        )
+        object.__setattr__(project_carrier, "spec_version", current.spec_version)
+        object.__setattr__(project_carrier, "row_version", current.row_version)
+        object.__setattr__(project_carrier, "spec", current.spec)
+        return authority
+
+    monkeypatch.setattr(host_type, "_bind_graph", bind_then_revise)
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        service.prepare(plan)
+
+    with store.connection() as connection:
+        stages = tuple(
+            row["stage"]
+            for row in connection.execute(
+                "SELECT stage FROM checkpoints ORDER BY created_at, checkpoint_id"
+            ).fetchall()
+        )
+    assert stages == ("product_factory.repository_graph.v1",)
+
+
 def test_execution_plan_snapshots_mutable_graph_and_mapping_inputs(tmp_path: Path) -> None:
     (
         _store,
