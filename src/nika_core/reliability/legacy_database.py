@@ -261,7 +261,9 @@ def _open_readonly_snapshot(path: Path) -> int:
     return os.open(path, flags)
 
 
-def _read_pending_record(path: Path) -> object | None:
+def _read_pending_record(
+    path: Path,
+) -> tuple[object, tuple[int, int, int, int, int]] | None:
     try:
         before = os.lstat(path)
     except FileNotFoundError:
@@ -318,9 +320,38 @@ def _read_pending_record(path: Path) -> object | None:
     finally:
         os.close(fd)
     try:
-        return json.loads(payload.decode("utf-8"))
+        record = json.loads(payload.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError):
         raise LegacyDatabaseConflict(_MESSAGE) from None
+    return record, _snapshot_identity(after)
+
+
+def _remove_pending_record(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int, int, int, int],
+) -> None:
+    try:
+        current = os.lstat(path)
+    except OSError:
+        raise LegacyDatabaseConflict(_MESSAGE) from None
+    if (
+        _is_indirect(current)
+        or not stat.S_ISREG(current.st_mode)
+        or _snapshot_identity(current) != expected_identity
+    ):
+        raise LegacyDatabaseConflict(_MESSAGE)
+    try:
+        path.unlink()
+    except OSError:
+        raise LegacyDatabaseConflict(_MESSAGE) from None
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise LegacyDatabaseConflict(_MESSAGE) from None
+    raise LegacyDatabaseConflict(_MESSAGE)
 
 
 def _publish_pending(path: Path, record: dict[str, object]) -> None:
@@ -376,7 +407,9 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
     manager = SQLiteRecoveryManager(SQLiteStore(target))
     manager.recover_interrupted_restore()
     pending_path = target.with_name(f".{target.name}.legacy-adoption.json")
-    pending = _read_pending_record(pending_path)
+    pending_snapshot = _read_pending_record(pending_path)
+    pending = pending_snapshot[0] if pending_snapshot is not None else None
+    pending_identity = pending_snapshot[1] if pending_snapshot is not None else None
     if pending is not None:
         if (
             not isinstance(pending, dict)
@@ -414,7 +447,9 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
             same_source = path == original or (original.exists() and path.samefile(original))
             if not same_source or state.digest != receipt["source_digest"]:
                 raise LegacyDatabaseConflict(_MESSAGE)
-        pending_path.unlink(missing_ok=True)
+        if pending_identity is None:
+            raise LegacyDatabaseConflict(_MESSAGE)
+        _remove_pending_record(pending_path, expected_identity=pending_identity)
         return
     if not sources and not pending:
         return
