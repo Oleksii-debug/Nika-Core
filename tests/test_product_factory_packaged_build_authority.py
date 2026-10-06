@@ -10,7 +10,10 @@ import pytest
 import nika_core.product_factory_packaged_build_authority as authority_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
-from nika_core.product_factory_build_execution import BuildExecutionState
+from nika_core.product_factory_build_execution import (
+    BuildExecutionPortError,
+    BuildExecutionState,
+)
 from nika_core.product_factory_coordinator import (
     ProductFactoryCoordinator,
     ReviewDecision,
@@ -449,6 +452,83 @@ def test_template_drift_invalidates_execution_but_preserves_bound_output_inspect
         match="different packaged authority",
     ):
         _admit(runtime)
+
+
+def test_reconfigured_restart_restores_uncertain_effect_without_stale_replay(
+    tmp_path: Path,
+) -> None:
+    store, startup, node, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={
+            "kind": "product_factory",
+            "product_project_id": PROJECT_ID,
+        },
+    )
+    host = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task.task_id,
+        project_id=PROJECT_ID,
+        node=node,
+        startup=startup,
+        trusted_authority=runtime.trusted_execution,
+        output_policies=runtime.output_policies,
+        recovery_authority=runtime.recovery_execution,
+    )
+    host.submit(spec)
+    host.prepare(spec.request.work_id)
+    host.begin_dispatch(spec.request.work_id)
+
+    class LostAcknowledgementPort:
+        def run(self, _dispatch):
+            raise BuildExecutionPortError("simulated acknowledgement loss")
+
+        def inspect(self, _dispatch):
+            return None
+
+    host.node_port = LostAcknowledgementPort()
+    uncertain = host.execute(spec.request.work_id)
+    assert uncertain.state is BuildExecutionState.RECONCILE_REQUIRED
+
+    runtime.authorities.configure(
+        _template(argv_suffix=("--wheel",), max_changed_files=3),
+        expected_revision=1,
+    )
+    restarted_runtime = PackagedBuildAuthorityRuntime(
+        PackagedBuildAuthorityStore(
+            store,
+            node=node,
+            startup=startup,
+        )
+    )
+    restarted = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task.task_id,
+        project_id=PROJECT_ID,
+        node=node,
+        startup=startup,
+        trusted_authority=restarted_runtime.trusted_execution,
+        output_policies=restarted_runtime.output_policies,
+        recovery_authority=restarted_runtime.recovery_execution,
+    )
+
+    restored = restarted.snapshot().coordinator.records[0]
+    assert restored.state is BuildExecutionState.RECONCILE_REQUIRED
+    assert restarted.coordinator.trusted_authority is restarted_runtime.trusted_execution
+
+    inspected = restarted.reconcile(spec.request.work_id)
+    assert inspected.state is BuildExecutionState.RECONCILE_REQUIRED
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="changed after PF5 work admission",
+    ):
+        restarted_runtime.trusted_execution.resolve(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            work_id=spec.request.work_id,
+        )
 
 
 def test_historical_bound_output_policy_fails_closed_on_history_tamper(
