@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 
@@ -42,13 +43,21 @@ class AllowReviewAuthority:
 
 
 class NeverDispatchWorker:
+    def __init__(self) -> None:
+        self.dispatch_calls = 0
+        self.inspect_calls = 0
+        self.recover_calls = 0
+
     async def dispatch(self, request):
+        self.dispatch_calls += 1
         raise AssertionError(f"unexpected dispatch: {request.work_id}")
 
     async def inspect(self, work_id: str) -> RecoveryState | None:
+        self.inspect_calls += 1
         raise AssertionError(f"unexpected inspect: {work_id}")
 
     async def recover(self, request, state):
+        self.recover_calls += 1
         raise AssertionError(f"unexpected recover: {request.work_id}:{state}")
 
 
@@ -366,6 +375,139 @@ def test_concurrent_project_revision_after_graph_binding_blocks_initial_checkpoi
         )
         == 0
     )
+
+
+def _revise_product_after_running_checkpoint(
+    *,
+    repository: ProductProjectRepository,
+    project_id: str,
+    service: PackagedProductFactoryPreparationService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_reserve = service._host._program._reserve_effect
+    revised = False
+
+    def reserve_after_revision(**kwargs):
+        nonlocal revised
+        if not revised:
+            latest = repository.get(project_id)
+            repository.update_spec(
+                latest.project_id,
+                replace(
+                    latest.spec,
+                    desired_outcome=(
+                        "Concurrent ProductProject revision before worker effect admission"
+                    ),
+                ),
+                expected_row_version=latest.row_version,
+                change_reason="regression: revise before worker effect reservation",
+            )
+            revised = True
+        return original_reserve(**kwargs)
+
+    monkeypatch.setattr(
+        service._host._program,
+        "_reserve_effect",
+        reserve_after_revision,
+    )
+
+
+def test_project_revision_after_running_checkpoint_blocks_worker_dispatch_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        _store,
+        repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    prepared = service.prepare(plan)
+    worker = service._host.worker
+    assert isinstance(worker, NeverDispatchWorker)
+    _revise_product_after_running_checkpoint(
+        repository=repository,
+        project_id=project.project_id,
+        service=service,
+        monkeypatch=monkeypatch,
+    )
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        asyncio.run(
+            service._host.dispatch_ready(
+                host_task_id=prepared.host_task_id,
+                state=prepared.state,
+                max_parallel=1,
+                max_count=1,
+            )
+        )
+
+    record = prepared.state.coordinator.snapshot().records[0]
+    assert record.state.value == "running"
+    assert worker.dispatch_calls == 0
+    assert worker.inspect_calls == 0
+    assert worker.recover_calls == 0
+
+
+def test_stale_running_project_version_blocks_recovery_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        _store,
+        repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    prepared = service.prepare(plan)
+    worker = service._host.worker
+    assert isinstance(worker, NeverDispatchWorker)
+    _revise_product_after_running_checkpoint(
+        repository=repository,
+        project_id=project.project_id,
+        service=service,
+        monkeypatch=monkeypatch,
+    )
+
+    with pytest.raises(MultiRepositoryExecutionError):
+        asyncio.run(
+            service._host.dispatch_ready(
+                host_task_id=prepared.host_task_id,
+                state=prepared.state,
+                max_parallel=1,
+                max_count=1,
+            )
+        )
+    assert prepared.state.coordinator.snapshot().records[0].state.value == "running"
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        asyncio.run(
+            service._host.recover_running(
+                host_task_id=prepared.host_task_id,
+                state=prepared.state,
+                max_parallel=1,
+            )
+        )
+
+    assert worker.dispatch_calls == 0
+    assert worker.inspect_calls == 0
+    assert worker.recover_calls == 0
 
 
 def test_execution_plan_snapshots_mutable_graph_and_mapping_inputs(tmp_path: Path) -> None:
