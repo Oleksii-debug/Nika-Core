@@ -515,10 +515,9 @@ def test_router_rejects_target_owners_from_different_sqlite_authorities(
 def test_router_rejects_foreign_caller_owned_connection_before_effect(
     tmp_path: Path,
 ) -> None:
-    primary_store = SQLiteStore(tmp_path / "router-connection-primary.db")
-    foreign_store = SQLiteStore(tmp_path / "router-connection-foreign.db")
+    primary_store = SQLiteStore(tmp_path / "router-connection-shared.db")
+    foreign_store = SQLiteStore(primary_store.path)
     primary_store.initialize()
-    foreign_store.initialize()
     memory = MemoryService(primary_store)
     foreign_memory = MemoryService(foreign_store)
     router = LearningSemanticUpdateRouter(
@@ -552,7 +551,7 @@ def test_router_rejects_foreign_caller_owned_connection_before_effect(
 
     with foreign_store.connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        with pytest.raises(ValueError, match="does not belong to this SQLiteStore"):
+        with pytest.raises(ValueError, match="not opened by this SQLiteStore"):
             router.apply_with_connection(
                 conn,
                 intent=intent,

@@ -34,11 +34,14 @@ class SQLiteStore:
             if str(self.path) == ":memory:"
             else self.path.expanduser().resolve(strict=False)
         )
+        self._active_connections: dict[int, sqlite3.Connection] = {}
 
     def require_connection(self, conn: sqlite3.Connection) -> None:
         """Fail closed unless conn is bound to this store's main database."""
         if type(conn) is not sqlite3.Connection:
             raise TypeError("conn must be an exact sqlite3.Connection")
+        if self._active_connections.get(id(conn)) is not conn:
+            raise ValueError("connection was not opened by this SQLiteStore")
         rows = conn.execute("PRAGMA database_list").fetchall()
         main_rows = tuple(row for row in rows if row[1] == "main")
         if len(main_rows) != 1:
@@ -58,15 +61,19 @@ class SQLiteStore:
     def connection(self) -> Iterator[sqlite3.Connection]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+        connection_id = id(conn)
+        self._active_connections[connection_id] = conn
         try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
             yield conn
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         finally:
+            if self._active_connections.get(connection_id) is conn:
+                del self._active_connections[connection_id]
             conn.close()
 
     def initialize(self) -> None:
