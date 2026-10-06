@@ -348,8 +348,19 @@ def test_report_reads_legacy_v5_with_original_two_step_semantics(
         )
     )
 
+    expected_payload = json.dumps(
+        restored.canonical_payload(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    expected_sha256 = hashlib.sha256(
+        b"nika-peft-physical-pilot-report-v5\x00" + expected_payload
+    ).hexdigest()
+
     assert restored.schema_version == 5
     assert restored.completed_steps == 2
+    assert restored.evidence_sha256 == expected_sha256
     assert restored.evidence_sha256 != report.evidence_sha256
 
 
