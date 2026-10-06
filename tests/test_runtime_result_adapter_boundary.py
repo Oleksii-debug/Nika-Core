@@ -339,6 +339,8 @@ def test_canonical_result_rejects_forgery_without_consulting_hostile_properties(
         "runtime.started",
         "runtime.finished",
         "runtime.cancel_accepted",
+        "runtime.finished_after_pause",
+        "runtime.pause_runtime_outcome_uncertain",
         "runtime.recovery_claim_completed",
         "runtime.recovery_auto_resume_failed",
     ),
