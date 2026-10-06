@@ -170,6 +170,7 @@ def build_windows_bridge(
     cloud_permission_confirm: CloudModelPermissionConfirm | None = None,
     activity_report_day: Callable[[], date] | None = None,
     start_startup_recovery: bool = True,
+    defer_startup_recovery: Callable[[Callable[[], None]], None] | None = None,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
     store = SQLiteStore(config.database_path)
     store.initialize()
@@ -316,7 +317,7 @@ def build_windows_bridge(
         },
         state_provider=source_state,
     )
-    if start_startup_recovery:
+    def start_recovery() -> None:
         try:
             backend.start_startup_recovery()
         except Exception as exc:
@@ -324,6 +325,12 @@ def build_windows_bridge(
             raise _StartupRecoveryInventoryError(
                 "packaged startup recovery inventory failed"
             ) from exc
+
+    if start_startup_recovery:
+        if defer_startup_recovery is None:
+            start_recovery()
+        else:
+            defer_startup_recovery(start_recovery)
     return bridge, products
 
 
@@ -504,8 +511,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             "встановлення та повторіть запуск. Незавершені завдання не відновлювалися."
         )
         return 1
+    deferred_recovery: list[Callable[[], None]] = []
     try:
-        bridge, _products = build_windows_bridge(config)
+        bridge, _products = build_windows_bridge(
+            config,
+            defer_startup_recovery=deferred_recovery.append,
+        )
+        if len(deferred_recovery) != 1:
+            raise RuntimeError("packaged startup recovery runner was not scheduled exactly once")
     except _StartupRecoveryInventoryError:
         show_recovery_error(
             "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
@@ -522,7 +535,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
     try:
-        launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
+        launch_windows_shell(
+            bridge,
+            title=f"Nika Core {config.app_version}",
+            on_gui_started=deferred_recovery[0],
+        )
+    except _StartupRecoveryInventoryError:
+        show_recovery_error(
+            "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
+            "Запуск зупинено без автоматичного повторення дій."
+        )
+        return 1
     except Exception as exc:  # noqa: BLE001 - redact packaged GUI startup failures
         logging.getLogger(__name__).error(
             "Packaged shell launch failed: exception_type=%s", type(exc).__name__

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -25,7 +26,12 @@ def preflight_windows_shell() -> None:
     import_module("webview")
 
 
-def launch_windows_shell(bridge: UIActionBridge, *, title: str = "Nika Core") -> Any:
+def launch_windows_shell(
+    bridge: UIActionBridge,
+    *,
+    title: str = "Nika Core",
+    on_gui_started: Callable[[], None] | None = None,
+) -> Any:
     """Launch the local HTML shell with EdgeChromium/WebView2.
 
     Import pywebview lazily so headless/core installations can import Nika without
@@ -49,6 +55,23 @@ def launch_windows_shell(bridge: UIActionBridge, *, title: str = "Nika Core") ->
         width=1180,
         height=760,
         min_size=(760, 520),
+        hidden=on_gui_started is not None,
     )
-    webview.start(gui="edgechromium")
+    callback_failure: list[Exception] = []
+
+    def finish_startup() -> None:
+        try:
+            if on_gui_started is not None:
+                on_gui_started()
+            window.show()
+        except Exception as exc:  # noqa: BLE001 - relay worker-thread startup failure
+            callback_failure.append(exc)
+            window.destroy()
+
+    if on_gui_started is None:
+        webview.start(gui="edgechromium")
+    else:
+        webview.start(finish_startup, gui="edgechromium")
+        if callback_failure:
+            raise callback_failure[0]
     return window

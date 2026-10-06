@@ -88,7 +88,7 @@ def test_storage_startup_failure_is_accessible_private_and_does_not_launch_shell
     monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
     messages: list[str] = []
 
-    def fail_open(_config: AppConfig) -> None:
+    def fail_open(_config: AppConfig, **_kwargs: object) -> None:
         raise failure
 
     monkeypatch.setattr(nika_windows, "build_windows_bridge", fail_open)
@@ -225,6 +225,7 @@ def test_shell_preflight_failure_happens_before_runtime_recovery_and_is_redacted
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: Exception,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
     monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
@@ -251,6 +252,8 @@ def test_shell_preflight_failure_happens_before_runtime_recovery_and_is_redacted
     assert "Не вдалося підготувати інтерфейс Nika" in messages[0]
     assert "не відновлювалися" in messages[0]
     assert "PRIVATE_" not in messages[0]
+    assert "PRIVATE_" not in caplog.text
+    assert f"exception_type={type(failure).__name__}" in caplog.text
     assert not config.database_path.exists()
 
 
@@ -285,6 +288,88 @@ def test_shell_preflight_imports_pywebview_after_complete_assets(
     assert imported == ["webview"]
 
 
+
+def test_shell_deferred_startup_runs_before_hidden_window_is_shown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    create_kwargs: dict[str, object] = {}
+
+    class Window:
+        def show(self) -> None:
+            events.append("show")
+
+        def destroy(self) -> None:
+            events.append("destroy")
+
+    window = Window()
+
+    class WebView:
+        @staticmethod
+        def create_window(_title: str, _url: str, **kwargs: object) -> Window:
+            create_kwargs.update(kwargs)
+            return window
+
+        @staticmethod
+        def start(func=None, *, gui: str) -> None:
+            assert gui == "edgechromium"
+            assert func is not None
+            func()
+
+    monkeypatch.setattr(ui_shell, "preflight_windows_shell", lambda: None)
+    monkeypatch.setattr(ui_shell, "import_module", lambda _name: WebView)
+
+    result = ui_shell.launch_windows_shell(
+        object(),
+        on_gui_started=lambda: events.append("recovery"),
+    )
+
+    assert result is window
+    assert create_kwargs["hidden"] is True
+    assert events == ["recovery", "show"]
+
+
+def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Window:
+        def show(self) -> None:
+            events.append("show")
+
+        def destroy(self) -> None:
+            events.append("destroy")
+
+    window = Window()
+
+    class WebView:
+        @staticmethod
+        def create_window(_title: str, _url: str, **_kwargs: object) -> Window:
+            return window
+
+        @staticmethod
+        def start(func=None, *, gui: str) -> None:
+            assert gui == "edgechromium"
+            assert func is not None
+            func()
+
+    def fail_recovery() -> None:
+        events.append("recovery")
+        raise RuntimeError("DEFERRED_RECOVERY_CANARY")
+
+    monkeypatch.setattr(ui_shell, "preflight_windows_shell", lambda: None)
+    monkeypatch.setattr(ui_shell, "import_module", lambda _name: WebView)
+
+    with pytest.raises(RuntimeError, match="DEFERRED_RECOVERY_CANARY"):
+        ui_shell.launch_windows_shell(
+            object(),
+            on_gui_started=fail_recovery,
+        )
+
+    assert events == ["recovery", "destroy"]
+
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -305,7 +390,7 @@ def test_shell_launch_failure_is_accessible_private_and_returns_error(
     monkeypatch.setattr(
         nika_windows,
         "build_windows_bridge",
-        lambda _config: (bridge, products),
+        lambda _config, **_kwargs: (bridge, products),
     )
     messages: list[str] = []
     monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
@@ -334,7 +419,7 @@ def test_shell_launch_boundary_does_not_swallow_process_exit(
     monkeypatch.setattr(
         nika_windows,
         "build_windows_bridge",
-        lambda _config: (object(), object()),
+        lambda _config, **_kwargs: (object(), object()),
     )
 
     def stop_process(*_args: object, **_kwargs: object) -> None:
