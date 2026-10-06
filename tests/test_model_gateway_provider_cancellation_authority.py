@@ -557,7 +557,7 @@ def test_pending_caller_cancellation_stops_before_provider_effect(
     tmp_path: Path,
 ) -> None:
     audit = _audit(tmp_path)
-    primary = _FallbackProvider()
+    primary = _BlockingProvider()
     gateway = ModelGateway(audit_log=audit)
     gateway.register(primary)
 
