@@ -7,6 +7,7 @@ import pytest
 
 from nika_core.product_factory_build_deployment_handoff import BuildDeploymentHandoff
 from nika_core.product_factory_build_execution import (
+    BuildExecutionError,
     BuildExecutionRecord,
     BuildExecutionScopeRequest,
     BuildExecutionSpec,
@@ -326,3 +327,103 @@ def test_component_identity_is_strict(
 
     with pytest.raises(PackagedReviewedBuildLoopError):
         controller.advance_component(state=_state(), component_id=value)
+
+
+def test_pre_dispatch_availability_loss_is_settled_through_durable_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    host = _host()
+    _patch_admission(monkeypatch)
+    waiting = _record(BuildExecutionState.WAITING_FOR_NODE)
+    retry_calls: list[str] = []
+
+    monkeypatch.setattr(
+        DurableBuildExecutionHost,
+        "submit",
+        lambda _self, _spec_value: _record(BuildExecutionState.PENDING),
+    )
+    monkeypatch.setattr(
+        DurableBuildExecutionHost,
+        "prepare",
+        lambda _self, _work_id: _record(BuildExecutionState.PREPARED),
+    )
+
+    def lose_node(_self, _work_id: str):
+        raise BuildExecutionError("selected node became unavailable")
+
+    monkeypatch.setattr(
+        DurableBuildExecutionHost,
+        "begin_dispatch",
+        lose_node,
+    )
+    object.__setattr__(
+        host,
+        "coordinator",
+        SimpleNamespace(get=lambda work_id: waiting if work_id == WORK_ID else None),
+    )
+
+    def retry(_self, work_id: str) -> BuildExecutionRecord:
+        retry_calls.append(work_id)
+        return waiting
+
+    monkeypatch.setattr(DurableBuildExecutionHost, "retry", retry)
+
+    result = PackagedReviewedBuildLoopController(
+        runtime,
+        host,
+    ).advance_component(
+        state=_state(),
+        component_id=COMPONENT_ID,
+    )
+
+    assert result.state is BuildExecutionState.WAITING_FOR_NODE
+    assert retry_calls == [WORK_ID]
+
+
+def test_pre_dispatch_unclassified_failure_remains_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    host = _host()
+    _patch_admission(monkeypatch)
+    prepared = _record(BuildExecutionState.PREPARED)
+
+    monkeypatch.setattr(
+        DurableBuildExecutionHost,
+        "submit",
+        lambda _self, _spec_value: _record(BuildExecutionState.PENDING),
+    )
+    monkeypatch.setattr(
+        DurableBuildExecutionHost,
+        "prepare",
+        lambda _self, _work_id: prepared,
+    )
+
+    def explode(_self, _work_id: str):
+        raise BuildExecutionError("lease identity mismatch")
+
+    monkeypatch.setattr(
+        DurableBuildExecutionHost,
+        "begin_dispatch",
+        explode,
+    )
+    object.__setattr__(
+        host,
+        "coordinator",
+        SimpleNamespace(get=lambda work_id: prepared if work_id == WORK_ID else None),
+    )
+
+    def forbidden_retry(*_args, **_kwargs):
+        raise AssertionError("unclassified dispatch failure must not be normalized")
+
+    monkeypatch.setattr(DurableBuildExecutionHost, "retry", forbidden_retry)
+
+    with pytest.raises(BuildExecutionError, match="lease identity mismatch"):
+        PackagedReviewedBuildLoopController(
+            runtime,
+            host,
+        ).advance_component(
+            state=_state(),
+            component_id=COMPONENT_ID,
+        )
