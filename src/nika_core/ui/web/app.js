@@ -115,6 +115,17 @@
   const workspacesEmpty = document.getElementById("workspaces-empty");
   const productProjectEmpty = document.getElementById("product-project-empty");
   const productProjectSummary = document.getElementById("product-project-summary");
+  const productFactoryLocalStartupJson = document.getElementById(
+    "product-factory-local-startup-json",
+  );
+  const productFactoryLocalStartupStatus = document.getElementById(
+    "product-factory-local-startup-status",
+  );
+  const productFactoryLocalStartupSave = document.getElementById(
+    "product-factory-local-startup-save",
+  );
+  let productFactoryLocalStartupRevision = 0;
+  let productFactoryLocalStartupDirty = false;
   const productFactoryExecutionPlanPath = document.getElementById(
     "product-factory-execution-plan-path",
   );
@@ -670,6 +681,76 @@
       productProjectOperatorFields[field].textContent = operator[field];
     }
     productProjectOperator.hidden = false;
+  }
+
+  function validProductFactoryLocalStartupSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false;
+    if (!["ready", "invalid"].includes(snapshot.status)) return false;
+    if (!Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0) return false;
+    if (typeof snapshot.configured !== "boolean") return false;
+    if (typeof snapshot.environment_override !== "boolean") return false;
+    if (
+      !["active", "restart_required", "model_required", "not_configured", "invalid"]
+        .includes(snapshot.runtime_status)
+    ) return false;
+    if (snapshot.config_json !== null && typeof snapshot.config_json !== "string") return false;
+    if (snapshot.status === "invalid") {
+      return snapshot.configured === false
+        && snapshot.config_json === null
+        && snapshot.runtime_status === "invalid";
+    }
+    return snapshot.configured === (typeof snapshot.config_json === "string");
+  }
+
+  function renderProductFactoryLocalStartup(snapshot) {
+    if (!productFactoryLocalStartupJson || !productFactoryLocalStartupStatus) return false;
+    if (!validProductFactoryLocalStartupSnapshot(snapshot)) {
+      productFactoryLocalStartupJson.disabled = true;
+      if (productFactoryLocalStartupSave) productFactoryLocalStartupSave.disabled = true;
+      productFactoryLocalStartupStatus.textContent =
+        "Стан конфігурації локального Product Factory недоступний або несумісний.";
+      return false;
+    }
+
+    if (!productFactoryLocalStartupDirty) {
+      productFactoryLocalStartupRevision = snapshot.revision;
+      productFactoryLocalStartupJson.value = snapshot.config_json ?? "";
+    } else if (snapshot.revision !== productFactoryLocalStartupRevision) {
+      productFactoryLocalStartupSave.disabled = true;
+      productFactoryLocalStartupStatus.textContent =
+        "Збережена конфігурація змінилася в іншому вікні. Натисніть «Перечитати локальний Product Factory» перед збереженням.";
+      return true;
+    }
+
+    productFactoryLocalStartupJson.disabled = false;
+    if (productFactoryLocalStartupSave) productFactoryLocalStartupSave.disabled = false;
+    if (snapshot.status === "invalid" || snapshot.runtime_status === "invalid") {
+      productFactoryLocalStartupStatus.textContent = snapshot.environment_override
+        ? "Конфігурація з NIKA_PRODUCT_FACTORY_LOCAL_STARTUP_JSON некоректна. Локальний backend заблоковано; приберіть або виправте змінну середовища й перезапустіть Nika."
+        : "Збережена конфігурація локального Product Factory пошкоджена або несумісна. Введіть коректний JSON і збережіть його.";
+      return true;
+    }
+
+    const dirtyPrefix = productFactoryLocalStartupDirty
+      ? "Є незбережені зміни. "
+      : "";
+    if (snapshot.environment_override) {
+      productFactoryLocalStartupStatus.textContent =
+        dirtyPrefix
+        + "Поточний запуск керується NIKA_PRODUCT_FACTORY_LOCAL_STARTUP_JSON. "
+        + "Збережене тут значення не стане активним, доки змінну середовища не прибрано і Nika не перезапущено.";
+      return true;
+    }
+
+    const messages = {
+      active: "Локальний backend Product Factory активний у цьому запуску.",
+      restart_required: "Збережену конфігурацію змінено. Перезапустіть Nika, щоб застосувати її.",
+      model_required: "Host-конфігурацію прийнято, але локальний backend не активний. Виберіть маршрут Ollama у налаштуваннях моделі й перезапустіть Nika.",
+      not_configured: "Локальний backend Product Factory ще не налаштовано. Введіть strict JSON конфігурації та збережіть його.",
+    };
+    productFactoryLocalStartupStatus.textContent =
+      dirtyPrefix + (messages[snapshot.runtime_status] || messages.not_configured);
+    return true;
   }
 
   function renderProductFactoryExecutionPlan(snapshot) {
@@ -1879,6 +1960,14 @@
   for (const input of Object.values(sourceInputs)) {
     input?.addEventListener("input", () => { sourceDirty = true; });
   }
+  productFactoryLocalStartupJson?.addEventListener("input", () => {
+    productFactoryLocalStartupDirty = true;
+    if (productFactoryLocalStartupStatus) {
+      productFactoryLocalStartupStatus.textContent =
+        "Конфігурацію локального Product Factory змінено, але ще не збережено.";
+    }
+  });
+
   document.getElementById("model-reload")?.addEventListener("click", () => {
     modelDirty = false;
   });
@@ -1938,6 +2027,7 @@
     const recoveryRender = renderStartupRecovery(state.startup_recovery ?? null);
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     if (modelReadGeneration === modelGeneration) renderModelSettings(state.v01_model_settings ?? null);
+    renderProductFactoryLocalStartup(state.product_factory_local_startup ?? null);
     renderSourceSetup(state.v01_sources ?? null);
     renderVoiceModelSetup(state.voice_model_setup ?? null);
     renderSpeech(state.speech ?? null);
@@ -2009,7 +2099,9 @@
       return;
     }
     // Group task controls: pause/resume/stop must not race an unacknowledged task creation.
-    const durableMutation = taskMutationActions.has(actionId) || actionId === "team.sources.configure";
+    const durableMutation = taskMutationActions.has(actionId)
+      || actionId === "team.sources.configure"
+      || actionId === "settings.product_factory_local.configure";
     const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
     if (inFlightActions.has(lockKey)) {
       announce("Попередню команду ще обробляють. Дочекайтеся підтвердження.", false);
@@ -2058,6 +2150,11 @@
       if (actionId === "product.factory.execution_plan.load") {
         payload.path = productFactoryExecutionPlanPath?.value ?? "";
       }
+      if (actionId === "settings.product_factory_local.configure") {
+        const raw = productFactoryLocalStartupJson?.value.trim() ?? "";
+        payload.revision = productFactoryLocalStartupRevision;
+        payload.config_json = raw || null;
+      }
       if (actionId === "speech.start") payload.text = speechText?.value ?? "";
       if (actionId === "team.sources.configure") {
         payload.revision = sourceRevision;
@@ -2090,6 +2187,13 @@
           : (result.status === "accepted" ? "Дію прийнято до виконання." : "Виконано."));
       if (actionId === "team.sources.configure" && result.status === "completed") {
         sourceDirty = false;
+      }
+      if (
+        ["settings.product_factory_local.configure", "settings.product_factory_local.refresh"]
+          .includes(actionId)
+        && result.status === "completed"
+      ) {
+        productFactoryLocalStartupDirty = false;
       }
       announce(message, failed);
       appendLog(message);
