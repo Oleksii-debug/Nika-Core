@@ -493,3 +493,21 @@ def test_router_receipt_does_not_expose_semantic_payload(tmp_path: Path) -> None
 
     assert secret not in repr(receipt)
 
+
+def test_router_rejects_target_owners_from_different_sqlite_authorities(
+    tmp_path: Path,
+) -> None:
+    primary_store = SQLiteStore(tmp_path / "router-primary.db")
+    other_store = SQLiteStore(tmp_path / "router-other.db")
+    primary_store.initialize()
+    other_store.initialize()
+    primary = MemoryService(primary_store)
+    other = MemoryService(other_store)
+
+    with pytest.raises(ValueError, match="share one canonical SQLiteStore"):
+        LearningSemanticUpdateRouter(
+            memory=LearningMemoryApplier(primary),
+            world_model=LearningWorldModelApplier(WorldModelService(other)),
+            self_model=LearningSelfModelApplier(SelfModelService(primary)),
+            skill=LearningSkillApplier(LearnedSkillService(primary)),
+        )

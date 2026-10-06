@@ -423,3 +423,17 @@ def test_semantic_executor_factory_rejects_noncanonical_idempotency(
             MemoryService(store),
             DerivedIdempotencyLedger(store),
         )
+
+def test_semantic_executor_factory_rejects_split_sqlite_authorities(
+    tmp_path: Path,
+) -> None:
+    memory_store = SQLiteStore(tmp_path / "semantic-memory.db")
+    ledger_store = SQLiteStore(tmp_path / "semantic-ledger.db")
+    memory_store.initialize()
+    ledger_store.initialize()
+
+    with pytest.raises(ValueError, match="share one SQLiteStore"):
+        build_learning_semantic_update_executor(
+            MemoryService(memory_store),
+            IdempotencyLedger(ledger_store),
+        )
