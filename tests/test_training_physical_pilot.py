@@ -54,8 +54,10 @@ def _candidate_manifest(
     *,
     previous_adapter_tensors_sha256: str = "7" * 64,
     trained_adapter_tensors_sha256: str = "8" * 64,
+    schema: str = "nika-peft-candidate-v2",
+    foundation_model_sha256: str = "0" * 64,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "adapter_config": {
             "base_model_name_or_path": "models/base",
             "bias": "none",
@@ -85,7 +87,7 @@ def _candidate_manifest(
             "torch": "1.0",
             "transformers": "1.0",
         },
-        "schema": "nika-peft-candidate-v2",
+        "schema": schema,
         "step_number": 2,
         "trainer_parameters": {
             "learning_rate": 0.0002,
@@ -99,7 +101,9 @@ def _candidate_manifest(
             "torch_num_threads": 1,
         },
     }
-
+    if schema == "nika-peft-candidate-v3":
+        payload["foundation_model_sha256"] = foundation_model_sha256
+    return payload
 
 def _descriptor(path: Path, *, payload: bytes | None = None) -> ModelArtifactDescriptor:
     body = path.read_bytes() if payload is None else payload
@@ -660,6 +664,29 @@ def test_build_report_rejects_candidate_manifest_without_tensor_mutation(
             candidate_descriptor=_descriptor(candidate),
             candidate_root=tmp_path,
         )
+
+
+def test_build_report_accepts_v3_manifest_and_binds_exact_manifest_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _candidate_manifest(
+        schema="nika-peft-candidate-v3",
+        foundation_model_sha256="0" * 64,
+    )
+    monkeypatch.setattr(pilot, "candidate_adapter_manifest", lambda _: manifest)
+
+    report = _build_report(tmp_path)
+
+    encoded = json.dumps(
+        manifest,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    assert report.candidate_manifest_sha256 == _sha256(encoded)
+    assert report.schema_version == 5
 
 
 def test_build_report_rejects_candidate_manifest_reader_failure(

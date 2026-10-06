@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import importlib.metadata
 import json
 import math
@@ -83,6 +84,9 @@ class ParsedRequest:
 @dataclass(frozen=True, slots=True)
 class TrainerConfig:
     base_gguf: Path
+    base_gguf_sha256: str
+    initial_adapter: Path | None
+    initial_adapter_sha256: str | None
     model_dir: Path
     model_dir_manifest_sha256: str
     trainer_implementation_sha256: str
@@ -694,6 +698,7 @@ def build_trainer_environment(
     *,
     base_gguf: Path,
     model_dir: Path,
+    initial_adapter: Path | None = None,
     output_root: Path,
     max_records: int = _MAX_RECORDS_DEFAULT,
     max_sequence_length: int = _MAX_SEQUENCE_LENGTH_DEFAULT,
@@ -714,12 +719,37 @@ def build_trainer_environment(
     """
     base = Path(base_gguf)
     model = Path(model_dir)
+    initial = None if initial_adapter is None else Path(initial_adapter)
     output = Path(output_root)
     if not base.is_absolute() or not model.is_absolute() or not output.is_absolute():
         raise ValueError("trainer paths must be absolute")
     _require_regular_unlinked(base, code="nika_trainer_base_gguf_invalid")
     if base.suffix.casefold() != ".gguf":
         raise ValueError("base_gguf must use the .gguf suffix")
+    try:
+        base_gguf_sha256, _ = _hash_regular_snapshot(
+            base,
+            code="nika_trainer_base_gguf_changed",
+        )
+    except PeftTrainerError as exc:
+        raise ValueError("base_gguf could not be snapshotted") from exc
+    initial_adapter_sha256: str | None = None
+    if initial is not None:
+        if not initial.is_absolute():
+            raise ValueError("initial_adapter must be absolute")
+        _require_regular_unlinked(
+            initial,
+            code="nika_trainer_initial_adapter_invalid",
+        )
+        if initial.suffix.casefold() != ".safetensors":
+            raise ValueError("initial_adapter must use the .safetensors suffix")
+        try:
+            initial_adapter_sha256, _ = _hash_regular_snapshot(
+                initial,
+                code="nika_trainer_initial_adapter_changed",
+            )
+        except PeftTrainerError as exc:
+            raise ValueError("initial_adapter could not be snapshotted") from exc
     try:
         model_manifest = model_directory_manifest_sha256(model)
     except ValueError as exc:
@@ -777,6 +807,7 @@ def build_trainer_environment(
         raise ValueError("output_root must be a non-linked directory")
     environment = {
         "NIKA_TRAINER_BASE_GGUF": os.fspath(base),
+        "NIKA_TRAINER_BASE_GGUF_SHA256": base_gguf_sha256,
         "NIKA_TRAINER_IMPLEMENTATION_SHA256": trainer_implementation_sha256(),
         "NIKA_TRAINER_LEARNING_RATE": format(learning_rate, ".17g"),
         "NIKA_TRAINER_LORA_ALPHA": str(lora_alpha),
@@ -796,6 +827,9 @@ def build_trainer_environment(
         "NIKA_TRAINER_SEED": str(seed),
         "NIKA_TRAINER_TORCH_NUM_THREADS": str(torch_num_threads),
     }
+    if initial is not None and initial_adapter_sha256 is not None:
+        environment["NIKA_TRAINER_INITIAL_ADAPTER_PATH"] = os.fspath(initial)
+        environment["NIKA_TRAINER_INITIAL_ADAPTER_SHA256"] = initial_adapter_sha256
     for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS:
         environment[environment_key] = deployment_runtime_versions[distribution]
     return environment
@@ -1210,6 +1244,41 @@ def _read_config() -> TrainerConfig:
     base_gguf = _absolute_env_path("NIKA_TRAINER_BASE_GGUF", file=True)
     if base_gguf.suffix.casefold() != ".gguf":
         _fail("nika_trainer_base_gguf_invalid")
+    base_gguf_sha256 = _require_sha256(
+        os.environ.get("NIKA_TRAINER_BASE_GGUF_SHA256"),
+        field="nika_trainer_base_gguf_sha256",
+    )
+    observed_base_gguf_sha256, _ = _hash_regular_snapshot(
+        base_gguf,
+        code="nika_trainer_base_gguf_changed",
+    )
+    if observed_base_gguf_sha256 != base_gguf_sha256:
+        _fail("nika_trainer_base_gguf_digest_mismatch")
+    initial_adapter_raw = os.environ.get("NIKA_TRAINER_INITIAL_ADAPTER_PATH")
+    initial_adapter_sha256_raw = os.environ.get(
+        "NIKA_TRAINER_INITIAL_ADAPTER_SHA256"
+    )
+    if (initial_adapter_raw is None) != (initial_adapter_sha256_raw is None):
+        _fail("nika_trainer_initial_adapter_authority_incomplete")
+    initial_adapter: Path | None = None
+    initial_adapter_sha256: str | None = None
+    if initial_adapter_raw is not None:
+        initial_adapter = _absolute_env_path(
+            "NIKA_TRAINER_INITIAL_ADAPTER_PATH",
+            file=True,
+        )
+        if initial_adapter.suffix.casefold() != ".safetensors":
+            _fail("nika_trainer_initial_adapter_invalid")
+        initial_adapter_sha256 = _require_sha256(
+            initial_adapter_sha256_raw,
+            field="nika_trainer_initial_adapter_sha256",
+        )
+        observed_initial_adapter_sha256, _ = _hash_regular_snapshot(
+            initial_adapter,
+            code="nika_trainer_initial_adapter_changed",
+        )
+        if observed_initial_adapter_sha256 != initial_adapter_sha256:
+            _fail("nika_trainer_initial_adapter_digest_mismatch")
     model_dir = _absolute_env_path("NIKA_TRAINER_MODEL_DIR", file=False)
     model_dir_manifest_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256"),
@@ -1252,6 +1321,9 @@ def _read_config() -> TrainerConfig:
 
     return TrainerConfig(
         base_gguf=base_gguf,
+        base_gguf_sha256=base_gguf_sha256,
+        initial_adapter=initial_adapter,
+        initial_adapter_sha256=initial_adapter_sha256,
         model_dir=model_dir,
         model_dir_manifest_sha256=model_dir_manifest_sha256,
         trainer_implementation_sha256=expected_implementation_sha256,
@@ -1331,6 +1403,140 @@ def _best_effort_unlink_identity(path: Path, identity: tuple[int, int]) -> None:
             pass
 
 
+def _copy_initial_adapter_snapshot(
+    source: Path,
+    destination: Path,
+    *,
+    expected_sha256: str,
+) -> None:
+    before = _require_regular_unlinked(
+        source,
+        code="initial_adapter_source_changed",
+    )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source_fd = os.open(source, flags)
+    except OSError:
+        _fail("initial_adapter_source_changed")
+    temporary: Path | None = None
+    temporary_identity: tuple[int, int] | None = None
+    try:
+        opened = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            _fail("initial_adapter_source_changed")
+        digest = hashlib.sha256()
+        total = 0
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{_CANDIDATE_FILE}.initial-",
+            suffix=".tmp",
+            dir=destination.parent,
+            delete=False,
+        ) as target:
+            temporary = Path(target.name)
+            while True:
+                chunk = os.read(source_fd, _READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_CHECKPOINT_BYTES:
+                    _fail("initial_adapter_source_changed")
+                digest.update(chunk)
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        after = os.fstat(source_fd)
+        current = _require_regular_unlinked(
+            source,
+            code="initial_adapter_source_changed",
+        )
+        source_identity = (
+            opened.st_dev,
+            opened.st_ino,
+            opened.st_size,
+            opened.st_mtime_ns,
+        )
+        if (
+            total != opened.st_size
+            or digest.hexdigest() != expected_sha256
+            or source_identity
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            or source_identity
+            != (
+                current.st_dev,
+                current.st_ino,
+                current.st_size,
+                current.st_mtime_ns,
+            )
+        ):
+            _fail("initial_adapter_source_changed")
+        temporary_stat = _require_regular_unlinked(
+            temporary,
+            code="initial_adapter_stage_failed",
+        )
+        temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            _fail("initial_adapter_stage_conflict")
+        linked = _require_regular_unlinked(
+            destination,
+            code="initial_adapter_stage_failed",
+        )
+        if (
+            (linked.st_dev, linked.st_ino) != temporary_identity
+            or linked.st_nlink != 2
+        ):
+            _fail("initial_adapter_stage_failed")
+        os.unlink(temporary)
+        temporary = None
+        final = _require_regular_unlinked(
+            destination,
+            code="initial_adapter_stage_failed",
+        )
+        if (
+            (final.st_dev, final.st_ino) != temporary_identity
+            or final.st_nlink != 1
+        ):
+            _fail("initial_adapter_stage_failed")
+    except PeftTrainerError:
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(destination, temporary_identity)
+        raise
+    except OSError:
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(destination, temporary_identity)
+        _fail("initial_adapter_stage_failed")
+    finally:
+        try:
+            os.close(source_fd)
+        except OSError:
+            pass
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def _candidate_foundation_model_sha256(manifest: dict[str, object]) -> str:
+    schema = manifest.get("schema")
+    if schema == "nika-peft-candidate-v2":
+        field = "base_artifact_sha256"
+    elif schema == "nika-peft-candidate-v3":
+        field = "foundation_model_sha256"
+    else:
+        _fail("initial_adapter_manifest_schema_invalid")
+    return _require_sha256(
+        manifest.get(field),
+        field="initial_adapter_foundation_model_sha256",
+    )
+
+
 def _job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
     return config.output_root / _candidate_key(request.candidate_artifact_ref)
 
@@ -1360,9 +1566,193 @@ def _ensure_job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
     )
 
 
+def _publish_initial_adapter_config(path: Path, payload: bytes) -> None:
+    if type(payload) is not bytes or not payload:
+        _fail("initial_adapter_config_write_failed")
+    expected_sha256 = hashlib.sha256(payload).hexdigest()
+    temporary = path.with_name(f".{path.name}.tmp")
+
+    if path.exists():
+        current = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_invalid",
+        )
+        observed_sha256, _ = _hash_regular_snapshot(
+            path,
+            code="initial_adapter_config_invalid",
+        )
+        if observed_sha256 != expected_sha256:
+            _fail("initial_adapter_config_mismatch")
+        if current.st_nlink == 1:
+            if temporary.exists():
+                stale = _require_regular_unlinked(
+                    temporary,
+                    code="initial_adapter_config_invalid",
+                )
+                if stale.st_nlink != 1:
+                    _fail("initial_adapter_config_invalid")
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    _fail("initial_adapter_config_write_failed")
+            return
+        if current.st_nlink != 2:
+            _fail("initial_adapter_config_invalid")
+        linked_temporary = _require_regular_unlinked(
+            temporary,
+            code="initial_adapter_config_invalid",
+        )
+        if (
+            linked_temporary.st_nlink != 2
+            or (linked_temporary.st_dev, linked_temporary.st_ino)
+            != (current.st_dev, current.st_ino)
+        ):
+            _fail("initial_adapter_config_invalid")
+        try:
+            os.unlink(temporary)
+        except OSError:
+            _fail("initial_adapter_config_write_failed")
+        recovered = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_invalid",
+        )
+        if (
+            recovered.st_nlink != 1
+            or (recovered.st_dev, recovered.st_ino)
+            != (current.st_dev, current.st_ino)
+        ):
+            _fail("initial_adapter_config_invalid")
+        return
+
+    if temporary.exists():
+        stale = _require_regular_unlinked(
+            temporary,
+            code="initial_adapter_config_invalid",
+        )
+        if stale.st_nlink != 1:
+            _fail("initial_adapter_config_invalid")
+        try:
+            os.unlink(temporary)
+        except OSError:
+            _fail("initial_adapter_config_write_failed")
+
+    temporary_identity: tuple[int, int] | None = None
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_stat = _require_regular_unlinked(
+            temporary,
+            code="initial_adapter_config_write_failed",
+        )
+        if temporary_stat.st_nlink != 1:
+            _fail("initial_adapter_config_invalid")
+        temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        observed_sha256, _ = _hash_regular_snapshot(
+            temporary,
+            code="initial_adapter_config_write_failed",
+        )
+        if observed_sha256 != expected_sha256:
+            _fail("initial_adapter_config_write_failed")
+        os.link(temporary, path)
+        published = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_write_failed",
+        )
+        if (
+            published.st_nlink != 2
+            or (published.st_dev, published.st_ino) != temporary_identity
+        ):
+            _fail("initial_adapter_config_invalid")
+        os.unlink(temporary)
+        final = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_write_failed",
+        )
+        if final.st_nlink != 1 or (final.st_dev, final.st_ino) != temporary_identity:
+            _fail("initial_adapter_config_invalid")
+    except FileExistsError:
+        _fail("initial_adapter_config_conflict")
+    except PeftTrainerError:
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(path, temporary_identity)
+            _best_effort_unlink_identity(temporary, temporary_identity)
+        raise
+    except OSError:
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(path, temporary_identity)
+            _best_effort_unlink_identity(temporary, temporary_identity)
+        _fail("initial_adapter_config_write_failed")
+
+
+def _stage_initial_adapter(
+    config: TrainerConfig,
+    request: ParsedRequest,
+    job_root: Path,
+) -> Path | None:
+    if config.initial_adapter is None:
+        if config.initial_adapter_sha256 is not None:
+            _fail("initial_adapter_authority_invalid")
+        return None
+    if config.initial_adapter_sha256 is None:
+        _fail("initial_adapter_authority_invalid")
+    if request.step_index != 0:
+        _fail("initial_adapter_requires_first_step")
+    if request.base_artifact_sha256 != config.initial_adapter_sha256:
+        _fail("initial_adapter_logical_base_mismatch")
+    target_dir = _ensure_child_directory(
+        job_root,
+        "initial-adapter",
+        code="initial_adapter_stage_failed",
+    )
+    target = target_dir / _CANDIDATE_FILE
+    if target.exists():
+        target_sha256, _ = _hash_regular_snapshot(
+            target,
+            code="initial_adapter_stage_invalid",
+        )
+        if target_sha256 != config.initial_adapter_sha256:
+            _fail("initial_adapter_stage_digest_mismatch")
+    else:
+        _copy_initial_adapter_snapshot(
+            config.initial_adapter,
+            target,
+            expected_sha256=config.initial_adapter_sha256,
+        )
+    manifest = candidate_adapter_manifest(target)
+    if manifest.get("candidate_artifact_ref") != request.base_artifact_ref:
+        _fail("initial_adapter_artifact_ref_mismatch")
+    foundation_model_sha256 = _candidate_foundation_model_sha256(manifest)
+    if foundation_model_sha256 != config.base_gguf_sha256:
+        _fail("initial_adapter_foundation_model_mismatch")
+    adapter_config = manifest.get("adapter_config")
+    if type(adapter_config) is not dict:
+        _fail("initial_adapter_manifest_invalid")
+    adapter_config_payload = _canonical_json_bytes(adapter_config)
+    adapter_config_path = target_dir / "adapter_config.json"
+    _publish_initial_adapter_config(adapter_config_path, adapter_config_payload)
+    _adapter_config_snapshot(target_dir, request, config)
+    return target_dir
+
+
 def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root: Path) -> Path:
     source = config.base_gguf
-    if _sha256_file(source) != request.base_artifact_sha256:
+    logical_base_sha256 = (
+        config.base_gguf_sha256
+        if config.initial_adapter is None
+        else config.initial_adapter_sha256
+    )
+    if (
+        logical_base_sha256 is None
+        or request.base_artifact_sha256 != logical_base_sha256
+    ):
+        _fail("logical_base_digest_mismatch")
+    source_sha256, _ = _hash_regular_snapshot(
+        source,
+        code="base_gguf_digest_mismatch",
+    )
+    if source_sha256 != config.base_gguf_sha256:
         _fail("base_gguf_digest_mismatch")
     target_dir = _ensure_child_directory(
         job_root,
@@ -1371,25 +1761,35 @@ def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root:
     )
     target = target_dir / "base.gguf"
     if target.exists():
-        _require_regular_unlinked(target, code="staged_base_invalid")
-        if _sha256_file(target) != request.base_artifact_sha256:
+        target_sha256, _ = _hash_regular_snapshot(
+            target,
+            code="staged_base_invalid",
+        )
+        if target_sha256 != config.base_gguf_sha256:
             _fail("staged_base_digest_mismatch")
         return target
     temporary = target_dir / ".base.gguf.tmp"
     try:
-        with source.open("rb") as src, temporary.open("xb") as dst:
-            while True:
-                chunk = src.read(_READ_CHUNK_BYTES)
-                if not chunk:
-                    break
-                dst.write(chunk)
-            dst.flush()
-            os.fsync(dst.fileno())
-        if _sha256_file(temporary) != request.base_artifact_sha256:
+        source_stat = _require_regular_unlinked(
+            source,
+            code="base_gguf_digest_mismatch",
+        )
+        _copy_model_snapshot_file(
+            source,
+            temporary,
+            expected_size=source_stat.st_size,
+        )
+        temporary_sha256, _ = _hash_regular_snapshot(
+            temporary,
+            code="staged_base_digest_mismatch",
+        )
+        if temporary_sha256 != config.base_gguf_sha256:
             _fail("staged_base_digest_mismatch")
         os.replace(temporary, target)
     except FileExistsError:
         _fail("staged_base_conflict")
+    except PeftTrainerError:
+        raise
     except OSError:
         _fail("staged_base_copy_failed")
     finally:
@@ -1692,6 +2092,41 @@ def _validate_serialized_adapter_weights(
         _fail(invalid_code)
 
 
+def _canonical_adapter_tensor_sha256(
+    tensors: dict[str, Any],
+    *,
+    safe_serialize: Any,
+    torch: Any,
+    invalid_code: str,
+    non_finite_code: str,
+) -> str:
+    """Hash one loaded finite adapter tensor state using the canonical formula."""
+
+    if type(tensors) is not dict or not tensors:
+        _fail(invalid_code)
+    canonical: dict[str, Any] = {}
+    try:
+        for name in sorted(tensors):
+            if type(name) is not str or not name or len(name.encode("utf-8")) > 4096:
+                _fail(invalid_code)
+            tensor = tensors[name]
+            count = tensor.numel()
+            finite = torch.isfinite(tensor).all().item()
+            if type(count) is not int or count <= 0:
+                _fail(invalid_code)
+            if finite is not True:
+                _fail(non_finite_code)
+            canonical[name] = tensor
+        serialized = safe_serialize(canonical)
+    except PeftTrainerError:
+        raise
+    except Exception:
+        _fail(invalid_code)
+    if type(serialized) is not bytes or not serialized:
+        _fail(invalid_code)
+    return hashlib.sha256(serialized).hexdigest()
+
+
 def _adapter_tensor_sha256(
     path: Path,
     *,
@@ -1703,26 +2138,22 @@ def _adapter_tensor_sha256(
 ) -> str:
     """Hash canonical finite adapter tensor state, excluding container metadata."""
 
-    _validate_serialized_adapter_weights(
-        path,
-        safe_open=safe_open,
-        torch=torch,
-        invalid_code=invalid_code,
-        non_finite_code=non_finite_code,
-    )
+    _require_regular_unlinked(path, code=invalid_code)
     try:
         with safe_open(os.fspath(path), framework="pt", device="cpu") as source:
             names = tuple(sorted(source.keys()))
             tensors = {name: source.get_tensor(name) for name in names}
-        serialized = safe_serialize(tensors)
     except PeftTrainerError:
         raise
     except Exception:
         _fail(invalid_code)
-    if type(serialized) is not bytes or not serialized:
-        _fail(invalid_code)
-    return hashlib.sha256(serialized).hexdigest()
-
+    return _canonical_adapter_tensor_sha256(
+        tensors,
+        safe_serialize=safe_serialize,
+        torch=torch,
+        invalid_code=invalid_code,
+        non_finite_code=non_finite_code,
+    )
 
 
 def _snapshot_adapter_weights_sha256(
@@ -1730,9 +2161,11 @@ def _snapshot_adapter_weights_sha256(
     job_root: Path,
     *,
     safe_open: Any,
+    safe_serialize: Any,
     torch: Any,
-) -> str:
-    """Hash one valid finite serialized PEFT adapter without retaining the snapshot."""
+) -> tuple[str, str]:
+    """Bind exact bytes and canonical tensors from one loaded-model adapter snapshot."""
+
     try:
         with tempfile.TemporaryDirectory(
             prefix=".adapter-weight-snapshot-",
@@ -1755,14 +2188,21 @@ def _snapshot_adapter_weights_sha256(
                 adapter_file,
                 code="adapter_weight_snapshot_failed",
             )
+            tensor_sha256 = _adapter_tensor_sha256(
+                adapter_file,
+                safe_open=safe_open,
+                safe_serialize=safe_serialize,
+                torch=torch,
+                invalid_code="adapter_weight_snapshot_failed",
+                non_finite_code="adapter_weight_snapshot_non_finite",
+            )
     except PeftTrainerError:
         raise
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         _fail("adapter_weight_snapshot_failed")
     if size <= 0:
         _fail("adapter_weight_snapshot_failed")
-    return digest
-
+    return digest, tensor_sha256
 
 def _train_one_step(
     request: ParsedRequest,
@@ -1796,6 +2236,11 @@ def _train_one_step(
     staged_base = _copy_verified_base(config, request, job_root)
     staged_model_dir = _model_directory_snapshot(config, job_root)
     previous_checkpoint = _resume_checkpoint(job_root, request)
+    initial_adapter_dir = (
+        _stage_initial_adapter(config, request, job_root)
+        if previous_checkpoint is None
+        else None
+    )
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(
@@ -1821,7 +2266,7 @@ def _train_one_step(
             _fail("model_dir_changed_during_load")
         if after_load_manifest != config.model_dir_manifest_sha256:
             _fail("model_dir_changed_during_load")
-        if previous_checkpoint is None:
+        if previous_checkpoint is None and initial_adapter_dir is None:
             lora = LoraConfig(
                 r=config.lora_r,
                 lora_alpha=config.lora_alpha,
@@ -1832,7 +2277,13 @@ def _train_one_step(
             )
             model = get_peft_model(model, lora)
         else:
-            adapter_dir = previous_checkpoint / "adapter"
+            adapter_dir = (
+                initial_adapter_dir
+                if previous_checkpoint is None
+                else previous_checkpoint / "adapter"
+            )
+            if adapter_dir is None:
+                _fail("training_adapter_state_missing")
             model = PeftModel.from_pretrained(
                 model,
                 os.fspath(adapter_dir),
@@ -1840,10 +2291,14 @@ def _train_one_step(
                 local_files_only=True,
             )
 
-        before_step_adapter_sha256 = _snapshot_adapter_weights_sha256(
+        (
+            before_step_adapter_sha256,
+            loaded_adapter_tensors_sha256,
+        ) = _snapshot_adapter_weights_sha256(
             model,
             job_root,
             safe_open=safe_open,
+            safe_serialize=safe_serialize,
             torch=torch,
         )
 
@@ -1939,22 +2394,16 @@ def _train_one_step(
         invalid_code="adapter_candidate_invalid",
         non_finite_code="adapter_candidate_non_finite",
     )
-    previous_adapter_tensors_sha256: str | None = None
-    if previous_checkpoint is not None:
-        previous_adapter_file = previous_checkpoint / "adapter" / _CANDIDATE_FILE
-        previous_adapter_tensors_sha256 = _adapter_tensor_sha256(
-            previous_adapter_file,
-            safe_open=safe_open,
-            safe_serialize=safe_serialize,
-            torch=torch,
-            invalid_code="previous_adapter_candidate_invalid",
-            non_finite_code="previous_adapter_candidate_non_finite",
-        )
-        if hmac.compare_digest(
-            previous_adapter_tensors_sha256,
-            trained_adapter_tensors_sha256,
-        ):
-            _fail("training_step_no_tensor_mutation")
+    previous_adapter_tensors_sha256 = (
+        loaded_adapter_tensors_sha256
+        if previous_checkpoint is not None or initial_adapter_dir is not None
+        else None
+    )
+    if previous_adapter_tensors_sha256 is not None and hmac.compare_digest(
+        previous_adapter_tensors_sha256,
+        trained_adapter_tensors_sha256,
+    ):
+        _fail("training_step_no_tensor_mutation")
     checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
     marker_sha256 = _write_checkpoint_marker(
         checkpoint,
@@ -2183,6 +2632,9 @@ def _candidate_manifest_json(
             "seed": config.seed,
         },
     }
+    if config.initial_adapter is not None:
+        payload["foundation_model_sha256"] = config.base_gguf_sha256
+        payload["schema"] = "nika-peft-candidate-v3"
     _validate_candidate_manifest_payload(payload)
     return _canonical_json_bytes(payload).decode("utf-8")
 
@@ -2190,7 +2642,7 @@ def _candidate_manifest_json(
 def _validate_candidate_manifest_payload(
     value: dict[str, object],
 ) -> dict[str, object]:
-    expected = {
+    tensor_expected = {
         "adapter_config",
         "base_artifact_ref",
         "base_artifact_sha256",
@@ -2209,7 +2661,14 @@ def _validate_candidate_manifest_payload(
         "step_number",
         "trainer_parameters",
     }
-    if set(value) != expected or value.get("schema") != "nika-peft-candidate-v2":
+    schema = value.get("schema")
+    if schema == "nika-peft-candidate-v2":
+        expected = tensor_expected
+    elif schema == "nika-peft-candidate-v3":
+        expected = tensor_expected | {"foundation_model_sha256"}
+    else:
+        _fail("candidate_manifest_invalid")
+    if set(value) != expected:
         _fail("candidate_manifest_invalid")
 
     base_ref = value["base_artifact_ref"]
@@ -2234,7 +2693,7 @@ def _validate_candidate_manifest_payload(
         or _looks_like_private_local_path(candidate_ref)
     ):
         _fail("candidate_manifest_invalid")
-    for field in (
+    digest_fields = [
         "base_artifact_sha256",
         "consumed_materials_sha256",
         "job_fingerprint",
@@ -2244,7 +2703,10 @@ def _validate_candidate_manifest_payload(
         "trainer_implementation_sha256",
         "trainer_sha256",
         "training_runtime_manifest_sha256",
-    ):
+    ]
+    if schema == "nika-peft-candidate-v3":
+        digest_fields.append("foundation_model_sha256")
+    for field in digest_fields:
         if type(value[field]) is not str or _HEX_RE.fullmatch(value[field]) is None:
             _fail("candidate_manifest_invalid")
 
@@ -2269,9 +2731,12 @@ def _validate_candidate_manifest_payload(
         or _HEX_RE.fullmatch(previous_adapter_tensors_sha256) is None
     ):
         _fail("candidate_manifest_invalid")
+    previous_required = (
+        step_number > 1 or schema == "nika-peft-candidate-v3"
+    )
     if (
-        (step_number == 1 and previous_adapter_tensors_sha256 is not None)
-        or (step_number > 1 and previous_adapter_tensors_sha256 is None)
+        (previous_required and previous_adapter_tensors_sha256 is None)
+        or (not previous_required and previous_adapter_tensors_sha256 is not None)
         or (
             previous_adapter_tensors_sha256 is not None
             and hmac.compare_digest(
@@ -2354,12 +2819,20 @@ def _validate_candidate_manifest_payload(
     return dict(value)
 
 
-def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
-    """Read and strictly validate the self-contained manifest bound into a PEFT candidate."""
+def _candidate_tensor_dependencies() -> tuple[Any, Any, Any]:
     try:
+        import torch
         from safetensors import safe_open
+        from safetensors.torch import save as safe_serialize
     except ImportError:
         _fail("training_dependencies_unavailable")
+    return torch, safe_open, safe_serialize
+
+
+def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
+    """Read and validate one manifest plus its exact published tensor state."""
+
+    torch, safe_open, safe_serialize = _candidate_tensor_dependencies()
     path = Path(candidate_path)
     if not path.is_absolute():
         raise ValueError("candidate_path must be absolute")
@@ -2367,7 +2840,8 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
     try:
         with safe_open(os.fspath(path), framework="pt", device="cpu") as handle:
             metadata = handle.metadata()
-            tensor_keys = tuple(handle.keys())
+            tensor_keys = tuple(sorted(handle.keys()))
+            tensors = {name: handle.get_tensor(name) for name in tensor_keys}
     except (OSError, RuntimeError, TypeError, ValueError):
         _fail("candidate_safetensors_invalid")
     if not tensor_keys or any(
@@ -2375,6 +2849,13 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
         for name in tensor_keys
     ):
         _fail("candidate_safetensors_empty")
+    published_tensor_sha256 = _canonical_adapter_tensor_sha256(
+        tensors,
+        safe_serialize=safe_serialize,
+        torch=torch,
+        invalid_code="candidate_safetensors_invalid",
+        non_finite_code="candidate_safetensors_non_finite",
+    )
     if type(metadata) is not dict or set(metadata) != {"nika_adapter_manifest"}:
         _fail("candidate_manifest_missing")
     raw = metadata["nika_adapter_manifest"]
@@ -2393,8 +2874,14 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
         _fail("candidate_manifest_invalid")
     if _canonical_json_bytes(value).decode("utf-8") != raw:
         _fail("candidate_manifest_not_canonical")
-    return _validate_candidate_manifest_payload(value)
-
+    manifest = _validate_candidate_manifest_payload(value)
+    trained_sha256 = manifest["trained_adapter_tensors_sha256"]
+    if type(trained_sha256) is not str or not hmac.compare_digest(
+        published_tensor_sha256,
+        trained_sha256,
+    ):
+        _fail("candidate_tensor_state_mismatch")
+    return manifest
 
 def _response(
     request: ParsedRequest,
