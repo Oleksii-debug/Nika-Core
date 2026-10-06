@@ -8,11 +8,14 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.learning_package import (
     FrozenLearningPackage,
     LearningDataSplit,
     LearningShard,
 )
+from nika_core.runtime.idempotency import IdempotencyLedger
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -328,3 +331,143 @@ def test_configure_promotion_rejects_noncanonical_policy(
 
     with pytest.raises(proof.ProofError, match=match):
         proof.configure_promotion(tmp_path)
+
+def _complete_scale_progression_record(
+    store: SQLiteStore,
+    *,
+    task_id: str,
+    operation_key: str,
+    claim: dict[str, object],
+) -> None:
+    ledger = IdempotencyLedger(store)
+    record, created = ledger.reserve_once(
+        operation_key=operation_key,
+        task_id=task_id,
+        operation_type="training.physical_scale_progression",
+        input_fingerprint="sha256:" + _sha(operation_key.encode("utf-8")),
+    )
+    assert created is True
+    ledger.complete_pending_if_matches(
+        operation_key=record.operation_key,
+        task_id=record.task_id,
+        operation_type=record.operation_type,
+        input_fingerprint=record.input_fingerprint,
+        created_at=record.created_at,
+        result={
+            "schema": "nika-physical-scale-progression-record-v1",
+            "proof_sha256": _sha(
+                json.dumps(
+                    claim,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ),
+            "proof": claim,
+        },
+    )
+
+
+def _progression_discovery_fixture(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, SQLiteStore, object, dict[str, object]]:
+    root = (tmp_path / "progression-run").resolve()
+    root.mkdir()
+    store = SQLiteStore(root / "physical-pilot.sqlite3")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="physical-proof-workspace",
+        agent_id="physical-peft-pilot",
+        payload={"job_id": "pilot-job", "kind": "physical_peft_pilot"},
+    )
+    claim = {
+        "plan_sha256": _sha(b"plan"),
+        "tier_index": 0,
+        "candidate_artifact_ref": "models/tier0-adapter",
+        "candidate_sha256": _sha(b"candidate"),
+    }
+    _complete_scale_progression_record(
+        store,
+        task_id=task.task_id,
+        operation_key="scale-progression-one",
+        claim=claim,
+    )
+    report = SimpleNamespace(job_id="pilot-job")
+    restored = SimpleNamespace(canonical_payload=lambda: dict(claim))
+    monkeypatch.setattr(proof, "_pilot_report", lambda _root: report)
+    monkeypatch.setattr(
+        proof,
+        "load_trusted_scale_progression_proof",
+        lambda _root, *, workspace_id, expected_claim: (
+            restored
+            if workspace_id == "physical-proof-workspace"
+            and expected_claim == claim
+            else (_ for _ in ()).throw(AssertionError("unexpected trusted restore"))
+        ),
+    )
+    return root, store, task, claim
+
+
+def test_trusted_progression_discovery_streams_durable_history(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, _store, _task, claim = _progression_discovery_fixture(
+        proof,
+        tmp_path,
+        monkeypatch,
+    )
+
+    def forbid_list_for_task(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("qualification must stream durable ledger rows")
+
+    monkeypatch.setattr(
+        proof.IdempotencyLedger,
+        "list_for_task",
+        forbid_list_for_task,
+    )
+
+    restored = proof._trusted_progression(
+        root,
+        workspace_id="physical-proof-workspace",
+    )
+
+    assert restored.canonical_payload() == claim
+
+
+def test_trusted_progression_discovery_rejects_duplicate_durable_claims(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, store, task, claim = _progression_discovery_fixture(
+        proof,
+        tmp_path,
+        monkeypatch,
+    )
+    _complete_scale_progression_record(
+        store,
+        task_id=task.task_id,
+        operation_key="scale-progression-two",
+        claim=claim,
+    )
+    monkeypatch.setattr(
+        proof,
+        "load_trusted_scale_progression_proof",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("duplicate discovery must fail before trusted restore")
+        ),
+    )
+
+    with pytest.raises(
+        proof.ProofError,
+        match="exactly one durable scale progression proof is required",
+    ):
+        proof._trusted_progression(
+            root,
+            workspace_id="physical-proof-workspace",
+        )
+
