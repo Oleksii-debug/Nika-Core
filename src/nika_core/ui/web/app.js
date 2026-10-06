@@ -126,6 +126,17 @@
   );
   let productFactoryLocalStartupRevision = 0;
   let productFactoryLocalStartupDirty = false;
+  const productFactoryBuildAuthorityJson = document.getElementById(
+    "product-factory-build-authority-json",
+  );
+  const productFactoryBuildRuntimeStatus = document.getElementById(
+    "product-factory-build-runtime-status",
+  );
+  const productFactoryBuildRuntimeSave = document.getElementById(
+    "product-factory-build-runtime-save",
+  );
+  let productFactoryBuildRuntimeRevision = 0;
+  let productFactoryBuildRuntimeDirty = false;
   const productFactoryExecutionPlanPath = document.getElementById(
     "product-factory-execution-plan-path",
   );
@@ -659,6 +670,7 @@
   function reportStateUnavailable() {
     renderStartupRecovery(null);
     renderModelSettings(null);
+    renderProductFactoryBuildRuntime(null);
     renderProductFactoryExecutionPlan(null);
     renderProductFactoryLocalRepositories(null);
     clearTaskSelection();
@@ -767,6 +779,73 @@
       not_configured: "Локальний backend Product Factory ще не налаштовано. Введіть strict JSON конфігурації та збережіть його.",
     };
     productFactoryLocalStartupStatus.textContent =
+      dirtyPrefix + (messages[snapshot.runtime_status] || messages.not_configured);
+    return true;
+  }
+
+  function validProductFactoryBuildRuntimeSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false;
+    if (!["ready", "invalid"].includes(snapshot.status)) return false;
+    if (!Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0) return false;
+    if (typeof snapshot.configured !== "boolean") return false;
+    if (
+      ![
+        "active",
+        "restart_required",
+        "not_configured",
+        "invalid",
+        "product_factory_required",
+      ].includes(snapshot.runtime_status)
+    ) return false;
+    if (snapshot.config_json !== null && typeof snapshot.config_json !== "string") return false;
+    if (snapshot.status === "invalid") {
+      return snapshot.configured === false
+        && snapshot.config_json === null
+        && snapshot.runtime_status === "invalid";
+    }
+    return snapshot.configured === (typeof snapshot.config_json === "string");
+  }
+
+  function renderProductFactoryBuildRuntime(snapshot) {
+    if (!productFactoryBuildAuthorityJson || !productFactoryBuildRuntimeStatus) return false;
+    if (!validProductFactoryBuildRuntimeSnapshot(snapshot)) {
+      productFactoryBuildAuthorityJson.disabled = true;
+      if (productFactoryBuildRuntimeSave) productFactoryBuildRuntimeSave.disabled = true;
+      productFactoryBuildRuntimeStatus.textContent =
+        "Стан PF5 build runtime недоступний або несумісний.";
+      return false;
+    }
+
+    if (!productFactoryBuildRuntimeDirty) {
+      productFactoryBuildRuntimeRevision = snapshot.revision;
+      productFactoryBuildAuthorityJson.value = snapshot.config_json ?? "";
+    } else if (snapshot.revision !== productFactoryBuildRuntimeRevision) {
+      productFactoryBuildRuntimeSave.disabled = true;
+      productFactoryBuildRuntimeStatus.textContent =
+        "PF5 build runtime змінено в іншому вікні. Перечитайте стан перед збереженням.";
+      return true;
+    }
+
+    productFactoryBuildAuthorityJson.disabled = false;
+    if (productFactoryBuildRuntimeSave) productFactoryBuildRuntimeSave.disabled = false;
+    if (snapshot.status === "invalid" || snapshot.runtime_status === "invalid") {
+      productFactoryBuildRuntimeStatus.textContent =
+        "Збережена конфігурація PF5 build runtime пошкоджена або несумісна.";
+      return true;
+    }
+
+    const dirtyPrefix = productFactoryBuildRuntimeDirty
+      ? "Є незбережені зміни. "
+      : "";
+    const messages = {
+      active: "PF5 build runtime активний у цьому запуску.",
+      restart_required: "Збережену PF5 конфігурацію змінено. Перезапустіть Nika.",
+      not_configured: "PF5 build runtime ще не налаштовано.",
+      product_factory_required:
+        "PF5 налаштовано, але локальний Product Factory не активний. "
+        + "Налаштуйте локальний backend і модель, потім перезапустіть Nika.",
+    };
+    productFactoryBuildRuntimeStatus.textContent =
       dirtyPrefix + (messages[snapshot.runtime_status] || messages.not_configured);
     return true;
   }
@@ -2099,6 +2178,13 @@
         "Конфігурацію локального Product Factory змінено, але ще не збережено.";
     }
   });
+  productFactoryBuildAuthorityJson?.addEventListener("input", () => {
+    productFactoryBuildRuntimeDirty = true;
+    if (productFactoryBuildRuntimeStatus) {
+      productFactoryBuildRuntimeStatus.textContent =
+        "PF5 build runtime змінено, але ще не збережено.";
+    }
+  });
 
   document.getElementById("model-reload")?.addEventListener("click", () => {
     modelDirty = false;
@@ -2160,6 +2246,7 @@
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     if (modelReadGeneration === modelGeneration) renderModelSettings(state.v01_model_settings ?? null);
     renderProductFactoryLocalStartup(state.product_factory_local_startup ?? null);
+    renderProductFactoryBuildRuntime(state.product_factory_build_runtime ?? null);
     renderSourceSetup(state.v01_sources ?? null);
     renderVoiceModelSetup(state.voice_model_setup ?? null);
     renderSpeech(state.speech ?? null);
@@ -2237,6 +2324,7 @@
     const durableMutation = taskMutationActions.has(actionId)
       || actionId === "team.sources.configure"
       || actionId === "settings.product_factory_local.configure"
+      || actionId === "settings.product_factory_build.configure"
       || actionId === "product.factory.local_repository.bind"
       || actionId === "product.factory.local_repository.unbind";
     const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
@@ -2306,6 +2394,11 @@
         payload.revision = productFactoryLocalStartupRevision;
         payload.config_json = raw || null;
       }
+      if (actionId === "settings.product_factory_build.configure") {
+        const raw = productFactoryBuildAuthorityJson?.value.trim() ?? "";
+        payload.revision = productFactoryBuildRuntimeRevision;
+        payload.config_json = raw || null;
+      }
       if (actionId === "speech.start") payload.text = speechText?.value ?? "";
       if (actionId === "team.sources.configure") {
         payload.revision = sourceRevision;
@@ -2345,6 +2438,13 @@
         && result.status === "completed"
       ) {
         productFactoryLocalStartupDirty = false;
+      }
+      if (
+        ["settings.product_factory_build.configure", "settings.product_factory_build.refresh"]
+          .includes(actionId)
+        && result.status === "completed"
+      ) {
+        productFactoryBuildRuntimeDirty = false;
       }
       if (
         ["product.factory.local_repository.bind", "product.factory.local_repository.unbind"]

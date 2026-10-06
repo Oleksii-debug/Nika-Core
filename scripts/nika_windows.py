@@ -40,6 +40,15 @@ from nika_core.product_factory_local_repository_operator import (
     PackagedLocalRepositoryOperator,
 )
 from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
+from nika_core.product_factory_packaged_build_continuation import (
+    PackagedReviewedBuildContinuation,
+)
+from nika_core.product_factory_packaged_build_settings import (
+    ActivatedPackagedBuildRuntime,
+    PackagedBuildRuntimeSettings,
+    activate_packaged_build_runtime,
+    decode_packaged_build_runtime_config,
+)
 from nika_core.product_factory_packaged_execution import (
     PackagedProductFactoryExecutionController,
     ProductFactoryExecutionPlanResolver,
@@ -320,6 +329,7 @@ def build_windows_bridge(
     source_settings = V01SourceSettings(store, config)
     model_settings = V01ModelSettings(store)
     local_product_factory_settings = PackagedLocalProductFactorySettings(store)
+    packaged_build_runtime_settings = PackagedBuildRuntimeSettings(store)
     local_product_factory_environment_override = (
         config.product_factory_local_startup_json is not None
     )
@@ -345,6 +355,36 @@ def build_windows_bridge(
             )
         except PackagedLocalProductFactoryStartupError:
             local_product_factory_settings_invalid = True
+
+    packaged_build_runtime_settings_invalid = False
+    packaged_build_runtime_launch_json: str | None = None
+    packaged_build_runtime_launch_revision: int | None = None
+    packaged_build_runtime_config = None
+    packaged_build_snapshot = packaged_build_runtime_settings.snapshot(
+        runtime_status="not_configured"
+    )
+    packaged_build_revision = packaged_build_snapshot.get("revision")
+    packaged_build_json = packaged_build_snapshot.get("config_json")
+    if (
+        packaged_build_snapshot.get("status") != "ready"
+        or type(packaged_build_revision) is not int
+        or packaged_build_revision < 0
+        or (
+            packaged_build_json is not None
+            and type(packaged_build_json) is not str
+        )
+    ):
+        packaged_build_runtime_settings_invalid = True
+    else:
+        packaged_build_runtime_launch_revision = packaged_build_revision
+        packaged_build_runtime_launch_json = packaged_build_json
+        if packaged_build_json is not None:
+            try:
+                packaged_build_runtime_config = decode_packaged_build_runtime_config(
+                    packaged_build_json
+                )
+            except ValueError:
+                packaged_build_runtime_settings_invalid = True
 
     if (
         product_factory_execution_host is not None
@@ -463,6 +503,52 @@ def build_windows_bridge(
             )
             local_product_factory_settings_invalid = True
 
+    packaged_build_runtime_activation: ActivatedPackagedBuildRuntime | None = None
+    packaged_build_continuation: PackagedReviewedBuildContinuation | None = None
+    packaged_build_runtime_active = False
+    if (
+        local_product_factory_runtime_active
+        and local_product_factory_startup is not None
+        and packaged_build_runtime_config is not None
+        and not packaged_build_runtime_settings_invalid
+    ):
+        try:
+            activation = activate_packaged_build_runtime(
+                store,
+                startup=local_product_factory_startup,
+                config=packaged_build_runtime_config,
+            )
+            continuation = PackagedReviewedBuildContinuation(
+                store=store,
+                startup=local_product_factory_startup,
+                activated=activation,
+            )
+        except Exception as exc:  # noqa: BLE001 - optional PF5 backend must fail closed
+            logging.getLogger(__name__).error(
+                "Packaged PF5 runtime activation failed: exception_type=%s",
+                type(exc).__name__,
+            )
+            packaged_build_runtime_settings_invalid = True
+        else:
+            packaged_build_after = packaged_build_runtime_settings.snapshot(
+                runtime_status="not_configured"
+            )
+            if (
+                packaged_build_after.get("status") == "ready"
+                and packaged_build_after.get("revision")
+                == packaged_build_runtime_launch_revision
+                and packaged_build_after.get("config_json")
+                == packaged_build_runtime_launch_json
+            ):
+                packaged_build_runtime_activation = activation
+                packaged_build_continuation = continuation
+                packaged_build_runtime_active = True
+            else:
+                logging.getLogger(__name__).warning(
+                    "Packaged PF5 authority changed during startup; "
+                    "restart is required before execution"
+                )
+
     local_product_factory_launch_json = local_product_factory_startup_json
 
     def local_product_factory_restart_focus() -> str | None:
@@ -489,6 +575,24 @@ def build_windows_bridge(
         ):
             return "model-route-kind"
         return None
+
+    def packaged_build_runtime_restart_focus() -> str | None:
+        if not packaged_build_runtime_active:
+            return None
+        local_focus = local_product_factory_restart_focus()
+        if local_focus is not None:
+            return local_focus
+        snapshot = packaged_build_runtime_settings.snapshot(
+            runtime_status="not_configured"
+        )
+        if (
+            snapshot.get("status") != "ready"
+            or snapshot.get("revision") != packaged_build_runtime_launch_revision
+            or snapshot.get("config_json") != packaged_build_runtime_launch_json
+        ):
+            return "product-factory-build-authority-json"
+        return None
+
     intelligence_mode_commands = PackagedIntelligenceModeCommandAdapter(model_settings)
     cloud_permissions = V01CloudModelPermissionService(
         store=store,
@@ -524,6 +628,31 @@ def build_windows_bridge(
         if current_saved_json is None:
             return "not_configured"
         return "model_required"
+
+    def packaged_build_runtime_status() -> str:
+        snapshot = packaged_build_runtime_settings.snapshot(
+            runtime_status="not_configured"
+        )
+        if (
+            packaged_build_runtime_settings_invalid
+            or snapshot.get("status") != "ready"
+        ):
+            return "invalid"
+        configured = snapshot.get("config_json")
+        if configured is None:
+            if packaged_build_runtime_activation is not None:
+                return "restart_required"
+            return "not_configured"
+        if (
+            snapshot.get("revision") != packaged_build_runtime_launch_revision
+            or configured != packaged_build_runtime_launch_json
+        ):
+            return "restart_required"
+        if packaged_build_runtime_active:
+            if packaged_build_runtime_restart_focus() is not None:
+                return "restart_required"
+            return "active"
+        return "product_factory_required"
 
     def prepare_task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         source_bound = source_settings.prepare_task_payload(payload)
@@ -608,7 +737,13 @@ def build_windows_bridge(
             host=product_factory_execution_host,
             resolve_plan=execution_plan_resolver,
             submit=backend.submit_packaged_coroutine,
+            post_dispatch=(
+                packaged_build_continuation
+                if packaged_build_runtime_active
+                else None
+            ),
         )
+
         def start_product_factory_execution(project_id: str) -> UIResult:
             restart_focus = local_product_factory_restart_focus()
             if (
@@ -624,6 +759,28 @@ def build_windows_bridge(
                         "новим запуском Product Factory."
                     ),
                     focus_id=restart_focus,
+                )
+            build_snapshot = packaged_build_runtime_settings.snapshot(
+                runtime_status="not_configured"
+            )
+            build_runtime_expected = (
+                packaged_build_runtime_settings_invalid
+                or packaged_build_runtime_activation is not None
+                or build_snapshot.get("configured") is True
+            )
+            build_status = packaged_build_runtime_status()
+            if build_runtime_expected and build_status != "active":
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="rejected",
+                    message=(
+                        "PF5 build runtime потребує узгодженої host-конфігурації. "
+                        "Перечитайте налаштування та перезапустіть Nika."
+                    ),
+                    focus_id=(
+                        packaged_build_runtime_restart_focus()
+                        or "product-factory-build-authority-json"
+                    ),
                 )
             return product_factory_execution.start(project_id)
 
@@ -771,6 +928,11 @@ def build_windows_bridge(
                 runtime_status=local_product_factory_runtime_status(),
             )
         )
+        state["product_factory_build_runtime"] = (
+            packaged_build_runtime_settings.snapshot(
+                runtime_status=packaged_build_runtime_status()
+            )
+        )
         state["speech"] = speech.snapshot()
         state["voice"] = voice.snapshot()
         state["voice_model_setup"] = voice_model_setup.snapshot()
@@ -793,6 +955,33 @@ def build_windows_bridge(
             status="completed",
             message="Збережені налаштування Product Factory перечитано.",
             focus_id="product-factory-local-startup-json",
+        )
+
+    def refresh_packaged_build_runtime_settings(
+        payload: Mapping[str, Any],
+    ) -> UIResult:
+        if payload:
+            return UIResult(
+                request_id="product-factory-build-runtime-settings",
+                status="rejected",
+                message="Перечитування PF5 build runtime не приймає параметрів.",
+                focus_id="product-factory-build-authority-json",
+            )
+        snapshot = packaged_build_runtime_settings.snapshot(
+            runtime_status=packaged_build_runtime_status()
+        )
+        if snapshot.get("status") == "invalid":
+            return UIResult(
+                request_id="product-factory-build-runtime-settings",
+                status="failed",
+                message="Не вдалося прочитати налаштування PF5 build runtime.",
+                focus_id="product-factory-build-authority-json",
+            )
+        return UIResult(
+            request_id="product-factory-build-runtime-settings",
+            status="completed",
+            message="Збережені налаштування PF5 build runtime перечитано.",
+            focus_id="product-factory-build-authority-json",
         )
 
     def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
@@ -926,6 +1115,12 @@ def build_windows_bridge(
             ),
             "settings.product_factory_local.refresh": (
                 refresh_local_product_factory_settings
+            ),
+            "settings.product_factory_build.configure": (
+                packaged_build_runtime_settings.configure
+            ),
+            "settings.product_factory_build.refresh": (
+                refresh_packaged_build_runtime_settings
             ),
             "speech.start": speech.speak,
             "speech.cancel": speech.cancel,
