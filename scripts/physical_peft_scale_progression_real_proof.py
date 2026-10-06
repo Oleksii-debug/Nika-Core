@@ -90,9 +90,11 @@ def _reject_constant(value: str) -> NoReturn:
 
 def _read_object_snapshot(path: Path) -> tuple[dict[str, object], bytes]:
     try:
-        raw = path.read_bytes()
-        if not raw or len(raw) > _MAX_JSON_BYTES:
-            _fail(f"JSON authority has invalid size: {path.name}")
+        raw = _stable_file_bytes(
+            path,
+            max_bytes=_MAX_JSON_BYTES,
+            name=f"JSON authority {path.name}",
+        )
         value = json.loads(
             raw.decode("utf-8", errors="strict"),
             object_pairs_hook=_strict_object,
@@ -246,20 +248,27 @@ def _require_open_snapshot_identity(path: Path, descriptor: int, *, name: str) -
         _fail(f"{name} identity changed")
 
 
-def _read_held_candidate_bytes(descriptor: int, *, name: str) -> bytes:
+def _read_held_bytes(
+    descriptor: int,
+    *,
+    max_bytes: int,
+    name: str,
+) -> bytes:
+    if type(max_bytes) is not int or max_bytes <= 0:
+        _fail(f"{name} size bound is invalid")
     try:
         os.lseek(descriptor, 0, os.SEEK_SET)
         chunks: list[bytes] = []
         total = 0
         while True:
-            remaining = _MAX_CANDIDATE_BYTES + 1 - total
+            remaining = max_bytes + 1 - total
             if remaining <= 0:
                 _fail(f"{name} size is invalid")
             chunk = os.read(descriptor, min(1024 * 1024, remaining))
             if not chunk:
                 break
             total += len(chunk)
-            if total > _MAX_CANDIDATE_BYTES:
+            if total > max_bytes:
                 _fail(f"{name} size is invalid")
             chunks.append(chunk)
     except ProofError:
@@ -271,60 +280,124 @@ def _read_held_candidate_bytes(descriptor: int, *, name: str) -> bytes:
     return b"".join(chunks)
 
 
+def _stable_file_bytes(path: Path, *, max_bytes: int, name: str) -> bytes:
+    descriptor: int | None = None
+    try:
+        before = os.lstat(path)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > max_bytes
+        ):
+            _fail(f"{name} size or file type is invalid")
+        descriptor = _open_readonly_snapshot(path)
+        _require_open_snapshot_identity(path, descriptor, name=name)
+        opened = os.fstat(descriptor)
+        payload = _read_held_bytes(
+            descriptor,
+            max_bytes=max_bytes,
+            name=name,
+        )
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+    except ProofError:
+        raise
+    except OSError as exc:
+        raise ProofError(f"{name} could not be snapshotted") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    identities = (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+        (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+    )
+    if len(set(identities)) != 1 or len(payload) != before.st_size:
+        _fail(f"{name} changed while it was being snapshotted")
+    return payload
+
+
+def _load_frozen_package_snapshot(
+    path: Path,
+    *,
+    expected_manifest_sha256: str,
+) -> FrozenLearningPackage:
+    raw = _stable_file_bytes(
+        path,
+        max_bytes=_MAX_JSON_BYTES,
+        name=f"frozen learning package {path.name}",
+    )
+    try:
+        return FrozenLearningPackage.from_json(
+            raw,
+            expected_manifest_sha256=expected_manifest_sha256,
+        )
+    except (RuntimeError, TypeError, UnicodeError, ValueError) as exc:
+        raise ProofError(f"frozen learning package is invalid: {path.name}") from exc
+
+
 def _candidate_manifest_from_payload(
     payload: bytes,
     *,
     name: str,
 ) -> dict[str, object]:
-    """Parse the manifest from a private byte-exact candidate snapshot."""
+    """Parse a candidate manifest from a private byte-exact snapshot."""
 
     if type(payload) is not bytes or not payload:
         _fail(f"{name} private manifest snapshot is invalid")
+    descriptor: int | None = None
     try:
         with tempfile.TemporaryDirectory(prefix=".nika-peft-scale-candidate-") as snapshot_root:
             snapshot_path = Path(snapshot_root) / "adapter_model.safetensors"
             _write_new(snapshot_path, payload)
-            descriptor: int | None = None
-            try:
-                descriptor = _open_readonly_snapshot(snapshot_path)
-                _require_open_snapshot_identity(
-                    snapshot_path,
+            descriptor = _open_readonly_snapshot(snapshot_path)
+            _require_open_snapshot_identity(
+                snapshot_path,
+                descriptor,
+                name=f"{name} private manifest snapshot",
+            )
+            if (
+                _read_held_bytes(
                     descriptor,
+                    max_bytes=_MAX_CANDIDATE_BYTES,
                     name=f"{name} private manifest snapshot",
                 )
-                if (
-                    _read_held_candidate_bytes(
-                        descriptor,
-                        name=f"{name} private manifest snapshot",
-                    )
-                    != payload
-                ):
-                    _fail(f"{name} private manifest snapshot changed before parse")
-                manifest = candidate_adapter_manifest(snapshot_path.resolve(strict=True))
-                _require_open_snapshot_identity(
-                    snapshot_path,
+                != payload
+            ):
+                _fail(f"{name} private manifest snapshot changed before parse")
+            manifest = candidate_adapter_manifest(snapshot_path.resolve(strict=True))
+            _require_open_snapshot_identity(
+                snapshot_path,
+                descriptor,
+                name=f"{name} private manifest snapshot",
+            )
+            if (
+                _read_held_bytes(
                     descriptor,
+                    max_bytes=_MAX_CANDIDATE_BYTES,
                     name=f"{name} private manifest snapshot",
                 )
-                if (
-                    _read_held_candidate_bytes(
-                        descriptor,
-                        name=f"{name} private manifest snapshot",
-                    )
-                    != payload
-                ):
-                    _fail(f"{name} private manifest snapshot changed during parse")
-                return manifest
-            finally:
-                if descriptor is not None:
-                    try:
-                        os.close(descriptor)
-                    except OSError:
-                        pass
+                != payload
+            ):
+                _fail(f"{name} private manifest snapshot changed during parse")
+            return manifest
     except ProofError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ProofError(f"{name} private manifest snapshot could not be verified") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
 
 
 def _candidate_file_authority(
@@ -348,7 +421,11 @@ def _candidate_file_authority(
         descriptor = _open_readonly_snapshot(path)
         _require_open_snapshot_identity(path, descriptor, name=name)
         opened = os.fstat(descriptor)
-        payload = _read_held_candidate_bytes(descriptor, name=name)
+        payload = _read_held_bytes(
+            descriptor,
+            max_bytes=_MAX_CANDIDATE_BYTES,
+            name=name,
+        )
         if len(payload) != before.st_size:
             _fail(f"{name} changed while it was being read")
 
@@ -357,7 +434,14 @@ def _candidate_file_authority(
         _require_open_snapshot_identity(path, descriptor, name=name)
         after = os.fstat(descriptor)
         current = os.lstat(path)
-        if _read_held_candidate_bytes(descriptor, name=name) != payload:
+        if (
+            _read_held_bytes(
+                descriptor,
+                max_bytes=_MAX_CANDIDATE_BYTES,
+                name=name,
+            )
+            != payload
+        ):
             _fail(f"{name} changed during manifest verification")
         identities = (
             (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
@@ -593,8 +677,8 @@ def prepare_tier0(root: Path) -> None:
     config = _read_object(config_path)
     if config.get("schema_version") != 1 or "scale_plan" in config:
         _fail("tier-0 proof config must start from canonical schema-v1 preparation")
-    package = FrozenLearningPackage.from_json(
-        package_path.read_bytes(),
+    package = _load_frozen_package_snapshot(
+        package_path,
         expected_manifest_sha256=str(config.get("frozen_package_sha256", "")),
     )
     config["schema_version"] = 2
@@ -720,8 +804,8 @@ def prepare_tier1(root: Path) -> None:
     ):
         _fail("promoted adapter bytes do not match tier-0 report")
 
-    source_package = FrozenLearningPackage.from_json(
-        (root / "frozen-package.json").read_bytes(),
+    source_package = _load_frozen_package_snapshot(
+        root / "frozen-package.json",
         expected_manifest_sha256=str(
             tier0_config.get("frozen_package_sha256", "")
         ),
@@ -789,8 +873,8 @@ def verify(root: Path) -> None:
     if type(workspace_id) is not str or not workspace_id:
         _fail("tier-0 workspace identity is invalid")
     tier0_package_path = root / "frozen-package.json"
-    tier0_package = FrozenLearningPackage.from_json(
-        tier0_package_path.read_bytes(),
+    tier0_package = _load_frozen_package_snapshot(
+        tier0_package_path,
         expected_manifest_sha256=str(
             tier0_config.get("frozen_package_sha256", "")
         ),
@@ -890,9 +974,8 @@ def verify(root: Path) -> None:
     ).resolve(strict=True)
     if tier1_package_path != expected_tier1_package_path:
         _fail("tier-1 config points at an unexpected frozen package")
-    tier1_package_bytes = tier1_package_path.read_bytes()
-    tier1_package = FrozenLearningPackage.from_json(
-        tier1_package_bytes,
+    tier1_package = _load_frozen_package_snapshot(
+        tier1_package_path,
         expected_manifest_sha256=tier1.frozen_package_sha256,
     )
     if (
