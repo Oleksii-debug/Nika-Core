@@ -374,22 +374,25 @@ def test_snapshot_rejects_binding_change_after_projection_before_return(
         root=first_root,
         expected_binding_version=None,
     )
-    original_validate_plan = bindings.validate_plan
-    validation_calls = 0
+    original_final_snapshot = bindings.validate_plan_and_current_binding_versions
+    final_snapshot_calls = 0
 
-    def validate_then_rebind(plan_to_validate: PackagedProductFactoryExecutionPlan) -> None:
-        nonlocal validation_calls
-        validation_calls += 1
-        original_validate_plan(plan_to_validate)
-        if validation_calls == 2:
-            bindings.bind(
-                project_id=project.project_id,
-                repository=repository,
-                root=replacement_root.resolve(),
-                expected_binding_version=first.binding_version,
-            )
+    def rebind_then_snapshot(plan_to_validate: PackagedProductFactoryExecutionPlan):
+        nonlocal final_snapshot_calls
+        final_snapshot_calls += 1
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=replacement_root.resolve(),
+            expected_binding_version=first.binding_version,
+        )
+        return original_final_snapshot(plan_to_validate)
 
-    monkeypatch.setattr(bindings, "validate_plan", validate_then_rebind)
+    monkeypatch.setattr(
+        bindings,
+        "validate_plan_and_current_binding_versions",
+        rebind_then_snapshot,
+    )
 
     snapshot = operator.snapshot(project.project_id)
 
@@ -399,6 +402,7 @@ def test_snapshot_rejects_binding_change_after_projection_before_return(
         "repositories": [],
         "message": "Стан локальних прив’язок Product Factory недоступний.",
     }
+    assert final_snapshot_calls == 1
     assert bindings.current_binding_version(
         project.project_id,
         repository.repository_id,

@@ -191,6 +191,38 @@ def test_current_binding_versions_snapshots_bound_and_unbound_repositories(
     }
 
 
+def test_plan_and_binding_snapshot_uses_one_active_store_transaction(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=_root(tmp_path),
+        expected_binding_version=None,
+    )
+    original_get_conn = bindings._projects._get_conn
+    observed_active_transactions: list[bool] = []
+
+    def checked_get_conn(conn, project_id: str):
+        store.require_transaction_connection(conn)
+        observed_active_transactions.append(conn.in_transaction)
+        return original_get_conn(conn, project_id)
+
+    monkeypatch.setattr(bindings._projects, "_get_conn", checked_get_conn)
+
+    versions = bindings.validate_plan_and_current_binding_versions(
+        _plan(project, repository)
+    )
+
+    assert observed_active_transactions == [True]
+    assert dict(versions) == {repository.repository_id: bound.binding_version}
+
+
 def test_binding_update_requires_exact_version(
     tmp_path: pathlib.Path,
 ) -> None:

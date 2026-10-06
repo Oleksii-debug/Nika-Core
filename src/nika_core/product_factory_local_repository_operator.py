@@ -217,10 +217,8 @@ class PackagedLocalRepositoryOperator:
                     " Недійсні прив’язки можна безпечно замінити, вказавши "
                     "новий шлях; поточна CAS-версія збережена без розкриття старого шляху."
                 )
-            self._bindings.validate_plan(plan)
-            current_versions = self._bindings.current_binding_versions(
-                plan.project_id,
-                tuple(repository.repository_id for repository in plan.graph.repositories),
+            current_versions = self._bindings.validate_plan_and_current_binding_versions(
+                plan
             )
             if dict(current_versions) != projected_versions:
                 raise ProductFactoryLocalRepositoryBindingError(
