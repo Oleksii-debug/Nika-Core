@@ -513,6 +513,21 @@ class OpenHandsProductFactoryPorts:
             raise OpenHandsProductFactoryError(
                 "private candidate commit differs from validated candidate paths"
             )
+        status = _git(
+            (
+                *prefix,
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+            ),
+            cwd=plan.private_git_dir.parent,
+            environment=plan.environment,
+        ).stdout
+        if status:
+            raise OpenHandsProductFactoryError(
+                "private candidate commit does not match validated worktree bytes"
+            )
         tracked = _nul_paths(
             _git(
                 (*prefix, "ls-files", "-z"),

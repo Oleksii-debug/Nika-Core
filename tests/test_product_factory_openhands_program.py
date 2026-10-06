@@ -10,6 +10,7 @@ import sys
 
 import pytest
 
+import nika_core.product_factory_openhands_program as openhands_program
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_coding_worker_adapter import CodingWorkerComponentAdapter
 from nika_core.product_factory_coordinator import ComponentWorkRequest
@@ -274,6 +275,56 @@ def test_collect_commits_exact_validated_candidate_only_in_private_git(
     assert program.ports.candidate_worktree(request.work_id).joinpath(
         "src", "core.py"
     ).read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+def test_collect_rejects_commit_bytes_changed_after_tree_validation(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, base_sha = _repository(tmp_path)
+    _store, program = _program(tmp_path, repository)
+    request = _request(base_sha, work_id="work-staging-byte-drift")
+    context = _run(program.ports.context_for(request))
+    job = _job(request, context)
+
+    candidate = context.lease.workspace_root / "src" / "core.py"
+    candidate.write_text("VALUE = 2\n", encoding="utf-8")
+    expected = candidate.read_bytes()
+    result = CodingResult(
+        job_id=request.work_id,
+        changed_files=(
+            ChangedFile(
+                "src/core.py",
+                hashlib.sha256(expected).hexdigest(),
+                len(expected),
+            ),
+        ),
+    )
+
+    real_git = openhands_program._git
+    injected = False
+
+    def _mutating_git(args, *, cwd, environment):
+        nonlocal injected
+        if not injected and "add" in args:
+            candidate.write_text("VALUE = staged_attacker\n", encoding="utf-8")
+            outcome = real_git(args, cwd=cwd, environment=environment)
+            candidate.write_bytes(expected)
+            injected = True
+            return outcome
+        return real_git(args, cwd=cwd, environment=environment)
+
+    monkeypatch.setattr(openhands_program, "_git", _mutating_git)
+
+    with pytest.raises(
+        OpenHandsProductFactoryError,
+        match="commit does not match validated worktree bytes",
+    ):
+        _run(program.ports.collect(request, job, result))
+
+    assert injected is True
+    assert candidate.read_bytes() == expected
+    assert (repository / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 1\n"
 
 
 def test_collect_rejects_unreported_private_tree_change_before_commit(
