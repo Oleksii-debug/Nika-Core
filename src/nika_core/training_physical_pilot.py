@@ -29,8 +29,10 @@ from nika_core.training_runtime import (
 )
 from nika_core.training_scale import TrainingScaleAuthorization
 
-_SCHEMA_VERSION = 5
-_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v5\x00"
+_SCHEMA_VERSION = 6
+_LEGACY_SCHEMA_VERSION = 5
+_REPORT_DOMAIN_V5 = b"nika-peft-physical-pilot-report-v5\x00"
+_REPORT_DOMAIN_V6 = b"nika-peft-physical-pilot-report-v6\x00"
 _MAX_REPORT_BYTES = 32 * 1024
 _MAX_CANDIDATE_MANIFEST_BYTES = 512 * 1024
 _MAX_TEXT_BYTES = 1024
@@ -488,7 +490,10 @@ class PhysicalTrainingPilotReport:
     schema_version: int = _SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != _SCHEMA_VERSION:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version not in {_LEGACY_SCHEMA_VERSION, _SCHEMA_VERSION}
+        ):
             _fail("unsupported physical pilot report schema")
         if type(self.platform) is not str or self.platform != "windows":
             _fail("physical PEFT pilot report must identify Windows")
@@ -547,10 +552,12 @@ class PhysicalTrainingPilotReport:
             or self.candidate_byte_count > (1 << 63) - 1
         ):
             _fail("candidate_byte_count must be a positive signed-64 integer")
-        if (
-            type(self.completed_steps) is not int
-            or not 2 <= self.completed_steps <= _MAX_STEPS
-        ):
+        if type(self.completed_steps) is not int:
+            _fail("physical pilot report completed_steps must be an integer")
+        if self.schema_version == _LEGACY_SCHEMA_VERSION:
+            if self.completed_steps != 2:
+                _fail("legacy physical pilot report requires exactly two completed steps")
+        elif not 2 <= self.completed_steps <= _MAX_STEPS:
             _fail("physical pilot report requires a bounded multi-step completion")
 
     def canonical_payload(self) -> dict[str, object]:
@@ -587,8 +594,13 @@ class PhysicalTrainingPilotReport:
 
     @property
     def evidence_sha256(self) -> str:
+        domain = (
+            _REPORT_DOMAIN_V5
+            if self.schema_version == _LEGACY_SCHEMA_VERSION
+            else _REPORT_DOMAIN_V6
+        )
         return hashlib.sha256(
-            _REPORT_DOMAIN + _canonical_json_bytes(self.canonical_payload())
+            domain + _canonical_json_bytes(self.canonical_payload())
         ).hexdigest()
 
     def to_json(self) -> str:
