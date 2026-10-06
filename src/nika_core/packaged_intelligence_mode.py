@@ -39,12 +39,11 @@ def _normalize_command(command: str) -> str:
 
 
 def is_packaged_intelligence_mode_command(command: str) -> bool:
-    """Recognize only the explicit packaged intelligence-mode command namespace."""
+    """Recognize the reserved namespace so malformed special commands fail closed."""
 
-    try:
-        normalized = _normalize_command(command).casefold()
-    except (TypeError, ValueError):
+    if type(command) is not str:
         return False
+    normalized = " ".join(command.split()).strip().casefold()
     return any(
         normalized == prefix or normalized.startswith(prefix + " ")
         for prefix in _PREFIXES
