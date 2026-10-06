@@ -118,6 +118,126 @@ def _pinned_executable_descriptor_sha256(descriptor: int) -> str:
         ) from exc
 
 
+def _write_descriptor_bytes(descriptor: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(descriptor, view)
+        if written <= 0:
+            raise ProcessExecutionError("unable to write runtime executable snapshot")
+        view = view[written:]
+
+
+def _open_posix_executable_snapshot() -> int:
+    memfd_create = getattr(os, "memfd_create", None)
+    sealing_flag = getattr(os, "MFD_ALLOW_SEALING", 0)
+    if memfd_create is None or not sealing_flag:
+        raise ProcessExecutionError(
+            "immutable runtime executable snapshot is unavailable"
+        )
+    flags = getattr(os, "MFD_CLOEXEC", 0) | sealing_flag
+    try:
+        return memfd_create("nika-runtime-executable", flags)
+    except OSError as exc:
+        raise ProcessExecutionError(
+            "unable to create sealed runtime executable snapshot"
+        ) from exc
+
+
+def _seal_posix_executable_snapshot(descriptor: int) -> None:
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise ProcessExecutionError(
+            "runtime executable snapshot sealing is unavailable"
+        ) from exc
+
+    required_names = (
+        "F_ADD_SEALS",
+        "F_GET_SEALS",
+        "F_SEAL_WRITE",
+        "F_SEAL_GROW",
+        "F_SEAL_SHRINK",
+        "F_SEAL_SEAL",
+    )
+    if any(not hasattr(fcntl, name) for name in required_names):
+        raise ProcessExecutionError(
+            "runtime executable snapshot sealing is unavailable"
+        )
+
+    seals = (
+        fcntl.F_SEAL_WRITE
+        | fcntl.F_SEAL_GROW
+        | fcntl.F_SEAL_SHRINK
+        | fcntl.F_SEAL_SEAL
+    )
+    try:
+        fcntl.fcntl(descriptor, fcntl.F_ADD_SEALS, seals)
+        applied = fcntl.fcntl(descriptor, fcntl.F_GET_SEALS)
+    except OSError as exc:
+        raise ProcessExecutionError(
+            "unable to seal runtime executable snapshot"
+        ) from exc
+    if applied & seals != seals:
+        raise ProcessExecutionError(
+            "runtime executable snapshot sealing is incomplete"
+        )
+
+
+def _snapshot_posix_executable(
+    source_descriptor: int,
+    *,
+    byte_count: int,
+    expected_sha256: str,
+) -> int:
+    snapshot_descriptor = _open_posix_executable_snapshot()
+    try:
+        digest = hashlib.sha256()
+        offset = 0
+        remaining = byte_count
+        while remaining > 0:
+            try:
+                chunk = os.pread(
+                    source_descriptor,
+                    min(1024 * 1024, remaining),
+                    offset,
+                )
+            except (AttributeError, OSError) as exc:
+                raise ProcessExecutionError(
+                    "unable to read pinned runtime executable for snapshot"
+                ) from exc
+            if not chunk:
+                break
+            digest.update(chunk)
+            _write_descriptor_bytes(snapshot_descriptor, chunk)
+            offset += len(chunk)
+            remaining -= len(chunk)
+
+        if remaining != 0 or digest.hexdigest() != expected_sha256:
+            raise ProcessExecutionError(
+                "pinned runtime executable bytes changed before process launch"
+            )
+
+        os.fchmod(snapshot_descriptor, 0o500)
+        _seal_posix_executable_snapshot(snapshot_descriptor)
+
+        os.lseek(snapshot_descriptor, 0, os.SEEK_SET)
+        if (
+            _pinned_executable_descriptor_sha256(snapshot_descriptor)
+            != expected_sha256
+        ):
+            raise ProcessExecutionError(
+                "runtime executable snapshot changed before process launch"
+            )
+        os.lseek(snapshot_descriptor, 0, os.SEEK_SET)
+        return snapshot_descriptor
+    except Exception:
+        try:
+            os.close(snapshot_descriptor)
+        except OSError:
+            pass
+        raise
+
+
 def _open_windows_executable_launch_lock(path: pathlib.Path) -> int:
     """Hold one final executable path against write/delete replacement."""
 
@@ -274,26 +394,54 @@ class _PinnedExecutableLaunchGuard:
                     raise ProcessExecutionError(
                         "pinned runtime executable changed before process launch"
                     )
-                if (
-                    _pinned_executable_descriptor_sha256(descriptor)
-                    != self._expected_sha256
+                executable_authority_path: pathlib.Path | None = None
+                for descriptor_root in (
+                    pathlib.Path("/proc/self/fd"),
+                    pathlib.Path("/dev/fd"),
                 ):
+                    descriptor_path = descriptor_root / str(descriptor)
+                    try:
+                        authority_stat = descriptor_path.stat()
+                    except OSError:
+                        continue
+                    if (
+                        authority_stat.st_dev == descriptor_stat.st_dev
+                        and authority_stat.st_ino == descriptor_stat.st_ino
+                    ):
+                        executable_authority_path = descriptor_path
+                        break
+                if executable_authority_path is None:
                     raise ProcessExecutionError(
-                        "pinned runtime executable bytes changed before process launch"
+                        "descriptor-backed executable launch is unavailable"
                     )
+                if not os.access(executable_authority_path, os.X_OK):
+                    raise ProcessExecutionError(
+                        "pinned runtime executable is not executable"
+                    )
+                snapshot_descriptor = _snapshot_posix_executable(
+                    descriptor,
+                    byte_count=descriptor_stat.st_size,
+                    expected_sha256=self._expected_sha256,
+                )
+                self._descriptor = snapshot_descriptor
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                snapshot_stat = os.fstat(snapshot_descriptor)
 
                 for descriptor_root in (
                     pathlib.Path("/proc/self/fd"),
                     pathlib.Path("/dev/fd"),
                 ):
-                    launch_path = descriptor_root / str(descriptor)
+                    launch_path = descriptor_root / str(snapshot_descriptor)
                     try:
                         launch_stat = launch_path.stat()
                     except OSError:
                         continue
                     if (
-                        launch_stat.st_dev == descriptor_stat.st_dev
-                        and launch_stat.st_ino == descriptor_stat.st_ino
+                        launch_stat.st_dev == snapshot_stat.st_dev
+                        and launch_stat.st_ino == snapshot_stat.st_ino
                     ):
                         return launch_path
                 raise ProcessExecutionError(
