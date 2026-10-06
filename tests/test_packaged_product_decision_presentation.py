@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from _product_decision_test_support import ApprovedProductProjectCommandService
+from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_factory_packaged_journey import (
@@ -15,6 +16,7 @@ from nika_core.product_factory_packaged_journey import (
     PackagedProductJourneyError,
     PackagedProductSelectionStore,
     PackagedProductStateProvider,
+    product_project_identity,
 )
 from nika_core.product_project import (
     EvidenceRef,
@@ -26,6 +28,7 @@ from nika_core.product_project import (
     ResearchEvidencePackage,
 )
 from nika_core.ui.bridge_models import UIResult
+from scripts import nika_windows
 
 _PROJECT_ID = "product-decision-presentation"
 
@@ -216,3 +219,87 @@ def test_multiple_pending_decisions_are_not_auto_selected_in_packaged_ui(
 
     with pytest.raises(PackagedProductJourneyError, match="Кілька рішень"):
         router.create({"command": "Show current product decision"})
+
+
+def test_real_windows_bridge_restores_pending_decision_and_focus_after_restart(
+    tmp_path: Path,
+) -> None:
+    database = (tmp_path / "Windows рішення користувача.db").resolve()
+    config = AppConfig(database_path=database)
+    command = "Створи застосунок для доступного обліку витрат"
+    project_id = product_project_identity(command)
+
+    bridge, products = nika_windows.build_windows_bridge(
+        config,
+        start_startup_recovery=False,
+    )
+    created = bridge.dispatch(
+        {
+            "request_id": "decision-product-create",
+            "action_id": "task.create",
+            "payload": {"command": command},
+        }
+    )
+    assert created["status"] == "completed"
+
+    store = SQLiteStore(database)
+    store.initialize()
+    repository = ProductProjectRepository(store)
+    repository.record_research_handoff(
+        project_id,
+        ResearchEvidencePackage(
+            "research-windows-decision",
+            (
+                EvidenceRef(
+                    "evidence:windows-decision",
+                    "research://windows-decision/claim/1",
+                    "Packaged Windows product choice",
+                ),
+            ),
+        ),
+        (
+            ProductOption(
+                "option-windows",
+                "option-windows",
+                "Use the accessible Windows path",
+                ("research-windows-decision",),
+            ),
+        ),
+    )
+    products.record_decision(
+        project_id,
+        ProductDecision(
+            decision_id="decision-windows",
+            option_id="option-windows",
+            state=ProductDecisionState.PROPOSED,
+            rationale="Owner must choose before continuation",
+            decided_by_ref="user://owner",
+        ),
+        expected_row_version=0,
+        idempotency_key="decision:windows:pending",
+    )
+
+    first_state = bridge.get_state()["state"]["product_project"]
+    assert first_state["current_decision"]["decision_id"] == "decision-windows"
+    assert first_state["current_decision"]["risk_level"] == 0
+
+    restarted, restarted_products = nika_windows.build_windows_bridge(
+        config,
+        start_startup_recovery=False,
+    )
+    recovered = restarted.get_state()["state"]["product_project"]
+    assert recovered["project_id"] == project_id
+    assert recovered["current_decision"] == first_state["current_decision"]
+    assert restarted_products.inspect_project(project_id).summary.current_decision is not None
+
+    result = restarted.dispatch(
+        {
+            "request_id": "decision-product-read",
+            "action_id": "task.create",
+            "payload": {"command": "Покажи поточне рішення ProductProject"},
+        }
+    )
+    assert result["status"] == "completed"
+    assert result["focus_id"] == "product-project-decision-heading"
+    assert "decision-windows" in result["message"]
+    assert "Owner must choose before continuation" in result["message"]
