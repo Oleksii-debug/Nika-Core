@@ -216,7 +216,7 @@ def test_current_task_status_rejects_ambiguous_multiple_unfinished_tasks(
     response = nika_windows._current_task_status_result(queue)
 
     assert response.status == "rejected"
-    assert "(2)" in response.message
+    assert "кілька незавершених завдань" in response.message
     assert first.task_id not in response.message
     assert second.task_id not in response.message
 

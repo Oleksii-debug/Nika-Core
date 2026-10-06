@@ -69,6 +69,9 @@ _TERMINAL_TASK_STATES = frozenset(
         TaskState.ARCHIVED,
     }
 )
+_NONTERMINAL_TASK_STATES = tuple(
+    state for state in TaskState if state not in _TERMINAL_TASK_STATES
+)
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -193,11 +196,7 @@ def _current_task_status_result(
                 message=f"Завдання: {record.task_id}; state {record.state.value}.",
                 focus_id="tasks-heading",
             )
-        unfinished = tuple(
-            record
-            for record in queue.list_recent(limit=50)
-            if record.state not in _TERMINAL_TASK_STATES
-        )
+        unfinished = queue.list_by_states(_NONTERMINAL_TASK_STATES, limit=2)
     except KeyError:
         return UIResult(
             request_id="desktop-handler",
@@ -228,7 +227,7 @@ def _current_task_status_result(
             request_id="desktop-handler",
             status="rejected",
             message=(
-                f"Є кілька незавершених завдань ({len(unfinished)}); "
+                "Є кілька незавершених завдань; "
                 "відкрийте список «Завдання» для явного вибору."
             ),
             focus_id="tasks-heading",
