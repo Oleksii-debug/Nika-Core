@@ -63,6 +63,23 @@ class _EntryRepositoryAuthority:
     expected_project: _ProjectSnapshot
     expected: Mapping[str, _BindingSnapshot]
 
+    def require_repository_root(
+        self,
+        *,
+        repository_id: str,
+        root: Path,
+    ) -> None:
+        expected = self.expected.get(repository_id)
+        if expected is None:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "repository is outside the prepared binding snapshot"
+            )
+        self.require_component_root(
+            project_id=expected.project_id,
+            repository_id=repository_id,
+            root=root,
+        )
+
     def require_component_root(
         self,
         *,
@@ -426,12 +443,14 @@ class PackagedBoundLocalProductFactoryHost:
             repositories=repositories,
             model_authority=self._model_authority,
         )
-        program.ports.repository_authority = _EntryRepositoryAuthority(
+        authority = _EntryRepositoryAuthority(
             bindings=self._bindings,
             projects=self._projects,
             expected_project=project_snapshot,
             expected=snapshots,
         )
+        program.ports.repository_authority = authority
+        program.worker.repository_authority = authority
         return _ProgramEntry(
             project=project_snapshot,
             program=program,
