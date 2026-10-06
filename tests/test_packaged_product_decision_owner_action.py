@@ -113,6 +113,77 @@ def _approval_request_id(message: str) -> str:
     return match.group(0)
 
 
+def test_multiple_pending_decisions_are_discoverable_by_bounded_pages_and_exact_read(
+    tmp_path: Path,
+) -> None:
+    _store, repository, service, router = _build(tmp_path / "pending-pages.db")
+    for index in range(9):
+        package_id = f"research-page-{index:02d}"
+        option_id = f"option-page-{index:02d}"
+        decision_id = f"decision-{index:02d}"
+        repository.record_research_handoff(
+            _PROJECT_ID,
+            ResearchEvidencePackage(
+                package_id,
+                (
+                    EvidenceRef(
+                        f"evidence-page-{index:02d}",
+                        f"research://pending-page/{index:02d}",
+                        f"Evidence for pending decision {index:02d}",
+                    ),
+                ),
+            ),
+            (
+                ProductOption(
+                    option_id,
+                    f"Option {index:02d}",
+                    f"Candidate option {index:02d}",
+                    (package_id,),
+                ),
+            ),
+        )
+        service.record_decision(
+            _PROJECT_ID,
+            ProductDecision(
+                decision_id=decision_id,
+                option_id=option_id,
+                state=ProductDecisionState.PROPOSED,
+                rationale=f"Question for owner {index:02d}",
+                decided_by_ref="user://owner",
+            ),
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+            idempotency_key=f"decision:page:{index:02d}",
+        )
+
+    before = repository.get(_PROJECT_ID)
+    first = router.create({"command": "list pending product decisions"})
+    second = router.create(
+        {"command": "list pending product decisions page 2"}
+    )
+    exact = router.create(
+        {"command": "show product decision decision-00"}
+    )
+
+    assert "1-8 із 10" in first.message
+    for index in range(8):
+        assert f"decision-{index:02d}" in first.message
+    assert "decision-08" not in first.message
+    assert "decision-owner" not in first.message
+    assert "page 2" in first.message
+
+    assert "9-10 із 10" in second.message
+    assert "decision-08" in second.message
+    assert "decision-owner" in second.message
+    assert "decision-00" not in second.message
+
+    assert exact.status == "completed"
+    assert exact.focus_id == "product-project-heading"
+    assert "decision-00" in exact.message
+    assert "Question for owner 00" in exact.message
+    assert "стан pending" in exact.message
+    assert repository.get(_PROJECT_ID) == before
+
+
 def test_approval_is_two_step_and_replay_does_not_mint_second_effect(
     tmp_path: Path,
 ) -> None:
@@ -337,6 +408,9 @@ def test_owner_decision_commands_fail_closed_on_missing_or_malformed_identity(
 def test_packaged_help_exposes_keyboard_two_step_owner_flow() -> None:
     html = Path("src/nika_core/ui/web/index.html").read_text(encoding="utf-8")
 
+    assert "list pending product decisions" in html
+    assert "list pending product decisions page &lt;номер&gt;" in html
+    assert "show product decision &lt;decision_id&gt;" in html
     assert "approve product decision &lt;decision_id&gt;" in html
     assert "reject product decision &lt;decision_id&gt;" in html
     assert (
