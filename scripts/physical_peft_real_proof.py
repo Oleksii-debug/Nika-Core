@@ -438,6 +438,93 @@ def prepare(root: Path, trainer_executable: Path) -> None:
     print(config_path)
 
 
+def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_constant(_: str) -> NoReturn:
+    raise ValueError("non-finite JSON constant")
+
+
+def _verified_asset_manifest(root: Path, raw: bytes) -> dict[str, object]:
+    try:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
+        raise ProofError("physical proof asset manifest is invalid JSON") from exc
+    expected_keys = {
+        "license",
+        "license_reference",
+        "model_files",
+        "repository",
+        "revision",
+        "runtime_versions",
+        "source_reference",
+    }
+    if type(value) is not dict or set(value) != expected_keys:
+        _fail("physical proof asset manifest fields are invalid")
+    if (
+        value["repository"] != _MODEL_REPOSITORY
+        or value["revision"] != _MODEL_REVISION
+        or value["license"] != _MODEL_LICENSE
+        or value["source_reference"] != _MODEL_SOURCE_REFERENCE
+        or value["license_reference"] != _MODEL_LICENSE_REFERENCE
+    ):
+        _fail("physical proof asset provenance changed")
+
+    runtime_versions = value["runtime_versions"]
+    if (
+        type(runtime_versions) is not dict
+        or set(runtime_versions) != set(_RUNTIME_PACKAGES)
+        or runtime_versions != _runtime_versions()
+    ):
+        _fail("physical proof runtime version evidence changed")
+
+    raw_files = value["model_files"]
+    expected_paths = set(_MODEL_FILES) | {_GGUF_FILE}
+    if type(raw_files) is not list or len(raw_files) != len(expected_paths):
+        _fail("physical proof asset inventory is invalid")
+    observed_paths: set[str] = set()
+    for entry in raw_files:
+        if type(entry) is not dict or set(entry) != {"path", "sha256", "size_bytes"}:
+            _fail("physical proof asset inventory entry is invalid")
+        relative = entry["path"]
+        digest = entry["sha256"]
+        size_bytes = entry["size_bytes"]
+        if (
+            type(relative) is not str
+            or relative not in expected_paths
+            or relative in observed_paths
+            or type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or type(size_bytes) is not int
+            or size_bytes <= 0
+            or size_bytes > _MAX_DOWNLOAD_BYTES
+        ):
+            _fail("physical proof asset inventory entry is invalid")
+        observed_paths.add(relative)
+        source = root / "base.gguf" if relative == _GGUF_FILE else root / "model" / relative
+        payload = _stable_file_bytes(
+            source,
+            max_bytes=_MAX_DOWNLOAD_BYTES,
+            name=f"staged model asset {relative}",
+        )
+        if len(payload) != size_bytes or _sha256_bytes(payload) != digest:
+            _fail(f"staged model asset identity changed: {relative}")
+    if observed_paths != expected_paths:
+        _fail("physical proof asset inventory is incomplete")
+    return value
+
+
 def verify(root: Path) -> None:
     root = root.resolve(strict=True)
     report_path = root / "run" / "physical-pilot-report.json"
@@ -515,7 +602,7 @@ def verify(root: Path) -> None:
         max_bytes=_MAX_EVIDENCE_MANIFEST_BYTES,
         name="physical proof asset manifest",
     )
-    assets = json.loads(assets_bytes.decode("utf-8", errors="strict"))
+    assets = _verified_asset_manifest(root, assets_bytes)
     summary = {
         "asset_revision": assets["revision"],
         "asset_repository": assets["repository"],
