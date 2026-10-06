@@ -329,6 +329,56 @@ def test_resolve_for_plan_holds_writer_fence_across_repository_set(
     ]
 
 
+def test_zero_inode_identity_does_not_alias_distinct_repository_roots(
+    tmp_path: pathlib.Path,
+) -> None:
+    first = binding_module._FilesystemIdentity(
+        root_path=str(tmp_path / "first"),
+        root_device="0",
+        root_inode="0",
+        git_metadata_kind="directory",
+        git_metadata_device="0",
+        git_metadata_inode="0",
+        gitfile_sha256=None,
+        git_target_device=None,
+        git_target_inode=None,
+        git_commondir_sha256=None,
+        git_common_device=None,
+        git_common_inode=None,
+    )
+    second = binding_module._FilesystemIdentity(
+        root_path=str(tmp_path / "second"),
+        root_device="0",
+        root_inode="0",
+        git_metadata_kind="directory",
+        git_metadata_device="0",
+        git_metadata_inode="0",
+        gitfile_sha256=None,
+        git_target_device=None,
+        git_target_inode=None,
+        git_commondir_sha256=None,
+        git_common_device=None,
+        git_common_inode=None,
+    )
+    same_path = binding_module._FilesystemIdentity(
+        root_path=first.root_path,
+        root_device="999",
+        root_inode="0",
+        git_metadata_kind="directory",
+        git_metadata_device="999",
+        git_metadata_inode="0",
+        gitfile_sha256=None,
+        git_target_device=None,
+        git_target_inode=None,
+        git_commondir_sha256=None,
+        git_common_device=None,
+        git_common_inode=None,
+    )
+
+    assert not binding_module._same_physical_repository(first, second)
+    assert binding_module._same_physical_repository(first, same_path)
+
+
 def test_binding_update_requires_exact_version(
     tmp_path: pathlib.Path,
 ) -> None:
