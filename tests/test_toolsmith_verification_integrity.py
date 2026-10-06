@@ -15,6 +15,7 @@ from nika_core.toolsmith import (
     CodingResult,
     DeterministicCodingWorker,
     GapKind,
+    InvalidTransitionError,
     ReuseCandidate,
     ToolsmithRepository,
 )
@@ -366,7 +367,7 @@ def test_registration_cleanup_requires_durable_rolled_back_state(tmp_path: Path)
     )
 
     with pytest.raises(
-        Exception,
+        InvalidTransitionError,
         match="cleanup requires durable ROLLED_BACK state",
     ):
         repository.rollback_registration(task_id=task_id, capability_id=CAPABILITY_ID)
