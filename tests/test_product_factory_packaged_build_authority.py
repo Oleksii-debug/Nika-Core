@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.product_factory_packaged_build_authority as authority_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_build_execution import BuildExecutionState
@@ -406,14 +407,19 @@ def test_repeat_bind_rejects_resource_scope_drift_for_same_work(
         )
 
 
-def test_template_drift_invalidates_already_bound_work(
+def test_template_drift_revokes_execution_but_preserves_bound_output_policy(
     tmp_path: Path,
 ) -> None:
     _store, _startup_value, _node_value, runtime = _runtime(tmp_path)
     spec = _admit(runtime)
+    before = runtime.output_policies.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+    )
 
     runtime.authorities.configure(
-        _template(argv_suffix=("--wheel",)),
+        _template(argv_suffix=("--wheel",), max_changed_files=3),
         expected_revision=1,
     )
 
@@ -426,11 +432,166 @@ def test_template_drift_invalidates_already_bound_work(
             repository_id=REPOSITORY_ID,
             work_id=spec.request.work_id,
         )
+    after = runtime.output_policies.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+    )
+    assert after == before
+    assert after.max_changed_files == 8
+
     with pytest.raises(
         PackagedBuildAuthorityError,
         match="different packaged authority",
     ):
         _admit(runtime)
+
+
+def _seed_schema_v1_binding(
+    tmp_path: Path,
+    *,
+    current_template: PackagedBuildAuthorityTemplate,
+    bound_template: PackagedBuildAuthorityTemplate,
+) -> SQLiteStore:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    current_payload = authority_module._encode_template(current_template)
+    current_digest = authority_module._digest_payload(current_payload)
+    bound_payload = authority_module._encode_template(bound_template)
+    bound_digest = authority_module._digest_payload(bound_payload)
+    current_revision = 1 if current_digest == bound_digest else 2
+    with store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "CREATE TABLE product_factory_build_authority_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE product_factory_build_authority_templates ("
+            "project_id TEXT NOT NULL, repository_id TEXT NOT NULL, "
+            "component_id TEXT NOT NULL, revision INTEGER NOT NULL "
+            "CHECK(revision > 0), template_json TEXT NOT NULL, "
+            "template_digest TEXT NOT NULL, configured_at TEXT NOT NULL, "
+            "PRIMARY KEY(project_id, repository_id, component_id))"
+        )
+        conn.execute(
+            "CREATE TABLE product_factory_build_authority_bindings ("
+            "work_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, "
+            "repository_id TEXT NOT NULL, component_id TEXT NOT NULL, "
+            "candidate_work_id TEXT NOT NULL, source_sha TEXT NOT NULL, "
+            "review_fingerprint TEXT NOT NULL, spec_version INTEGER NOT NULL, "
+            "row_version INTEGER NOT NULL, graph_digest TEXT NOT NULL, "
+            "template_revision INTEGER NOT NULL, template_digest TEXT NOT NULL, "
+            "bound_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO product_factory_build_authority_schema VALUES (?, ?)",
+            (1, "2026-10-06T00:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO product_factory_build_authority_templates VALUES "
+            "(?, ?, ?, ?, ?, ?, ?)",
+            (
+                PROJECT_ID,
+                REPOSITORY_ID,
+                COMPONENT_ID,
+                current_revision,
+                current_payload,
+                current_digest,
+                "2026-10-06T00:00:00+00:00",
+            ),
+        )
+        conn.execute(
+            "INSERT INTO product_factory_build_authority_bindings VALUES "
+            "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "pf5:migrated-work",
+                PROJECT_ID,
+                REPOSITORY_ID,
+                COMPONENT_ID,
+                "candidate:migrated-work",
+                BASE_SHA,
+                "e" * 64,
+                1,
+                0,
+                GRAPH_DIGEST,
+                1,
+                bound_digest,
+                "2026-10-06T00:00:00+00:00",
+            ),
+        )
+    return store
+
+
+def test_schema_v1_migration_backfills_only_exact_current_bound_template(
+    tmp_path: Path,
+) -> None:
+    store = _seed_schema_v1_binding(
+        tmp_path,
+        current_template=_template(),
+        bound_template=_template(),
+    )
+    runtime = PackagedBuildAuthorityRuntime(
+        PackagedBuildAuthorityStore(
+            store,
+            node=_node(),
+            startup=_startup(tmp_path),
+        )
+    )
+
+    policy = runtime.output_policies.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id="pf5:migrated-work",
+    )
+
+    assert policy.allowed_paths.roots == ("products/build",)
+    assert policy.max_changed_files == 8
+    with store.connection() as conn:
+        version = conn.execute(
+            "SELECT MAX(version) FROM product_factory_build_authority_schema"
+        ).fetchone()[0]
+        payload = conn.execute(
+            "SELECT template_json FROM product_factory_build_authority_bindings "
+            "WHERE work_id = ?",
+            ("pf5:migrated-work",),
+        ).fetchone()["template_json"]
+    assert version == 2
+    assert type(payload) is str
+
+
+def test_schema_v1_migration_does_not_invent_superseded_bound_template(
+    tmp_path: Path,
+) -> None:
+    store = _seed_schema_v1_binding(
+        tmp_path,
+        current_template=_template(argv_suffix=("--new",), max_changed_files=3),
+        bound_template=_template(),
+    )
+    runtime = PackagedBuildAuthorityRuntime(
+        PackagedBuildAuthorityStore(
+            store,
+            node=_node(),
+            startup=_startup(tmp_path),
+        )
+    )
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="historical output authority snapshot is unavailable",
+    ):
+        runtime.output_policies.resolve(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            work_id="pf5:migrated-work",
+        )
+    with store.connection() as conn:
+        payload = conn.execute(
+            "SELECT template_json FROM product_factory_build_authority_bindings "
+            "WHERE work_id = ?",
+            ("pf5:migrated-work",),
+        ).fetchone()["template_json"]
+    assert payload is None
 
 
 def test_stale_configure_revision_is_fail_closed(tmp_path: Path) -> None:

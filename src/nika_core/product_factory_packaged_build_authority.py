@@ -27,7 +27,7 @@ from nika_core.product_factory_packaged_local_startup import (
 )
 from nika_core.toolsmith.contracts import AllowedPathPolicy, normalize_relative_path
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _MAX_REVISION = (1 << 63) - 1
 _SCHEMA = "nika.product-factory.packaged-build-authority.v1"
 _SENSITIVE_ARG_MARKERS = (
@@ -370,6 +370,7 @@ class PackagedBuildAuthorityStore:
             authority.digest,
         )
         template = authority.template
+        template_payload = _encode_template(template)
         if (
             component_id != template.component_id
             or spec.request.project_id != template.project_id
@@ -430,13 +431,28 @@ class PackagedBuildAuthorityStore:
                         raise PackagedBuildAuthorityError(
                             "PF5 work id is already bound to different packaged authority"
                         )
+                    stored_payload = existing["template_json"]
+                    if stored_payload is None:
+                        conn.execute(
+                            "UPDATE product_factory_build_authority_bindings "
+                            "SET template_json = ? WHERE work_id = ?",
+                            (template_payload, bound.work_id),
+                        )
+                    elif (
+                        type(stored_payload) is not str
+                        or stored_payload != template_payload
+                        or _digest_payload(stored_payload) != bound.template_digest
+                    ):
+                        raise PackagedBuildAuthorityError(
+                            "PF5 bound template snapshot is corrupt"
+                        )
                     return
                 conn.execute(
                     "INSERT INTO product_factory_build_authority_bindings "
                     "(work_id, project_id, repository_id, component_id, candidate_work_id, "
                     "source_sha, review_fingerprint, spec_version, row_version, graph_digest, "
-                    "template_revision, template_digest, bound_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "template_revision, template_digest, template_json, bound_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         bound.work_id,
                         bound.project_id,
@@ -450,6 +466,7 @@ class PackagedBuildAuthorityStore:
                         bound.graph_digest,
                         bound.template_revision,
                         bound.template_digest,
+                        template_payload,
                         datetime.now(UTC).isoformat(),
                     ),
                 )
@@ -520,6 +537,69 @@ class PackagedBuildAuthorityStore:
             )
         return bound, current
 
+    def bound_output_policy(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        work_id: str,
+    ) -> BuildOutputPolicy:
+        for label, value in (
+            ("project_id", project_id),
+            ("repository_id", repository_id),
+            ("work_id", work_id),
+        ):
+            _exact_text(value, label)
+        try:
+            with self._store.connection() as conn:
+                row = conn.execute(
+                    "SELECT * FROM product_factory_build_authority_bindings "
+                    "WHERE work_id = ?",
+                    (work_id,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise PackagedBuildAuthorityError(
+                "PF5 bound output authority could not be read"
+            ) from exc
+        if row is None:
+            raise PackagedBuildAuthorityError(
+                "PF5 work has no durable packaged authority binding"
+            )
+        bound = _binding_from_row(row)
+        if bound.project_id != project_id or bound.repository_id != repository_id:
+            raise PackagedBuildAuthorityError(
+                "PF5 packaged authority binding identity does not match request"
+            )
+        payload = row["template_json"]
+        if payload is None:
+            raise PackagedBuildAuthorityError(
+                "PF5 historical output authority snapshot is unavailable"
+            )
+        if type(payload) is not str or _digest_payload(payload) != bound.template_digest:
+            raise PackagedBuildAuthorityError(
+                "PF5 historical output authority snapshot is corrupt"
+            )
+        template = _decode_template(payload)
+        if (
+            template.project_id != bound.project_id
+            or template.repository_id != bound.repository_id
+            or template.component_id != bound.component_id
+        ):
+            raise PackagedBuildAuthorityError(
+                "PF5 historical output authority identity does not match binding"
+            )
+        PackagedBuildAuthoritySnapshot(
+            template,
+            bound.template_revision,
+            bound.template_digest,
+        )
+        return _output_policy(
+            template=template,
+            project_id=project_id,
+            repository_id=repository_id,
+            work_id=work_id,
+        )
+
     def _initialize(self) -> None:
         try:
             with self._store.connection() as conn:
@@ -566,6 +646,40 @@ class PackagedBuildAuthorityStore:
                     conn.execute(
                         "INSERT INTO product_factory_build_authority_schema VALUES (?, ?)",
                         (1, datetime.now(UTC).isoformat()),
+                    )
+                    current = 1
+                if current < 2:
+                    columns = {
+                        row["name"]
+                        for row in conn.execute(
+                            "PRAGMA table_info(product_factory_build_authority_bindings)"
+                        ).fetchall()
+                    }
+                    if "template_json" not in columns:
+                        conn.execute(
+                            "ALTER TABLE product_factory_build_authority_bindings "
+                            "ADD COLUMN template_json TEXT"
+                        )
+                    conn.execute(
+                        "UPDATE product_factory_build_authority_bindings "
+                        "SET template_json = ("
+                        "SELECT templates.template_json "
+                        "FROM product_factory_build_authority_templates AS templates "
+                        "WHERE templates.project_id = "
+                        "product_factory_build_authority_bindings.project_id "
+                        "AND templates.repository_id = "
+                        "product_factory_build_authority_bindings.repository_id "
+                        "AND templates.component_id = "
+                        "product_factory_build_authority_bindings.component_id "
+                        "AND templates.revision = "
+                        "product_factory_build_authority_bindings.template_revision "
+                        "AND templates.template_digest = "
+                        "product_factory_build_authority_bindings.template_digest"
+                        ") WHERE template_json IS NULL"
+                    )
+                    conn.execute(
+                        "INSERT INTO product_factory_build_authority_schema VALUES (?, ?)",
+                        (2, datetime.now(UTC).isoformat()),
                     )
         except sqlite3.Error as exc:
             raise PackagedBuildAuthorityError(
@@ -736,25 +850,33 @@ class PackagedTrustedBuildOutputPolicyPort:
         repository_id: str,
         work_id: str,
     ) -> BuildOutputPolicy:
-        _bound, snapshot = self.authorities.bound_snapshot(
+        return self.authorities.bound_output_policy(
             project_id=project_id,
             repository_id=repository_id,
             work_id=work_id,
         )
-        template = snapshot.template
-        path_identity = (
-            RepositoryPathIdentity.CASE_INSENSITIVE
-            if template.platform is Platform.WINDOWS
-            else RepositoryPathIdentity.CASE_SENSITIVE
-        )
-        return BuildOutputPolicy(
-            project_id=project_id,
-            repository_id=repository_id,
-            work_id=work_id,
-            allowed_paths=AllowedPathPolicy(template.output_paths),
-            max_changed_files=template.max_changed_files,
-            path_identity=path_identity,
-        )
+
+
+def _output_policy(
+    *,
+    template: PackagedBuildAuthorityTemplate,
+    project_id: str,
+    repository_id: str,
+    work_id: str,
+) -> BuildOutputPolicy:
+    path_identity = (
+        RepositoryPathIdentity.CASE_INSENSITIVE
+        if template.platform is Platform.WINDOWS
+        else RepositoryPathIdentity.CASE_SENSITIVE
+    )
+    return BuildOutputPolicy(
+        project_id=project_id,
+        repository_id=repository_id,
+        work_id=work_id,
+        allowed_paths=AllowedPathPolicy(template.output_paths),
+        max_changed_files=template.max_changed_files,
+        path_identity=path_identity,
+    )
 
 
 @dataclass(slots=True)
