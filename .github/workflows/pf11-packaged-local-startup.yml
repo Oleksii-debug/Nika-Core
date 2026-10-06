@@ -6,6 +6,8 @@ on:
       - "scripts/nika_windows.py"
       - "src/nika_core/config.py"
       - "src/nika_core/kernel/default_actions.py"
+      - "src/nika_core/ui/web/index.html"
+      - "src/nika_core/ui/web/app.js"
       - "src/nika_core/product_factory_packaged_local_settings.py"
       - "src/nika_core/product_factory_packaged_local_startup.py"
       - "src/nika_core/product_factory_local_model_program.py"
