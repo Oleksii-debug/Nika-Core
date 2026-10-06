@@ -535,6 +535,106 @@ def test_checkpoint_marker_publication_is_create_only(tmp_path: Path) -> None:
     assert not (checkpoint / f".{peft._CHECKPOINT_MARKER}.tmp").exists()
 
 
+def test_completed_checkpoint_recovers_known_postlink_marker_temp(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    job_root = peft._ensure_job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    payload_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+    marker_sha256 = peft._write_checkpoint_marker(
+        checkpoint,
+        request=request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha256,
+    )
+    marker = checkpoint / peft._CHECKPOINT_MARKER
+    temporary = checkpoint / f".{peft._CHECKPOINT_MARKER}.tmp"
+    temporary.hardlink_to(marker)
+    assert marker.stat().st_nlink == 2
+
+    recovered = peft._completed_step_checkpoint(
+        job_root,
+        request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+    )
+
+    assert recovered == (checkpoint, marker_sha256, payload_sha256)
+    assert marker.stat().st_nlink == 1
+    assert not temporary.exists()
+
+
+def test_completed_checkpoint_recovers_matching_prelink_marker_temp(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    job_root = peft._ensure_job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    payload_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+    marker_sha256 = peft._write_checkpoint_marker(
+        checkpoint,
+        request=request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha256,
+    )
+    marker = checkpoint / peft._CHECKPOINT_MARKER
+    temporary = checkpoint / f".{peft._CHECKPOINT_MARKER}.tmp"
+    temporary.write_bytes(marker.read_bytes())
+    assert marker.stat().st_nlink == 1
+    assert temporary.stat().st_nlink == 1
+
+    recovered = peft._completed_step_checkpoint(
+        job_root,
+        request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+    )
+
+    assert recovered == (checkpoint, marker_sha256, payload_sha256)
+    assert marker.stat().st_nlink == 1
+    assert not temporary.exists()
+
+
+def test_completed_checkpoint_rejects_unknown_marker_hardlink(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    job_root = peft._ensure_job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    payload_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+    peft._write_checkpoint_marker(
+        checkpoint,
+        request=request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha256,
+    )
+    marker = checkpoint / peft._CHECKPOINT_MARKER
+    outside = tmp_path / "unexpected-marker-hardlink"
+    outside.hardlink_to(marker)
+    assert marker.stat().st_nlink == 2
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="step_checkpoint_marker_invalid",
+    ):
+        peft._completed_step_checkpoint(
+            job_root,
+            request,
+            consumed_sha256=request.required_consumed_materials_sha256,
+        )
+
+    assert marker.stat().st_nlink == 2
+    assert outside.exists()
+
+
 def test_completed_step_checkpoint_rejects_oversized_marker(tmp_path: Path) -> None:
     request, base = _parsed(tmp_path, max_steps=1)
     config = _config(tmp_path, request, base)
