@@ -528,3 +528,75 @@ def test_wrong_work_identity_cannot_resolve_bound_authority(
             repository_id="repo-other",
             work_id=spec.request.work_id,
         )
+
+
+def test_forged_template_cannot_bypass_constructor_before_durable_storage(
+    tmp_path: Path,
+) -> None:
+    _store, _startup_value, _node_value, runtime = _runtime(tmp_path)
+    valid = _template()
+    forged = object.__new__(PackagedBuildAuthorityTemplate)
+    for name in (
+        "project_id",
+        "repository_id",
+        "component_id",
+        "node_id",
+        "platform",
+        "workspace_relpath",
+        "required_features",
+        "required_toolchains",
+        "resources",
+        "command_id",
+        "output_paths",
+        "max_changed_files",
+        "lease_seconds",
+        "require_gpu",
+    ):
+        object.__setattr__(forged, name, getattr(valid, name))
+    object.__setattr__(
+        forged,
+        "argv",
+        (str(Path(sys.executable).resolve()), "--token=constructor-bypass"),
+    )
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="credential material",
+    ):
+        runtime.authorities.configure(
+            forged,
+            expected_revision=1,
+        )
+
+    snapshot = runtime.authorities.snapshot(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        component_id=COMPONENT_ID,
+    )
+    assert snapshot.revision == 1
+    assert "constructor-bypass" not in " ".join(snapshot.template.argv)
+
+
+def test_template_rejects_non_exact_resource_scalars() -> None:
+    executable = str(Path(sys.executable).resolve())
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="cpu_cores",
+    ):
+        PackagedBuildAuthorityTemplate(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            component_id=COMPONENT_ID,
+            node_id=NODE_ID,
+            platform=_platform(),
+            workspace_relpath="products/build",
+            required_features=frozenset({"build"}),
+            required_toolchains=frozenset({"python"}),
+            resources=ResourceEnvelope(True, 1024, 2048),
+            command_id="build",
+            argv=(executable, "-m", "build"),
+            output_paths=("products/build",),
+            max_changed_files=8,
+            lease_seconds=120,
+        )
