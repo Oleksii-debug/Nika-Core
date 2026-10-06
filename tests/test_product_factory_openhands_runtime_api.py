@@ -145,6 +145,32 @@ class _RuntimeApi:
         raise AssertionError((request.method, request.url, payload))
 
 
+def _agent_factory(base_url: str, session_key: str) -> httpx.Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/health"
+        assert request.headers["X-Session-API-Key"] == session_key
+        return httpx.Response(200, json={"status": "ok"})
+
+    return httpx.Client(
+        base_url=base_url,
+        headers={"X-Session-API-Key": session_key},
+        transport=httpx.MockTransport(handler),
+    )
+
+
+def _provider(
+    api: _RuntimeApi,
+    config: OpenHandsRuntimeApiConfig,
+    *,
+    control_client_factory=None,
+) -> OpenHandsRuntimeApiSandboxProvider:
+    return OpenHandsRuntimeApiSandboxProvider(
+        config,
+        control_client_factory=control_client_factory or _factory(api, config),
+        agent_client_factory=_agent_factory,
+    )
+
+
 def _factory(api: _RuntimeApi, config: OpenHandsRuntimeApiConfig):
     transport = httpx.MockTransport(api)
 
@@ -172,10 +198,7 @@ def test_provider_rejects_unapproved_runtime_host_before_external_effect(
 ) -> None:
     config = _config()
     api = _RuntimeApi()
-    provider = OpenHandsRuntimeApiSandboxProvider(
-        config,
-        control_client_factory=_factory(api, config),
-    )
+    provider = _provider(api, config)
     job = _job(
         tmp_path,
         approved_hosts=("agent.example.test", "models.example.test"),
@@ -192,10 +215,7 @@ def test_acquire_returns_secret_free_attested_endpoint_and_redeems_client(
 ) -> None:
     config = _config()
     api = _RuntimeApi()
-    provider = OpenHandsRuntimeApiSandboxProvider(
-        config,
-        control_client_factory=_factory(api, config),
-    )
+    provider = _provider(api, config)
 
     endpoint = _run(provider.acquire(_job(tmp_path)))
 
@@ -233,10 +253,7 @@ def test_failed_work_pauses_runtime_and_fresh_provider_can_resume_recovery(
 ) -> None:
     config = _config()
     api = _RuntimeApi()
-    first = OpenHandsRuntimeApiSandboxProvider(
-        config,
-        control_client_factory=_factory(api, config),
-    )
+    first = _provider(api, config)
     job = _job(tmp_path)
     endpoint = _run(first.acquire(job))
 
@@ -244,10 +261,7 @@ def test_failed_work_pauses_runtime_and_fresh_provider_can_resume_recovery(
     assert api.status == "paused"
     assert api.exists is True
 
-    second = OpenHandsRuntimeApiSandboxProvider(
-        config,
-        control_client_factory=_factory(api, config),
-    )
+    second = _provider(api, config)
     client = second.client_for(endpoint)
     try:
         assert api.status == "running"
@@ -261,10 +275,7 @@ def test_failed_work_pauses_runtime_and_fresh_provider_can_resume_recovery(
 def test_successful_work_stops_runtime(tmp_path: pathlib.Path) -> None:
     config = _config()
     api = _RuntimeApi()
-    provider = OpenHandsRuntimeApiSandboxProvider(
-        config,
-        control_client_factory=_factory(api, config),
-    )
+    provider = _provider(api, config)
     job = _job(tmp_path)
     endpoint = _run(provider.acquire(job))
 
@@ -279,10 +290,7 @@ def test_recovery_fails_closed_if_bound_agent_server_url_changes(
 ) -> None:
     config = _config()
     api = _RuntimeApi()
-    provider = OpenHandsRuntimeApiSandboxProvider(
-        config,
-        control_client_factory=_factory(api, config),
-    )
+    provider = _provider(api, config)
     endpoint = _run(provider.acquire(_job(tmp_path)))
     api.agent_url = "https://other.example.test"
 
@@ -296,10 +304,7 @@ def test_untrusted_agent_server_host_is_stopped_before_acquire_returns(
     config = _config()
     api = _RuntimeApi()
     api.agent_url = "https://evil.example.test"
-    provider = OpenHandsRuntimeApiSandboxProvider(
-        config,
-        control_client_factory=_factory(api, config),
-    )
+    provider = _provider(api, config)
 
     with pytest.raises(OpenHandsRuntimeApiError, match="trusted Runtime API configuration"):
         _run(provider.acquire(_job(tmp_path)))
@@ -314,10 +319,7 @@ def test_control_plane_failure_does_not_echo_secret_response_body(
     config = _config()
     api = _RuntimeApi()
     api.fail_start = True
-    provider = OpenHandsRuntimeApiSandboxProvider(
-        config,
-        control_client_factory=_factory(api, config),
-    )
+    provider = _provider(api, config)
 
     with pytest.raises(OpenHandsRuntimeApiError) as caught:
         _run(provider.acquire(_job(tmp_path)))
@@ -336,10 +338,7 @@ def test_control_client_must_be_authenticated(tmp_path: pathlib.Path) -> None:
     def unauthenticated() -> httpx.Client:
         return httpx.Client(base_url=config.runtime_api_url, transport=transport)
 
-    provider = OpenHandsRuntimeApiSandboxProvider(
-        config,
-        control_client_factory=unauthenticated,
-    )
+    provider = _provider(api, config, control_client_factory=unauthenticated)
 
     with pytest.raises(OpenHandsRuntimeApiError, match="lacks X-API-Key"):
         _run(provider.acquire(_job(tmp_path)))
