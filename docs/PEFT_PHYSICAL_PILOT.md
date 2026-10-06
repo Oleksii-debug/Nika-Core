@@ -57,9 +57,11 @@ separate runtime and trainer-protocol job fingerprints, trainer deployment/imple
 provenance, consumed-material and model-directory manifest digests, distinct previous and trained
 adapter tensor-state digests, the original pause, restart-probe, and completion checkpoint IDs,
 candidate byte count, completed step count, schema version, and the literal platform value
-`windows`. The report uses schema v5: the
-canonical previous/trained tensor-state digests live in candidate manifest v2 and are bound
-transitively by `candidate_manifest_sha256` after the physical pilot verifies that they differ.
+`windows`. New reports use schema v6: the completed-step count may describe either the exact two-step
+pilot or a bounded higher-tier completion. Legacy schema-v5 reports remain readable only with
+their original exact two-step semantics and original evidence-hash domain. The canonical
+previous/trained tensor-state digests live in candidate manifest v2 and are bound transitively
+by `candidate_manifest_sha256` after the physical training harness verifies that they differ.
 It does not
 serialize training/validation records, model paths, credentials, environment variables,
 prompts, responses, or checkpoint payloads.
@@ -72,10 +74,14 @@ Register the exact local trainer executable in the canonical Artifact Registry a
 `training_executable`, including the required PEFT runtime-version metadata.
 
 Resolve the frozen training package through the canonical training-material resolver. Build
-the pilot-tier `TrainingScaleAuthorization` from the same material evidence and the
-`SubprocessTrainingWorker.execution_plan_sha256`. The physical evidence job must use exactly
-`max_steps == 2`: the first step establishes the durable pre-restart adapter state and the second
-step establishes the trained adapter tensor state after reopen.
+`TrainingScaleAuthorization` from the same material evidence and the
+`SubprocessTrainingWorker.execution_plan_sha256`. Tier 0 remains the exact two-step acceptance
+pilot: the first step establishes the durable pre-restart adapter state and the second establishes
+the trained adapter tensor state after reopen. A schema-v3 continuation into tier N > 0 instead
+uses the selected canonical `TrainingScaleTier.max_steps` as both authorization and
+`TrainingJobSpec` budget, subject to the physical execution ceiling. The same one-step durable
+pause and fresh-runtime probe still occur before execution resumes through that exact higher-tier
+budget.
 
 The restart factory must reopen the same durable checkpoint state rather than returning the
 original `TrainingRuntime` object or a new runtime backed by an empty store. The harness proves
@@ -129,8 +135,9 @@ as trainer deployment metadata; the child independently verifies those exact ins
 before training effects.
 
 The driver registers the exact trainer executable, resolves the frozen training/validation bytes,
-derives the two-step pilot scale authorization, applies one-concurrent ResourceManager admission,
-and constructs fresh runtime/worker objects for the restart proof. After COMPLETED evidence exists,
+derives either the exact two-step pilot authorization or the selected higher-tier authorization,
+applies one-concurrent ResourceManager admission, and constructs fresh runtime/worker objects for
+the restart proof. After COMPLETED evidence exists,
 its descriptor factory supplies only the public model provenance plus completed candidate digest
 and byte size. Final candidate-byte verification, Windows stability locking, strict PEFT candidate
 manifest evidence, runtime-vs-trainer job identity, and trainer deployment provenance remain owned
@@ -192,9 +199,19 @@ Run from the installed environment that owns the registered trainer executable:
 nika-peft-physical-pilot "C:\\NikaData\\physical-pilot.json"
 ```
 
-A successful invocation prints the canonical path-free schema-v5 report and publishes
+A successful invocation prints the canonical path-free schema-v6 report and publishes
 `physical-pilot-report.json` through the canonical atomic/no-clobber writer. Generated run
-evidence remains outside Git. The command never auto-discovers runtime versions and never stores
+evidence remains outside Git. For a schema-v3 higher-tier continuation, the manifest must carry
+the canonical scale plan, selected tier, promoted adapter and progression claim, and the command
+must supply the previous promoted physical-training output root as independently trusted durable
+authority, for example:
+
+```powershell
+nika-peft-physical-pilot "C:\\NikaData\\physical-tier-small.json" --trusted-progression-root "C:\\NikaRuns\\pilot-001"
+```
+
+The loader reconstructs the trusted progression proof from completed durable training/evaluation
+state; the JSON claim alone cannot authorize a higher tier. The command never auto-discovers runtime versions and never stores
 API keys, tokens, cookies, browser profiles, or other credentials.
 
 ## Example control flow
@@ -218,19 +235,23 @@ print(report.evidence_sha256)
 ```
 
 The helper supplies both the control sequence required to create the one-step pause and the
-effect-free restart probe. Reports use schema version 5 because they preserve the distinct runtime
-and trainer-protocol job identities from schema v4 while also binding the canonical previous and
-trained adapter tensor-state identities admitted by candidate manifest v2. The worker-accepted
+effect-free restart probe. New reports use schema version 6 so the evidence hash also binds the
+bounded completed-step count needed for full higher-tier execution. Schema v6 preserves the
+distinct runtime and trainer-protocol job identities and the canonical previous/trained adapter
+tensor-state identities introduced by schema v5. The worker-accepted
 consumed-material attestation, strict candidate-manifest digest, Registry trainer deployment,
 trainer/runtime provenance, and three durable checkpoint identities remain in the same evidence
 object.
 
-## Schema-v5 migration boundary
+## Schema-v5/v6 migration boundary
 
 Schema-v4 physical reports are intentionally not upgraded in place. They do not contain the
-previous/trained adapter tensor-state identities now required by the physical evidence hash.
-Re-run the canonical two-step Windows physical pilot to produce fresh schema-v5 evidence; do not
-copy, infer, or synthesize the missing digests from an older report.
+previous/trained adapter tensor-state identities required by current physical evidence. Schema-v5
+reports remain readable only as legacy exact-two-step evidence under their original hash domain;
+they cannot claim a multi-step completion. Re-run the current Windows physical training path to
+produce fresh schema-v6 evidence. Tier 0 still completes exactly two steps, while tier N > 0 must
+complete the exact selected canonical tier budget. Do not copy, infer, or synthesize missing
+digests or completed-step evidence from an older report.
 
 ## Evidence boundaries
 
@@ -238,7 +259,7 @@ A unit test, green CI run, or merely constructing a report is not physical-train
 The physical acceptance claim requires an observed successful run on the intended Windows/CPU
 ML environment with the exact Registry/runtime/material authorities that the report binds.
 
-This harness never self-sets `HUMAN_TESTED` or `NVDA_VERIFIED`. A real observed schema-v5 Windows
+This harness never self-sets `HUMAN_TESTED` or `NVDA_VERIFIED`. A real observed schema-v6 Windows
 run can supply concrete adapter-weight mutation evidence because the canonical trainer must pass
 the finite/non-empty per-step mutation fence and the final report binds distinct prior and trained
 tensor states. Repository/CI evidence alone still cannot set `TRAINING_WEIGHTS_PROVEN`,
