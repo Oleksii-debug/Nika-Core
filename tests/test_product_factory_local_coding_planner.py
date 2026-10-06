@@ -224,6 +224,34 @@ def test_planner_rejects_non_utf8_source_before_model_effect(
     assert provider.requests == []
 
 
+def test_planner_rejects_symlink_tree_entry_before_model_effect(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, _base_sha, _tree_sha = _repository(tmp_path)
+    blob = _git(repository, "hash-object", "-w", "src/value.py")
+    _git(
+        repository,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"120000,{blob},src/link.py",
+    )
+    _git(repository, "commit", "-m", "add synthetic symlink entry")
+    base_sha = _git(repository, "rev-parse", "HEAD")
+    tree_sha = _git(repository, "rev-parse", f"{base_sha}^{{tree}}")
+    provider = _Provider(_valid_response())
+    planner = _planner(repository, provider)
+    job = _job(tmp_path, base_sha=base_sha, tree_sha=tree_sha)
+
+    with pytest.raises(
+        ModelGatewayLocalCodingPlannerError,
+        match="symlink, submodule or unsupported entry",
+    ):
+        _run(planner.plan(job))
+
+    assert provider.requests == []
+
+
 def test_planner_rejects_oversized_source_before_model_effect(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -322,6 +350,23 @@ def test_planner_rejects_case_drift_for_existing_path(
         match="changes existing path casing",
     ):
         _run(planner.plan(job))
+
+
+def test_planner_rejects_oversized_model_response(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha, tree_sha = _repository(tmp_path)
+    provider = _Provider(_valid_response())
+    planner = _planner(repository, provider, max_response_bytes=32)
+    job = _job(tmp_path, base_sha=base_sha, tree_sha=tree_sha)
+
+    with pytest.raises(
+        ModelGatewayLocalCodingPlannerError,
+        match="response exceeds the byte limit",
+    ):
+        _run(planner.plan(job))
+
+    assert len(provider.requests) == 1
 
 
 def test_planner_requires_explicit_modelgateway_route(
