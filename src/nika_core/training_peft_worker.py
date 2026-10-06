@@ -3380,6 +3380,120 @@ def _snapshot_adapter_weights_sha256(
     return digest, tensor_sha256
 
 
+def _private_candidate_replay_snapshot(
+    candidate: Path,
+    authority_fd: int,
+    *,
+    expected_identity: tuple[int, int, int, int, int],
+) -> tuple[dict[str, object], str]:
+    """Bind replay digest and manifest to one private copy of the held bytes."""
+
+    try:
+        source_open = os.fstat(authority_fd)
+        if (
+            not stat.S_ISREG(source_open.st_mode)
+            or _is_reparse(source_open)
+            or source_open.st_nlink != 1
+            or _stable_stat_identity(source_open) != expected_identity
+        ):
+            _fail("candidate_replay_changed")
+        os.lseek(authority_fd, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        total = 0
+        with tempfile.TemporaryDirectory(
+            prefix=".candidate-replay-snapshot-",
+            dir=os.fspath(candidate.parent),
+        ) as raw_directory:
+            snapshot = Path(raw_directory) / _CANDIDATE_FILE
+            with snapshot.open("xb") as target:
+                while True:
+                    chunk = os.read(authority_fd, _READ_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _MAX_CHECKPOINT_BYTES:
+                        _fail("candidate_replay_changed")
+                    digest.update(chunk)
+                    target.write(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+            if total <= 0:
+                _fail("candidate_replay_changed")
+
+            source_after = os.fstat(authority_fd)
+            source_path = _require_regular_unlinked(
+                candidate,
+                code="candidate_replay_changed",
+            )
+            if (
+                source_after.st_nlink != 1
+                or source_path.st_nlink != 1
+                or _stable_stat_identity(source_after) != expected_identity
+                or _stable_stat_identity(source_path) != expected_identity
+            ):
+                _fail("candidate_replay_changed")
+
+            snapshot_before = _require_regular_unlinked(
+                snapshot,
+                code="candidate_replay_changed",
+            )
+            if snapshot_before.st_nlink != 1 or snapshot_before.st_size != total:
+                _fail("candidate_replay_changed")
+            snapshot_identity = _stable_stat_identity(snapshot_before)
+            snapshot_fd: int | None = None
+            try:
+                snapshot_fd = _open_readonly_snapshot(snapshot)
+                snapshot_open = os.fstat(snapshot_fd)
+                if (
+                    not stat.S_ISREG(snapshot_open.st_mode)
+                    or _is_reparse(snapshot_open)
+                    or snapshot_open.st_nlink != 1
+                    or _stable_stat_identity(snapshot_open) != snapshot_identity
+                ):
+                    _fail("candidate_replay_changed")
+                snapshot_sha256, snapshot_size = _hash_regular_snapshot(
+                    snapshot,
+                    code="candidate_replay_changed",
+                )
+                if (
+                    snapshot_size != total
+                    or snapshot_sha256 != digest.hexdigest()
+                ):
+                    _fail("candidate_replay_changed")
+
+                manifest = candidate_adapter_manifest(snapshot.resolve(strict=True))
+
+                snapshot_after = os.fstat(snapshot_fd)
+                snapshot_path = _require_regular_unlinked(
+                    snapshot,
+                    code="candidate_replay_changed",
+                )
+                after_sha256, after_size = _hash_regular_snapshot(
+                    snapshot,
+                    code="candidate_replay_changed",
+                )
+                if (
+                    snapshot_after.st_nlink != 1
+                    or snapshot_path.st_nlink != 1
+                    or _stable_stat_identity(snapshot_after) != snapshot_identity
+                    or _stable_stat_identity(snapshot_path) != snapshot_identity
+                    or after_size != total
+                    or after_sha256 != digest.hexdigest()
+                ):
+                    _fail("candidate_replay_changed")
+                return manifest, digest.hexdigest()
+            finally:
+                if snapshot_fd is not None:
+                    try:
+                        os.close(snapshot_fd)
+                    except OSError:
+                        pass
+    except PeftTrainerError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _fail("candidate_replay_invalid")
+
+
 def _existing_candidate_sha256(
     candidate: Path,
     *,
@@ -3403,23 +3517,28 @@ def _existing_candidate_sha256(
     try:
         authority_fd = _open_readonly_snapshot(candidate)
         opened = os.fstat(authority_fd)
+        opened_identity = _stable_stat_identity(opened)
         if (
             not stat.S_ISREG(opened.st_mode)
             or _is_reparse(opened)
-            or _stable_stat_identity(opened) != _stable_stat_identity(before)
+            or opened_identity != _stable_stat_identity(before)
             or opened.st_nlink != 1
         ):
             _fail("candidate_replay_changed")
 
-        observed_manifest = candidate_adapter_manifest(candidate)
+        observed_manifest, digest = _private_candidate_replay_snapshot(
+            candidate,
+            authority_fd,
+            expected_identity=opened_identity,
+        )
         middle_open = os.fstat(authority_fd)
         middle_path = _require_regular_unlinked(
             candidate,
             code="candidate_replay_changed",
         )
         if (
-            _stable_stat_identity(middle_open) != _stable_stat_identity(opened)
-            or _stable_stat_identity(middle_path) != _stable_stat_identity(opened)
+            _stable_stat_identity(middle_open) != opened_identity
+            or _stable_stat_identity(middle_path) != opened_identity
             or middle_open.st_nlink != 1
             or middle_path.st_nlink != 1
         ):
@@ -3427,19 +3546,14 @@ def _existing_candidate_sha256(
         if observed_manifest != expected_manifest:
             _fail("candidate_replay_identity_mismatch")
 
-        digest, size = _hash_regular_snapshot(
-            candidate,
-            code="candidate_replay_changed",
-        )
         after_open = os.fstat(authority_fd)
         after_path = _require_regular_unlinked(
             candidate,
             code="candidate_replay_changed",
         )
         if (
-            size <= 0
-            or _stable_stat_identity(after_open) != _stable_stat_identity(opened)
-            or _stable_stat_identity(after_path) != _stable_stat_identity(opened)
+            _stable_stat_identity(after_open) != opened_identity
+            or _stable_stat_identity(after_path) != opened_identity
             or after_open.st_nlink != 1
             or after_path.st_nlink != 1
         ):
