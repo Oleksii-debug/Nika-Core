@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from _product_decision_test_support import ApprovedProductDecisionRepository
-
 import json
 from pathlib import Path
 
 import httpx
 import pytest
 
+from _product_decision_test_support import ApprovedProductDecisionRepository
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
     ProductDecision,
     ProductDecisionState,
