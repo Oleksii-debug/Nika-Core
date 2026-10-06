@@ -252,6 +252,27 @@ def test_planner_rejects_symlink_tree_entry_before_model_effect(
     assert provider.requests == []
 
 
+def test_planner_bounds_git_stdout_before_model_effect(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha, tree_sha = _repository(tmp_path)
+    provider = _Provider(_valid_response())
+    planner = _planner(
+        repository,
+        provider,
+        max_git_output_bytes=40,
+    )
+    job = _job(tmp_path, base_sha=base_sha, tree_sha=tree_sha)
+
+    with pytest.raises(
+        ModelGatewayLocalCodingPlannerError,
+        match="Git command output exceeds the byte limit",
+    ):
+        _run(planner.plan(job))
+
+    assert provider.requests == []
+
+
 def test_planner_rejects_oversized_source_before_model_effect(
     tmp_path: pathlib.Path,
 ) -> None:
