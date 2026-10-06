@@ -510,6 +510,87 @@ def _build_progression_proof(
     return proof
 
 
+def restore_scale_progression_proof_from_trusted_digest(
+    value: object,
+    *,
+    trusted_proof_sha256: str,
+) -> TrainingScaleProgressionProof:
+    """Restore canonical proof bytes only against an independent durable digest.
+
+    This helper does not establish promotion authority by itself. Callers must source
+    the trusted proof digest from Nika-owned durable state rather than from the same
+    serialized payload being restored.
+    """
+
+    expected_digest = _require_sha256(
+        trusted_proof_sha256,
+        name="trusted_proof_sha256",
+    )
+    if type(value) is not dict:
+        raise TrainingScaleError(
+            "durable training progression proof payload must be an exact object"
+        )
+    expected_fields = {
+        "authorization_sha256",
+        "base_artifact_ref",
+        "base_sha256",
+        "candidate_artifact_ref",
+        "candidate_sha256",
+        "comparison_evidence_sha256",
+        "evaluation_set_sha256",
+        "execution_plan_sha256",
+        "frozen_package_sha256",
+        "job_fingerprint",
+        "job_id",
+        "plan_sha256",
+        "tier_index",
+        "training_material_sha256",
+    }
+    if set(value) != expected_fields:
+        raise TrainingScaleError(
+            "durable training progression proof fields do not match the strict schema"
+        )
+    for field in (
+        "authorization_sha256",
+        "base_sha256",
+        "candidate_sha256",
+        "comparison_evidence_sha256",
+        "evaluation_set_sha256",
+        "execution_plan_sha256",
+        "frozen_package_sha256",
+        "job_fingerprint",
+        "plan_sha256",
+        "training_material_sha256",
+    ):
+        _require_sha256(value[field], name=field)
+    tier_index = value["tier_index"]
+    if type(tier_index) is not int or tier_index < 0:
+        raise TrainingScaleError("tier_index must be a non-negative integer")
+    for field in ("job_id", "base_artifact_ref", "candidate_artifact_ref"):
+        _require_text(value[field], name=field)
+    proof = _build_progression_proof(
+        plan_sha256=value["plan_sha256"],
+        tier_index=tier_index,
+        authorization_sha256=value["authorization_sha256"],
+        job_id=value["job_id"],
+        job_fingerprint=value["job_fingerprint"],
+        base_artifact_ref=value["base_artifact_ref"],
+        base_sha256=value["base_sha256"],
+        candidate_artifact_ref=value["candidate_artifact_ref"],
+        candidate_sha256=value["candidate_sha256"],
+        frozen_package_sha256=value["frozen_package_sha256"],
+        training_material_sha256=value["training_material_sha256"],
+        execution_plan_sha256=value["execution_plan_sha256"],
+        comparison_evidence_sha256=value["comparison_evidence_sha256"],
+        evaluation_set_sha256=value["evaluation_set_sha256"],
+    )
+    if not hmac.compare_digest(proof.proof_sha256, expected_digest):
+        raise TrainingScaleError(
+            "durable training progression proof does not match trusted digest authority"
+        )
+    return proof
+
+
 @dataclass(frozen=True, slots=True)
 class TrainingScaleAuthorization:
     plan: TrainingScalePlan
