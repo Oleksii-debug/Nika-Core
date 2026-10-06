@@ -693,6 +693,36 @@ def build_windows_bridge(
         store=store,
     )
 
+    def execution_plan_state() -> dict[str, object] | None:
+        if product_factory_execution_plan_files is None:
+            return None
+        snapshot = product_factory_execution_plan_files.snapshot()
+        active_project_id = product_router.active_project_id
+        if active_project_id is None:
+            return {
+                "status": "missing",
+                "loaded": False,
+                "project_id": None,
+                "message": (
+                    "Спочатку створіть або відкрийте поточний ProductProject, "
+                    "а потім завантажте його JSON-план."
+                ),
+            }
+        if (
+            snapshot.get("loaded") is True
+            and snapshot.get("project_id") != active_project_id
+        ):
+            return {
+                "status": "missing",
+                "loaded": False,
+                "project_id": None,
+                "message": (
+                    "Для поточного ProductProject JSON-план виконання не завантажено. "
+                    "Виберіть його план перед роботою з репозиторіями."
+                ),
+            }
+        return snapshot
+
     def local_repository_binding_state() -> dict[str, object]:
         operator = product_factory_local_repository_operator
         if operator is None:
@@ -744,11 +774,7 @@ def build_windows_bridge(
         state["speech"] = speech.snapshot()
         state["voice"] = voice.snapshot()
         state["voice_model_setup"] = voice_model_setup.snapshot()
-        state["product_factory_execution_plan"] = (
-            product_factory_execution_plan_files.snapshot()
-            if product_factory_execution_plan_files is not None
-            else None
-        )
+        state["product_factory_execution_plan"] = execution_plan_state()
         state["product_factory_local_repositories"] = local_repository_binding_state()
         return agent_builder_state.decorate(state)
 

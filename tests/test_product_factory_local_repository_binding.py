@@ -459,6 +459,79 @@ def test_bind_rejects_filesystem_identity_changed_before_write(
         project.project_id,
         repository.repository_id,
     ) is None
+    with store.connection() as conn:
+        bound_audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE event_type='product_factory.local_repository.bound' "
+            "AND entity_type='product_project' AND entity_id=?",
+            (project.project_id,),
+        ).fetchone()[0]
+    assert bound_audit_count == 0
+
+
+def test_rebind_rejects_filesystem_identity_changed_before_write_without_mutation(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    first_root = _root(tmp_path, "first repository")
+    replacement_root = _root(tmp_path, "replacement repository")
+    moved = tmp_path / "replacement moved before binding write"
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    original_require_project_repository = bindings._require_project_repository
+    require_calls = 0
+
+    def require_project_repository(project_id: str, locator: str):
+        nonlocal require_calls
+        current = original_require_project_repository(project_id, locator)
+        require_calls += 1
+        if require_calls == 2:
+            replacement_root.rename(moved)
+            replacement_root.mkdir()
+            (replacement_root / ".git").mkdir()
+        return current
+
+    monkeypatch.setattr(
+        bindings,
+        "_require_project_repository",
+        require_project_repository,
+    )
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="filesystem identity changed",
+    ):
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=replacement_root,
+            expected_binding_version=first.binding_version,
+        )
+
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) == first.binding_version
+    assert bindings.require(
+        project.project_id,
+        repository.repository_id,
+    ).root == first_root.resolve(strict=True)
+    with store.connection() as conn:
+        bound_audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE event_type='product_factory.local_repository.bound' "
+            "AND entity_type='product_project' AND entity_id=?",
+            (project.project_id,),
+        ).fetchone()[0]
+    assert bound_audit_count == 1
 
 
 def test_require_rejects_binding_changed_during_filesystem_validation(

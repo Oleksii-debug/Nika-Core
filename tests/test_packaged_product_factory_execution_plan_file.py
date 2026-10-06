@@ -368,10 +368,8 @@ def test_accessible_execution_plan_file_controls_and_bridge_contract() -> None:
         "load_product_factory_execution_plan"
         in script
     )
-    assert (
-        'state["product_factory_execution_plan"] = ('
-        in script
-    )
+    assert 'state["product_factory_execution_plan"] = execution_plan_state()' in script
+    assert "def execution_plan_state()" in script
 
 
 class _UnusedProgramWorker:
@@ -481,6 +479,11 @@ def test_windows_bridge_fences_plan_and_repository_actions_to_active_product(
         second_state = bridge.get_state()["state"]
         second_id = second_state["product_project"]["project_id"]
         assert second_id != first_id
+        stale_plan_state = second_state["product_factory_execution_plan"]
+        assert stale_plan_state["status"] == "missing"
+        assert stale_plan_state["loaded"] is False
+        assert stale_plan_state["project_id"] is None
+        assert "поточного ProductProject" in stale_plan_state["message"]
         stale_repository_state = second_state["product_factory_local_repositories"]
         assert stale_repository_state["status"] == "invalid"
         assert stale_repository_state["project_id"] == second_id
