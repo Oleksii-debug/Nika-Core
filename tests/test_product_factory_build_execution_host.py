@@ -363,6 +363,67 @@ def test_restart_post_effect_does_not_require_old_node_lease_to_be_recreated(
     assert restarted_port.inspect_calls == 1
 
 
+def test_restart_post_effect_preserves_unrelated_current_node_lease(
+    tmp_path,
+) -> None:
+    port = Port(programming_error=True, inspect_result=_result())
+    host, checkpoint, _, _, _, task_id, store = _setup(tmp_path, port=port)
+    spec = _spec("work-1", Platform.LINUX, "linux-1")
+    _dispatch(host, spec)
+    with pytest.raises(RuntimeError, match="adapter crash"):
+        host.execute("work-1", now=NOW)
+    assert (
+        checkpoint.latest().snapshot.coordinator.records[0].state
+        is BuildExecutionState.EFFECT_IN_FLIGHT
+    )
+
+    registry = ExecutionNodeRegistry()
+    registry.register(_node("linux-1", Platform.LINUX))
+    unrelated = registry.acquire(
+        ExecutionRequest(
+            "project-1",
+            "work-2",
+            Platform.LINUX,
+            frozenset({"build"}),
+            frozenset({"python"}),
+            ResourceEnvelope(2, 2048, 4096),
+        ),
+        now=NOW,
+        lease_seconds=120,
+    )
+    restarted_port = Port(inspect_result=_result())
+    restarted = DurableBuildExecutionHost(
+        BuildExecutionCoordinator(
+            registry,
+            Available(set()),
+            Authority(_authority("work-1", "linux-1")),
+        ),
+        restarted_port,
+        FileEvidence(),
+        OutputPolicies(
+            BuildOutputPolicy(
+                "project-1",
+                "repo-main",
+                "work-1",
+                AllowedPathPolicy(("products/build",)),
+                4,
+                RepositoryPathIdentity.CASE_SENSITIVE,
+            )
+        ),
+        SQLiteBuildExecutionCheckpointStore(store, task_id, "project-1"),
+    )
+
+    restored = restarted.restore_latest(now=NOW)
+
+    assert restored.coordinator.records[0].state is BuildExecutionState.RECONCILE_REQUIRED
+    assert registry.snapshot().leases == (unrelated,)
+    assert restarted_port.run_calls == 0
+    completed = restarted.reconcile("work-1", now=NOW)
+    assert completed.state is BuildExecutionState.SUCCEEDED
+    assert restarted_port.inspect_calls == 1
+    assert registry.snapshot().leases == (unrelated,)
+
+
 def test_restart_post_effect_rejects_conflicting_current_work_lease(
     tmp_path,
 ) -> None:
