@@ -8,7 +8,7 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
-from nika_core.product_factory_coordinator import ReviewDecision, WorkerResultEnvelope
+from nika_core.product_factory_coordinator import ReviewDecision, WorkerResultEnvelope, WorkState
 from nika_core.product_factory_multi_repository import (
     MultiRepositoryExecutionError,
     MultiRepositoryProductFactoryHost,
@@ -273,6 +273,96 @@ def test_prepare_is_exact_idempotent_and_restart_restores_same_authority(
     assert restarted.graph_digest == first.graph_digest
     assert restarted.state.coordinator.snapshot() == first.state.coordinator.snapshot()
     assert repository.get(project.project_id).row_version == project.row_version
+
+
+def test_prepare_after_execution_progress_restores_latest_without_reset(
+    tmp_path: Path,
+) -> None:
+    (
+        _store,
+        _repository,
+        _tasks,
+        service,
+        _project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    prepared = service.prepare(plan)
+    worker = FailureResultWorker()
+    service._host.worker = worker
+    service._host._program.worker = worker
+
+    outcomes = asyncio.run(
+        service._host.dispatch_ready(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            max_parallel=1,
+            max_count=1,
+        )
+    )
+    progressed = prepared.state.coordinator.snapshot()
+
+    assert len(outcomes) == 1
+    assert progressed.revision > 0
+    assert progressed.records[0].state is WorkState.REPAIR_REQUIRED
+    assert worker.dispatch_calls == 1
+
+    resumed = service.prepare(plan)
+
+    assert resumed.host_task_id == prepared.host_task_id
+    assert resumed.state.coordinator.snapshot() == progressed
+    assert resumed.state.coordinator is not prepared.state.coordinator
+    assert worker.dispatch_calls == 1
+
+
+def test_prepare_rejects_changed_plan_without_resetting_durable_progress(
+    tmp_path: Path,
+) -> None:
+    (
+        _store,
+        _repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    prepared = service.prepare(plan)
+    worker = FailureResultWorker()
+    service._host.worker = worker
+    service._host._program.worker = worker
+    asyncio.run(
+        service._host.dispatch_ready(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            max_parallel=1,
+            max_count=1,
+        )
+    )
+    progressed = prepared.state.coordinator.snapshot()
+    changed_plan = PackagedProductFactoryExecutionPlan(
+        project_id=plan.project_id,
+        expected_spec_version=plan.expected_spec_version,
+        expected_row_version=plan.expected_row_version,
+        graph=plan.graph,
+        graph_version=plan.graph_version,
+        base_shas={"repo-core": "b" * 40},
+        component_goals=dict(plan.component_goals),
+        permission_ceiling=plan.permission_ceiling,
+    )
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="trusted plan authority",
+    ):
+        service.prepare(changed_plan)
+
+    restored = service.restore(project.project_id)
+    assert restored.state.coordinator.snapshot() == progressed
 
 
 def test_prepare_recovers_after_exact_host_task_exists_without_graph_checkpoint(
