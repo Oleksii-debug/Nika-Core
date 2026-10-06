@@ -42,6 +42,19 @@ _SENSITIVE_ARG_MARKERS = (
     "secret=",
     "token=",
 )
+_SENSITIVE_ARG_OPTIONS = frozenset(
+    {
+        "--access-token",
+        "--api-key",
+        "--apikey",
+        "--authorization",
+        "--passwd",
+        "--password",
+        "--refresh-token",
+        "--secret",
+        "--token",
+    }
+)
 
 
 class PackagedBuildAuthorityError(ValueError):
@@ -1031,7 +1044,12 @@ def _text_list(
 
 def _reject_sensitive_argv(argv: tuple[str, ...]) -> None:
     for arg in argv:
-        if any(marker in arg.casefold() for marker in _SENSITIVE_ARG_MARKERS):
+        folded = arg.casefold()
+        option = folded.split("=", 1)[0]
+        if (
+            option in _SENSITIVE_ARG_OPTIONS
+            or any(marker in folded for marker in _SENSITIVE_ARG_MARKERS)
+        ):
             raise PackagedBuildAuthorityError(
                 "packaged build argv must not contain inline credential material"
             )
