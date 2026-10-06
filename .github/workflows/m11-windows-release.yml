@@ -42,6 +42,12 @@ on:
       - "tests/test_speech_streaming.py"
       - "tests/test_packaged_voice_entrypoint.py"
       - "tests/test_packaged_voice_model_setup.py"
+      - "tests/test_accessible_task_pagination.py"
+      - "tests/test_packaged_product_decision_presentation.py"
+      - "tests/test_packaged_product_status_presentation.py"
+      - "tests/test_terminal_packaged_command_convergence.py"
+      - "tests/test_terminal_packaged_task_explicit_target.py"
+      - "tests/test_terminal_user_flow_integration.py"
       - "tests/test_packaged_startup_cleanup.py"
       - "tests/test_desktop_voice.py"
       - "tests/test_microphone_capture.py"
@@ -123,6 +129,12 @@ on:
       - "tests/test_speech_streaming.py"
       - "tests/test_packaged_voice_entrypoint.py"
       - "tests/test_packaged_voice_model_setup.py"
+      - "tests/test_accessible_task_pagination.py"
+      - "tests/test_packaged_product_decision_presentation.py"
+      - "tests/test_packaged_product_status_presentation.py"
+      - "tests/test_terminal_packaged_command_convergence.py"
+      - "tests/test_terminal_packaged_task_explicit_target.py"
+      - "tests/test_terminal_user_flow_integration.py"
       - "tests/test_packaged_startup_cleanup.py"
       - "tests/test_desktop_voice.py"
       - "tests/test_microphone_capture.py"
@@ -229,6 +241,12 @@ jobs:
           tests/test_speech_streaming.py
           tests/test_packaged_voice_entrypoint.py
           tests/test_packaged_voice_model_setup.py
+          tests/test_accessible_task_pagination.py
+          tests/test_packaged_product_decision_presentation.py
+          tests/test_packaged_product_status_presentation.py
+          tests/test_terminal_packaged_command_convergence.py
+          tests/test_terminal_packaged_task_explicit_target.py
+          tests/test_terminal_user_flow_integration.py
           tests/test_packaged_startup_cleanup.py
           tests/test_desktop_voice.py
           tests/test_microphone_capture.py
