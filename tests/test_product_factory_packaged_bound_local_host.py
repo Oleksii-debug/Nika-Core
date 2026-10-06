@@ -4,6 +4,7 @@ import hashlib
 import json
 import pathlib
 import shutil
+import sqlite3
 import subprocess
 
 import pytest
@@ -336,6 +337,61 @@ def test_admitted_entry_keeps_frozen_model_if_revision_changes_after_recheck(
         match="model authority changed after packaged startup",
     ):
         host._entry_for("later-host-task", project, resolved)
+
+
+def test_model_authority_check_runs_under_durable_bind_write_fence(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    base_sha = _git(root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    original_require_current = host._require_model_authority_current
+    fence_observations: list[str] = []
+
+    def require_current_under_fence() -> None:
+        contender = sqlite3.connect(store.path, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                contender.execute("BEGIN IMMEDIATE")
+            fence_observations.append("writer-blocked")
+        finally:
+            contender.close()
+        original_require_current()
+
+    host._require_model_authority_current = require_current_under_fence
+
+    host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests"}
+        ),
+    )
+
+    assert fence_observations == ["writer-blocked"]
+    assert (
+        packaged_bound_local_host._MODEL_AUTHORITY_KEY
+        in TaskQueue(store).get("host-task").payload
+    )
 
 
 def test_host_task_persists_secret_free_model_authority_snapshot(
