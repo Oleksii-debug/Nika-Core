@@ -249,6 +249,20 @@ def test_multi_repository_host_rejects_product_factory_program_host_subclass(
         )
 
 
+def test_multi_repository_host_rejects_post_composition_store_drift(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, _base_sha = _repository(tmp_path)
+    _store, program = _program(tmp_path, repository)
+    foreign_store = SQLiteStore(tmp_path / "foreign-drift.db")
+    foreign_store.initialize()
+
+    program.multi_repository_host.store = foreign_store
+
+    with pytest.raises(MultiRepositoryExecutionError, match="store changed"):
+        program.multi_repository_host._assert_program_composition()
+
+
 def test_openhands_multi_repository_host_drives_packaged_prepare_and_dispatch(
     tmp_path: pathlib.Path,
 ) -> None:
