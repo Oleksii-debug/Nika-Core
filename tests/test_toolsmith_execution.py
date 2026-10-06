@@ -466,6 +466,23 @@ def test_posix_launch_snapshot_falls_back_without_memfd(
     assert result.stdout.strip() == "fallback-snapshot"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_launch_snapshot_does_not_grant_execute_permission(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o600)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="pinned runtime executable is not executable",
+    ):
+        with guard:
+            raise AssertionError("non-executable source must not gain launch permission")
+
+
 def test_typed_runner_rejects_same_path_replacement_after_runtime_admission(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -568,6 +585,50 @@ def test_posix_absolute_git_launch_owns_descriptor_guard(
 
     assert result.returncode == 0
     assert result.stdout.startswith("git version ")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_git_launch_survives_same_inode_mutation_at_subprocess_run(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_git = shutil.which("git")
+    if source_git is None:
+        pytest.skip("Git CLI unavailable")
+    executable = tmp_path / pathlib.Path(source_git).name
+    shutil.copy2(pathlib.Path(source_git).resolve(strict=True), executable)
+    expected_sha256 = execution_module._pinned_executable_sha256(executable)
+    original_stat = executable.stat()
+    original_run = execution_module.subprocess.run
+    mutated = False
+
+    def mutating_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal mutated
+        if not mutated:
+            executable.write_bytes(b"mutated git executable")
+            mutated = True
+        return original_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution_module.subprocess, "run", mutating_run)
+
+    result = execution_module._git(
+        (str(executable), "--version"),
+        cwd=tmp_path,
+        environment=sterile_git_environment(
+            {"PATH": os.environ.get("PATH", "")}
+        ),
+        expected_executable_sha256=expected_sha256,
+    )
+
+    mutated_stat = executable.stat()
+    assert mutated is True
+    assert (mutated_stat.st_dev, mutated_stat.st_ino) == (
+        original_stat.st_dev,
+        original_stat.st_ino,
+    )
+    assert result.returncode == 0
+    assert result.stdout.startswith("git version ")
+    assert executable.read_bytes() == b"mutated git executable"
 
 
 def test_private_git_rejects_replacement_after_host_git_admission(
