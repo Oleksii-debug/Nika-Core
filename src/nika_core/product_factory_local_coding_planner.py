@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import subprocess
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -34,6 +35,7 @@ _DEFAULT_MAX_SOURCE_FILES = 128
 _DEFAULT_MAX_FILE_BYTES = 128 * 1024
 _DEFAULT_MAX_SOURCE_BYTES = 512 * 1024
 _DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
+_DEFAULT_MAX_GIT_OUTPUT_BYTES = 2 * 1024 * 1024
 _DEFAULT_GIT_TIMEOUT_SECONDS = 30
 
 
@@ -70,6 +72,7 @@ class ModelGatewayLocalCodingPlanner:
     max_file_bytes: int = _DEFAULT_MAX_FILE_BYTES
     max_source_bytes: int = _DEFAULT_MAX_SOURCE_BYTES
     max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES
+    max_git_output_bytes: int = _DEFAULT_MAX_GIT_OUTPUT_BYTES
     git_executable: str = "git"
     source_environment: Mapping[str, str] | None = None
     _repositories: Mapping[str, pathlib.Path] = field(init=False, repr=False)
@@ -89,6 +92,7 @@ class ModelGatewayLocalCodingPlanner:
             ("max_file_bytes", self.max_file_bytes),
             ("max_source_bytes", self.max_source_bytes),
             ("max_response_bytes", self.max_response_bytes),
+            ("max_git_output_bytes", self.max_git_output_bytes),
         ):
             if type(value) is not int or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -462,27 +466,102 @@ class ModelGatewayLocalCodingPlanner:
             ) from exc
 
     def _git_bytes(self, repository_root: pathlib.Path, *arguments: str) -> bytes:
+        process: subprocess.Popen[bytes] | None = None
+        reader: threading.Thread | None = None
+        output = bytearray()
+        overflow = threading.Event()
+        read_failures: list[BaseException] = []
+
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 (self.git_executable, *arguments),
                 cwd=repository_root,
                 env=dict(self._environment),
                 shell=False,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=_DEFAULT_GIT_TIMEOUT_SECONDS,
-                check=False,
+                stderr=subprocess.DEVNULL,
             )
+            if process.stdout is None:
+                raise ModelGatewayLocalCodingPlannerError(
+                    "planner Git command stdout pipe is unavailable"
+                )
+            stdout = process.stdout
+
+            def read_stdout() -> None:
+                try:
+                    while len(output) <= self.max_git_output_bytes:
+                        remaining = self.max_git_output_bytes + 1 - len(output)
+                        chunk = stdout.read(min(64 * 1024, remaining))
+                        if not chunk:
+                            return
+                        output.extend(chunk)
+                        if len(output) > self.max_git_output_bytes:
+                            overflow.set()
+                            try:
+                                process.kill()
+                            except OSError:
+                                pass
+                            return
+                except (OSError, ValueError) as exc:
+                    read_failures.append(exc)
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+
+            reader = threading.Thread(
+                target=read_stdout,
+                name="nika-planner-git-output",
+                daemon=True,
+            )
+            reader.start()
+            try:
+                returncode = process.wait(timeout=_DEFAULT_GIT_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as exc:
+                process.kill()
+                process.wait()
+                raise ModelGatewayLocalCodingPlannerError(
+                    "planner Git command timed out"
+                ) from exc
+            reader.join()
+
+            if read_failures:
+                raise ModelGatewayLocalCodingPlannerError(
+                    "planner Git command output could not be read"
+                ) from read_failures[0]
+            if overflow.is_set() or len(output) > self.max_git_output_bytes:
+                raise ModelGatewayLocalCodingPlannerError(
+                    "planner Git command output exceeds the byte limit"
+                )
+            if returncode != 0:
+                raise ModelGatewayLocalCodingPlannerError(
+                    f"planner Git command failed (exit {returncode})"
+                )
+            return bytes(output)
+        except ModelGatewayLocalCodingPlannerError:
+            raise
         except (OSError, subprocess.SubprocessError) as exc:
             raise ModelGatewayLocalCodingPlannerError(
                 "planner Git command could not be executed"
             ) from exc
-        if result.returncode != 0:
-            raise ModelGatewayLocalCodingPlannerError(
-                f"planner Git command failed (exit {result.returncode})"
-            )
-        return bytes(result.stdout)
+        finally:
+            if process is not None and process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                try:
+                    process.wait()
+                except OSError:
+                    pass
+            if process is not None and process.stdout is not None:
+                try:
+                    process.stdout.close()
+                except OSError:
+                    pass
+            if reader is not None and reader.is_alive():
+                reader.join()
 
 
 def _canonical_text(value: object, label: str, *, max_bytes: int) -> str:
