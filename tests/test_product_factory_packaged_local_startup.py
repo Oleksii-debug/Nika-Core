@@ -809,3 +809,73 @@ def test_windows_bridge_does_not_activate_changed_startup_authority_mid_build(
     finally:
         for callback in reversed(cleanup):
             callback()
+
+def test_packaged_local_startup_html_exposes_semantic_keyboard_controls() -> None:
+    html = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src"
+        / "nika_core"
+        / "ui"
+        / "web"
+        / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert '<label for="product-factory-local-startup-json">' in html
+    assert 'id="product-factory-local-startup-json"' in html
+    assert 'maxlength="65536"' in html
+    assert (
+        'aria-describedby="product-factory-local-startup-help '
+        'product-factory-local-startup-status"'
+        in html
+    )
+    assert 'id="product-factory-local-startup-save"' in html
+    assert 'data-action-id="settings.product_factory_local.configure"' in html
+    assert 'id="product-factory-local-startup-reload"' in html
+    assert 'data-action-id="settings.product_factory_local.refresh"' in html
+    assert html.count(
+        'data-error-focus-target="product-factory-local-startup-json"'
+    ) >= 2
+
+
+def test_packaged_local_startup_js_preserves_revision_dirty_and_fail_closed_state() -> None:
+    javascript = (
+        pathlib.Path(__file__).resolve().parents[1]
+        / "src"
+        / "nika_core"
+        / "ui"
+        / "web"
+        / "app.js"
+    ).read_text(encoding="utf-8")
+
+    required_fragments = (
+        'let productFactoryLocalStartupRevision = 0;',
+        'let productFactoryLocalStartupDirty = false;',
+        'function validProductFactoryLocalStartupSnapshot(snapshot)',
+        'function renderProductFactoryLocalStartup(snapshot)',
+        'productFactoryLocalStartupJson.disabled = true;',
+        'productFactoryLocalStartupSave.disabled = true;',
+        'snapshot.revision !== productFactoryLocalStartupRevision',
+        'productFactoryLocalStartupDirty = true;',
+        'payload.revision = productFactoryLocalStartupRevision;',
+        'payload.config_json = raw || null;',
+        '"settings.product_factory_local.configure"',
+        '"settings.product_factory_local.refresh"',
+        'productFactoryLocalStartupDirty = false;',
+        'document.documentElement.dataset.nikaReady = "false";',
+    )
+    for fragment in required_fragments:
+        assert fragment in javascript
+
+    configure_payload = javascript.index(
+        'if (actionId === "settings.product_factory_local.configure")'
+    )
+    revision_payload = javascript.index(
+        "payload.revision = productFactoryLocalStartupRevision;",
+        configure_payload,
+    )
+    config_payload = javascript.index(
+        "payload.config_json = raw || null;",
+        revision_payload,
+    )
+    dispatch = javascript.index("window.pywebview.api.dispatch", config_payload)
+    assert configure_payload < revision_payload < config_payload < dispatch
