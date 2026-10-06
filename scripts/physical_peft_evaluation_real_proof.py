@@ -340,7 +340,34 @@ def _verified_candidate_tokenization_from_snapshot(
         ) as snapshot_root:
             snapshot_path = Path(snapshot_root) / "adapter_model.safetensors"
             _write_new_file(snapshot_path, candidate_bytes)
-            manifest = candidate_adapter_manifest(snapshot_path.resolve(strict=True))
+            descriptor: int | None = None
+            try:
+                descriptor = _open_readonly_snapshot(snapshot_path)
+                if (
+                    _stable_file_bytes(
+                        snapshot_path,
+                        max_bytes=_MAX_EVIDENCE_CANDIDATE_BYTES,
+                        name="candidate verification snapshot",
+                    )
+                    != candidate_bytes
+                ):
+                    _fail("physical evaluation candidate snapshot changed before manifest read")
+                manifest = candidate_adapter_manifest(snapshot_path.resolve(strict=True))
+                if (
+                    _stable_file_bytes(
+                        snapshot_path,
+                        max_bytes=_MAX_EVIDENCE_CANDIDATE_BYTES,
+                        name="candidate verification snapshot",
+                    )
+                    != candidate_bytes
+                ):
+                    _fail("physical evaluation candidate snapshot changed during manifest read")
+            finally:
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
     except ProofError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
