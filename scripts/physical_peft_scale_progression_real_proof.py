@@ -36,6 +36,7 @@ _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_JSON_BYTES = 1024 * 1024
 _MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
+_MAX_FOUNDATION_BYTES = 64 * 1024 * 1024
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_OPEN_EXISTING = 3
@@ -173,8 +174,9 @@ def _sha256_file(path: Path) -> tuple[str, int]:
             or not stat.S_ISREG(before.st_mode)
             or int(getattr(before, "st_nlink", 1)) != 1
             or before.st_size <= 0
+            or before.st_size > _MAX_FOUNDATION_BYTES
         ):
-            _fail(f"authority file type is invalid: {path.name}")
+            _fail(f"authority file type or size is invalid: {path.name}")
         descriptor = _open_readonly_snapshot(path)
         _require_open_snapshot_identity(
             path,
@@ -1017,6 +1019,7 @@ def verify(root: Path) -> None:
         != tier0.previous_adapter_tensors_sha256
         or initial_tensors_sha256 != tier0.trained_adapter_tensors_sha256
         or initial_manifest.get("foundation_model_sha256") != base_gguf_sha256
+        or tier0_package.base_artifact_sha256 != base_gguf_sha256
     ):
         _fail("tier-0 candidate manifest does not match physical tensor evidence")
 
@@ -1145,6 +1148,7 @@ def verify(root: Path) -> None:
         "progression_proof": proof.canonical_payload(),
         "progression_proof_sha256": proof.proof_sha256,
         "staged_assets_sha256": staged_assets_sha256,
+        "foundation_model_sha256": base_gguf_sha256,
         "resource_budget": tier0_config.get("resource_budget"),
         "runtime_versions": tier0_config.get("runtime_versions"),
         "trainer_parameters": tier0_config.get("trainer_parameters"),
