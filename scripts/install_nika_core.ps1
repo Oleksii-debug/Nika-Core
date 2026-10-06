@@ -61,6 +61,37 @@ function Test-NikaFullyQualifiedWindowsPath {
     return $false
 }
 
+function Get-NikaDatabaseAliasIdentity {
+    param([Parameter(Mandatory=$true)][string]$Path)
+
+    if (-not (Test-NikaFullyQualifiedWindowsPath -Path $Path)) {
+        throw "Configured Nika Core database path must be fully qualified."
+    }
+
+    # Match pathlib's Windows path identity for compatibility aliases without
+    # resolving '..' into a different spelling. Separators, redundant
+    # separators and '.' are non-semantic; '..' remains part of the identity.
+    $normalized = $Path.Replace('/', '\\')
+    $root = [System.IO.Path]::GetPathRoot($normalized)
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        throw "Configured Nika Core database path must be fully qualified."
+    }
+    $relative = $normalized.Substring($root.Length)
+    $parts = [System.Collections.Generic.List[string]]::new()
+    foreach ($part in $relative.Split([char]'\\')) {
+        if ([string]::IsNullOrEmpty($part) -or $part -eq ".") {
+            continue
+        }
+        $parts.Add($part)
+    }
+
+    $rootIdentity = $root.TrimEnd([char]'\\')
+    if ($parts.Count -eq 0) {
+        return $rootIdentity + "\\"
+    }
+    return $rootIdentity + "\\" + [string]::Join("\\", $parts)
+}
+
 function Test-NikaPathWithin {
     param(
         [Parameter(Mandatory=$true)][string]$Path,
@@ -81,11 +112,37 @@ function Test-NikaPathWithin {
 }
 
 function Get-NikaCanonicalDataRoot {
-    $databasePath = [System.Environment]::GetEnvironmentVariable("NIKA_DB_PATH")
-    if ([string]::IsNullOrWhiteSpace($databasePath)) {
-        $databasePath = [System.Environment]::GetEnvironmentVariable("NIKA_DATABASE_PATH")
+    $primaryDatabasePath = [System.Environment]::GetEnvironmentVariable("NIKA_DB_PATH")
+    $compatDatabasePath = [System.Environment]::GetEnvironmentVariable("NIKA_DATABASE_PATH")
+    $hasPrimaryDatabasePath = -not [string]::IsNullOrWhiteSpace($primaryDatabasePath)
+    $hasCompatDatabasePath = -not [string]::IsNullOrWhiteSpace($compatDatabasePath)
+
+    $primaryIdentity = $null
+    $compatIdentity = $null
+    if ($hasPrimaryDatabasePath) {
+        $primaryIdentity = Get-NikaDatabaseAliasIdentity -Path $primaryDatabasePath
     }
-    if ([string]::IsNullOrWhiteSpace($databasePath)) {
+    if ($hasCompatDatabasePath) {
+        $compatIdentity = Get-NikaDatabaseAliasIdentity -Path $compatDatabasePath
+    }
+    if (
+        $hasPrimaryDatabasePath -and
+        $hasCompatDatabasePath -and
+        -not [System.StringComparer]::OrdinalIgnoreCase.Equals(
+            $primaryIdentity,
+            $compatIdentity
+        )
+    ) {
+        throw "Conflicting Nika Core database path environment aliases."
+    }
+
+    if ($hasPrimaryDatabasePath) {
+        $databasePath = $primaryDatabasePath
+    }
+    elseif ($hasCompatDatabasePath) {
+        $databasePath = $compatDatabasePath
+    }
+    else {
         $localAppData = [System.Environment]::GetEnvironmentVariable("LOCALAPPDATA")
         if ([string]::IsNullOrWhiteSpace($localAppData)) {
             throw "LOCALAPPDATA is required to resolve the canonical Nika Core data root."
@@ -94,9 +151,6 @@ function Get-NikaCanonicalDataRoot {
             throw "LOCALAPPDATA must be a fully qualified local or UNC path."
         }
         $databasePath = Join-Path (Join-Path $localAppData "NikaCore") "nika_core.db"
-    }
-    elseif (-not (Test-NikaFullyQualifiedWindowsPath -Path $databasePath)) {
-        throw "Configured Nika Core database path must be fully qualified."
     }
 
     $canonicalDatabase = Get-NikaFullPath $databasePath

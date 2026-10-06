@@ -330,6 +330,210 @@ def test_posix_typed_runner_survives_path_swap_at_popen(
     assert executable.read_text(encoding="utf-8") == "#!/bin/sh\nprintf 'replacement\\n'\n"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_launch_guard_survives_same_inode_byte_mutation(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = tmp_path / "runner"
+    trusted = "#!/bin/sh\nprintf 'snapshot-trusted\\n'\n"
+    replacement = "#!/bin/sh\nprintf 'same-inode-replacement\\n'\n"
+    executable.write_text(trusted, encoding="utf-8")
+    executable.chmod(0o700)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with guard as launch_executable:
+        original_stat = executable.stat()
+        executable.write_text(replacement, encoding="utf-8")
+        mutated_stat = executable.stat()
+        assert (mutated_stat.st_dev, mutated_stat.st_ino) == (
+            original_stat.st_dev,
+            original_stat.st_ino,
+        )
+        result = subprocess.run(
+            (str(executable),),
+            executable=str(launch_executable),
+            pass_fds=guard.pass_fds,
+            cwd=tmp_path,
+            env=sterile_git_environment({"PATH": os.environ.get("PATH", "")}),
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == "snapshot-trusted"
+    assert executable.read_text(encoding="utf-8") == replacement
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_typed_runner_survives_same_inode_mutation_at_popen(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "runner"
+    trusted = "#!/bin/sh\nprintf 'typed-snapshot-trusted\\n'\n"
+    replacement = "#!/bin/sh\nprintf 'typed-same-inode-replacement\\n'\n"
+    executable.write_text(trusted, encoding="utf-8")
+    executable.chmod(0o700)
+    original_stat = executable.stat()
+    original_popen = execution_module.subprocess.Popen
+    mutated = False
+
+    def mutating_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        nonlocal mutated
+        if not mutated:
+            executable.write_text(replacement, encoding="utf-8")
+            mutated = True
+        return original_popen(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution_module.subprocess, "Popen", mutating_popen)
+
+    result = run_typed_process(
+        (str(executable),),
+        process_policy=ProcessPolicy((str(executable),)),
+        resource_budget=ResourceBudget(
+            timeout_seconds=5,
+            max_output_bytes=4096,
+            max_changed_files=1,
+        ),
+        cwd=tmp_path,
+        environment=sterile_git_environment(
+            {"PATH": os.environ.get("PATH", "")}
+        ),
+    )
+
+    mutated_stat = executable.stat()
+    assert mutated is True
+    assert (mutated_stat.st_dev, mutated_stat.st_ino) == (
+        original_stat.st_dev,
+        original_stat.st_ino,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "typed-snapshot-trusted"
+    assert executable.read_text(encoding="utf-8") == replacement
+
+
+@pytest.mark.skipif(
+    os.name == "nt"
+    or getattr(os, "memfd_create", None) is None
+    or not getattr(os, "MFD_ALLOW_SEALING", 0),
+    reason="Linux sealed memfd only",
+)
+def test_posix_launch_snapshot_is_write_sealed(tmp_path: pathlib.Path) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text(
+        "#!/bin/sh\nprintf 'sealed-snapshot\\n'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with guard:
+        assert len(guard.pass_fds) == 1
+        descriptor = guard.pass_fds[0]
+        with pytest.raises(OSError):
+            os.pwrite(descriptor, b"x", 0)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_launch_snapshot_fails_closed_without_memfd(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o700)
+    monkeypatch.setattr(execution_module.os, "memfd_create", None, raising=False)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="immutable runtime executable snapshot is unavailable",
+    ):
+        with guard:
+            raise AssertionError("launch must fail without immutable snapshot")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_launch_snapshot_fails_closed_when_memfd_creation_is_denied(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o700)
+
+    def denied_memfd(_name: str, _flags: int) -> int:
+        raise OSError("memfd denied")
+
+    monkeypatch.setattr(execution_module.os, "memfd_create", denied_memfd)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="unable to create sealed runtime executable snapshot",
+    ):
+        with guard:
+            raise AssertionError("launch must fail when immutable snapshot is denied")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_launch_snapshot_does_not_grant_execute_permission(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o600)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="pinned runtime executable is not executable",
+    ):
+        with guard:
+            raise AssertionError("non-executable source must not gain launch permission")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_execute_permission_check_stays_on_held_inode(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "runner"
+    replacement = tmp_path / "replacement"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o600)
+    replacement.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    replacement.chmod(0o700)
+    original_inode = executable.stat().st_ino
+    original_access = execution_module.os.access
+    replaced = False
+
+    def swapping_access(path: object, mode: int, *args: object, **kwargs: object) -> bool:
+        nonlocal replaced
+        if not replaced and mode == os.X_OK:
+            os.replace(replacement, executable)
+            replaced = True
+        return original_access(path, mode, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution_module.os, "access", swapping_access)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="pinned runtime executable is not executable",
+    ):
+        with guard:
+            raise AssertionError("replacement permissions must not authorize held bytes")
+
+    assert replaced is True
+    assert executable.stat().st_ino != original_inode
+
+
 def test_typed_runner_rejects_same_path_replacement_after_runtime_admission(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -432,6 +636,50 @@ def test_posix_absolute_git_launch_owns_descriptor_guard(
 
     assert result.returncode == 0
     assert result.stdout.startswith("git version ")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_git_launch_survives_same_inode_mutation_at_subprocess_run(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_git = shutil.which("git")
+    if source_git is None:
+        pytest.skip("Git CLI unavailable")
+    executable = tmp_path / pathlib.Path(source_git).name
+    shutil.copy2(pathlib.Path(source_git).resolve(strict=True), executable)
+    expected_sha256 = execution_module._pinned_executable_sha256(executable)
+    original_stat = executable.stat()
+    original_run = execution_module.subprocess.run
+    mutated = False
+
+    def mutating_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal mutated
+        if not mutated:
+            executable.write_bytes(b"mutated git executable")
+            mutated = True
+        return original_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution_module.subprocess, "run", mutating_run)
+
+    result = execution_module._git(
+        (str(executable), "--version"),
+        cwd=tmp_path,
+        environment=sterile_git_environment(
+            {"PATH": os.environ.get("PATH", "")}
+        ),
+        expected_executable_sha256=expected_sha256,
+    )
+
+    mutated_stat = executable.stat()
+    assert mutated is True
+    assert (mutated_stat.st_dev, mutated_stat.st_ino) == (
+        original_stat.st_dev,
+        original_stat.st_ino,
+    )
+    assert result.returncode == 0
+    assert result.stdout.startswith("git version ")
+    assert executable.read_bytes() == b"mutated git executable"
 
 
 def test_private_git_rejects_replacement_after_host_git_admission(
