@@ -477,27 +477,45 @@ class PackagedLocalBuildExecutionNode:
 
     def _claim_effect(self, dispatch: BuildExecutionDispatch, dispatch_digest: str) -> None:
         assert self.audit is not None
-        with self.store.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            rows = conn.execute(
-                "SELECT event_type FROM audit_events "
-                "WHERE entity_type=? AND entity_id=? ORDER BY event_id",
-                (_ENTITY_TYPE, dispatch.dispatch_id),
-            ).fetchall()
-            if rows:
-                raise BuildExecutionPortError(
-                    "local build dispatch already has durable effect evidence"
-                )
-            self.audit.append_with_connection(
-                conn,
-                event_type=_STARTED_EVENT,
-                entity_type=_ENTITY_TYPE,
-                entity_id=dispatch.dispatch_id,
-                payload={
-                    "schema": _RECEIPT_SCHEMA,
-                    "dispatch_digest": dispatch_digest,
-                },
+        marker = getattr(
+            self.trusted_authority,
+            "mark_effect_started_with_connection",
+            None,
+        )
+        if marker is not None and not callable(marker):
+            raise BuildExecutionPortError(
+                "local build effect authority marker is not callable"
             )
+        try:
+            with self.store.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                rows = conn.execute(
+                    "SELECT event_type FROM audit_events "
+                    "WHERE entity_type=? AND entity_id=? ORDER BY event_id",
+                    (_ENTITY_TYPE, dispatch.dispatch_id),
+                ).fetchall()
+                if rows:
+                    raise BuildExecutionPortError(
+                        "local build dispatch already has durable effect evidence"
+                    )
+                if marker is not None:
+                    marker(conn, dispatch)
+                self.audit.append_with_connection(
+                    conn,
+                    event_type=_STARTED_EVENT,
+                    entity_type=_ENTITY_TYPE,
+                    entity_id=dispatch.dispatch_id,
+                    payload={
+                        "schema": _RECEIPT_SCHEMA,
+                        "dispatch_digest": dispatch_digest,
+                    },
+                )
+        except BuildExecutionPortError:
+            raise
+        except Exception:
+            raise BuildExecutionPortError(
+                "local build effect authority could not be durably admitted"
+            ) from None
 
     def _write_receipt(
         self,
