@@ -374,6 +374,8 @@ def sterile_git_environment(
             or identity in _GIT_CREDENTIAL_VARIABLES
         ):
             continue
+        if os.name != "nt" and key != identity:
+            continue
         if type(value) is not str or "\x00" in value:
             raise WorkspaceSecurityError(
                 "allowed environment values must be exact NUL-free text"
