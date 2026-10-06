@@ -11,23 +11,32 @@ import nika_core.product_factory_packaged_execution_plan_file as plan_file_modul
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.default_actions import build_default_action_registry
+from nika_core.product_factory_local_repository_binding import (
+    ProductFactoryLocalRepositoryBindings,
+)
 from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
 from nika_core.product_factory_packaged_execution_plan_file import (
     PackagedExecutionPlanFileError,
     PackagedProductFactoryExecutionPlanFileSource,
 )
+from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
 from scripts import nika_windows
 
 ROOT = Path(__file__).resolve().parents[1]
 _PROJECT_ID = "product-" + "a" * 64
 
 
-def _claim(project_id: str = _PROJECT_ID) -> dict[str, object]:
+def _claim(
+    project_id: str = _PROJECT_ID,
+    *,
+    expected_spec_version: int = 1,
+    expected_row_version: int = 0,
+) -> dict[str, object]:
     return {
         "schema": "nika-packaged-product-factory-execution-plan-v1",
         "project_id": project_id,
-        "expected_spec_version": 1,
-        "expected_row_version": 0,
+        "expected_spec_version": expected_spec_version,
+        "expected_row_version": expected_row_version,
         "graph_version": 1,
         "repositories": [
             {
@@ -58,10 +67,20 @@ def _claim(project_id: str = _PROJECT_ID) -> dict[str, object]:
     }
 
 
-def _write_plan(path: Path, *, project_id: str = _PROJECT_ID) -> Path:
+def _write_plan(
+    path: Path,
+    *,
+    project_id: str = _PROJECT_ID,
+    expected_spec_version: int = 1,
+    expected_row_version: int = 0,
+) -> Path:
     path.write_bytes(
         json.dumps(
-            _claim(project_id),
+            _claim(
+                project_id,
+                expected_spec_version=expected_spec_version,
+                expected_row_version=expected_row_version,
+            ),
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
@@ -179,6 +198,25 @@ def test_file_source_rejects_plan_for_other_project_at_resolution(tmp_path: Path
     assert source.load({"path": str(path.resolve())}).status == "completed"
 
     with pytest.raises(PackagedExecutionPlanFileError, match="another ProductProject"):
+        source.resolve(_PROJECT_ID)
+
+
+def test_file_source_rejects_other_project_during_selected_project_load(
+    tmp_path: Path,
+) -> None:
+    other = "product-" + "b" * 64
+    path = _write_plan(tmp_path / "other-selected.json", project_id=other)
+    source = PackagedProductFactoryExecutionPlanFileSource()
+
+    result = source.load(
+        {"path": str(path.resolve())},
+        expected_project_id=_PROJECT_ID,
+    )
+
+    assert result.status == "rejected"
+    assert "іншому ProductProject" in result.message
+    assert source.snapshot()["loaded"] is False
+    with pytest.raises(PackagedExecutionPlanFileError, match="no packaged"):
         source.resolve(_PROJECT_ID)
 
 
@@ -374,6 +412,112 @@ def test_windows_bridge_rejects_plan_file_when_execution_host_is_unconfigured(
     assert result["status"] == "rejected"
     assert "недоступне" in result["message"]
     assert result["focus_id"] == "product-factory-execution-plan-path"
+
+
+def test_windows_bridge_fences_plan_and_repository_actions_to_active_product(
+    tmp_path: Path,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+    host_store = SQLiteStore(config.database_path)
+    host_store.initialize()
+    host = MultiRepositoryProductFactoryHost(host_store, _UnusedProgramWorker())
+    cleanup: list[object] = []
+
+    try:
+        bridge, _products = nika_windows.build_windows_bridge(
+            config,
+            start_startup_recovery=False,
+            register_cleanup=cleanup.append,
+            product_factory_execution_host=host,
+        )
+        first_created = bridge.dispatch(
+            {
+                "request_id": "create-first-product",
+                "action_id": "task.create",
+                "payload": {"command": "Створи застосунок для каталогу документів"},
+            }
+        )
+        assert first_created["status"] == "completed"
+        first_state = bridge.get_state()["state"]
+        first_id = first_state["product_project"]["project_id"]
+
+        projects = ProductProjectRepository(host_store)
+        first = projects.get(first_id)
+        first = projects.update_spec(
+            first_id,
+            ProductProjectSpec(
+                goal=first.spec.goal,
+                desired_outcome=first.spec.desired_outcome,
+                repository_refs=("Oleksii-debug/Nika-Core",),
+            ),
+            expected_row_version=first.row_version,
+            change_reason="admit repository for packaged plan test",
+            idempotency_key="test:packaged-plan:first-repository",
+        )
+        first_plan = _write_plan(
+            tmp_path / "first-product-plan.json",
+            project_id=first_id,
+            expected_spec_version=first.spec_version,
+            expected_row_version=first.row_version,
+        )
+        loaded = bridge.dispatch(
+            _plan_file_command(first_plan.resolve(), "load-first-product-plan")
+        )
+        assert loaded["status"] == "completed"
+        repository_state = bridge.get_state()["state"][
+            "product_factory_local_repositories"
+        ]
+        assert repository_state["status"] == "ready"
+        assert repository_state["project_id"] == first_id
+
+        second_created = bridge.dispatch(
+            {
+                "request_id": "create-second-product",
+                "action_id": "task.create",
+                "payload": {"command": "Створи застосунок для іншого каталогу"},
+            }
+        )
+        assert second_created["status"] == "completed"
+        second_state = bridge.get_state()["state"]
+        second_id = second_state["product_project"]["project_id"]
+        assert second_id != first_id
+        stale_repository_state = second_state["product_factory_local_repositories"]
+        assert stale_repository_state["status"] == "invalid"
+        assert stale_repository_state["project_id"] == second_id
+        assert stale_repository_state["repositories"] == []
+
+        stale_bind = bridge.dispatch(
+            {
+                "request_id": "bind-stale-product",
+                "action_id": "product.factory.local_repository.bind",
+                "payload": {
+                    "project_id": first_id,
+                    "repository_id": "repo-core",
+                    "root_path": str((tmp_path / "must-not-be-read").resolve()),
+                    "expected_binding_version": None,
+                },
+            }
+        )
+        assert stale_bind["status"] == "rejected"
+        assert "ProductProject змінився" in stale_bind["message"]
+        assert ProductFactoryLocalRepositoryBindings(
+            host_store
+        ).current_binding_version(first_id, "repo-core") is None
+
+        wrong_reload = bridge.dispatch(
+            _plan_file_command(first_plan.resolve(), "reload-old-product-plan")
+        )
+        assert wrong_reload["status"] == "rejected"
+        assert "іншому ProductProject" in wrong_reload["message"]
+        after_reject = bridge.get_state()["state"]
+        assert after_reject["product_factory_execution_plan"]["loaded"] is False
+        assert (
+            after_reject["product_factory_local_repositories"]["status"]
+            == "missing_plan"
+        )
+    finally:
+        for callback in reversed(cleanup):
+            callback()
 
 
 def test_windows_bridge_rejects_plan_file_when_custom_resolver_owns_authority(

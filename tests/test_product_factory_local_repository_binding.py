@@ -262,6 +262,25 @@ def test_binding_allows_distinct_roots_for_distinct_repository_ids(
     assert second.root == second_root.resolve(strict=True)
 
 
+def test_validate_plan_rejects_repository_outside_current_product_project(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    injected = _repository_ref(
+        repository_id="repo-injected",
+        locator="Oleksii-debug/injected",
+    )
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="execution plan is stale",
+    ):
+        bindings.validate_plan(_plan(project, injected))
+
+
 def test_binding_rejects_locator_outside_current_product_project(
     tmp_path: pathlib.Path,
 ) -> None:

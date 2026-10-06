@@ -403,6 +403,10 @@ def _require_plan_project(
         or project.spec_version != plan.expected_spec_version
         or project.row_version != plan.expected_row_version
         or project.status != "active"
+        or any(
+            repository.locator not in project.spec.repository_refs
+            for repository in plan.graph.repositories
+        )
     ):
         raise ProductFactoryLocalRepositoryBindingError(
             "execution plan is stale for the current ProductProject"

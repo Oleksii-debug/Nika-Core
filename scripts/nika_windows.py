@@ -706,15 +706,31 @@ def build_windows_bridge(
                 ),
             }
         assert product_factory_execution_plan_files is not None
+        active_project_id = product_router.active_project_id
         plan_snapshot = product_factory_execution_plan_files.snapshot()
-        project_id = (
-            plan_snapshot.get("project_id")
-            if plan_snapshot.get("loaded") is True
-            else None
-        )
-        return operator.snapshot(
-            project_id if isinstance(project_id, str) else None
-        )
+        if active_project_id is None:
+            return {
+                "status": "missing_plan",
+                "project_id": None,
+                "repositories": [],
+                "message": (
+                    "Спочатку виберіть поточний ProductProject, а потім "
+                    "завантажте його JSON-план виконання."
+                ),
+            }
+        if plan_snapshot.get("loaded") is not True:
+            return operator.snapshot(None)
+        if plan_snapshot.get("project_id") != active_project_id:
+            return {
+                "status": "invalid",
+                "project_id": active_project_id,
+                "repositories": [],
+                "message": (
+                    "Завантажений JSON-план належить іншому ProductProject. "
+                    "Завантажте план для поточного ProductProject."
+                ),
+            }
+        return operator.snapshot(active_project_id)
 
     def source_state() -> Mapping[str, Any]:
         state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
@@ -776,6 +792,25 @@ def build_windows_bridge(
             focus_id="model-route-kind",
         )
 
+    def _repository_mutation_project_guard(
+        payload: Mapping[str, Any],
+    ) -> UIResult | None:
+        active_project_id = product_router.active_project_id
+        if (
+            active_project_id is None
+            or payload.get("project_id") != active_project_id
+        ):
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=(
+                    "Поточний ProductProject змінився. Перечитайте стан, "
+                    "завантажте його JSON-план і повторіть дію."
+                ),
+                focus_id="product-factory-local-repository-select",
+            )
+        return None
+
     def bind_product_factory_local_repository(
         payload: Mapping[str, Any],
     ) -> UIResult:
@@ -789,6 +824,9 @@ def build_windows_bridge(
                 ),
                 focus_id="product-factory-local-repository-select",
             )
+        guard = _repository_mutation_project_guard(payload)
+        if guard is not None:
+            return guard
         return product_factory_local_repository_operator.bind(payload)
 
     def unbind_product_factory_local_repository(
@@ -804,6 +842,9 @@ def build_windows_bridge(
                 ),
                 focus_id="product-factory-local-repository-select",
             )
+        guard = _repository_mutation_project_guard(payload)
+        if guard is not None:
+            return guard
         return product_factory_local_repository_operator.unbind(payload)
 
     def load_product_factory_execution_plan(payload: Mapping[str, Any]) -> UIResult:
@@ -817,7 +858,21 @@ def build_windows_bridge(
                 ),
                 focus_id="product-factory-execution-plan-path",
             )
-        return product_factory_execution_plan_files.load(payload)
+        active_project_id = product_router.active_project_id
+        if active_project_id is None:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=(
+                    "Спочатку створіть або відкрийте поточний ProductProject, "
+                    "а потім завантажте його JSON-план."
+                ),
+                focus_id="product-factory-execution-plan-path",
+            )
+        return product_factory_execution_plan_files.load(
+            payload,
+            expected_project_id=active_project_id,
+        )
 
     bridge = UIActionBridge(
         actions,
