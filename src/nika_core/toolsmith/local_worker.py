@@ -702,6 +702,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             raise ContainedLocalWorkerError("local worker has no terminal execution evidence")
         try:
             evidence = _evidence_from_state(state)
+            self._require_repository_authority(evidence.repository_id)
             result = _result_from_payload(state["result"])
             self._validate_terminal_storage(evidence, result)
             return evidence
@@ -1037,6 +1038,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
         if state["phase"] == "terminal":
             try:
                 evidence = _evidence_from_state(state)
+                self._require_repository_authority(evidence.repository_id)
                 result = _result_from_payload(state["result"])
                 self._validate_terminal_storage(evidence, result)
             except Exception:
@@ -1771,6 +1773,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 raise ContainedLocalWorkerError(
                     "terminal evidence identity does not match the requested job"
                 )
+            self._require_repository_authority(job.repository.repository_id)
             self._validate_terminal_storage(evidence, result)
             return result
         except Exception:
