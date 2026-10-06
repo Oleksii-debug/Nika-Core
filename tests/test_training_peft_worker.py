@@ -3935,6 +3935,96 @@ def test_final_candidate_rejects_transient_tensor_source_substitution(
     assert not candidate.exists()
 
 
+def test_candidate_adapter_config_is_pinned_through_manifest_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    checkpoint = peft._checkpoint_dir(
+        peft._job_root(config, request),
+        1,
+    )
+    config_path = checkpoint / "adapter" / "adapter_config.json"
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_read = peft._read_regular_snapshot
+    observed = {"blocked": False, "mutated": False}
+
+    def _transient_config_read(
+        path: Path,
+        *,
+        max_bytes: int,
+        code: str,
+    ) -> bytes:
+        if Path(path) != config_path or code != "adapter_config_read_failed":
+            return real_read(path, max_bytes=max_bytes, code=code)
+        original = config_path.read_bytes()
+        before = config_path.stat()
+        payload = json.loads(original)
+        payload["modules_to_save"] = ["lm_head"]
+        forged = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        try:
+            config_path.write_bytes(forged)
+            forged_read = real_read(
+                path,
+                max_bytes=max_bytes,
+                code=code,
+            )
+            config_path.write_bytes(original)
+            peft.os.utime(
+                config_path,
+                ns=(before.st_atime_ns, before.st_mtime_ns),
+            )
+            observed["mutated"] = True
+            return forged_read
+        except OSError:
+            observed["blocked"] = True
+            return real_read(path, max_bytes=max_bytes, code=code)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(
+        peft,
+        "_read_regular_snapshot",
+        _transient_config_read,
+    )
+
+    if peft.os.name == "nt":
+        _, candidate_sha256 = peft._train_one_step(
+            request,
+            config,
+            consumed,
+        )
+        assert candidate_sha256 is not None
+        assert observed == {"blocked": True, "mutated": False}
+        carrier = json.loads(candidate.read_bytes())
+        manifest = json.loads(
+            carrier["metadata"]["nika_adapter_manifest"]
+        )
+        assert "modules_to_save" not in manifest["adapter_config"]
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="adapter_config_changed_during_candidate",
+        ):
+            peft._train_one_step(
+                request,
+                config,
+                consumed,
+            )
+        assert observed == {"blocked": False, "mutated": True}
+        assert not candidate.exists()
+
+
 def test_final_candidate_rejects_checkpoint_change_during_materialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
