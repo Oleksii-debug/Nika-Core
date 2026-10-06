@@ -4,7 +4,7 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
+import stat
 import sys
 import urllib.error
 import urllib.request
@@ -50,6 +50,14 @@ _RUNTIME_PACKAGES = (
     "safetensors",
 )
 _MAX_DOWNLOAD_BYTES = 64 * 1024 * 1024
+_MAX_EVIDENCE_CANDIDATE_BYTES = 64 * 1024 * 1024
+_MAX_EVIDENCE_REPORT_BYTES = 64 * 1024
+_MAX_EVIDENCE_MANIFEST_BYTES = 64 * 1024
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 
 class ProofError(RuntimeError):
@@ -72,6 +80,138 @@ def _sha256_file(path: Path) -> tuple[str, int]:
             total += len(chunk)
             digest.update(chunk)
     return digest.hexdigest(), total
+
+
+def _is_reparse(value: os.stat_result) -> bool:
+    attributes = int(getattr(value, "st_file_attributes", 0))
+    flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return bool(attributes & flag)
+
+
+def _open_readonly_snapshot(path: Path) -> int:
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows evidence snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(getattr(os, "O_NONBLOCK", 0))
+    return os.open(path, flags)
+
+
+def _stable_file_bytes(path: Path, *, max_bytes: int, name: str) -> bytes:
+    descriptor: int | None = None
+    try:
+        before = os.lstat(path)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > max_bytes
+        ):
+            _fail(f"{name} size or file type is invalid")
+        descriptor = _open_readonly_snapshot(path)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            _fail(f"{name} changed before it was opened")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            remaining = max_bytes + 1 - total
+            if remaining <= 0:
+                _fail(f"{name} size is invalid")
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                _fail(f"{name} size is invalid")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+    except ProofError:
+        raise
+    except OSError as exc:
+        raise ProofError(f"{name} could not be read") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    identities = (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+        (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+    )
+    if (
+        len(set(identities)) != 1
+        or total != before.st_size
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+    ):
+        _fail(f"{name} changed while it was being snapshotted")
+    if total <= 0 or total > max_bytes:
+        _fail(f"{name} size is invalid")
+    return b"".join(chunks)
+
+
+def _write_new_file(path: Path, payload: bytes) -> None:
+    if type(payload) is not bytes or not payload:
+        _fail("physical proof evidence payload is invalid")
+    try:
+        with path.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except OSError as exc:
+        raise ProofError("physical proof evidence could not be published") from exc
 
 
 def _canonical_json(payload: object) -> str:
@@ -301,7 +441,12 @@ def prepare(root: Path, trainer_executable: Path) -> None:
 def verify(root: Path) -> None:
     root = root.resolve(strict=True)
     report_path = root / "run" / "physical-pilot-report.json"
-    raw_report = report_path.read_text(encoding="utf-8", errors="strict")
+    report_bytes = _stable_file_bytes(
+        report_path,
+        max_bytes=_MAX_EVIDENCE_REPORT_BYTES,
+        name="physical proof report",
+    )
+    raw_report = report_bytes.decode("utf-8", errors="strict")
     report = PhysicalTrainingPilotReport.from_json(raw_report)
     if report.schema_version != 6:
         _fail("physical proof requires a fresh schema-v6 report")
@@ -315,15 +460,28 @@ def verify(root: Path) -> None:
     candidate = candidate_artifact_path(root / "run", _CANDIDATE_REF)
     if not candidate.is_file():
         _fail("physical proof candidate is missing")
-    candidate_sha256, candidate_size = _sha256_file(candidate)
-    if candidate_size <= 0:
-        _fail("physical proof candidate is empty")
+    candidate_bytes = _stable_file_bytes(
+        candidate,
+        max_bytes=_MAX_EVIDENCE_CANDIDATE_BYTES,
+        name="physical proof candidate",
+    )
+    candidate_sha256 = _sha256_bytes(candidate_bytes)
+    candidate_size = len(candidate_bytes)
     if candidate_sha256 != report.candidate_sha256:
         _fail("physical proof candidate digest does not match report")
     if candidate_size != report.candidate_byte_count:
         _fail("physical proof candidate size does not match report")
 
-    manifest = candidate_adapter_manifest(candidate)
+    evidence_dir = root / "evidence"
+    try:
+        evidence_dir.mkdir()
+    except OSError as exc:
+        raise ProofError("physical proof evidence directory could not be created") from exc
+    evidence_candidate = evidence_dir / "adapter_model.safetensors"
+    _write_new_file(evidence_dir / "physical-pilot-report.json", report_bytes)
+    _write_new_file(evidence_candidate, candidate_bytes)
+
+    manifest = candidate_adapter_manifest(evidence_candidate)
     if manifest.get("schema") != "nika-peft-candidate-v2":
         _fail("pilot proof requires a candidate-v2 tensor-evidence manifest")
     if manifest.get("candidate_artifact_ref") != _CANDIDATE_REF:
@@ -341,7 +499,7 @@ def verify(root: Path) -> None:
 
     from safetensors import safe_open
 
-    with safe_open(os.fspath(candidate), framework="pt", device="cpu") as source:
+    with safe_open(os.fspath(evidence_candidate), framework="pt", device="cpu") as source:
         tensor_names = sorted(source.keys())
         if not tensor_names:
             _fail("physical proof candidate contains no safetensors tensors")
@@ -352,9 +510,12 @@ def verify(root: Path) -> None:
         if total_elements <= 0:
             _fail("physical proof candidate tensors are empty")
 
-    assets = json.loads(
-        (root / "staged-assets.json").read_text(encoding="utf-8", errors="strict")
+    assets_bytes = _stable_file_bytes(
+        root / "staged-assets.json",
+        max_bytes=_MAX_EVIDENCE_MANIFEST_BYTES,
+        name="physical proof asset manifest",
     )
+    assets = json.loads(assets_bytes.decode("utf-8", errors="strict"))
     summary = {
         "asset_revision": assets["revision"],
         "asset_repository": assets["repository"],
@@ -371,10 +532,6 @@ def verify(root: Path) -> None:
         "schema_version": report.schema_version,
         "trained_adapter_tensors_sha256": report.trained_adapter_tensors_sha256,
     }
-    evidence_dir = root / "evidence"
-    evidence_dir.mkdir()
-    shutil.copyfile(report_path, evidence_dir / "physical-pilot-report.json")
-    shutil.copyfile(candidate, evidence_dir / "adapter_model.safetensors")
     (evidence_dir / "physical-proof-summary.json").write_text(
         _canonical_json(summary) + "\n",
         encoding="utf-8",
