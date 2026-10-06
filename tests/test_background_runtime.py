@@ -1314,6 +1314,127 @@ def test_resource_status_must_bind_to_exact_background_owner(tmp_path: Path) -> 
     assert queue.get(task_id).state is TaskState.READY
 
 
+def test_duplicate_background_pause_provenance_cannot_claim_paused_task(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    queue = TaskQueue(store)
+    audit = AuditLog(store)
+    task_id = _ready_task(queue)
+    queue.transition(task_id, TaskState.PAUSED)
+    with store.connection() as conn:
+        task_row = conn.execute(
+            "SELECT event_id FROM task_events WHERE task_id = ? "
+            "ORDER BY event_id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    assert task_row is not None
+    pause_event_id = int(task_row["event_id"])
+    marker_id = audit.append(
+        event_type="background.dispatch_paused",
+        entity_type="task",
+        entity_id=task_id,
+        payload={
+            "reason": "owner_active",
+            "phase": "preflight",
+            "task_event_id": pause_event_id,
+        },
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE audit_events SET payload_json = ? WHERE event_id = ?",
+            (
+                '{"task_event_id":999999,"task_event_id":'
+                f"{pause_event_id}"
+                "}",
+                marker_id,
+            ),
+        )
+
+    guard, _queue, _audit, _resources = _guard(
+        store=store,
+        observations=[
+            _obs(sequence, OwnerPresence.AWAY, now=now)
+            for sequence in range(1, 6)
+        ],
+        now=now,
+    )
+    calls = 0
+
+    async def effect() -> object:
+        nonlocal calls
+        calls += 1
+        return "must-not-run"
+
+    with pytest.raises(ValueError, match="does not own"):
+        asyncio.run(
+            guard.dispatch(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.SELF_TEST,
+                effect=effect,
+            )
+        )
+
+    assert calls == 0
+    assert queue.get(task_id).state is TaskState.PAUSED
+
+
+def test_duplicate_owner_return_provenance_cannot_authorize_resume(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    guard, queue, audit, _resources = _guard(
+        store=store,
+        observations=[
+            _obs(sequence, OwnerPresence.AWAY, now=now)
+            for sequence in range(20, 25)
+        ],
+        now=now,
+    )
+    task_id, pause_event_id = _owner_return_paused_task(queue, audit)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT event_id FROM audit_events "
+            "WHERE event_type = ? AND entity_type = ? AND entity_id = ? "
+            "ORDER BY event_id DESC LIMIT 1",
+            ("background.running_paused_for_owner", "task", task_id),
+        ).fetchone()
+    assert row is not None
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE audit_events SET payload_json = ? WHERE event_id = ?",
+            (
+                '{"task_event_id":999999,"task_event_id":'
+                f"{pause_event_id}"
+                "}",
+                int(row["event_id"]),
+            ),
+        )
+
+    calls = 0
+
+    async def effect() -> object:
+        nonlocal calls
+        calls += 1
+        queue.transition(task_id, TaskState.READY)
+        queue.transition(task_id, TaskState.RUNNING)
+        return "must-not-run"
+
+    with pytest.raises(ValueError, match="provenance is malformed"):
+        asyncio.run(
+            guard.resume_paused(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.UNFINISHED_WORK,
+                effect=effect,
+            )
+        )
+
+    assert calls == 0
+    assert queue.get(task_id).state is TaskState.PAUSED
+
+
 def test_presence_source_identity_is_bounded(tmp_path: Path) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
     store = _store(tmp_path)
