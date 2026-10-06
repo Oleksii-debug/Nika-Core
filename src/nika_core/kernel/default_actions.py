@@ -56,6 +56,18 @@ def build_default_action_registry() -> ActionRegistry:
             None,
         ),
         ActionDefinition(
+            "settings.product_factory_build.configure",
+            "Зберегти PF5 build runtime",
+            "Product Factory",
+            None,
+        ),
+        ActionDefinition(
+            "settings.product_factory_build.refresh",
+            "Перечитати PF5 build runtime",
+            "Product Factory",
+            None,
+        ),
+        ActionDefinition(
             "settings.model.configure", "Зберегти модель", "Налаштування", None
         ),
         ActionDefinition(

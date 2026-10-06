@@ -324,6 +324,50 @@
           </button>
         </div>
       </div>
+      <div aria-labelledby="product-factory-build-runtime-heading">
+        <h3 id="product-factory-build-runtime-heading" tabindex="-1">
+          Packaged PF5 build runtime
+        </h3>
+        <p id="product-factory-build-runtime-help">
+          Ця конфігурація задає лише локальний build-вузол і host-owned build policy
+          для компонентів, які вже пройшли незалежний review у Product Factory.
+          Вона не обходить review gate і не вмикає PF6 deployment. Не вставляйте
+          паролі, токени, API-ключі або інші секрети. Зміни застосовуються лише після
+          перезапуску Nika.
+        </p>
+        <label for="product-factory-build-authority-json">
+          JSON конфігурації packaged PF5 build runtime
+        </label>
+        <textarea
+          id="product-factory-build-authority-json"
+          rows="14"
+          maxlength="131072"
+          spellcheck="false"
+          autocomplete="off"
+          aria-describedby="product-factory-build-runtime-help product-factory-build-runtime-status"
+        ></textarea>
+        <p id="product-factory-build-runtime-status">
+          Перевірка збереженої конфігурації packaged PF5 build runtime.
+        </p>
+        <div class="actions">
+          <button
+            type="button"
+            id="product-factory-build-runtime-save"
+            data-action-id="settings.product_factory_build.configure"
+            data-error-focus-target="product-factory-build-authority-json"
+          >
+            Зберегти PF5 build runtime
+          </button>
+          <button
+            type="button"
+            id="product-factory-build-runtime-reload"
+            data-action-id="settings.product_factory_build.refresh"
+            data-error-focus-target="product-factory-build-authority-json"
+          >
+            Перечитати PF5 build runtime
+          </button>
+        </div>
+      </div>
       <div aria-labelledby="product-factory-execution-plan-heading">
         <h3 id="product-factory-execution-plan-heading" tabindex="-1">
           План виконання Product Factory

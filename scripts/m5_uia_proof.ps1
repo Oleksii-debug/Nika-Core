@@ -60,7 +60,10 @@ $requiredNames = @(
     'Репозиторій з поточного плану',
     'Повний шлях до локального Git-кореня',
     'Прив’язати локальний репозиторій',
-    'Скасувати локальну прив’язку'
+    'Скасувати локальну прив’язку',
+    'JSON конфігурації packaged PF5 build runtime',
+    'Зберегти PF5 build runtime',
+    'Перечитати PF5 build runtime'
 )
 
 # WebView2 enables renderer accessibility on demand when assistive technology such
@@ -758,6 +761,21 @@ try {
             }
         }
         Write-Host 'Packaged local repository controls are UIA-discoverable and fail closed before execution authority is configured.'
+        $factoryBuildRuntimeControl = Wait-DescendantName 'JSON конфігурації packaged PF5 build runtime' ([System.Windows.Automation.ControlType]::Edit)
+        $factoryBuildRuntimeSaveControl = Wait-DescendantName 'Зберегти PF5 build runtime' ([System.Windows.Automation.ControlType]::Button)
+        $factoryBuildRuntimeReloadControl = Wait-DescendantName 'Перечитати PF5 build runtime' ([System.Windows.Automation.ControlType]::Button)
+        foreach ($control in @(
+            $factoryBuildRuntimeControl,
+            $factoryBuildRuntimeSaveControl,
+            $factoryBuildRuntimeReloadControl
+        )) {
+            if (-not (Resolve-BoundControlIdentity $control).Current.IsEnabled) {
+                throw 'Packaged PF5 build runtime settings control must be enabled for fail-closed local configuration.'
+            }
+        }
+        Set-BoundControlFocus $factoryBuildRuntimeControl
+        Wait-FocusName $factoryBuildRuntimeControl
+        Write-Host 'Packaged PF5 build runtime controls are UIA-discoverable and keyboard-focusable; no build effect was invoked.'
         $voiceModelSourceControl = Wait-DescendantName 'Папка локальної голосової моделі — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
         $voiceModelImportControl = Wait-DescendantName 'Імпортувати голосову модель' ([System.Windows.Automation.ControlType]::Button)
         $voiceModelCancelControl = Wait-DescendantName 'Скасувати імпорт голосової моделі' ([System.Windows.Automation.ControlType]::Button)
