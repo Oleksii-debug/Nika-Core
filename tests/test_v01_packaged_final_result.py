@@ -458,3 +458,66 @@ def test_checker_result_requires_exact_wrapper_and_does_not_leak_extra_payload(
     assert comparison["status"] == "evidence_invalid"
     assert comparison["validated"] is False
     assert raw_canary not in json.dumps(corrupted, ensure_ascii=False, sort_keys=True)
+
+
+@pytest.mark.parametrize("carrier", ("worker-handoff", "checker-result"))
+@pytest.mark.parametrize("corruption", ("duplicate-key", "sqlite-blob"))
+def test_ambiguous_comparison_evidence_never_stays_validated(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    carrier: str,
+    corruption: str,
+) -> None:
+    store, _queue, _task_id, projection, provider = _complete_packaged_task(
+        tmp_path,
+        monkeypatch,
+        source_b_text=_RAW_SOURCE_CANARY,
+    )
+    assert projection["final_result"]["comparison"]["validated"] is True
+    team_id = projection["team"]["team_id"]
+    with store.connection() as conn:
+        if carrier == "worker-handoff":
+            table = "multi_agent_handoffs"
+            key = "handoff_id"
+            row = conn.execute(
+                "SELECT handoff_id, payload_json FROM multi_agent_handoffs "
+                "WHERE team_id = ? AND sender_id = 'worker-a' AND kind = 'result'",
+                (team_id,),
+            ).fetchone()
+        else:
+            table = "multi_agent_results"
+            key = "result_id"
+            row = conn.execute(
+                "SELECT result_id, payload_json FROM multi_agent_results "
+                "WHERE team_id = ? AND member_id = 'checker'",
+                (team_id,),
+            ).fetchone()
+        assert row is not None
+        original = row["payload_json"]
+        if corruption == "sqlite-blob":
+            hostile = original.encode("utf-8")
+        else:
+            first_key, first_value = next(iter(json.loads(original).items()))
+            hostile = (
+                original[:-1] + ","
+                + json.dumps(first_key, ensure_ascii=False) + ":"
+                + json.dumps(first_value, ensure_ascii=False, separators=(",", ":")) + "}"
+            )
+            assert json.loads(hostile) == json.loads(original)
+        conn.execute(
+            f"UPDATE {table} SET payload_json = ? WHERE {key} = ?",
+            (hostile, row[key]),
+        )
+
+    # These persisted bytes used to replay as an unchanged, validated result.
+    comparison = provider()["v01_team_task"]["final_result"]["comparison"]
+    assert comparison == {
+        "status": "evidence_invalid",
+        "validated": False,
+        "source_states": [],
+        "agreement_count": 0,
+        "difference_count": 0,
+    }
+    assert _RAW_SOURCE_CANARY not in json.dumps(
+        provider()["v01_team_task"], ensure_ascii=False, sort_keys=True
+    )

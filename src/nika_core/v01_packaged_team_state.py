@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -11,6 +10,7 @@ from nika_core.intelligence.provenance import (
     IntelligenceResultStatus,
     resolve_model_intelligence_mode,
 )
+from nika_core.kernel.task_queue import TaskPayloadCorruptionError, decode_task_payload
 from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent.checker import V01CheckerAgent
 from nika_core.multi_agent.contracts import AgentHandoff, HandoffKind
@@ -88,12 +88,12 @@ class V01PackagedTeamStateProvider:
         task_payload_by_member: dict[str, dict[str, Any]] = {}
         shared_task_id: str | None = None
         saw_v01_marker = False
+        invalid_handoff = False
         for row in task_rows:
             try:
-                payload = json.loads(row["payload_json"])
-            except (TypeError, json.JSONDecodeError):
-                continue
-            if not isinstance(payload, dict):
+                payload = decode_task_payload(row["payload_json"])
+            except TaskPayloadCorruptionError:
+                invalid_handoff = True
                 continue
             marked = "shared_task_id" in payload or "stage" in payload
             if not marked:
@@ -123,6 +123,8 @@ class V01PackagedTeamStateProvider:
 
         if not saw_v01_marker:
             return None
+        if invalid_handoff:
+            raise ValueError("invalid V0.1 team task handoff")
         if shared_task_id is None or not {"worker", "source_worker"}.intersection(
             stage_by_member.values()
         ):
@@ -326,11 +328,11 @@ class V01PackagedTeamStateProvider:
         rows = conn.execute(
             "SELECT sender_id, recipient_id, kind, created_at "
             "FROM multi_agent_handoffs WHERE team_id = ? "
-            "ORDER BY created_at, handoff_id",
+            "ORDER BY created_at DESC, handoff_id DESC LIMIT 20",
             (team_id,),
         ).fetchall()
         events: list[dict[str, str]] = []
-        for row in rows[-20:]:
+        for row in reversed(rows):
             kind = str(row["kind"])
             sender_id = str(row["sender_id"])
             recipient_id = str(row["recipient_id"])
@@ -384,7 +386,7 @@ class V01PackagedTeamStateProvider:
         model_bound_audits = conn.execute(
             "SELECT payload_json FROM audit_events "
             "WHERE event_type = 'v01.model.bound' AND entity_type = 'task' AND entity_id = ? "
-            "ORDER BY event_id",
+            "ORDER BY event_id LIMIT 2",
             (shared_task_id,),
         ).fetchall()
 
@@ -396,9 +398,8 @@ class V01PackagedTeamStateProvider:
             if binding is not None or model_bound_audits:
                 raise ValueError("model authority exists without durable task")
             return None
-        task_payload = json.loads(task_row["payload_json"])
-        if not isinstance(task_payload, Mapping):
-            raise TypeError("invalid durable task payload")
+        # Decode the exact row from this SQLite snapshot through kernel authority.
+        task_payload = decode_task_payload(task_row["payload_json"])
 
         has_selection = _TASK_SELECTION_FIELD in task_payload
         selection_id = task_payload.get(_TASK_SELECTION_FIELD)
@@ -437,7 +438,10 @@ class V01PackagedTeamStateProvider:
 
         if len(model_bound_audits) != 1:
             raise ValueError("model binding audit is missing or ambiguous")
-        audit_payload = json.loads(model_bound_audits[0]["payload_json"])
+        try:
+            audit_payload = decode_task_payload(model_bound_audits[0]["payload_json"])
+        except TaskPayloadCorruptionError as exc:
+            raise ValueError("invalid durable model binding audit") from exc
         if (
             type(audit_payload) is not dict
             or type(audit_payload.get("schema_version")) is not int
@@ -650,8 +654,9 @@ class V01PackagedTeamStateProvider:
             ).fetchall()
             handoffs: list[AgentHandoff] = []
             for row in handoff_rows:
-                payload = json.loads(row["payload_json"])
-                if not isinstance(payload, dict):
+                try:
+                    payload = decode_task_payload(row["payload_json"])
+                except TaskPayloadCorruptionError:
                     return invalid
                 handoffs.append(
                     AgentHandoff(
@@ -678,7 +683,10 @@ class V01PackagedTeamStateProvider:
             checker_row = checker_rows[0]
             if checker_row["outcome"] != "completed" or checker_row["error"] is not None:
                 return invalid
-            persisted = json.loads(checker_row["payload_json"])
+            try:
+                persisted = decode_task_payload(checker_row["payload_json"])
+            except TaskPayloadCorruptionError:
+                return invalid
             frozen_model_identity = V01PackagedTeamStateProvider._frozen_model_identity(
                 conn,
                 shared_task_id=shared_task_id,
@@ -746,7 +754,7 @@ class V01PackagedTeamStateProvider:
                         "provenance_validated": True,
                     }
             return result
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (KeyError, TypeError, ValueError):
             return invalid
 
     @staticmethod
