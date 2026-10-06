@@ -314,6 +314,7 @@ class ProductFactoryLocalRepositoryBindings:
                     now,
                 ),
             )
+            _require_filesystem_identity(root, identity)
 
         current = self.require(project_id, repository.repository_id)
         if current.binding_version != version:
@@ -554,28 +555,34 @@ class ProductFactoryLocalRepositoryBindings:
     ) -> MappingProxyType[str, pathlib.Path]:
         if type(plan) is not PackagedProductFactoryExecutionPlan:
             raise TypeError("plan must be an exact PackagedProductFactoryExecutionPlan")
-        project = self._projects.get(plan.project_id)
-        _require_plan_project(plan, project)
+        # Keep the complete durable repository projection under one writer fence.
+        # Individual require() calls also validate filesystem identity, while this
+        # transaction prevents bind/rebind/unbind or ProductProject writes from
+        # committing between repository members of the returned plan snapshot.
+        with self._store.connection() as fence:
+            fence.execute("BEGIN IMMEDIATE")
+            project = self._projects._get_conn(fence, plan.project_id)
+            _require_plan_project(plan, project)
 
-        resolved: dict[str, pathlib.Path] = {}
-        for repository in plan.graph.repositories:
-            binding = self.require(plan.project_id, repository.repository_id)
-            if (
-                binding.provider != repository.provider
-                or binding.locator != repository.locator
-            ):
-                raise ProductFactoryLocalRepositoryBindingError(
-                    "local repository binding does not match the execution-plan repository"
-                )
-            if repository.locator not in project.spec.repository_refs:
-                raise ProductFactoryLocalRepositoryBindingError(
-                    "execution-plan repository is not present in current ProductProject"
-                )
-            resolved[repository.repository_id] = binding.root
+            resolved: dict[str, pathlib.Path] = {}
+            for repository in plan.graph.repositories:
+                binding = self.require(plan.project_id, repository.repository_id)
+                if (
+                    binding.provider != repository.provider
+                    or binding.locator != repository.locator
+                ):
+                    raise ProductFactoryLocalRepositoryBindingError(
+                        "local repository binding does not match the execution-plan repository"
+                    )
+                if repository.locator not in project.spec.repository_refs:
+                    raise ProductFactoryLocalRepositoryBindingError(
+                        "execution-plan repository is not present in current ProductProject"
+                    )
+                resolved[repository.repository_id] = binding.root
 
-        project_after = self._projects.get(plan.project_id)
-        _require_plan_project(plan, project_after)
-        return MappingProxyType(resolved)
+            project_after = self._projects._get_conn(fence, plan.project_id)
+            _require_plan_project(plan, project_after)
+            return MappingProxyType(resolved)
 
     def _require_project_repository(
         self,
@@ -875,15 +882,6 @@ def _same_physical_repository(
     return (
         first.root_device == second.root_device
         and first.root_inode == second.root_inode
-        and first.git_metadata_kind == second.git_metadata_kind
-        and first.git_metadata_device == second.git_metadata_device
-        and first.git_metadata_inode == second.git_metadata_inode
-        and first.gitfile_sha256 == second.gitfile_sha256
-        and first.git_target_device == second.git_target_device
-        and first.git_target_inode == second.git_target_inode
-        and first.git_commondir_sha256 == second.git_commondir_sha256
-        and first.git_common_device == second.git_common_device
-        and first.git_common_inode == second.git_common_inode
     )
 
 

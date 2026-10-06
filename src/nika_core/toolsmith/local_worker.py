@@ -1113,6 +1113,37 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 git_plan,
                 git_executable=self.git_executable,
             )
+        except WorkspaceSecurityError as exc:
+            return self._rollback_private_failure(
+                job,
+                git_plan,
+                WorkerFailureKind.POLICY_VIOLATION,
+                str(exc),
+            )
+        except Exception:
+            return self._rollback_private_failure(
+                job,
+                git_plan,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "contained local worker could not prove a safe candidate",
+            )
+
+        # The source copy is a repository-authority effect: a rebind, unbind or
+        # filesystem-identity change while Git is cloning must not be admitted merely
+        # because the copied base tree happens to retain the expected digest.
+        try:
+            self._require_repository_authority(job.repository.repository_id)
+        except Exception:
+            try:
+                cleanup_private_git_workspace(git_plan)
+            except Exception as cleanup_exc:
+                raise ContainedLocalWorkerError(
+                    "repository authority changed during private Git preparation "
+                    "and cleanup could not be proven"
+                ) from cleanup_exc
+            raise
+
+        try:
             if self._private_tree_digest(git_plan) != job.repository.tree_digest.casefold():
                 raise WorkspaceSecurityError(
                     "private workspace tree identity does not match trusted repository snapshot"
