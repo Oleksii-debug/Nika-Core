@@ -213,6 +213,43 @@ def test_proof_staged_assets_reject_post_pilot_model_change(
         proof._verified_staged_assets(tmp_path, raw, pilot=pilot)
 
 
+def test_proof_pilot_config_rejects_alias_path(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    base = tmp_path / "base.gguf"
+    base.write_bytes(b"base")
+    output = tmp_path / "run"
+    output.mkdir()
+    digest = _sha(b"frozen")
+    pilot = SimpleNamespace(
+        candidate_artifact_ref="candidate-ref",
+        frozen_package_sha256=digest,
+    )
+    monkeypatch.setattr(proof, "_RUNTIME_PACKAGES", ("test-runtime",))
+    monkeypatch.setattr(proof, "_runtime_versions", lambda: {"test-runtime": "1.0"})
+    payload = {
+        "schema_version": 1,
+        "base_artifact_ref": proof._BASE_ARTIFACT_REF,
+        "candidate_artifact_ref": "candidate-ref",
+        "frozen_package_sha256": digest,
+        "runtime_versions": {"test-runtime": "1.0"},
+        "model_dir": str(model_dir / ".." / "model"),
+        "base_gguf_path": str(base),
+        "output_root": str(output),
+    }
+
+    with pytest.raises(proof.ProofError, match="non-canonical model_dir"):
+        proof._verified_pilot_config(
+            tmp_path,
+            (proof._canonical_json(payload) + "\n").encode("utf-8"),
+            pilot=pilot,
+        )
+
+
 def _evaluation_report_fixture(proof: ModuleType) -> dict[str, object]:
     digest = _sha(b"digest")
     return {

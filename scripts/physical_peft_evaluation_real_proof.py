@@ -357,6 +357,8 @@ def _verified_pilot_config(
         path = Path(raw_path)
         if not path.is_absolute():
             _fail(f"physical pilot config has non-absolute {key}")
+        if path != expected:
+            _fail(f"physical pilot config has non-canonical {key}")
         try:
             resolved = path.resolve(strict=True)
         except OSError as exc:
