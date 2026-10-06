@@ -253,6 +253,7 @@ def test_history_rejects_nontext_lifecycle_actor(tmp_path) -> None:
     with pytest.raises(ProductProjectError, match="lifecycle audit"):
         ProductProjectHistoricalIntegrityService(store).validate("project-1")
 
+
 def _different_sha256(value: str) -> str:
     candidate = "0" * 64
     return "1" * 64 if value == candidate else candidate
