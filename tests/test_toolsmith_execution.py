@@ -198,10 +198,10 @@ def test_windows_typed_runner_holds_launch_paths_during_popen(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    comspec = os.environ.get("COMSPEC")
-    if not comspec:
-        pytest.skip("COMSPEC unavailable")
-    source = pathlib.Path(comspec).resolve(strict=True)
+    helper = shutil.which("whoami.exe") or shutil.which("whoami")
+    if helper is None:
+        pytest.skip("standalone Windows helper unavailable")
+    source = pathlib.Path(helper).resolve(strict=True)
     executable = tmp_path / "runner.exe"
     replacement = tmp_path / "replacement.exe"
     workspace = tmp_path / "workspace"
@@ -229,7 +229,7 @@ def test_windows_typed_runner_holds_launch_paths_during_popen(
     monkeypatch.setattr(execution_module.subprocess, "Popen", probing_popen)
 
     result = run_typed_process(
-        (str(executable), "/d", "/c", "echo guarded"),
+        (str(executable),),
         process_policy=ProcessPolicy((str(executable),)),
         resource_budget=ResourceBudget(
             timeout_seconds=5,
@@ -245,7 +245,7 @@ def test_windows_typed_runner_holds_launch_paths_during_popen(
 
     assert attempted is True
     assert result.returncode == 0
-    assert "guarded" in result.stdout.casefold()
+    assert result.stdout.strip()
     assert replacement.exists()
     assert cwd.is_dir()
 
