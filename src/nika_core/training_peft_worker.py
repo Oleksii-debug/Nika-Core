@@ -1890,13 +1890,20 @@ def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root:
         or request.base_artifact_sha256 != logical_base_sha256
     ):
         _fail("logical_base_digest_mismatch")
-    target_dir = _ensure_child_directory(
-        job_root,
-        "base",
-        code="staged_base_directory_invalid",
-    )
+    target_dir = job_root / "base"
     target = target_dir / "base.gguf"
-    if target.exists():
+    try:
+        os.lstat(target)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        _fail("staged_base_invalid")
+    else:
+        _ensure_child_directory(
+            job_root,
+            "base",
+            code="staged_base_directory_invalid",
+        )
         target_sha256, _ = _hash_regular_snapshot(
             target,
             code="staged_base_invalid",
@@ -1911,6 +1918,12 @@ def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root:
     )
     if source_sha256 != config.base_gguf_sha256:
         _fail("base_gguf_digest_mismatch")
+    target_dir = _ensure_child_directory(
+        job_root,
+        "base",
+        code="staged_base_directory_invalid",
+    )
+    target = target_dir / "base.gguf"
     temporary = target_dir / ".base.gguf.tmp"
     try:
         source_stat = _require_regular_unlinked(
