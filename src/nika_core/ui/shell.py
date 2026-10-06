@@ -75,10 +75,8 @@ def launch_windows_shell(
             window.show()
         except BaseException as exc:  # noqa: BLE001 - relay control-flow to main thread
             callback_failure.append(exc)
-            # The host stays hidden until recovery and its post-recovery reload succeed,
-            # so the shown event cannot be a destruction precondition on this path.
-            # Always close it so webview.start() can return the original failure.
-            window.destroy()
+            if window.events.shown.is_set():
+                window.destroy()
 
     if on_gui_started is None:
         webview.start(gui="edgechromium")
