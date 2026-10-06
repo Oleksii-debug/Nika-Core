@@ -309,7 +309,8 @@ def test_current_windows_bridge_wires_speech_state_actions_and_cleanup(
     assert speech_state["schema"] == "nika.packaged-speech-state:v1"
     assert speech_state["status"] == "idle"
     assert "text" not in speech_state
-    assert cleanup_callbacks == [feature.close]
+    assert len(cleanup_callbacks) == 3
+    assert cleanup_callbacks[-1] == feature.close
 
     started = bridge.dispatch(
         {
@@ -326,9 +327,9 @@ def test_current_windows_bridge_wires_speech_state_actions_and_cleanup(
         "Явний локальний тест озвучення."
     ]
 
-    cleanup = cleanup_callbacks[0]
-    assert callable(cleanup)
-    cleanup()
+    for cleanup in reversed(cleanup_callbacks):
+        assert callable(cleanup)
+        cleanup()
     rejected = bridge.dispatch(
         {
             "request_id": "packaged-speech-after-close",
