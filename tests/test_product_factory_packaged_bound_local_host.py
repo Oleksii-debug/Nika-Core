@@ -268,7 +268,7 @@ def test_admitted_entry_keeps_frozen_model_if_revision_changes_after_recheck(
     )
     original_build = getattr(
         packaged_bound_local_host,
-        "build_repository_bound_packaged_local_product_factory_program",
+        "_build_repository_bound_packaged_local_product_factory_program_with_authority",
     )
     observed: dict[str, object] = {}
 
@@ -305,7 +305,7 @@ def test_admitted_entry_keeps_frozen_model_if_revision_changes_after_recheck(
 
     monkeypatch.setattr(
         packaged_bound_local_host,
-        "build_repository_bound_packaged_local_product_factory_program",
+        "_build_repository_bound_packaged_local_product_factory_program_with_authority",
         mutate_after_admission_then_build,
     )
 
@@ -910,7 +910,7 @@ async def test_worker_revalidates_binding_at_sync_effect_entry(
                 repository_id=repository_id,
                 root=root,
             )
-            if self.calls == 3:
+            if self.calls == 5:
                 bindings.bind(
                     project_id=project.project_id,
                     repository=repository,
@@ -934,7 +934,7 @@ async def test_worker_revalidates_binding_at_sync_effect_entry(
     ):
         await entry.program.host.worker.dispatch(request)
 
-    assert race_authority.calls == 4
+    assert race_authority.calls == 6
     assert not (
         entry.program.worker.workspace_root_for(request.work_id) / "worktree"
     ).exists()
