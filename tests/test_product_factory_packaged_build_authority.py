@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from nika_core.product_factory_deployment import (
     Platform,
     ResourceEnvelope,
 )
+from nika_core.product_factory_local_build_execution import _dispatch_digest
 from nika_core.product_factory_local_coding import ContainedLocalCodingPolicy
 from nika_core.product_factory_multi_repository import RepositoryGraphAuthority
 from nika_core.product_factory_orchestration import (
@@ -576,12 +578,26 @@ def test_historical_authority_is_effect_bound_and_recovery_scoped(
             work_id=work_id,
         )
 
-    with runtime.trusted_execution.historical_recovery(frozenset({work_id})):
+    with runtime.trusted_execution.historical_recovery(
+        frozenset({(work_id, dispatch.dispatch_id)})
+    ):
         assert runtime.trusted_execution.resolve(
             project_id=PROJECT_ID,
             repository_id=REPOSITORY_ID,
             work_id=work_id,
         ) == execution
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(
+                runtime.trusted_execution.resolve,
+                project_id=PROJECT_ID,
+                repository_id=REPOSITORY_ID,
+                work_id=work_id,
+            )
+            with pytest.raises(
+                PackagedBuildAuthorityError,
+                match="changed after PF5 work admission",
+            ):
+                future.result()
 
     with pytest.raises(
         PackagedBuildAuthorityError,
@@ -592,6 +608,19 @@ def test_historical_authority_is_effect_bound_and_recovery_scoped(
             repository_id=REPOSITORY_ID,
             work_id=work_id,
         )
+
+    with runtime.trusted_execution.historical_recovery(
+        frozenset({(work_id, f"{dispatch.dispatch_id}:rebound")})
+    ):
+        with pytest.raises(
+            PackagedBuildAuthorityError,
+            match="dispatch identity does not match recovery",
+        ):
+            runtime.trusted_execution.resolve(
+                project_id=PROJECT_ID,
+                repository_id=REPOSITORY_ID,
+                work_id=work_id,
+            )
 
     assert runtime.output_policies.resolve(
         project_id=PROJECT_ID,
@@ -654,7 +683,9 @@ def test_missing_historical_template_payload_fails_closed_after_effect_marker(
         expected_revision=1,
     )
 
-    with runtime.trusted_execution.historical_recovery(frozenset({work_id})):
+    with runtime.trusted_execution.historical_recovery(
+        frozenset({(work_id, dispatch.dispatch_id)})
+    ):
         with pytest.raises(
             PackagedBuildAuthorityError,
             match="unavailable or corrupt",
@@ -672,13 +703,16 @@ def test_historical_authority_rejects_work_without_effect_admission(
     _store, _startup_value, _node_value, runtime = _runtime(tmp_path)
     spec = _admit(runtime)
     work_id = spec.request.work_id
+    dispatch = _dispatch_for(runtime, spec)
 
     runtime.authorities.configure(
         _template(argv_suffix=("--wheel",)),
         expected_revision=1,
     )
 
-    with runtime.trusted_execution.historical_recovery(frozenset({work_id})):
+    with runtime.trusted_execution.historical_recovery(
+        frozenset({(work_id, dispatch.dispatch_id)})
+    ):
         with pytest.raises(
             PackagedBuildAuthorityError,
             match="lacks durable effect admission",
@@ -699,12 +733,16 @@ def test_historical_authority_rejects_work_without_effect_admission(
         )
 
 
-class _UncertainBuildPort:
+class _StartedUncertainBuildPort:
+    def __init__(self, inner) -> None:
+        self.inner = inner
+
     def run(self, dispatch: BuildExecutionDispatch):
+        self.inner._claim_effect(dispatch, _dispatch_digest(dispatch))
         raise BuildExecutionPortError("simulated effect acknowledgement loss")
 
     def inspect(self, dispatch: BuildExecutionDispatch):
-        return None
+        return self.inner.inspect(dispatch)
 
 
 def test_packaged_restart_uses_historical_authority_only_for_dispatched_work(
@@ -732,10 +770,19 @@ def test_packaged_restart_uses_historical_authority_only_for_dispatched_work(
     host.submit(spec)
     host.prepare(spec.request.work_id)
     dispatch = host.begin_dispatch(spec.request.work_id)
-    host.node_port = _UncertainBuildPort()
+    local_node = host.node_port
+    host.node_port = _StartedUncertainBuildPort(local_node)
     uncertain = host.execute(spec.request.work_id)
     assert uncertain.state is BuildExecutionState.RECONCILE_REQUIRED
-    _mark_effect_started(store, runtime, dispatch)
+    assert local_node.inspect(dispatch) is None
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT effect_dispatch_id "
+            "FROM product_factory_build_authority_bindings WHERE work_id = ?",
+            (spec.request.work_id,),
+        ).fetchone()
+    assert row is not None
+    assert row["effect_dispatch_id"] == dispatch.dispatch_id
 
     runtime.authorities.configure(
         _template(argv_suffix=("--wheel",)),

@@ -5,6 +5,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -550,6 +551,7 @@ class PackagedBuildAuthorityStore:
         repository_id: str,
         work_id: str,
         require_effect_started: bool = True,
+        effect_dispatch_id: str | None = None,
     ) -> tuple[_BoundBuildAuthority, PackagedBuildAuthoritySnapshot]:
         for label, value in (
             ("project_id", project_id),
@@ -559,6 +561,8 @@ class PackagedBuildAuthorityStore:
             _exact_text(value, label)
         if type(require_effect_started) is not bool:
             raise TypeError("require_effect_started must be exact bool")
+        if effect_dispatch_id is not None:
+            _exact_text(effect_dispatch_id, "effect_dispatch_id")
         try:
             with self._store.connection() as conn:
                 row = conn.execute(
@@ -579,12 +583,17 @@ class PackagedBuildAuthorityStore:
             raise PackagedBuildAuthorityError(
                 "PF5 packaged authority binding identity does not match request"
             )
-        if require_effect_started:
-            dispatch_id = row["effect_dispatch_id"]
-            if type(dispatch_id) is not str or not dispatch_id.strip():
-                raise PackagedBuildAuthorityError(
-                    "PF5 historical authority lacks durable effect admission"
-                )
+        dispatch_id = row["effect_dispatch_id"]
+        if require_effect_started and (
+            type(dispatch_id) is not str or not dispatch_id.strip()
+        ):
+            raise PackagedBuildAuthorityError(
+                "PF5 historical authority lacks durable effect admission"
+            )
+        if effect_dispatch_id is not None and dispatch_id != effect_dispatch_id:
+            raise PackagedBuildAuthorityError(
+                "PF5 historical authority dispatch identity does not match recovery"
+            )
         return bound, _historical_snapshot_from_row(row, bound)
 
     def mark_effect_started_with_connection(
@@ -835,34 +844,52 @@ class PackagedReviewedBuildExecutionPolicyPort:
 @dataclass(slots=True)
 class PackagedTrustedExecutionAuthorityPort:
     authorities: PackagedBuildAuthorityStore
-    _historical_recovery_work_ids: frozenset[str] = field(
-        default_factory=frozenset,
-        init=False,
-        repr=False,
-    )
-    _historical_recovery_active: bool = field(
-        default=False,
+    _historical_recovery_dispatches: ContextVar[dict[str, str] | None] = field(
+        default_factory=lambda: ContextVar(
+            "pf5_historical_recovery_dispatches",
+            default=None,
+        ),
         init=False,
         repr=False,
     )
 
     @contextmanager
-    def historical_recovery(self, work_ids: frozenset[str]) -> Iterator[None]:
-        if type(work_ids) is not frozenset or any(
-            type(work_id) is not str or not work_id.strip() for work_id in work_ids
-        ):
-            raise TypeError("historical recovery work ids must be exact canonical frozenset")
-        if self._historical_recovery_active:
+    def historical_recovery(
+        self,
+        dispatches: frozenset[tuple[str, str]],
+    ) -> Iterator[None]:
+        if type(dispatches) is not frozenset:
+            raise TypeError(
+                "historical recovery dispatches must be exact canonical frozenset"
+            )
+        recovered: dict[str, str] = {}
+        for item in dispatches:
+            if (
+                type(item) is not tuple
+                or len(item) != 2
+                or type(item[0]) is not str
+                or type(item[1]) is not str
+            ):
+                raise TypeError(
+                    "historical recovery dispatch identity must be exact text pair"
+                )
+            work_id = _exact_text(item[0], "recovery work_id")
+            dispatch_id = _exact_text(item[1], "recovery dispatch_id")
+            existing = recovered.get(work_id)
+            if existing is not None and existing != dispatch_id:
+                raise PackagedBuildAuthorityError(
+                    "historical recovery contains conflicting dispatch identity"
+                )
+            recovered[work_id] = dispatch_id
+        if self._historical_recovery_dispatches.get() is not None:
             raise PackagedBuildAuthorityError(
                 "nested PF5 historical recovery authority is not allowed"
             )
-        self._historical_recovery_active = True
-        self._historical_recovery_work_ids = work_ids
+        token = self._historical_recovery_dispatches.set(recovered)
         try:
             yield
         finally:
-            self._historical_recovery_work_ids = frozenset()
-            self._historical_recovery_active = False
+            self._historical_recovery_dispatches.reset(token)
 
     def mark_effect_started_with_connection(
         self,
@@ -885,13 +912,16 @@ class PackagedTrustedExecutionAuthorityPort:
                 work_id=work_id,
             )
         except PackagedBuildAuthorityError:
-            if work_id not in self._historical_recovery_work_ids:
+            recovery = self._historical_recovery_dispatches.get()
+            recovery_dispatch_id = None if recovery is None else recovery.get(work_id)
+            if recovery_dispatch_id is None:
                 raise
             _bound, snapshot = self.authorities.historical_bound_snapshot(
                 project_id=project_id,
                 repository_id=repository_id,
                 work_id=work_id,
                 require_effect_started=True,
+                effect_dispatch_id=recovery_dispatch_id,
             )
         return _execution_authority(snapshot, work_id)
 
