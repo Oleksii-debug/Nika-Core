@@ -87,9 +87,9 @@ function Get-NikaDatabaseAliasIdentity {
 
     $rootIdentity = $root.TrimEnd([char]'\')
     if ($parts.Count -eq 0) {
-        return $rootIdentity + "\\"
+        return $rootIdentity + "\"
     }
-    return $rootIdentity + "\\" + [string]::Join("\\", $parts)
+    return $rootIdentity + "\" + [string]::Join("\", $parts)
 }
 
 function Test-NikaPathWithin {
