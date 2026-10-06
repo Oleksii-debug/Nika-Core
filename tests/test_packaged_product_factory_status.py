@@ -12,6 +12,7 @@ from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
     ProductProjectPresentationConsistencyError,
 )
+from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
 from nika_core.product_factory_orchestration import (
     ProductComponent,
@@ -286,9 +287,17 @@ class SelectedProjectRouter:
         self.active_project_id = None
 
 
-def test_packaged_state_exposes_bounded_component_status_without_evidence(tmp_path: Path) -> None:
+def test_packaged_state_exposes_bounded_component_status_without_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _store, _repository, project, plan, preparation, center = _fixture(tmp_path)
     preparation.prepare(plan)
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Factory status projection must keep bounded decision reads")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
     router = SelectedProjectRouter(project.project_id)
     provider = PackagedProductStateProvider(
         base_state=lambda: {"tasks": [], "agents": [], "workspaces": []},
@@ -326,3 +335,4 @@ def test_windows_composition_uses_read_only_packaged_factory_status_reader() -> 
     assert "PackagedProductFactoryStatusReader(store)" in source
     assert "PackagedProductCommandCenter(" in source
     assert "status_reader=PackagedProductFactoryStatusReader(store)" in source
+    assert "team_planner=PackagedProductFactoryTeamPlanner(product_repository)" in source
