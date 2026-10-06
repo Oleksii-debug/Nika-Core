@@ -249,6 +249,54 @@ class TrainingScalePlan:
             ],
         }
 
+    @classmethod
+    def from_canonical_payload(cls, value: object) -> TrainingScalePlan:
+        if type(value) is not dict:
+            raise TrainingScaleError("training scale plan payload must be an exact object")
+        expected = {
+            "evaluation_set_sha256",
+            "plan_id",
+            "schema_version",
+            "tiers",
+        }
+        if set(value) != expected:
+            raise TrainingScaleError(
+                "training scale plan payload fields do not match the strict schema"
+            )
+        raw_tiers = value["tiers"]
+        if type(raw_tiers) is not list:
+            raise TrainingScaleError("training scale plan tiers must be an exact list")
+        tier_keys = {
+            "max_steps",
+            "max_training_bytes",
+            "max_training_records",
+            "max_validation_bytes",
+            "max_validation_records",
+            "tier_id",
+        }
+        tiers: list[TrainingScaleTier] = []
+        for raw_tier in raw_tiers:
+            if type(raw_tier) is not dict or set(raw_tier) != tier_keys:
+                raise TrainingScaleError(
+                    "training scale tier payload fields do not match the strict schema"
+                )
+            tiers.append(
+                TrainingScaleTier(
+                    tier_id=raw_tier["tier_id"],
+                    max_training_records=raw_tier["max_training_records"],
+                    max_training_bytes=raw_tier["max_training_bytes"],
+                    max_validation_records=raw_tier["max_validation_records"],
+                    max_validation_bytes=raw_tier["max_validation_bytes"],
+                    max_steps=raw_tier["max_steps"],
+                )
+            )
+        return cls(
+            plan_id=value["plan_id"],
+            evaluation_set_sha256=value["evaluation_set_sha256"],
+            tiers=tuple(tiers),
+            schema_version=value["schema_version"],
+        )
+
     @property
     def plan_sha256(self) -> str:
         return _sha256_payload(
@@ -320,10 +368,9 @@ class TrainingScaleProgressionProof:
         except AttributeError as exc:
             raise TrainingScaleError("training progression proof fields are incomplete") from exc
 
-    @property
-    def proof_sha256(self) -> str:
+    def canonical_payload(self) -> dict[str, object]:
         proof = self.revalidated()
-        payload = {
+        return {
             "authorization_sha256": proof.authorization_sha256,
             "base_artifact_ref": proof.base_artifact_ref,
             "base_sha256": proof.base_sha256,
@@ -339,7 +386,89 @@ class TrainingScaleProgressionProof:
             "tier_index": proof.tier_index,
             "training_material_sha256": proof.training_material_sha256,
         }
-        return _sha256_payload(payload, domain=b"nika-training-scale-proof-v1")
+
+    @classmethod
+    def from_canonical_payload(
+        cls,
+        value: object,
+        *,
+        plan: TrainingScalePlan,
+        authorization: TrainingScaleAuthorization,
+        run: TrainingRunEvidence,
+        comparison: AttestedTrainingComparisonResult,
+    ) -> TrainingScaleProgressionProof:
+        """Restore a persisted proof only through independently trusted authorities."""
+
+        del cls
+        if type(value) is not dict:
+            raise TrainingScaleError(
+                "training progression proof payload must be an exact object"
+            )
+        expected = {
+            "authorization_sha256",
+            "base_artifact_ref",
+            "base_sha256",
+            "candidate_artifact_ref",
+            "candidate_sha256",
+            "comparison_evidence_sha256",
+            "evaluation_set_sha256",
+            "execution_plan_sha256",
+            "frozen_package_sha256",
+            "job_fingerprint",
+            "job_id",
+            "plan_sha256",
+            "tier_index",
+            "training_material_sha256",
+        }
+        if set(value) != expected:
+            raise TrainingScaleError(
+                "training progression proof fields do not match the strict schema"
+            )
+        for field in (
+            "authorization_sha256",
+            "base_sha256",
+            "candidate_sha256",
+            "comparison_evidence_sha256",
+            "evaluation_set_sha256",
+            "execution_plan_sha256",
+            "frozen_package_sha256",
+            "job_fingerprint",
+            "plan_sha256",
+            "training_material_sha256",
+        ):
+            _require_sha256(value[field], name=field)
+        tier_index = value["tier_index"]
+        if type(tier_index) is not int or tier_index < 0:
+            raise TrainingScaleError("tier_index must be a non-negative integer")
+        for field in (
+            "job_id",
+            "base_artifact_ref",
+            "candidate_artifact_ref",
+        ):
+            _require_text(value[field], name=field)
+        if value["base_artifact_ref"] == value["candidate_artifact_ref"]:
+            raise TrainingScaleError(
+                "progression proof cannot overwrite the base artifact"
+            )
+
+        trusted = build_scale_progression_proof(
+            plan=plan,
+            authorization=authorization,
+            run=run,
+            comparison=comparison,
+        )
+        if value != trusted.canonical_payload():
+            raise TrainingScaleError(
+                "training progression proof payload does not match trusted prior-run authority"
+            )
+        return trusted
+
+    @property
+    def proof_sha256(self) -> str:
+        return _sha256_payload(
+            self.canonical_payload(),
+            domain=b"nika-training-scale-proof-v1",
+        )
 
 
 def _build_progression_proof(
