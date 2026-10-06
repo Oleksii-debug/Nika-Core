@@ -35,6 +35,7 @@ _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_OPEN_EXISTING = 3
 _WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 
@@ -117,6 +118,44 @@ def _open_windows_executable_launch_lock(path: pathlib.Path) -> int:
         ) from exc
 
 
+def _open_windows_directory_launch_lock(path: pathlib.Path) -> int:
+    """Hold one process-context directory against rename/delete replacement."""
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            str(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "CreateFileW failed")
+        return int(handle)
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        raise ProcessExecutionError(
+            "unable to lock process directory authority for launch"
+        ) from exc
+
+
 def _close_windows_executable_launch_lock(handle: int) -> None:
     try:
         import ctypes
@@ -173,6 +212,81 @@ class _PinnedExecutableLaunchGuard:
             return
         self._handle = None
         _close_windows_executable_launch_lock(handle)
+
+
+class _PinnedDirectoryLaunchGuard:
+    """Revalidate and, on Windows, hold workspace/cwd directory authority."""
+
+    def __init__(
+        self,
+        workspace_root: pathlib.Path,
+        cwd: pathlib.Path,
+    ) -> None:
+        self._workspace_root = workspace_root
+        self._cwd = cwd
+        try:
+            relative = cwd.relative_to(workspace_root)
+        except ValueError as exc:
+            raise ProcessExecutionError(
+                "process cwd escapes declared workspace root"
+            ) from exc
+        paths = [workspace_root]
+        current = workspace_root
+        for component in relative.parts:
+            current = current / component
+            paths.append(current)
+        self._paths = tuple(paths)
+        self._handles: list[int] = []
+
+    def __enter__(self) -> pathlib.Path:
+        if os.name == "nt":
+            try:
+                for path in self._paths:
+                    self._handles.append(
+                        _open_windows_directory_launch_lock(path)
+                    )
+            except Exception:
+                self._close()
+                raise
+        try:
+            workspace_root = ensure_real_directory_root(
+                self._workspace_root,
+                label="process workspace root",
+            )
+            cwd = ensure_real_directory_root(
+                self._cwd,
+                label="process cwd",
+            )
+            if (
+                _resolution_chain_key(workspace_root)
+                != _resolution_chain_key(self._workspace_root)
+                or _resolution_chain_key(cwd) != _resolution_chain_key(self._cwd)
+            ):
+                raise ProcessExecutionError(
+                    "process directory authority changed before launch"
+                )
+            try:
+                cwd.relative_to(workspace_root)
+            except ValueError as exc:
+                raise ProcessExecutionError(
+                    "process cwd escaped the workspace before launch"
+                ) from exc
+            return cwd
+        except Exception:
+            self._close()
+            raise
+
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> None:
+        self._close()
+
+    def _close(self) -> None:
+        while self._handles:
+            _close_windows_executable_launch_lock(self._handles.pop())
 
 
 def _resolve_pinned_executable(
@@ -286,6 +400,19 @@ def _cancelled_before_launch(typed_argv: tuple[str, ...]) -> ProcessExecutionRes
     )
 
 
+def _timed_out_before_launch(typed_argv: tuple[str, ...]) -> ProcessExecutionResult:
+    return ProcessExecutionResult(
+        argv=typed_argv,
+        returncode=1,
+        stdout="",
+        stderr="",
+        timed_out=True,
+        cancelled=False,
+        output_limit_exceeded=False,
+        isolation_class=_process_isolation_class(),
+    )
+
+
 def run_typed_process(
     argv: collections.abc.Sequence[str],
     *,
@@ -336,18 +463,23 @@ def run_typed_process(
         pathlib.Path(typed_argv[0]),
         typed_argv[1:],
     ) as launch_executable:
-        launch_argv = (str(launch_executable), *typed_argv[1:])
-        process = subprocess.Popen(
-            launch_argv,
-            cwd=cwd,
-            env=process_environment,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            creationflags=creationflags,
-            start_new_session=start_new_session,
-        )
+        with _PinnedDirectoryLaunchGuard(workspace_root, cwd) as launch_cwd:
+            if cancellation_event is not None and cancellation_event.is_set():
+                return _cancelled_before_launch(typed_argv)
+            if time.monotonic() >= deadline:
+                return _timed_out_before_launch(typed_argv)
+            launch_argv = (str(launch_executable), *typed_argv[1:])
+            process = subprocess.Popen(
+                launch_argv,
+                cwd=launch_cwd,
+                env=process_environment,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=creationflags,
+                start_new_session=start_new_session,
+            )
 
     with _WindowsJob() as job:
         if os.name == "nt":
