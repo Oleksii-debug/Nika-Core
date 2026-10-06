@@ -18,6 +18,7 @@ from nika_core.training_peft_worker import (
 )
 from nika_core.training_physical_evaluation_driver import (
     _find_pilot_task,
+    _iter_task_idempotency_records,
     load_trusted_scale_progression_proof,
 )
 from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
@@ -246,11 +247,13 @@ def _trusted_progression(
         job_id=report.job_id,
     )
     ledger = IdempotencyLedger(store)
-    claims: list[dict[str, object]] = []
-    for record in ledger.list_for_task(
-        task.task_id,
-        status=IdempotencyStatus.COMPLETED,
+    claim: dict[str, object] | None = None
+    for record in _iter_task_idempotency_records(
+        ledger,
+        task_id=task.task_id,
     ):
+        if record.status is not IdempotencyStatus.COMPLETED:
+            continue
         result = record.result
         if (
             type(result) is dict
@@ -258,15 +261,17 @@ def _trusted_progression(
             == "nika-physical-scale-progression-record-v1"
             and type(result.get("proof")) is dict
         ):
-            claims.append(dict(result["proof"]))
-    if len(claims) != 1:
+            if claim is not None:
+                _fail("exactly one durable scale progression proof is required")
+            claim = dict(result["proof"])
+    if claim is None:
         _fail("exactly one durable scale progression proof is required")
     proof = load_trusted_scale_progression_proof(
         output_root,
         workspace_id=workspace_id,
-        expected_claim=claims[0],
+        expected_claim=claim,
     )
-    if proof.canonical_payload() != claims[0]:
+    if proof.canonical_payload() != claim:
         _fail("restored scale progression proof changed canonical payload")
     return proof
 
