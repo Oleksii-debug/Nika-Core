@@ -96,6 +96,16 @@ def validate_git_commit_sha(value: object, *, label: str = "base_sha") -> str:
     return value
 
 
+def validate_sha256_digest(value: object, *, label: str = "sha256") -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value.lower())
+    ):
+        raise WorkspaceSecurityError(f"{label} must be a hexadecimal sha256")
+    return value
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class WorkspacePathPolicy:
     allowed_roots: tuple[str, ...]
@@ -189,10 +199,7 @@ class ProductionIntegritySnapshot:
 
     def __post_init__(self) -> None:
         validate_git_commit_sha(self.base_sha)
-        if len(self.tree_digest) != 64 or any(
-            character not in "0123456789abcdef" for character in self.tree_digest.lower()
-        ):
-            raise WorkspaceSecurityError("tree_digest must be a hexadecimal sha256")
+        validate_sha256_digest(self.tree_digest, label="tree_digest")
 
 
 def _windows_component_is_reserved(component: str) -> bool:
