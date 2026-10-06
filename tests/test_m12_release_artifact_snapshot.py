@@ -51,7 +51,7 @@ def test_release_artifact_snapshot_rejects_lstat_open_substitution(
     snapshot_dir = tmp_path / "snapshot"
     snapshot_dir.mkdir()
 
-    real_open = release_evidence._open_release_artifact_source
+    real_open = release_evidence._open_readonly_nofollow_snapshot
     swapped = False
 
     def swapping_open(path: Path) -> int:
@@ -61,7 +61,7 @@ def test_release_artifact_snapshot_rejects_lstat_open_substitution(
             swapped = True
         return real_open(path)
 
-    monkeypatch.setattr(release_evidence, "_open_release_artifact_source", swapping_open)
+    monkeypatch.setattr(release_evidence, "_open_readonly_nofollow_snapshot", swapping_open)
 
     with pytest.raises(RuntimeError, match="changed before snapshot"):
         _snapshot_release_artifact(source, snapshot_dir)
@@ -99,7 +99,7 @@ def test_release_artifact_source_handle_denies_write_and_rename_until_close(
     renamed = tmp_path / "renamed.zip"
     source.write_bytes(b"stable final artifact bytes")
 
-    descriptor = release_evidence._open_release_artifact_source(source)
+    descriptor = release_evidence._open_readonly_nofollow_snapshot(source)
     try:
         assert os.read(descriptor, 6) == b"stable"
         with pytest.raises(OSError):
