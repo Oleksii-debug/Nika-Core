@@ -121,6 +121,31 @@
   const productProjectStatusesTruncated = document.getElementById(
     "product-project-statuses-truncated",
   );
+  const productProjectOperator = document.getElementById("product-project-operator");
+  const productProjectOperatorFieldNames = Object.freeze([
+    "project",
+    "work",
+    "owner",
+    "state",
+    "blocker",
+    "candidate",
+    "test",
+    "qa",
+    "integration",
+    "next",
+  ]);
+  const productProjectOperatorFields = Object.freeze({
+    project: document.getElementById("product-project-operator-project"),
+    work: document.getElementById("product-project-operator-work"),
+    owner: document.getElementById("product-project-operator-owner"),
+    state: document.getElementById("product-project-operator-state"),
+    blocker: document.getElementById("product-project-operator-blocker"),
+    candidate: document.getElementById("product-project-operator-candidate"),
+    test: document.getElementById("product-project-operator-test"),
+    qa: document.getElementById("product-project-operator-qa"),
+    integration: document.getElementById("product-project-operator-integration"),
+    next: document.getElementById("product-project-operator-next"),
+  });
   const productProjectDecision = document.getElementById("product-project-decision");
   const productProjectDecisionFields = Object.freeze({
     decision_id: document.getElementById("product-project-decision-id"),
@@ -538,6 +563,18 @@
       && decision.risk_level <= 4;
   }
 
+  function validProductOperator(operator) {
+    if (!operator || typeof operator !== "object" || Array.isArray(operator)) return false;
+    const keys = Object.keys(operator);
+    if (keys.length !== productProjectOperatorFieldNames.length) return false;
+    return productProjectOperatorFieldNames.every((field) => (
+      Object.prototype.hasOwnProperty.call(operator, field)
+      && typeof operator[field] === "string"
+      && operator[field].trim()
+      && operator[field].length <= 4000
+    ));
+  }
+
   function validProductProject(project) {
     if (!project || typeof project !== "object" || Array.isArray(project)) return false;
     const stringFields = ["title", "project_id", "goal", "state"];
@@ -557,17 +594,21 @@
       return false;
     }
     return Object.prototype.hasOwnProperty.call(project, "current_decision")
-      && validProductDecision(project.current_decision);
+      && validProductDecision(project.current_decision)
+      && Object.prototype.hasOwnProperty.call(project, "operator")
+      && validProductOperator(project.operator);
   }
 
   function clearProductProjectFields() {
     for (const node of Object.values(productProjectFields)) node.textContent = "";
+    for (const node of Object.values(productProjectOperatorFields)) node.textContent = "";
     for (const node of Object.values(productProjectDecisionFields)) node.textContent = "";
     productProjectStatusesList.replaceChildren();
     productProjectStatusesEmpty.hidden = false;
     productProjectStatusesTruncated.textContent = "";
     productProjectStatusesTruncated.hidden = true;
     productProjectStatuses.hidden = true;
+    productProjectOperator.hidden = true;
     productProjectDecision.hidden = true;
   }
 
@@ -614,6 +655,13 @@
     productProjectStatuses.hidden = false;
   }
 
+  function renderProductProjectOperator(operator) {
+    for (const field of productProjectOperatorFieldNames) {
+      productProjectOperatorFields[field].textContent = operator[field];
+    }
+    productProjectOperator.hidden = false;
+  }
+
   function renderProductProject(project) {
     if (project == null) {
       productProjectEmpty.textContent = "Поточний ProductProject не вибрано.";
@@ -633,6 +681,7 @@
       node.textContent = String(project[field]);
     }
     renderProductProjectStatuses(project);
+    renderProductProjectOperator(project.operator);
     const decision = project.current_decision;
     if (decision === null) {
       productProjectDecision.hidden = true;
