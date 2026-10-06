@@ -20,6 +20,7 @@ from nika_core.product_project import ProductProjectSpec
 from nika_core.ui.bridge_models import UIResult
 
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
+AgentBuilderCommandHandler = Callable[[Mapping[str, Any]], UIResult]
 ActivityReportHandler = Callable[[], UIResult]
 TrainingStatusHandler = Callable[[str], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
@@ -215,8 +216,9 @@ class PackagedProductCommandRouter:
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
     Explicit daily-report and training-status intents may call injected read-only handlers.
-    This boundary deliberately does not dispatch workers, deploy providers, Toolsmith, or any
-    high-impact external action. Those remain downstream explicit factory/security boundaries.
+    Explicit Agent Builder intent delegates only to an injected safe-draft handler. Toolsmith
+    remains a separate fail-closed route. No high-impact external action is launched merely by
+    command classification.
     """
 
     def __init__(
@@ -224,12 +226,14 @@ class PackagedProductCommandRouter:
         *,
         products: ProductProjectCommandService,
         ordinary_handler: OrdinaryCommandHandler,
+        agent_builder_handler: AgentBuilderCommandHandler | None = None,
         activity_report_handler: ActivityReportHandler | None = None,
         training_status_handler: TrainingStatusHandler | None = None,
         selection_store: PackagedProductSelectionStore | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
+        self._agent_builder_handler = agent_builder_handler
         self._activity_report_handler = activity_report_handler
         self._training_status_handler = training_status_handler
         self._selection_store = selection_store
@@ -342,10 +346,17 @@ class PackagedProductCommandRouter:
             return self._ordinary_handler(payload)
         if decision.route is CommandRouteKind.AMBIGUOUS:
             raise PackagedProductJourneyError(
-                "Команда одночасно схожа на ProductProject і Toolsmith. "
-                "Уточніть, чи це довготривалий продукт, "
-                "чи створення інструмента."
+                "Команда одночасно відповідає кільком спеціалізованим маршрутам. "
+                "Уточніть, чи потрібно створити ProductProject, агента через Agent Builder, "
+                "чи нову можливість Toolsmith."
             )
+        if decision.route is CommandRouteKind.AGENT_BUILDER:
+            if self._agent_builder_handler is None:
+                raise PackagedProductJourneyError(
+                    "Команда визначена як запит Agent Builder. Поточна packaged-композиція "
+                    "ще не підключила Agent Builder handler; звичайне завдання не створено."
+                )
+            return self._agent_builder_handler(payload)
         if decision.route is CommandRouteKind.TOOLSMITH:
             raise PackagedProductJourneyError(
                 "Команда визначена як запит на нову "
