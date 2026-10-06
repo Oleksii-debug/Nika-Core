@@ -526,6 +526,36 @@ def test_present_empty_database_environment_alias_fails_before_install_mutation(
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_equivalent_database_alias_spellings_preserve_install_compatibility(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "bundle", "v1")
+    destination = tmp_path / "install" / "Nika Core"
+    database = tmp_path / "data" / "nika_core.db"
+    compatibility_spelling = (
+        str(database.parent).replace("\\", "/") + "/./" + database.name
+    )
+
+    installed = _run(
+        shell,
+        mode="Install",
+        destination=destination,
+        bundle=bundle,
+        env_overrides={
+            "NIKA_DB_PATH": str(database),
+            "NIKA_DATABASE_PATH": compatibility_spelling,
+        },
+    )
+
+    assert installed.returncode == 0, installed.stderr or installed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
 def test_equal_database_environment_aliases_preserve_install_compatibility(
     tmp_path: Path,
 ) -> None:
