@@ -17,6 +17,12 @@ def test_default_action_metadata_matches_ukrainian_webview_language() -> None:
             None,
             True,
         ),
+        "product.factory.execution_plan.load": (
+            "Завантажити план виконання Product Factory",
+            "Product Factory",
+            None,
+            True,
+        ),
         "settings.model.configure": (
             "Зберегти модель",
             "Налаштування",
