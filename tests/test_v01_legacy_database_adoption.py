@@ -326,6 +326,19 @@ def test_pending_record_snapshot_rejects_path_swap_after_open(tmp_path, monkeypa
     assert swapped
 
 
+def test_present_null_pending_record_is_rejected_not_treated_as_missing(tmp_path):
+    target = tmp_path / "data" / "nika.db"
+    target.parent.mkdir()
+    pending = target.with_name(f".{target.name}.legacy-adoption.json")
+    pending.write_text("null", encoding="utf-8")
+
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+
+    assert pending.read_text(encoding="utf-8") == "null"
+    assert not target.exists()
+
+
 def test_pending_record_snapshot_rejects_oversize_before_json_decode(tmp_path):
     pending = tmp_path / ".nika.db.legacy-adoption.json"
     pending.write_bytes(b"x" * (adoption._MAX_PENDING_BYTES + 1))
