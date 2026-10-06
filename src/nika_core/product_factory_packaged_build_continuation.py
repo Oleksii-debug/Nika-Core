@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.product_factory_build_execution import BuildExecutionState
 from nika_core.product_factory_coordinator import WorkState
 from nika_core.product_factory_packaged_build_settings import (
     ActivatedPackagedBuildRuntime,
@@ -32,6 +33,7 @@ class PackagedReviewedBuildContinuation:
     store: SQLiteStore
     startup: PackagedLocalProductFactoryStartup
     activated: ActivatedPackagedBuildRuntime
+    max_components: int = 32
 
     def __post_init__(self) -> None:
         if type(self.store) is not SQLiteStore:
@@ -45,6 +47,11 @@ class PackagedReviewedBuildContinuation:
                 "PF5 continuation requires exact ActivatedPackagedBuildRuntime"
             )
         self.startup.__post_init__()
+        if (
+            type(self.max_components) is not int
+            or not 1 <= self.max_components <= 256
+        ):
+            raise ValueError("PF5 continuation max_components must be an exact 1..256 integer")
 
     async def __call__(self, prepared: PreparedProductFactory) -> None:
         if type(prepared) is not PreparedProductFactory:
@@ -60,6 +67,10 @@ class PackagedReviewedBuildContinuation:
             for record in snapshot.records
             if record.state is WorkState.ACCEPTED
         )
+        if len(accepted) > self.max_components:
+            raise PackagedBuildContinuationError(
+                "accepted PF5 continuation exceeds the configured component bound"
+            )
         if not accepted:
             return
 
@@ -84,6 +95,13 @@ class PackagedReviewedBuildContinuation:
                 state=state,
                 component_id=record.request.component_id,
             )
+            if advanced.state in {
+                BuildExecutionState.EFFECT_IN_FLIGHT,
+                BuildExecutionState.RECONCILE_REQUIRED,
+            }:
+                advanced = controller.controller.reconcile_work(
+                    advanced.spec.request.work_id
+                )
             if advanced.spec.request.project_id != project_id:
                 raise PackagedBuildContinuationError(
                     "PF5 continuation returned work for a different ProductProject"
