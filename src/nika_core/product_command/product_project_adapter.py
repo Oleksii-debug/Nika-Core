@@ -14,7 +14,6 @@ from nika_core.product_command.contracts import (
 )
 from nika_core.product_command.reference_safety import safe_evidence_reference
 from nika_core.product_decisions import ProductDecisionRepository, StoredProductDecision
-from nika_core.security import ActionIntent, ApprovalEvidence, ApprovalVerifier
 from nika_core.product_project import (
     ProductDecision,
     ProductDecisionState,
@@ -28,6 +27,7 @@ from nika_core.product_project_lifecycle import (
     ProductProjectState,
     ProductProjectStatusTransition,
 )
+from nika_core.security import ActionIntent, ApprovalEvidence, ApprovalVerifier
 
 _MAX_LABEL = 240
 _MAX_DETAIL = 4000
