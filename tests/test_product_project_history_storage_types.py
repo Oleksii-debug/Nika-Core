@@ -458,6 +458,87 @@ def test_history_accepts_trusted_approved_decision_writer_fingerprint(tmp_path) 
     assert report.mutation_idempotency_count == 1
 
 
+def test_history_accepts_trusted_approval_after_prior_row_mutation(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    current = projects.get("project-1")
+    projects.update_spec(
+        "project-1",
+        replace(current.spec, hypothesis="Advance before trusted owner decision"),
+        expected_row_version=current.row_version,
+        change_reason="Advance causal row before trusted approval",
+        idempotency_key="spec:before-trusted-approval",
+    )
+    _research(projects)
+    current = projects.get("project-1")
+    assert current.row_version == 1
+    ApprovedProductDecisionRepository(store).record(
+        "project-1",
+        ProductDecision(
+            decision_id="decision-approved",
+            option_id="option-1",
+            state=ProductDecisionState.APPROVED,
+            rationale="Approve after prior durable mutation",
+            decided_by_ref="user://owner",
+        ),
+        expected_row_version=current.row_version,
+        idempotency_key="decision:approved:after-row-mutation",
+    )
+
+    report = ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+    assert report.mutation_idempotency_count == 1
+
+
+@pytest.mark.parametrize("field_name", ("action_fingerprint", "effect_fingerprint"))
+def test_history_rejects_trusted_approval_fingerprint_drift(
+    tmp_path,
+    field_name: str,
+) -> None:
+    store, projects = _project(tmp_path)
+    _research(projects)
+    current = projects.get("project-1")
+    ApprovedProductDecisionRepository(store).record(
+        "project-1",
+        ProductDecision(
+            decision_id="decision-approved",
+            option_id="option-1",
+            state=ProductDecisionState.APPROVED,
+            rationale="Approve the evidence-backed option",
+            decided_by_ref="user://owner",
+        ),
+        expected_row_version=current.row_version,
+        idempotency_key="decision:approved:fingerprint-drift",
+    )
+    replacement = hashlib.sha256(f"{field_name}:drift".encode()).hexdigest()
+    with store.connection() as conn:
+        audit = conn.execute(
+            "SELECT event_id,payload_json FROM audit_events "
+            "WHERE event_type='product_project.decision_recorded' "
+            "AND entity_id='project-1'"
+        ).fetchone()
+        payload = json.loads(audit["payload_json"])
+        assert replacement != payload["approval_authority"][field_name]
+        payload["approval_authority"][field_name] = replacement
+        conn.execute(
+            "UPDATE audit_events SET payload_json=? WHERE event_id=?",
+            (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                audit["event_id"],
+            ),
+        )
+
+    with pytest.raises(
+        ProductProjectError,
+        match="approval authority fingerprint drift",
+    ):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
 def test_history_rejects_approved_decision_actor_drift(tmp_path) -> None:
     store, projects = _project(tmp_path)
     _research(projects)
