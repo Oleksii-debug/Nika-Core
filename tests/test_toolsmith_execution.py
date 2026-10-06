@@ -162,7 +162,7 @@ def test_windows_executable_launch_guard_denies_replace_until_release(
         assert replacement.read_bytes() == b"replacement executable bytes"
 
     os.replace(replacement, executable)
-    assert executable.read_text(encoding="utf-8").endswith("replacement\\n'\\n")
+    assert executable.read_bytes() == b"replacement executable bytes"
 
 
 def test_typed_runner_rejects_final_executable_identity_change(
@@ -268,7 +268,7 @@ def test_posix_launch_guard_keeps_exact_descriptor_through_exec(
 
     assert result.returncode == 0
     assert result.stdout.strip() == "descriptor-bound"
-    assert executable.read_text(encoding="utf-8").endswith("replacement\\n'\\n")
+    assert executable.read_text(encoding="utf-8") == "#!/bin/sh\nprintf 'replacement\\n'\n"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor launch only")
@@ -317,7 +317,7 @@ def test_posix_typed_runner_survives_path_swap_at_popen(
     assert swapped is True
     assert result.returncode == 0
     assert result.stdout.strip() == "trusted-executable"
-    assert executable.read_bytes() == b"replacement executable bytes"
+    assert executable.read_text(encoding="utf-8") == "#!/bin/sh\nprintf 'replacement\\n'\n"
 
 
 def test_typed_runner_rejects_same_path_replacement_after_runtime_admission(
