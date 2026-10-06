@@ -264,6 +264,12 @@ class MultiRepositoryProductFactoryHost:
             coordinator=state.coordinator,
             max_parallel=max_parallel,
             max_count=max_count,
+            effect_admission_precondition=lambda connection: (
+                self._require_current_project_version(
+                    connection,
+                    state.binding.project,
+                )
+            ),
         )
 
     async def recover_running(
@@ -280,6 +286,12 @@ class MultiRepositoryProductFactoryHost:
             binding=state.binding,
             coordinator=state.coordinator,
             max_parallel=max_parallel,
+            effect_admission_precondition=lambda connection: (
+                self._require_current_project_version(
+                    connection,
+                    state.binding.project,
+                )
+            ),
         )
 
     def review_and_checkpoint(
