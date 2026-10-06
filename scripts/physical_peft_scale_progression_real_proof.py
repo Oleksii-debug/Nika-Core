@@ -89,9 +89,11 @@ def _reject_constant(value: str) -> NoReturn:
 
 def _read_object_snapshot(path: Path) -> tuple[dict[str, object], bytes]:
     try:
-        raw = path.read_bytes()
-        if not raw or len(raw) > _MAX_JSON_BYTES:
-            _fail(f"JSON authority has invalid size: {path.name}")
+        raw = _stable_file_bytes(
+            path,
+            max_bytes=_MAX_JSON_BYTES,
+            name=f"JSON authority {path.name}",
+        )
         value = json.loads(
             raw.decode("utf-8", errors="strict"),
             object_pairs_hook=_strict_object,
@@ -245,20 +247,27 @@ def _require_open_snapshot_identity(path: Path, descriptor: int, *, name: str) -
         _fail(f"{name} identity changed")
 
 
-def _read_held_candidate_bytes(descriptor: int, *, name: str) -> bytes:
+def _read_held_bytes(
+    descriptor: int,
+    *,
+    max_bytes: int,
+    name: str,
+) -> bytes:
+    if type(max_bytes) is not int or max_bytes <= 0:
+        _fail(f"{name} size bound is invalid")
     try:
         os.lseek(descriptor, 0, os.SEEK_SET)
         chunks: list[bytes] = []
         total = 0
         while True:
-            remaining = _MAX_CANDIDATE_BYTES + 1 - total
+            remaining = max_bytes + 1 - total
             if remaining <= 0:
                 _fail(f"{name} size is invalid")
             chunk = os.read(descriptor, min(1024 * 1024, remaining))
             if not chunk:
                 break
             total += len(chunk)
-            if total > _MAX_CANDIDATE_BYTES:
+            if total > max_bytes:
                 _fail(f"{name} size is invalid")
             chunks.append(chunk)
     except ProofError:
@@ -268,6 +277,50 @@ def _read_held_candidate_bytes(descriptor: int, *, name: str) -> bytes:
     if total <= 0:
         _fail(f"{name} is empty")
     return b"".join(chunks)
+
+
+def _stable_file_bytes(path: Path, *, max_bytes: int, name: str) -> bytes:
+    descriptor: int | None = None
+    try:
+        before = os.lstat(path)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > max_bytes
+        ):
+            _fail(f"{name} size or file type is invalid")
+        descriptor = _open_readonly_snapshot(path)
+        _require_open_snapshot_identity(path, descriptor, name=name)
+        opened = os.fstat(descriptor)
+        payload = _read_held_bytes(
+            descriptor,
+            max_bytes=max_bytes,
+            name=name,
+        )
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+    except ProofError:
+        raise
+    except OSError as exc:
+        raise ProofError(f"{name} could not be snapshotted") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    identities = (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+        (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+    )
+    if len(set(identities)) != 1 or len(payload) != before.st_size:
+        _fail(f"{name} changed while it was being snapshotted")
+    return payload
 
 
 def _candidate_file_authority(
@@ -291,7 +344,11 @@ def _candidate_file_authority(
         descriptor = _open_readonly_snapshot(path)
         _require_open_snapshot_identity(path, descriptor, name=name)
         opened = os.fstat(descriptor)
-        payload = _read_held_candidate_bytes(descriptor, name=name)
+        payload = _read_held_bytes(
+            descriptor,
+            max_bytes=_MAX_CANDIDATE_BYTES,
+            name=name,
+        )
         if len(payload) != before.st_size:
             _fail(f"{name} changed while it was being read")
 
@@ -300,7 +357,14 @@ def _candidate_file_authority(
         _require_open_snapshot_identity(path, descriptor, name=name)
         after = os.fstat(descriptor)
         current = os.lstat(path)
-        if _read_held_candidate_bytes(descriptor, name=name) != payload:
+        if (
+            _read_held_bytes(
+                descriptor,
+                max_bytes=_MAX_CANDIDATE_BYTES,
+                name=name,
+            )
+            != payload
+        ):
             _fail(f"{name} changed during manifest verification")
         identities = (
             (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
