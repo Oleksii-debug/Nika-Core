@@ -619,6 +619,22 @@ def _run_voice_runtime_proof(output_path: Path | None) -> int:
     return 0
 
 
+def _cleanup_packaged_resources(
+    cleanup_callbacks: list[Callable[[], None]],
+) -> None:
+    """Release registered packaged resources in reverse construction order."""
+
+    while cleanup_callbacks:
+        cleanup = cleanup_callbacks.pop()
+        try:
+            cleanup()
+        except Exception as exc:  # noqa: BLE001 - shutdown is best-effort and private
+            logging.getLogger(__name__).error(
+                "Packaged resource cleanup failed: exception_type=%s",
+                type(exc).__name__,
+            )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pf11-proof", action="store_true")
@@ -684,12 +700,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if len(deferred_recovery) != 1:
             raise RuntimeError("packaged startup recovery runner was not scheduled exactly once")
     except _StartupRecoveryInventoryError:
+        _cleanup_packaged_resources(cleanup_callbacks)
         show_recovery_error(
             "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
             "Запуск зупинено без автоматичного повторення дій."
         )
         return 1
     except Exception as exc:  # noqa: BLE001 - redact startup failures
+        _cleanup_packaged_resources(cleanup_callbacks)
         logging.getLogger(__name__).error(
             "Packaged startup failed: exception_type=%s", type(exc).__name__
         )
@@ -721,14 +739,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
     finally:
-        for cleanup in reversed(cleanup_callbacks):
-            try:
-                cleanup()
-            except Exception as exc:  # noqa: BLE001 - shutdown is best-effort and private
-                logging.getLogger(__name__).error(
-                    "Packaged resource cleanup failed: exception_type=%s",
-                    type(exc).__name__,
-                )
+        _cleanup_packaged_resources(cleanup_callbacks)
     return 0
 
 
