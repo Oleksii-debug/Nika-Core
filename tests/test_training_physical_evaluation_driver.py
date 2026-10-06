@@ -1174,6 +1174,54 @@ def test_windows_pe_header_admission_rejects_renamed_non_pe(
     ):
         driver._require_windows_pe_executable(executable, name="evaluator executable")
 
+
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows file-share semantics")
+def test_regular_authority_reader_refuses_writer_and_releases_share_fence(
+    tmp_path: Path,
+) -> None:
+    path = (tmp_path / "authority.json").resolve()
+    path.write_bytes(b'{"trusted":true}')
+
+    with path.open("r+b"):
+        with pytest.raises(
+            driver.PhysicalEvaluationDriverError,
+            match="authority input could not be read",
+        ):
+            driver._read_regular_file(
+                path,
+                name="authority input",
+                max_bytes=1024,
+            )
+
+    assert driver._read_regular_file(
+        path,
+        name="authority input",
+        max_bytes=1024,
+    ) == b'{"trusted":true}'
+    path.write_bytes(b'{"replacement":true}')
+    assert path.read_bytes() == b'{"replacement":true}'
+
+
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows file-share semantics")
+def test_windows_pe_header_reader_refuses_preexisting_writer(tmp_path: Path) -> None:
+    executable = (tmp_path / "evaluator.exe").resolve()
+    payload = bytearray(68)
+    payload[:2] = b"MZ"
+    payload[60:64] = (64).to_bytes(4, "little")
+    payload[64:68] = b"PE\0\0"
+    executable.write_bytes(payload)
+
+    with executable.open("r+b"):
+        with pytest.raises(
+            driver.PhysicalEvaluationDriverError,
+            match="Windows PE header could not be read",
+        ):
+            driver._require_windows_pe_executable(
+                executable,
+                name="evaluator executable",
+            )
+
+
 def test_model_size_preflight_does_not_read_model_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
