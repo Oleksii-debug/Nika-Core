@@ -7,6 +7,12 @@ on:
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
       - "src/nika_core/speech/**"
+      - "src/nika_core/microphone_capture.py"
+      - "src/nika_core/sherpa_onnx_stt.py"
+      - "src/nika_core/speech_to_text.py"
+      - "src/nika_core/voice_turn.py"
+      - "src/nika_core/wake_activation.py"
+      - "src/nika_core/windows_microphone_capture.py"
       - "src/nika_core/config.py"
       - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/reliability/backup.py"
@@ -34,6 +40,17 @@ on:
       - "tests/test_packaged_speech_output.py"
       - "tests/test_speech_output_windows.py"
       - "tests/test_speech_streaming.py"
+      - "tests/test_packaged_voice_entrypoint.py"
+      - "tests/test_packaged_voice_model_setup.py"
+      - "tests/test_packaged_startup_cleanup.py"
+      - "tests/test_desktop_voice.py"
+      - "tests/test_microphone_capture.py"
+      - "tests/test_microphone_capture_timeout_truth.py"
+      - "tests/test_sherpa_onnx_stt.py"
+      - "tests/test_speech_to_text.py"
+      - "tests/test_voice_turn.py"
+      - "tests/test_wake_activation.py"
+      - "tests/test_windows_microphone_capture.py"
       - "tests/test_release_sbom.py"
       - "tests/test_release_provenance_workflow.py"
       - "tests/test_m12_packaged_installer_bundle.py"
@@ -71,6 +88,12 @@ on:
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
       - "src/nika_core/speech/**"
+      - "src/nika_core/microphone_capture.py"
+      - "src/nika_core/sherpa_onnx_stt.py"
+      - "src/nika_core/speech_to_text.py"
+      - "src/nika_core/voice_turn.py"
+      - "src/nika_core/wake_activation.py"
+      - "src/nika_core/windows_microphone_capture.py"
       - "src/nika_core/config.py"
       - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/reliability/backup.py"
@@ -98,6 +121,17 @@ on:
       - "tests/test_packaged_speech_output.py"
       - "tests/test_speech_output_windows.py"
       - "tests/test_speech_streaming.py"
+      - "tests/test_packaged_voice_entrypoint.py"
+      - "tests/test_packaged_voice_model_setup.py"
+      - "tests/test_packaged_startup_cleanup.py"
+      - "tests/test_desktop_voice.py"
+      - "tests/test_microphone_capture.py"
+      - "tests/test_microphone_capture_timeout_truth.py"
+      - "tests/test_sherpa_onnx_stt.py"
+      - "tests/test_speech_to_text.py"
+      - "tests/test_voice_turn.py"
+      - "tests/test_wake_activation.py"
+      - "tests/test_windows_microphone_capture.py"
       - "tests/test_release_sbom.py"
       - "tests/test_release_provenance_workflow.py"
       - "tests/test_m12_packaged_installer_bundle.py"
@@ -155,7 +189,7 @@ jobs:
       - name: Verify exact candidate checkout identity
         run: python scripts/qa_assert_checkout_identity.py
       - name: Install GUI, packaging and test dependencies
-        run: python -m pip install -e ".[gui,qa,dev]"
+        run: python -m pip install -e ".[gui,voice,qa,dev]"
       - name: Install exact runtime and capture dependency provenance
         shell: pwsh
         run: |
@@ -164,7 +198,7 @@ jobs:
           python -m pip list --format=freeze --exclude nika-core |
             Set-Content -Encoding utf8NoBOM $constraints
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pip install --force-reinstall --quiet --constraint $constraints --report ./build/m11/pip-runtime-report.json ".[gui]"
+          python -m pip install --force-reinstall --quiet --constraint $constraints --report ./build/m11/pip-runtime-report.json ".[gui,voice]"
           $resolverExit = $LASTEXITCODE
           Remove-Item $constraints -Force -ErrorAction SilentlyContinue
           if ($resolverExit -ne 0) { exit $resolverExit }
@@ -193,6 +227,17 @@ jobs:
           tests/test_packaged_speech_output.py
           tests/test_speech_output_windows.py
           tests/test_speech_streaming.py
+          tests/test_packaged_voice_entrypoint.py
+          tests/test_packaged_voice_model_setup.py
+          tests/test_packaged_startup_cleanup.py
+          tests/test_desktop_voice.py
+          tests/test_microphone_capture.py
+          tests/test_microphone_capture_timeout_truth.py
+          tests/test_sherpa_onnx_stt.py
+          tests/test_speech_to_text.py
+          tests/test_voice_turn.py
+          tests/test_wake_activation.py
+          tests/test_windows_microphone_capture.py
           tests/test_release_sbom.py
           tests/test_release_provenance_workflow.py
           tests/test_qa_workflow_lineage.py

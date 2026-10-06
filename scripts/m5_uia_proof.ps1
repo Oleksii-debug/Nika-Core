@@ -48,6 +48,14 @@ $requiredNames = @(
     'Текст для озвучення',
     'Озвучити текст',
     'Скасувати озвучення',
+    'Голосовий ввід',
+    'Почати один голосовий ввід',
+    'Скасувати голосовий ввід',
+    'Перенести розпізнаний текст у поле команди',
+    'Локальна модель розпізнавання',
+    'Папка локальної голосової моделі — повний шлях',
+    'Імпортувати голосову модель',
+    'Скасувати імпорт голосової моделі',
     'Клавіатура'
 )
 
@@ -686,6 +694,22 @@ try {
         $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
         $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
         $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
+        $voiceModelSourceControl = Wait-DescendantName 'Папка локальної голосової моделі — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
+        $voiceModelImportControl = Wait-DescendantName 'Імпортувати голосову модель' ([System.Windows.Automation.ControlType]::Button)
+        $voiceModelCancelControl = Wait-DescendantName 'Скасувати імпорт голосової моделі' ([System.Windows.Automation.ControlType]::Button)
+        if (-not (Resolve-BoundControlIdentity $voiceModelSourceControl).Current.IsEnabled) {
+            throw 'Local voice model source input must be enabled when the packaged candidate has no model.'
+        }
+        if (-not (Resolve-BoundControlIdentity $voiceModelImportControl).Current.IsEnabled) {
+            throw 'Local voice model Import control must be enabled when the packaged candidate has no model.'
+        }
+        if ((Resolve-BoundControlIdentity $voiceModelCancelControl).Current.IsEnabled) {
+            throw 'Local voice model Cancel control must be disabled while no import is active.'
+        }
+        Set-BoundControlFocus $voiceModelSourceControl
+        Wait-FocusName $voiceModelSourceControl
+        Write-Host 'Local voice model setup controls are UIA-discoverable and keyboard-focusable; no file import was invoked.'
+
         $speechTextControl = Wait-DescendantName 'Текст для озвучення' ([System.Windows.Automation.ControlType]::Edit)
         $speechStartControl = Wait-DescendantName 'Озвучити текст' ([System.Windows.Automation.ControlType]::Button)
         $speechCancelControl = Wait-DescendantName 'Скасувати озвучення' ([System.Windows.Automation.ControlType]::Button)

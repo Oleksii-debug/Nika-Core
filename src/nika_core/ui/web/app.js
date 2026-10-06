@@ -21,6 +21,36 @@
     "failed",
   ]);
   let speechTerminalSignature = null;
+  const voiceStatus = document.getElementById("voice-status");
+  const voiceTranscript = document.getElementById("voice-transcript");
+  const voiceStart = document.getElementById("voice-start");
+  const voiceCancel = document.getElementById("voice-cancel");
+  const voiceUseCommand = document.getElementById("voice-use-command");
+  const voiceModelSource = document.getElementById("voice-model-source");
+  const voiceModelStatus = document.getElementById("voice-model-status");
+  const voiceModelImport = document.getElementById("voice-model-import");
+  const voiceModelCancel = document.getElementById("voice-model-cancel");
+  const allowedVoiceModelSetupStatuses = new Set([
+    "missing",
+    "installed",
+    "partial",
+    "importing",
+    "cancelling",
+    "restart_required",
+    "failed",
+    "cancelled",
+  ]);
+  let voiceModelTerminalSignature = null;
+  const allowedVoiceStatuses = new Set([
+    "idle",
+    "running",
+    "cancelling",
+    "completed",
+    "failed",
+    "cancelled",
+  ]);
+  let voiceTranscriptValue = "";
+  let voiceTerminalSignature = null;
   const sourceInputs = Object.freeze({
     root: document.getElementById("source-root"),
     source_a: document.getElementById("source-a"),
@@ -1345,6 +1375,172 @@
     return true;
   }
 
+
+  function renderVoiceModelSetup(snapshot) {
+    const failClosed = (message = "Стан локальної голосової моделі недоступний або несумісний.") => {
+      voiceModelTerminalSignature = null;
+      if (voiceModelStatus) voiceModelStatus.textContent = message;
+      if (voiceModelSource) voiceModelSource.disabled = true;
+      if (voiceModelImport) voiceModelImport.disabled = true;
+      if (voiceModelCancel) voiceModelCancel.disabled = true;
+      return false;
+    };
+    if (
+      !snapshot
+      || snapshot.schema !== "nika.packaged-voice-model-setup:v1"
+      || !allowedVoiceModelSetupStatuses.has(snapshot.status)
+      || !Number.isSafeInteger(snapshot.generation)
+      || snapshot.generation < 0
+      || typeof snapshot.active !== "boolean"
+      || typeof snapshot.installed !== "boolean"
+      || typeof snapshot.can_import !== "boolean"
+      || typeof snapshot.restart_required !== "boolean"
+      || typeof snapshot.message !== "string"
+      || snapshot.message.length === 0
+    ) {
+      return failClosed();
+    }
+
+    const activeStatus = snapshot.status === "importing" || snapshot.status === "cancelling";
+    if (snapshot.active !== activeStatus) return failClosed();
+    const retryableTerminal = snapshot.status === "failed" || snapshot.status === "cancelled";
+    const validState = (
+      (snapshot.status === "missing"
+        && !snapshot.active
+        && !snapshot.installed
+        && !snapshot.restart_required)
+      || (snapshot.status === "installed"
+        && !snapshot.active
+        && snapshot.installed
+        && !snapshot.can_import
+        && !snapshot.restart_required)
+      || (snapshot.status === "partial"
+        && !snapshot.active
+        && !snapshot.installed
+        && !snapshot.can_import
+        && !snapshot.restart_required)
+      || (snapshot.status === "importing"
+        && snapshot.active
+        && !snapshot.installed
+        && !snapshot.can_import
+        && !snapshot.restart_required)
+      || (snapshot.status === "cancelling"
+        && snapshot.active
+        && !snapshot.installed
+        && !snapshot.can_import
+        && !snapshot.restart_required)
+      || (snapshot.status === "restart_required"
+        && !snapshot.active
+        && snapshot.installed
+        && !snapshot.can_import
+        && snapshot.restart_required)
+      || (retryableTerminal
+        && !snapshot.active
+        && !snapshot.installed
+        && !snapshot.restart_required)
+    );
+    if (!validState) return failClosed();
+
+    if (voiceModelStatus) voiceModelStatus.textContent = snapshot.message;
+    if (voiceModelSource) voiceModelSource.disabled = !snapshot.can_import;
+    if (voiceModelImport) voiceModelImport.disabled = !snapshot.can_import;
+    if (voiceModelCancel) {
+      voiceModelCancel.disabled = !snapshot.active || snapshot.status === "cancelling";
+    }
+    if (snapshot.status === "restart_required" && voiceModelSource) {
+      voiceModelSource.value = "";
+    }
+
+    const terminal = ["restart_required", "failed", "cancelled"].includes(snapshot.status);
+    const signature = terminal && snapshot.generation > 0
+      ? JSON.stringify([snapshot.generation, snapshot.status, snapshot.message])
+      : null;
+    if (signature !== null && signature !== voiceModelTerminalSignature) {
+      voiceModelTerminalSignature = signature;
+      announce(snapshot.message, snapshot.status === "failed");
+    } else if (!terminal) {
+      voiceModelTerminalSignature = null;
+    }
+    return true;
+  }
+
+  function renderVoice(snapshot) {
+    const failClosed = (message = "Стан голосового вводу недоступний або несумісний.") => {
+      voiceTranscriptValue = "";
+      voiceTerminalSignature = null;
+      if (voiceStatus) voiceStatus.textContent = message;
+      if (voiceTranscript) voiceTranscript.textContent = "Недоступно.";
+      if (voiceStart) voiceStart.disabled = true;
+      if (voiceCancel) voiceCancel.disabled = true;
+      if (voiceUseCommand) voiceUseCommand.disabled = true;
+      return false;
+    };
+    if (
+      !snapshot
+      || snapshot.schema !== "nika.packaged-voice-state:v1"
+      || typeof snapshot.available !== "boolean"
+      || typeof snapshot.message !== "string"
+      || snapshot.message.length === 0
+    ) {
+      return failClosed();
+    }
+    if (!snapshot.available) {
+      if (snapshot.turn !== null) return failClosed();
+      voiceTranscriptValue = "";
+      voiceTerminalSignature = null;
+      if (voiceStatus) voiceStatus.textContent = snapshot.message;
+      if (voiceTranscript) voiceTranscript.textContent = "Голосовий ввід недоступний.";
+      if (voiceStart) voiceStart.disabled = true;
+      if (voiceCancel) voiceCancel.disabled = true;
+      if (voiceUseCommand) voiceUseCommand.disabled = true;
+      return true;
+    }
+
+    const turn = snapshot.turn;
+    if (
+      !turn
+      || turn.schema !== "nika.desktop-voice-state:v1"
+      || !allowedVoiceStatuses.has(turn.status)
+      || typeof turn.message !== "string"
+      || turn.message.length === 0
+      || typeof turn.active !== "boolean"
+      || ![null, true, false].includes(turn.activated)
+      || !(turn.transcript === null || typeof turn.transcript === "string")
+    ) {
+      return failClosed();
+    }
+    const activeStatus = turn.status === "running" || turn.status === "cancelling";
+    if (turn.active !== activeStatus) return failClosed();
+
+    if (voiceStatus) voiceStatus.textContent = turn.message;
+    if (voiceStart) voiceStart.disabled = turn.active;
+    if (voiceCancel) voiceCancel.disabled = !turn.active || turn.status === "cancelling";
+
+    const canUseTranscript = turn.status === "completed"
+      && turn.activated === true
+      && typeof turn.transcript === "string"
+      && turn.transcript.length > 0;
+    voiceTranscriptValue = canUseTranscript ? turn.transcript : "";
+    if (voiceTranscript) {
+      voiceTranscript.textContent = typeof turn.transcript === "string" && turn.transcript.length > 0
+        ? turn.transcript
+        : "Ще немає.";
+    }
+    if (voiceUseCommand) voiceUseCommand.disabled = !canUseTranscript;
+
+    const terminal = ["completed", "failed", "cancelled"].includes(turn.status);
+    const signature = terminal
+      ? JSON.stringify([turn.request_id, turn.status, turn.activated, turn.message])
+      : null;
+    if (signature !== null && signature !== voiceTerminalSignature) {
+      voiceTerminalSignature = signature;
+      announce(turn.message, turn.status === "failed");
+    } else if (!terminal) {
+      voiceTerminalSignature = null;
+    }
+    return true;
+  }
+
   function renderSourceSetup(selection) {
     if (!sourceStatus || selection == null) return;
     if (!["ready", "missing"].includes(selection.status)
@@ -1375,6 +1571,15 @@
     if (await refreshState()) announce("Збережені налаштування перечитано.");
   });
 
+  voiceUseCommand?.addEventListener("click", () => {
+    if (!voiceTranscriptValue) return;
+    commandInput.value = voiceTranscriptValue;
+    commandInput.focus();
+    announce(
+      "Розпізнаний текст перенесено в поле команди. Перевірте його перед створенням завдання.",
+    );
+  });
+
   async function refreshState({ announceTeamTransitions = true, requireCurrentGeneration = false } = {}) {
     const stateReadGeneration = ++stateRefreshGeneration;
     const isCurrentStateRead = () => stateReadGeneration === stateRefreshGeneration;
@@ -1383,6 +1588,8 @@
     if (!globalThis.pywebview?.api?.get_state) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
+      renderVoiceModelSetup(null);
+      renderVoice(null);
       lastStateReady = false;
       reportStateUnavailable();
       return false;
@@ -1394,6 +1601,8 @@
       if (!isCurrentStateRead()) return requireCurrentGeneration ? false : lastStateReady;
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
+      renderVoiceModelSetup(null);
+      renderVoice(null);
       lastStateReady = false;
       reportStateUnavailable();
       return false;
@@ -1402,6 +1611,8 @@
     if (!response?.ok) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
+      renderVoiceModelSetup(null);
+      renderVoice(null);
       lastStateReady = false;
       reportStateUnavailable();
       return false;
@@ -1411,7 +1622,9 @@
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     if (modelReadGeneration === modelGeneration) renderModelSettings(state.v01_model_settings ?? null);
     renderSourceSetup(state.v01_sources ?? null);
+    renderVoiceModelSetup(state.voice_model_setup ?? null);
     renderSpeech(state.speech ?? null);
+    renderVoice(state.voice ?? null);
     renderItems(
       tasksList,
       tasksEmpty,
@@ -1511,6 +1724,7 @@
     try {
       const payload = {};
       if (actionId === "task.create") payload.command = commandInput.value.trim();
+      if (actionId === "voice.model.import") payload.source_root = voiceModelSource?.value ?? "";
       if (actionId === "speech.start") payload.text = speechText?.value ?? "";
       if (actionId === "team.sources.configure") {
         payload.revision = sourceRevision;
