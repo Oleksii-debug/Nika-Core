@@ -7,7 +7,12 @@ from datetime import UTC, datetime
 from enum import StrEnum
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.product_factory_coordinator import ComponentWorkRequest
+from nika_core.kernel.task_queue import TaskPayloadCorruptionError, decode_task_payload
+from nika_core.product_factory_checkpoint_host import (
+    ProductFactoryCheckpointError,
+    ProductFactoryCheckpointHost,
+)
+from nika_core.product_factory_coordinator import ComponentWorkRequest, WorkState
 
 _SCHEMA_VERSION = 1
 
@@ -115,6 +120,7 @@ class ProductFactoryToolsmithBindingRepository:
 
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
+        self._checkpoints = ProductFactoryCheckpointHost(store)
         self._initialize_schema()
 
     def reserve(
@@ -137,7 +143,11 @@ class ProductFactoryToolsmithBindingRepository:
 
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._validate_host_task(conn, host_task_id, request.project_id)
+            self._require_durable_failed_request(
+                conn,
+                host_task_id=host_task_id,
+                request=request,
+            )
             existing = conn.execute(
                 """
                 SELECT *
@@ -403,6 +413,50 @@ class ProductFactoryToolsmithBindingRepository:
             )
         return _binding_from_row(row)
 
+    def _require_durable_failed_request(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        host_task_id: str,
+        request: ComponentWorkRequest,
+    ) -> None:
+        try:
+            persisted = self._checkpoints.latest_with_connection(
+                conn,
+                host_task_id=host_task_id,
+                project_id=request.project_id,
+            )
+        except ProductFactoryCheckpointError as exc:
+            raise ProductFactoryToolsmithBindingError(
+                f"durable Product Factory checkpoint is not authoritative: {exc}"
+            ) from exc
+        if persisted is None:
+            raise ProductFactoryToolsmithBindingError(
+                "capability escalation requires a durable Product Factory checkpoint"
+            )
+        matches = tuple(
+            record
+            for record in persisted.checkpoint.coordinator.records
+            if record.request.component_id == request.component_id
+        )
+        if len(matches) != 1:
+            raise ProductFactoryToolsmithBindingError(
+                "durable Product Factory checkpoint has ambiguous component identity"
+            )
+        record = matches[0]
+        if record.request != request:
+            raise ProductFactoryToolsmithBindingError(
+                "capability escalation request does not match the durable failed attempt"
+            )
+        if record.state is not WorkState.REPAIR_REQUIRED:
+            raise ProductFactoryToolsmithBindingError(
+                "capability gap can resume only from repair_required component state"
+            )
+        if record.result is None or record.result.coding_result.failure is None:
+            raise ProductFactoryToolsmithBindingError(
+                "capability escalation requires durable worker-failure evidence"
+            )
+
     def _initialize_schema(self) -> None:
         with self._store.connection() as conn:
             conn.execute(
@@ -487,15 +541,11 @@ class ProductFactoryToolsmithBindingRepository:
                 "Product Factory host task does not exist"
             )
         try:
-            payload = json.loads(row["payload_json"])
-        except (TypeError, json.JSONDecodeError) as exc:
+            payload = decode_task_payload(row["payload_json"])
+        except TaskPayloadCorruptionError as exc:
             raise ProductFactoryToolsmithBindingError(
                 "Product Factory host task payload is corrupt"
             ) from exc
-        if not isinstance(payload, dict):
-            raise ProductFactoryToolsmithBindingError(
-                "Product Factory host task payload is not an object"
-            )
         if (
             payload.get("kind") != "product_factory"
             or payload.get("product_project_id") != project_id
