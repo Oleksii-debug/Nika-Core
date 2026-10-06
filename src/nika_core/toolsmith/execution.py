@@ -120,6 +120,8 @@ def _pinned_executable_descriptor_sha256(descriptor: int) -> str:
 
 def _open_posix_executable_launch_snapshot(
     source_descriptor: int,
+    *,
+    byte_count: int,
     expected_sha256: str,
 ) -> int:
     """Freeze admitted executable bytes into one sealed anonymous launch object."""
@@ -157,9 +159,19 @@ def _open_posix_executable_launch_snapshot(
             "nika-executable",
             flags=close_on_exec | allow_sealing,
         )
-        os.lseek(source_descriptor, 0, os.SEEK_SET)
-        while True:
-            chunk = os.read(source_descriptor, 1024 * 1024)
+        offset = 0
+        remaining = byte_count
+        while remaining > 0:
+            try:
+                chunk = os.pread(
+                    source_descriptor,
+                    min(1024 * 1024, remaining),
+                    offset,
+                )
+            except (AttributeError, OSError) as exc:
+                raise ProcessExecutionError(
+                    "unable to read pinned runtime executable for launch snapshot"
+                ) from exc
             if not chunk:
                 break
             view = memoryview(chunk)
@@ -168,6 +180,12 @@ def _open_posix_executable_launch_snapshot(
                 if written <= 0:
                     raise OSError("short executable snapshot write")
                 view = view[written:]
+            offset += len(chunk)
+            remaining -= len(chunk)
+        if remaining != 0:
+            raise ProcessExecutionError(
+                "pinned runtime executable bytes changed during launch snapshot"
+            )
 
         os.fchmod(snapshot, 0o500)
         required_seals = (
@@ -379,7 +397,8 @@ class _PinnedExecutableLaunchGuard:
 
                 snapshot_descriptor = _open_posix_executable_launch_snapshot(
                     descriptor,
-                    self._expected_sha256,
+                    byte_count=descriptor_stat.st_size,
+                    expected_sha256=self._expected_sha256,
                 )
                 try:
                     os.close(descriptor)
