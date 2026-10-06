@@ -46,6 +46,7 @@ def _run(
     destination: Path,
     bundle: Path | None = None,
     env_overrides: dict[str, str] | None = None,
+    script: Path = SCRIPT,
 ) -> subprocess.CompletedProcess[str]:
     command = [
         shell,
@@ -54,7 +55,7 @@ def _run(
         "-ExecutionPolicy",
         "Bypass",
         "-File",
-        str(SCRIPT),
+        str(script),
         "-Mode",
         mode,
         "-Destination",
@@ -219,6 +220,7 @@ def test_source_bundle_substitution_after_initial_verify_fails_before_install(
         mode="Install",
         destination=destination,
         bundle=original,
+        script=instrumented,
     )
 
     assert rejected.returncode != 0, rejected.stdout
