@@ -135,6 +135,23 @@
   const productFactoryExecutionPlanLoad = document.getElementById(
     "product-factory-execution-plan-load",
   );
+  const productFactoryLocalRepositorySelect = document.getElementById(
+    "product-factory-local-repository-select",
+  );
+  const productFactoryLocalRepositoryRoot = document.getElementById(
+    "product-factory-local-repository-root",
+  );
+  const productFactoryLocalRepositoryStatus = document.getElementById(
+    "product-factory-local-repository-status",
+  );
+  const productFactoryLocalRepositoryBind = document.getElementById(
+    "product-factory-local-repository-bind",
+  );
+  const productFactoryLocalRepositoryUnbind = document.getElementById(
+    "product-factory-local-repository-unbind",
+  );
+  let productFactoryLocalRepositoryProjectId = null;
+  let productFactoryLocalRepositoryVersions = new Map();
   const productProjectStatuses = document.getElementById("product-project-statuses");
   const productProjectStatusesList = document.getElementById("product-project-statuses-list");
   const productProjectStatusesEmpty = document.getElementById("product-project-statuses-empty");
@@ -643,6 +660,7 @@
     renderStartupRecovery(null);
     renderModelSettings(null);
     renderProductFactoryExecutionPlan(null);
+    renderProductFactoryLocalRepositories(null);
     clearTaskSelection();
     renderTaskPage(null);
     renderProductProjectUnavailable(productProjectUnavailableMessage);
@@ -790,6 +808,99 @@
     }
     if (productFactoryExecutionPlanPath) productFactoryExecutionPlanPath.disabled = false;
     if (productFactoryExecutionPlanLoad) productFactoryExecutionPlanLoad.disabled = false;
+    return true;
+  }
+
+  function syncProductFactoryLocalRepositoryControls() {
+    const repositoryId = productFactoryLocalRepositorySelect?.value ?? "";
+    const version = productFactoryLocalRepositoryVersions.get(repositoryId);
+    const usable = (
+      typeof productFactoryLocalRepositoryProjectId === "string"
+      && repositoryId.length > 0
+      && productFactoryLocalRepositoryVersions.has(repositoryId)
+    );
+    if (productFactoryLocalRepositoryRoot) productFactoryLocalRepositoryRoot.disabled = !usable;
+    if (productFactoryLocalRepositoryBind) productFactoryLocalRepositoryBind.disabled = !usable;
+    if (productFactoryLocalRepositoryUnbind) {
+      productFactoryLocalRepositoryUnbind.disabled = !usable || version === null;
+    }
+  }
+
+  function renderProductFactoryLocalRepositories(snapshot) {
+    const failClosed = (message) => {
+      productFactoryLocalRepositoryProjectId = null;
+      productFactoryLocalRepositoryVersions = new Map();
+      if (productFactoryLocalRepositorySelect) {
+        productFactoryLocalRepositorySelect.replaceChildren();
+        const option = document.createElement("option");
+        option.value = "";
+        option.textContent = "Локальна прив’язка недоступна";
+        productFactoryLocalRepositorySelect.appendChild(option);
+        productFactoryLocalRepositorySelect.disabled = true;
+      }
+      if (productFactoryLocalRepositoryRoot) productFactoryLocalRepositoryRoot.disabled = true;
+      if (productFactoryLocalRepositoryBind) productFactoryLocalRepositoryBind.disabled = true;
+      if (productFactoryLocalRepositoryUnbind) productFactoryLocalRepositoryUnbind.disabled = true;
+      if (productFactoryLocalRepositoryStatus) productFactoryLocalRepositoryStatus.textContent = message;
+      return false;
+    };
+    if (
+      !snapshot
+      || !["missing_plan", "ready", "invalid", "unavailable"].includes(snapshot.status)
+      || typeof snapshot.message !== "string"
+      || !Array.isArray(snapshot.repositories)
+      || !(
+        snapshot.project_id === null
+        || (typeof snapshot.project_id === "string" && snapshot.project_id.length > 0)
+      )
+    ) return failClosed("Стан локальних прив’язок Product Factory недоступний.");
+    if (snapshot.status !== "ready") return failClosed(snapshot.message);
+    if (typeof snapshot.project_id !== "string" || !snapshot.project_id) {
+      return failClosed("Стан локальних прив’язок не містить ProductProject.");
+    }
+    const nextVersions = new Map();
+    const options = [];
+    for (const item of snapshot.repositories) {
+      if (
+        !item
+        || typeof item !== "object"
+        || Array.isArray(item)
+        || typeof item.repository_id !== "string"
+        || !item.repository_id
+        || typeof item.provider !== "string"
+        || !item.provider
+        || typeof item.locator !== "string"
+        || !item.locator
+        || typeof item.bound !== "boolean"
+        || !(
+          item.binding_version === null
+          || (Number.isSafeInteger(item.binding_version) && item.binding_version > 0)
+        )
+        || item.bound !== (item.binding_version !== null)
+        || nextVersions.has(item.repository_id)
+      ) return failClosed("Стан локальних прив’язок Product Factory несумісний.");
+      nextVersions.set(item.repository_id, item.binding_version);
+      const option = document.createElement("option");
+      option.value = item.repository_id;
+      option.textContent = (
+        `${item.repository_id} — ${item.provider}: ${item.locator}; `
+        + (item.bound ? `прив’язано, версія ${item.binding_version}` : "не прив’язано")
+      );
+      options.push(option);
+    }
+    if (!options.length) return failClosed("Поточний план Product Factory не містить репозиторіїв.");
+    const previous = productFactoryLocalRepositorySelect?.value ?? "";
+    productFactoryLocalRepositoryProjectId = snapshot.project_id;
+    productFactoryLocalRepositoryVersions = nextVersions;
+    if (productFactoryLocalRepositorySelect) {
+      productFactoryLocalRepositorySelect.replaceChildren(...options);
+      productFactoryLocalRepositorySelect.value = nextVersions.has(previous)
+        ? previous
+        : options[0].value;
+      productFactoryLocalRepositorySelect.disabled = false;
+    }
+    if (productFactoryLocalRepositoryStatus) productFactoryLocalRepositoryStatus.textContent = snapshot.message;
+    syncProductFactoryLocalRepositoryControls();
     return true;
   }
 
@@ -1960,6 +2071,9 @@
   for (const input of Object.values(sourceInputs)) {
     input?.addEventListener("input", () => { sourceDirty = true; });
   }
+  productFactoryLocalRepositorySelect?.addEventListener("change", () => {
+    syncProductFactoryLocalRepositoryControls();
+  });
   productFactoryLocalStartupJson?.addEventListener("input", () => {
     productFactoryLocalStartupDirty = true;
     if (productFactoryLocalStartupStatus) {
@@ -2035,6 +2149,9 @@
     renderProductFactoryExecutionPlan(
       state.product_factory_execution_plan ?? null,
     );
+    renderProductFactoryLocalRepositories(
+      state.product_factory_local_repositories ?? null,
+    );
     const taskPageReady = renderTaskPage(state.task_page ?? null);
     renderTasks(state.tasks || []);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
@@ -2101,7 +2218,9 @@
     // Group task controls: pause/resume/stop must not race an unacknowledged task creation.
     const durableMutation = taskMutationActions.has(actionId)
       || actionId === "team.sources.configure"
-      || actionId === "settings.product_factory_local.configure";
+      || actionId === "settings.product_factory_local.configure"
+      || actionId === "product.factory.local_repository.bind"
+      || actionId === "product.factory.local_repository.unbind";
     const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
     if (inFlightActions.has(lockKey)) {
       announce("Попередню команду ще обробляють. Дочекайтеся підтвердження.", false);
@@ -2150,6 +2269,20 @@
       if (actionId === "product.factory.execution_plan.load") {
         payload.path = productFactoryExecutionPlanPath?.value ?? "";
       }
+      if (
+        actionId === "product.factory.local_repository.bind"
+        || actionId === "product.factory.local_repository.unbind"
+      ) {
+        const repositoryId = productFactoryLocalRepositorySelect?.value ?? "";
+        payload.project_id = productFactoryLocalRepositoryProjectId;
+        payload.repository_id = repositoryId;
+        payload.expected_binding_version = (
+          productFactoryLocalRepositoryVersions.get(repositoryId) ?? null
+        );
+        if (actionId === "product.factory.local_repository.bind") {
+          payload.root_path = productFactoryLocalRepositoryRoot?.value ?? "";
+        }
+      }
       if (actionId === "settings.product_factory_local.configure") {
         const raw = productFactoryLocalStartupJson?.value.trim() ?? "";
         payload.revision = productFactoryLocalStartupRevision;
@@ -2194,6 +2327,14 @@
         && result.status === "completed"
       ) {
         productFactoryLocalStartupDirty = false;
+      }
+      if (
+        ["product.factory.local_repository.bind", "product.factory.local_repository.unbind"]
+          .includes(actionId)
+        && result.status === "completed"
+        && productFactoryLocalRepositoryRoot
+      ) {
+        productFactoryLocalRepositoryRoot.value = "";
       }
       announce(message, failed);
       appendLog(message);
