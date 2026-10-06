@@ -778,7 +778,7 @@ async def test_worker_revalidates_binding_at_sync_effect_entry(
                 repository_id=repository_id,
                 root=root,
             )
-            if self.calls == 3:
+            if self.calls == 5:
                 bindings.bind(
                     project_id=project.project_id,
                     repository=repository,
@@ -802,7 +802,7 @@ async def test_worker_revalidates_binding_at_sync_effect_entry(
     ):
         await entry.program.host.worker.dispatch(request)
 
-    assert race_authority.calls == 4
+    assert race_authority.calls == 6
     assert not (
         entry.program.worker.workspace_root_for(request.work_id) / "worktree"
     ).exists()
