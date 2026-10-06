@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections.abc import Iterable, Mapping
@@ -29,7 +30,7 @@ from nika_core.product_factory_packaged_preparation import (
     PackagedProductFactoryExecutionPlan,
 )
 from nika_core.product_project import ProductProject, ProductProjectRepository
-from nika_core.v01_model_settings import V01ModelSettings
+from nika_core.v01_model_settings import ModelSelection, V01ModelSettings
 
 _MODEL_AUTHORITY_KEY = "packaged_local_model_authority"
 _MODEL_AUTHORITY_SCHEMA = "nika.product-factory.packaged-model-authority.v1"
@@ -689,9 +690,14 @@ def _encode_model_authority(
         "artifact_pin_sha256": authority.artifact_pin_sha256,
         "model": authority.model,
         "base_url": authority.base_url,
+        "private_data_allowed": authority.private_data_allowed,
         "timeout_seconds": authority.timeout_seconds,
         "expected_manifest_sha256": authority.expected_manifest_sha256,
     }
+    payload["authority_sha256"] = hashlib.sha256(
+        _canonical_task_payload(payload).encode("utf-8")
+    ).hexdigest()
+    return payload
 
 
 def _decode_model_authority(value: object) -> _PackagedLocalOllamaAuthority:
@@ -702,8 +708,10 @@ def _decode_model_authority(value: object) -> _PackagedLocalOllamaAuthority:
         "artifact_pin_sha256",
         "model",
         "base_url",
+        "private_data_allowed",
         "timeout_seconds",
         "expected_manifest_sha256",
+        "authority_sha256",
     }
     if (
         type(value) is not dict
@@ -712,6 +720,21 @@ def _decode_model_authority(value: object) -> _PackagedLocalOllamaAuthority:
     ):
         raise PackagedBoundLocalProductFactoryHostError(
             "durable Product Factory model authority schema is invalid"
+        )
+
+    authority_sha256 = _authority_digest(
+        value["authority_sha256"],
+        "authority_sha256",
+        allow_none=False,
+    )
+    authority_payload = dict(value)
+    authority_payload.pop("authority_sha256")
+    expected_authority_sha256 = hashlib.sha256(
+        _canonical_task_payload(authority_payload).encode("utf-8")
+    ).hexdigest()
+    if authority_sha256 != expected_authority_sha256:
+        raise PackagedBoundLocalProductFactoryHostError(
+            "durable Product Factory model authority checksum mismatch"
         )
 
     revision = value["revision"]
@@ -734,8 +757,11 @@ def _decode_model_authority(value: object) -> _PackagedLocalOllamaAuthority:
         "expected_manifest_sha256",
         allow_none=True,
     )
-    model = _authority_text(value["model"], "model")
-    base_url = _authority_text(value["base_url"], "base_url")
+    private_data_allowed = value["private_data_allowed"]
+    if type(private_data_allowed) is not bool:
+        raise PackagedBoundLocalProductFactoryHostError(
+            "durable Product Factory private-data authority is invalid"
+        )
     timeout = value["timeout_seconds"]
     if (
         type(timeout) not in (int, float)
@@ -746,13 +772,40 @@ def _decode_model_authority(value: object) -> _PackagedLocalOllamaAuthority:
         raise PackagedBoundLocalProductFactoryHostError(
             "durable Product Factory model timeout is invalid"
         )
+    try:
+        selection = ModelSelection(
+            schema_version=1,
+            route_kind="ollama",
+            provider_id="ollama",
+            model=value["model"],
+            base_url=value["base_url"],
+            credential_ref=None,
+            private_data_allowed=private_data_allowed,
+            timeout_seconds=float(timeout),
+        )
+    except (TypeError, ValueError) as exc:
+        raise PackagedBoundLocalProductFactoryHostError(
+            "durable Product Factory Ollama route is invalid"
+        ) from exc
+    recalculated_selection_sha256 = hashlib.sha256(
+        selection.canonical_json().encode("utf-8")
+    ).hexdigest()
+    if recalculated_selection_sha256 != selection_sha256:
+        raise PackagedBoundLocalProductFactoryHostError(
+            "durable Product Factory model selection digest mismatch"
+        )
+    if selection.model is None or selection.base_url is None:
+        raise PackagedBoundLocalProductFactoryHostError(
+            "durable Product Factory Ollama route is incomplete"
+        )
     return _PackagedLocalOllamaAuthority(
         revision=revision,
         selection_sha256=selection_sha256,
         artifact_pin_sha256=artifact_pin_sha256,
-        model=model,
-        base_url=base_url,
-        timeout_seconds=float(timeout),
+        model=selection.model,
+        base_url=selection.base_url,
+        private_data_allowed=selection.private_data_allowed,
+        timeout_seconds=selection.timeout_seconds,
         expected_manifest_sha256=expected_manifest_sha256,
     )
 
@@ -769,20 +822,6 @@ def _authority_digest(
         type(value) is not str
         or len(value) != 64
         or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise PackagedBoundLocalProductFactoryHostError(
-            f"durable Product Factory {label} is invalid"
-        )
-    return value
-
-
-def _authority_text(value: object, label: str) -> str:
-    if (
-        type(value) is not str
-        or not value
-        or value != value.strip()
-        or "\x00" in value
-        or len(value.encode("utf-8")) > 4096
     ):
         raise PackagedBoundLocalProductFactoryHostError(
             f"durable Product Factory {label} is invalid"
