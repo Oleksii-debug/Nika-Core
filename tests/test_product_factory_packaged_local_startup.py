@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_packaged_local_startup import (
     PackagedLocalProductFactoryStartupError,
@@ -14,6 +15,7 @@ from nika_core.product_factory_packaged_local_startup import (
     decode_packaged_local_product_factory_startup,
 )
 from nika_core.v01_model_settings import V01ModelSettings
+from scripts import nika_windows
 
 
 def _git(root: pathlib.Path, *args: str) -> str:
@@ -254,4 +256,103 @@ def test_program_composition_fails_closed_when_model_selection_missing(
             store,
             settings=V01ModelSettings(store),
             startup=startup,
+        )
+
+
+def test_app_config_admits_bounded_startup_authority_without_interpreting_plan_data(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    repository = _repository(tmp_path)
+    raw = _startup_json(
+        tmp_path,
+        repository,
+        executable=str(pathlib.Path(executable).resolve()),
+    )
+
+    config = AppConfig(
+        database_path=(tmp_path / "configured.db").resolve(),
+        product_factory_local_startup_json=raw,
+    )
+
+    assert config.product_factory_local_startup_json == raw
+
+
+def test_app_config_rejects_unbounded_startup_authority_before_runtime(
+    tmp_path: pathlib.Path,
+) -> None:
+    with pytest.raises(ValueError, match="exceeds the size limit"):
+        AppConfig(
+            database_path=(tmp_path / "configured.db").resolve(),
+            product_factory_local_startup_json="{" + ("x" * (64 * 1024)) + "}",
+        )
+
+
+def test_windows_bridge_auto_composes_real_local_execution_host_from_config(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    repository = _repository(tmp_path)
+    database = (tmp_path / "ніка.db").resolve()
+    raw = _startup_json(
+        tmp_path,
+        repository,
+        executable=str(pathlib.Path(executable).resolve()),
+    )
+    seed_store = SQLiteStore(database)
+    seed_store.initialize()
+    _configure_ollama(V01ModelSettings(seed_store))
+    config = AppConfig(
+        database_path=database,
+        product_factory_local_startup_json=raw,
+    )
+    cleanup: list[object] = []
+
+    try:
+        bridge, products = nika_windows.build_windows_bridge(
+            config,
+            start_startup_recovery=False,
+            register_cleanup=cleanup.append,
+        )
+
+        assert bridge is not None
+        assert products is not None
+        state = bridge.get_state()
+        assert state["ok"] is True
+        assert state["state"]["product_factory_execution_plan"] == {
+            "status": "missing",
+            "loaded": False,
+            "project_id": None,
+            "message": "JSON-план виконання Product Factory ще не завантажено.",
+        }
+    finally:
+        for callback in reversed(cleanup):
+            callback()
+
+
+def test_windows_bridge_rejects_two_product_factory_host_authorities(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    repository = _repository(tmp_path)
+    config = AppConfig(
+        database_path=(tmp_path / "ніка.db").resolve(),
+        product_factory_local_startup_json=_startup_json(
+            tmp_path,
+            repository,
+            executable=str(pathlib.Path(executable).resolve()),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="conflicts"):
+        nika_windows.build_windows_bridge(
+            config,
+            start_startup_recovery=False,
+            product_factory_execution_host=object(),  # type: ignore[arg-type]
         )
