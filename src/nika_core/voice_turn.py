@@ -20,6 +20,7 @@ from nika_core.speech_to_text import (
     SpeechToTextService,
     SpeechToTextStatus,
 )
+from nika_core.voice_activity import VoiceActivityConfig, VoiceActivityDetector
 from nika_core.wake_activation import (
     MAX_TRANSCRIPT_CHARS,
     WakeActivationDetector,
@@ -33,6 +34,7 @@ from nika_core.windows_microphone_capture import WindowsWasapiMicrophoneCaptureA
 class VoiceTurnStatus(StrEnum):
     COMPLETED = "completed"
     CAPTURE_FAILED = "capture_failed"
+    NO_VOICE_ACTIVITY = "no_voice_activity"
     TRANSCRIPTION_FAILED = "transcription_failed"
     INVALID_COMPOSITION = "invalid_composition"
 
@@ -124,7 +126,7 @@ class VoiceTurnResult:
 
 
 class OneShotVoiceTurnService:
-    """Explicitly invoked local microphone -> STT -> wake composition.
+    """Explicitly invoked local microphone -> optional VAD -> STT -> wake composition.
 
     This service has no loop, scheduler, persistence or privileged-action authority.
     Each call represents one caller-authorized microphone turn.
@@ -136,6 +138,7 @@ class OneShotVoiceTurnService:
         microphone: MicrophoneCaptureService,
         speech_to_text: SpeechToTextService,
         wake_detector: WakeActivationDetector,
+        enable_voice_activity: bool = False,
     ) -> None:
         if type(microphone) is not MicrophoneCaptureService:
             raise TypeError("microphone must be an exact MicrophoneCaptureService")
@@ -143,9 +146,12 @@ class OneShotVoiceTurnService:
             raise TypeError("speech_to_text must be an exact SpeechToTextService")
         if type(wake_detector) is not WakeActivationDetector:
             raise TypeError("wake_detector must be an exact WakeActivationDetector")
+        if type(enable_voice_activity) is not bool:
+            raise TypeError("enable_voice_activity must be an exact bool")
         self._microphone = microphone
         self._speech_to_text = speech_to_text
         self._wake_detector = wake_detector
+        self._enable_voice_activity = enable_voice_activity
 
     async def run(self, request: VoiceTurnRequest) -> VoiceTurnResult:
         trusted = _snapshot_request(request)
@@ -160,6 +166,22 @@ class OneShotVoiceTurnService:
                 evidence=VoiceTurnEvidence(
                     request_id=trusted.request_id,
                     status=VoiceTurnStatus.CAPTURE_FAILED,
+                    capture=capture_result.evidence,
+                    transcription=None,
+                    wake=None,
+                    activated=False,
+                ),
+            )
+
+        if self._enable_voice_activity and not _has_sustained_voice_activity(
+            capture_result.pcm_s16le,
+            sample_rate_hz=trusted.capture.sample_rate_hz,
+        ):
+            return VoiceTurnResult(
+                transcript=None,
+                evidence=VoiceTurnEvidence(
+                    request_id=trusted.request_id,
+                    status=VoiceTurnStatus.NO_VOICE_ACTIVITY,
                     capture=capture_result.evidence,
                     transcription=None,
                     wake=None,
@@ -306,6 +328,21 @@ def _preflight_stt_authority(request: VoiceTurnRequest) -> SpeechToTextRequest:
     )
 
 
+def _has_sustained_voice_activity(
+    pcm_s16le: bytes,
+    *,
+    sample_rate_hz: int,
+) -> bool:
+    config = VoiceActivityConfig(sample_rate_hz=sample_rate_hz)
+    detector = VoiceActivityDetector(config)
+    frame_bytes = config.max_frame_bytes
+    for offset in range(0, len(pcm_s16le), frame_bytes):
+        decision = detector.process(pcm_s16le[offset : offset + frame_bytes])
+        if decision.speech_active:
+            return True
+    return False
+
+
 def build_windows_one_shot_voice_turn_service(
     *,
     encoder: str,
@@ -338,4 +375,5 @@ def build_windows_one_shot_voice_turn_service(
         microphone=MicrophoneCaptureService(microphone_adapter),
         speech_to_text=SpeechToTextService(stt_adapter),
         wake_detector=WakeActivationDetector(),
+        enable_voice_activity=True,
     )

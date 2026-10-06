@@ -31,8 +31,9 @@ from nika_core.wake_activation import MAX_TRANSCRIPT_CHARS, WakeActivationDetect
 
 
 class _MicrophoneAdapter:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, amplitude: int = 1) -> None:
         self.fail = fail
+        self.amplitude = amplitude
         self.calls = 0
         self._capabilities = MicrophoneCaptureCapabilities(
             provider_id="sounddevice-wasapi",
@@ -56,7 +57,8 @@ class _MicrophoneAdapter:
             provider_id=request.provider_id,
             device_id=request.device_id,
             sample_rate_hz=request.sample_rate_hz,
-            pcm_s16le=b"\x01\x00" * request.sample_count,
+            pcm_s16le=int(self.amplitude).to_bytes(2, "little", signed=True)
+            * request.sample_count,
             latency_ms=1.0,
         )
 
@@ -82,7 +84,7 @@ class _SttAdapter:
         )
 
 
-def _request() -> VoiceTurnRequest:
+def _request(*, sample_count: int = 8) -> VoiceTurnRequest:
     device_id = "wasapi-device-sha256:" + "a" * 64
     return VoiceTurnRequest(
         request_id="voice-turn-1",
@@ -91,7 +93,7 @@ def _request() -> VoiceTurnRequest:
             provider_id="sounddevice-wasapi",
             device_id=device_id,
             sample_rate_hz=16_000,
-            sample_count=8,
+            sample_count=sample_count,
             policy=MicrophoneCapturePolicy(timeout_seconds=1.0),
         ),
         stt_provider_id="local-stt",
@@ -108,11 +110,14 @@ def _request() -> VoiceTurnRequest:
 def _service(
     microphone: _MicrophoneAdapter,
     stt: _SttAdapter,
+    *,
+    enable_voice_activity: bool = False,
 ) -> OneShotVoiceTurnService:
     return OneShotVoiceTurnService(
         microphone=MicrophoneCaptureService(microphone),
         speech_to_text=SpeechToTextService(stt),
         wake_detector=WakeActivationDetector(),
+        enable_voice_activity=enable_voice_activity,
     )
 
 
@@ -140,6 +145,7 @@ def test_windows_factory_composes_real_backend_types_without_network() -> None:
     )
 
     assert type(service) is OneShotVoiceTurnService
+    assert service._enable_voice_activity is True
     assert _OfflineRecognizer.calls == [
         {
             "encoder": r"C:\models\encoder.onnx",
@@ -174,6 +180,67 @@ def test_one_shot_turn_composes_capture_stt_and_wake_without_durable_content() -
         durable["transcription"]["transcript_sha256"]
         == durable["wake"]["transcript_sha256"]
     )
+
+
+def test_voice_activity_gate_stops_silence_before_stt_and_wake() -> None:
+    microphone = _MicrophoneAdapter(amplitude=0)
+    stt = _SttAdapter()
+    result = asyncio.run(
+        _service(microphone, stt, enable_voice_activity=True).run(
+            _request(sample_count=3_200)
+        )
+    )
+
+    assert result.evidence.status is VoiceTurnStatus.NO_VOICE_ACTIVITY
+    assert result.transcript is None
+    assert result.evidence.transcription is None
+    assert result.evidence.wake is None
+    assert result.evidence.activated is False
+    assert microphone.calls == 1
+    assert stt.calls == []
+
+
+def test_voice_activity_gate_allows_sustained_active_pcm_to_stt() -> None:
+    microphone = _MicrophoneAdapter(amplitude=2_000)
+    stt = _SttAdapter("Ніка, продовжуй")
+    result = asyncio.run(
+        _service(microphone, stt, enable_voice_activity=True).run(
+            _request(sample_count=3_200)
+        )
+    )
+
+    assert result.evidence.status is VoiceTurnStatus.COMPLETED
+    assert result.evidence.activated is True
+    assert result.transcript == "Ніка, продовжуй"
+    assert microphone.calls == 1
+    assert len(stt.calls) == 1
+
+
+def test_voice_activity_gate_keeps_attack_debounce_for_short_burst() -> None:
+    microphone = _MicrophoneAdapter(amplitude=2_000)
+    stt = _SttAdapter()
+    result = asyncio.run(
+        _service(microphone, stt, enable_voice_activity=True).run(
+            _request(sample_count=1_600)
+        )
+    )
+
+    assert result.evidence.status is VoiceTurnStatus.NO_VOICE_ACTIVITY
+    assert result.transcript is None
+    assert stt.calls == []
+
+
+def test_voice_activity_flag_requires_exact_bool() -> None:
+    microphone = _MicrophoneAdapter()
+    stt = _SttAdapter()
+
+    with pytest.raises(TypeError, match="enable_voice_activity"):
+        OneShotVoiceTurnService(
+            microphone=MicrophoneCaptureService(microphone),
+            speech_to_text=SpeechToTextService(stt),
+            wake_detector=WakeActivationDetector(),
+            enable_voice_activity=1,
+        )
 
 
 def test_capture_failure_stops_before_stt_and_wake() -> None:
