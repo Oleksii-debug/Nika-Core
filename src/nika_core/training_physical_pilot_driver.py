@@ -33,6 +33,9 @@ from nika_core.training_peft_worker import (
     candidate_artifact_path,
     model_directory_manifest_sha256,
 )
+from nika_core.training_physical_evaluation_driver import (
+    load_trusted_scale_progression_proof,
+)
 from nika_core.training_physical_pilot import (
     PhysicalTrainingPilotError,
     PhysicalTrainingPilotReport,
@@ -970,6 +973,41 @@ def _selected_scale_tier(
     return index, plan.tiers[index]
 
 
+def _physical_training_task_payload(
+    *,
+    job_id: str,
+    plan: TrainingScalePlan,
+    tier_index: int,
+    progression_proof: TrainingScaleProgressionProof | None,
+) -> dict[str, object]:
+    canonical_plan = plan.revalidated()
+    if type(tier_index) is not int or not 0 <= tier_index < len(canonical_plan.tiers):
+        _fail("physical training task scale tier index is invalid")
+    tier = canonical_plan.tiers[tier_index]
+    if tier_index == 0:
+        if progression_proof is not None:
+            _fail("pilot training task must not carry progression authority")
+        kind = "physical_peft_pilot"
+        proof_sha256 = None
+        proof_payload = None
+    else:
+        if type(progression_proof) is not TrainingScaleProgressionProof:
+            _fail("higher-tier training task requires trusted progression authority")
+        trusted = progression_proof.revalidated()
+        kind = "physical_peft_scale_tier"
+        proof_sha256 = trusted.proof_sha256
+        proof_payload = trusted.canonical_payload()
+    return {
+        "job_id": job_id,
+        "kind": kind,
+        "progression_proof": proof_payload,
+        "progression_proof_sha256": proof_sha256,
+        "scale_plan": canonical_plan.canonical_payload(),
+        "scale_plan_sha256": canonical_plan.plan_sha256,
+        "scale_tier_id": tier.tier_id,
+    }
+
+
 def _preflight_higher_tier(
     config: PhysicalPilotConfig,
     *,
@@ -1168,19 +1206,12 @@ def run_physical_pilot_from_config(
     task = TaskQueue(store).create(
         workspace_id=config.workspace_id,
         agent_id="physical-peft-pilot",
-        payload={
-            "job_id": config.job_id,
-            "kind": (
-                "physical_peft_pilot"
-                if tier_index == 0
-                else "physical_peft_scale_tier"
-            ),
-            "progression_proof_sha256": (
-                None if progression_proof is None else progression_proof.proof_sha256
-            ),
-            "scale_plan_sha256": scale_plan.plan_sha256,
-            "scale_tier_id": scale_tier.tier_id,
-        },
+        payload=_physical_training_task_payload(
+            job_id=config.job_id,
+            plan=scale_plan,
+            tier_index=tier_index,
+            progression_proof=progression_proof,
+        ),
     )
     spec = TrainingJobSpec(
         job_id=config.job_id,
@@ -1276,6 +1307,36 @@ def _read_config(path: Path) -> PhysicalPilotConfig:
     return PhysicalPilotConfig.from_json(raw)
 
 
+def _trusted_progression_for_cli(
+    config: PhysicalPilotConfig,
+    *,
+    source_root: Path | None,
+) -> TrainingScaleProgressionProof | None:
+    if type(config) is not PhysicalPilotConfig:
+        raise TypeError("config must be exact PhysicalPilotConfig")
+    if config.scale_tier_id is None:
+        if source_root is not None:
+            _fail("pilot-tier execution must not receive a trusted progression root")
+        return None
+    if config.progression_proof_payload is None:
+        _fail("higher-tier config is missing its progression claim")
+    if source_root is None:
+        _fail("higher-tier CLI execution requires --trusted-progression-root")
+    root = source_root
+    if not root.is_absolute():
+        try:
+            root = root.resolve(strict=True)
+        except OSError as exc:
+            raise PhysicalPilotDriverError(
+                "trusted progression root is unavailable"
+            ) from exc
+    return load_trusted_scale_progression_proof(
+        root,
+        workspace_id=config.workspace_id,
+        expected_claim=config.progression_proof_payload,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the canonical Windows physical PEFT pause/reopen/resume pilot."
@@ -1284,6 +1345,15 @@ def build_parser() -> argparse.ArgumentParser:
         "config",
         type=Path,
         help="Path to the local UTF-8 physical-pilot JSON manifest.",
+    )
+    parser.add_argument(
+        "--trusted-progression-root",
+        type=Path,
+        default=None,
+        help=(
+            "Previous physical-training output root containing the completed "
+            "promoted evaluation authority required by schema-v3 higher-tier runs."
+        ),
     )
     return parser
 
@@ -1296,7 +1366,14 @@ def main(argv: list[str] | None = None) -> int:
         if not config_path.is_absolute():
             config_path = config_path.resolve(strict=True)
         config = _read_config(config_path)
-        report = run_physical_pilot_from_config(config)
+        trusted_progression = _trusted_progression_for_cli(
+            config,
+            source_root=args.trusted_progression_root,
+        )
+        report = run_physical_pilot_from_config(
+            config,
+            trusted_progression_proof=trusted_progression,
+        )
     except (
         KeyError,
         OSError,

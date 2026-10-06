@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 import nika_core.training_physical_evaluation_driver as driver
+import nika_core.training_scale as training_scale
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
     ExperimentStatus,
@@ -139,6 +141,61 @@ def _scale_task_payload(
         "scale_plan_sha256": "8" * 64,
         "scale_tier_id": "pilot" if kind == "physical_peft_pilot" else "small",
     }
+
+
+def _scale_plan_payload() -> dict[str, object]:
+    return {
+        "evaluation_set_sha256": "e" * 64,
+        "plan_id": "physical-scale",
+        "schema_version": 1,
+        "tiers": [
+            {
+                "max_steps": 2,
+                "max_training_bytes": 4096,
+                "max_training_records": 10,
+                "max_validation_bytes": 4096,
+                "max_validation_records": 10,
+                "tier_id": "pilot",
+            },
+            {
+                "max_steps": 8,
+                "max_training_bytes": 65536,
+                "max_training_records": 100,
+                "max_validation_bytes": 8192,
+                "max_validation_records": 20,
+                "tier_id": "small",
+            },
+        ],
+    }
+
+
+def _scale_task_payload_with_plan(
+    *,
+    kind: str = "physical_peft_pilot",
+    proof_sha256: str | None = None,
+) -> dict[str, object]:
+    plan_payload = _scale_plan_payload()
+    plan = driver.TrainingScalePlan.from_canonical_payload(plan_payload)
+    return {
+        **_scale_task_payload(kind=kind, proof_sha256=proof_sha256),
+        "scale_plan": plan_payload,
+        "scale_plan_sha256": plan.plan_sha256,
+    }
+
+
+def _scale_task_payload_with_chain(
+    *,
+    kind: str = "physical_peft_pilot",
+    proof: driver.TrainingScaleProgressionProof | None = None,
+) -> dict[str, object]:
+    payload = _scale_task_payload_with_plan(
+        kind=kind,
+        proof_sha256=None if proof is None else proof.proof_sha256,
+    )
+    payload["progression_proof"] = (
+        None if proof is None else proof.canonical_payload()
+    )
+    return payload
 
 
 def _pilot_report(
@@ -344,6 +401,165 @@ def test_find_pilot_task_accepts_scale_aware_training_identity(
 
 
 @pytest.mark.parametrize(
+    ("kind", "proof_sha256"),
+    (
+        ("physical_peft_pilot", None),
+        ("physical_peft_scale_tier", "9" * 64),
+    ),
+)
+def test_find_pilot_task_accepts_plan_bound_scale_identity(
+    tmp_path: Path,
+    kind: str,
+    proof_sha256: str | None,
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    expected = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload=_scale_task_payload_with_plan(
+            kind=kind,
+            proof_sha256=proof_sha256,
+        ),
+    )
+
+    actual = driver._find_pilot_task(
+        store,
+        workspace_id="evaluation-workspace",
+        job_id="pilot-job",
+    )
+
+    assert actual.task_id == expected.task_id
+
+
+def test_find_pilot_task_accepts_chained_higher_tier_identity(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    plan = driver.TrainingScalePlan.from_canonical_payload(_scale_plan_payload())
+    proof = training_scale._build_progression_proof(
+        plan_sha256=plan.plan_sha256,
+        tier_index=0,
+        authorization_sha256="2" * 64,
+        job_id="pilot-job",
+        job_fingerprint="3" * 64,
+        base_artifact_ref="models/base",
+        base_sha256="4" * 64,
+        candidate_artifact_ref="models/pilot-candidate",
+        candidate_sha256="5" * 64,
+        frozen_package_sha256="6" * 64,
+        training_material_sha256="7" * 64,
+        execution_plan_sha256="8" * 64,
+        comparison_evidence_sha256="9" * 64,
+        evaluation_set_sha256=plan.evaluation_set_sha256,
+    )
+    expected = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload={
+            **_scale_task_payload_with_chain(
+                kind="physical_peft_scale_tier",
+                proof=proof,
+            ),
+            "scale_tier_id": "small",
+        },
+    )
+
+    actual = driver._find_pilot_task(
+        store,
+        workspace_id="evaluation-workspace",
+        job_id="pilot-job",
+    )
+
+    assert actual.task_id == expected.task_id
+
+
+def test_find_pilot_task_rejects_chained_proof_digest_mismatch(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    plan = driver.TrainingScalePlan.from_canonical_payload(_scale_plan_payload())
+    proof = training_scale._build_progression_proof(
+        plan_sha256=plan.plan_sha256,
+        tier_index=0,
+        authorization_sha256="2" * 64,
+        job_id="pilot-job",
+        job_fingerprint="3" * 64,
+        base_artifact_ref="models/base",
+        base_sha256="4" * 64,
+        candidate_artifact_ref="models/pilot-candidate",
+        candidate_sha256="5" * 64,
+        frozen_package_sha256="6" * 64,
+        training_material_sha256="7" * 64,
+        execution_plan_sha256="8" * 64,
+        comparison_evidence_sha256="9" * 64,
+        evaluation_set_sha256=plan.evaluation_set_sha256,
+    )
+    payload = {
+        **_scale_task_payload_with_chain(
+            kind="physical_peft_scale_tier",
+            proof=proof,
+        ),
+        "progression_proof_sha256": "f" * 64,
+        "scale_tier_id": "small",
+    }
+    TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload=payload,
+    )
+
+    with pytest.raises(driver.PhysicalEvaluationDriverError, match="exactly one"):
+        driver._find_pilot_task(
+            store,
+            workspace_id="evaluation-workspace",
+            job_id="pilot-job",
+        )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            **_scale_task_payload_with_plan(),
+            "scale_plan_sha256": "f" * 64,
+        },
+        {
+            **_scale_task_payload_with_plan(),
+            "scale_tier_id": "small",
+        },
+        {
+            **_scale_task_payload_with_plan(
+                kind="physical_peft_scale_tier",
+                proof_sha256="9" * 64,
+            ),
+            "scale_tier_id": "pilot",
+        },
+    ),
+)
+def test_find_pilot_task_rejects_inconsistent_plan_bound_identity(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload=payload,
+    )
+
+    with pytest.raises(driver.PhysicalEvaluationDriverError, match="exactly one"):
+        driver._find_pilot_task(
+            store,
+            workspace_id="evaluation-workspace",
+            job_id="pilot-job",
+        )
+
+
+@pytest.mark.parametrize(
     "payload",
     (
         _scale_task_payload(
@@ -404,6 +620,362 @@ def test_find_pilot_task_rejects_ambiguous_identity(tmp_path: Path) -> None:
             store,
             workspace_id="evaluation-workspace",
             job_id="pilot-job",
+        )
+
+
+def _trusted_progression_proof() -> driver.TrainingScaleProgressionProof:
+    return training_scale._build_progression_proof(
+        plan_sha256="1" * 64,
+        tier_index=0,
+        authorization_sha256="2" * 64,
+        job_id="pilot-job",
+        job_fingerprint="3" * 64,
+        base_artifact_ref="models/base",
+        base_sha256="4" * 64,
+        candidate_artifact_ref="models/pilot-candidate",
+        candidate_sha256="5" * 64,
+        frozen_package_sha256="6" * 64,
+        training_material_sha256="7" * 64,
+        execution_plan_sha256="8" * 64,
+        comparison_evidence_sha256="9" * 64,
+        evaluation_set_sha256="a" * 64,
+    )
+
+
+def test_scale_progression_record_is_durable_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "progression.sqlite3")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+    )
+    ledger = driver.IdempotencyLedger(store)
+    proof = _trusted_progression_proof()
+
+    first = driver._persist_scale_progression_record(
+        ledger=ledger,
+        task_id=task.task_id,
+        proof=proof,
+    )
+    second = driver._persist_scale_progression_record(
+        ledger=ledger,
+        task_id=task.task_id,
+        proof=proof,
+    )
+
+    assert first.status is driver.IdempotencyStatus.COMPLETED
+    assert second == first
+    assert first.operation_type == driver._SCALE_PROGRESSION_OPERATION_TYPE
+    assert first.result == {
+        "schema": "nika-physical-scale-progression-record-v1",
+        "proof_sha256": proof.proof_sha256,
+        "proof": proof.canonical_payload(),
+    }
+
+
+def test_scale_progression_record_rejects_incomplete_existing_state(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "progression.sqlite3")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+    )
+    ledger = driver.IdempotencyLedger(store)
+    proof = _trusted_progression_proof()
+    operation_key, input_fingerprint, _ = driver._scale_progression_record_identity(
+        proof
+    )
+    ledger.reserve_once(
+        operation_key=operation_key,
+        task_id=task.task_id,
+        operation_type=driver._SCALE_PROGRESSION_OPERATION_TYPE,
+        input_fingerprint=input_fingerprint,
+    )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="incomplete or inconsistent",
+    ):
+        driver._persist_scale_progression_record(
+            ledger=ledger,
+            task_id=task.task_id,
+            proof=proof,
+        )
+
+
+def _complete_promoted_experiment(
+    *,
+    store: SQLiteStore,
+    experiment_id: str,
+    champion: driver.ModelCandidate,
+    challenger: driver.ModelCandidate,
+    config: driver.PhysicalEvaluationConfig,
+    evaluation: driver.EvaluationSet,
+) -> None:
+    repository = SQLiteExperimentRepository(store)
+    driver._claim_evaluation_attempt(
+        repository=repository,
+        experiment_id=experiment_id,
+        champion=champion,
+        challenger=challenger,
+        evaluation_set=evaluation,
+        execution_config=config.benchmark,
+        policy=config.policy,
+        permission_fingerprint=config.permission_fingerprint,
+    )
+    engine = driver.ExperimentEngine(repository)
+    for candidate_id, quality, task_pass in (
+        (champion.candidate_id, 0.0, 1.0),
+        (challenger.candidate_id, 1.0, 1.0),
+    ):
+        engine.record(
+            experiment_id,
+            MetricObservation(
+                candidate_id=candidate_id,
+                replay_id="case-one",
+                metric="model_quality_score",
+                value=quality,
+            ),
+        )
+        engine.record(
+            experiment_id,
+            MetricObservation(
+                candidate_id=candidate_id,
+                replay_id="case-one",
+                metric="model_task_pass",
+                value=task_pass,
+            ),
+        )
+    terminal = engine.complete(experiment_id)
+    assert terminal.status is ExperimentStatus.PROMOTED
+
+
+def _durable_loader_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[Path, dict[str, object], driver.TrainingScaleProgressionProof]:
+    root = (tmp_path / "previous-run").resolve()
+    root.mkdir()
+    database_path = root / "physical-pilot.sqlite3"
+    store = SQLiteStore(database_path)
+    store.initialize()
+    pilot = _pilot_report()
+    plan_payload = _scale_plan_payload()
+    plan_payload["evaluation_set_sha256"] = "a" * 64
+    plan = driver.TrainingScalePlan.from_canonical_payload(plan_payload)
+    task = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload={
+            "job_id": pilot.job_id,
+            "kind": "physical_peft_pilot",
+            "progression_proof_sha256": None,
+            "scale_plan": plan.canonical_payload(),
+            "scale_plan_sha256": plan.plan_sha256,
+            "scale_tier_id": "pilot",
+        },
+    )
+    claim = {
+        "authorization_sha256": pilot.scale_authorization_sha256,
+        "base_artifact_ref": "models/base",
+        "base_sha256": pilot.base_sha256,
+        "candidate_artifact_ref": pilot.candidate_artifact_ref,
+        "candidate_sha256": pilot.candidate_sha256,
+        "comparison_evidence_sha256": "9" * 64,
+        "evaluation_set_sha256": plan.evaluation_set_sha256,
+        "execution_plan_sha256": pilot.execution_plan_sha256,
+        "frozen_package_sha256": pilot.frozen_package_sha256,
+        "job_fingerprint": pilot.job_fingerprint,
+        "job_id": pilot.job_id,
+        "plan_sha256": plan.plan_sha256,
+        "tier_index": 0,
+        "training_material_sha256": pilot.training_material_sha256,
+    }
+    proof = training_scale._build_progression_proof(
+        plan_sha256=claim["plan_sha256"],
+        tier_index=claim["tier_index"],
+        authorization_sha256=claim["authorization_sha256"],
+        job_id=claim["job_id"],
+        job_fingerprint=claim["job_fingerprint"],
+        base_artifact_ref=claim["base_artifact_ref"],
+        base_sha256=claim["base_sha256"],
+        candidate_artifact_ref=claim["candidate_artifact_ref"],
+        candidate_sha256=claim["candidate_sha256"],
+        frozen_package_sha256=claim["frozen_package_sha256"],
+        training_material_sha256=claim["training_material_sha256"],
+        execution_plan_sha256=claim["execution_plan_sha256"],
+        comparison_evidence_sha256=claim["comparison_evidence_sha256"],
+        evaluation_set_sha256=claim["evaluation_set_sha256"],
+    )
+    ledger = driver.IdempotencyLedger(store)
+    driver._persist_scale_progression_record(
+        ledger=ledger,
+        task_id=task.task_id,
+        proof=proof,
+    )
+
+    config = _config(tmp_path)
+    champion, challenger = _physical_candidates(tmp_path)
+    evaluation = driver._evaluation_set_from_json(
+        json.dumps(_evaluation_payload(), ensure_ascii=False)
+    )
+    experiment_id = "durable-progression-experiment"
+    _complete_promoted_experiment(
+        store=store,
+        experiment_id=experiment_id,
+        champion=champion,
+        challenger=challenger,
+        config=config,
+        evaluation=evaluation,
+    )
+    evaluation_result = {
+        "schema_version": 1,
+        "schema": "nika-physical-old-new-evaluation-report-v1",
+        "physical_pilot_evidence_sha256": pilot.evidence_sha256,
+        "requested_experiment_id": config.experiment_id,
+        "evaluation_set_sha256": claim["evaluation_set_sha256"],
+        "execution_config_sha256": config.benchmark.evidence_sha256,
+        "comparison_evidence_sha256": claim["comparison_evidence_sha256"],
+        "experiment_id": experiment_id,
+        "experiment_status": "promoted",
+        "selected_candidate_id": claim["candidate_artifact_ref"],
+        "previous_champion_id": claim["base_artifact_ref"],
+        "training_binding_sha256": "b" * 64,
+        "champion_benchmark_sha256": "c" * 64,
+        "challenger_benchmark_sha256": "d" * 64,
+        "attestor_id": "evaluator-artifact",
+        "attestor_sha256": "e" * 64,
+        "champion_provider_manifest_sha256": None,
+        "challenger_provider_manifest_sha256": None,
+    }
+    eval_record, created = ledger.reserve_once(
+        operation_key="physical-old-new-effect:" + "f" * 64,
+        task_id=task.task_id,
+        operation_type=driver._EVALUATION_OPERATION_TYPE,
+        input_fingerprint="sha256:" + "1" * 64,
+    )
+    assert created is True
+    ledger.complete_pending_if_matches(
+        operation_key=eval_record.operation_key,
+        task_id=eval_record.task_id,
+        operation_type=eval_record.operation_type,
+        input_fingerprint=eval_record.input_fingerprint,
+        created_at=eval_record.created_at,
+        result=evaluation_result,
+    )
+
+    monkeypatch.setattr(driver, "_physical_report", lambda _: pilot)
+    monkeypatch.setattr(
+        driver,
+        "_verify_completed_checkpoint",
+        lambda *_args, **_kwargs: None,
+    )
+    return root, claim, proof
+
+
+def test_durable_progression_loader_restores_only_completed_promoted_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, claim, proof = _durable_loader_fixture(tmp_path, monkeypatch)
+
+    restored = driver.load_trusted_scale_progression_proof(
+        root,
+        workspace_id="evaluation-workspace",
+        expected_claim=claim,
+    )
+
+    assert restored.canonical_payload() == proof.canonical_payload()
+    assert restored.proof_sha256 == proof.proof_sha256
+
+
+def test_higher_tier_evaluation_reuses_durable_predecessor_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = driver.TrainingScalePlan.from_canonical_payload(_scale_plan_payload())
+    prior = training_scale._build_progression_proof(
+        plan_sha256=plan.plan_sha256,
+        tier_index=0,
+        authorization_sha256="2" * 64,
+        job_id="pilot-job",
+        job_fingerprint="3" * 64,
+        base_artifact_ref="models/base",
+        base_sha256="4" * 64,
+        candidate_artifact_ref="models/pilot-candidate",
+        candidate_sha256="5" * 64,
+        frozen_package_sha256="6" * 64,
+        training_material_sha256="7" * 64,
+        execution_plan_sha256="8" * 64,
+        comparison_evidence_sha256="9" * 64,
+        evaluation_set_sha256=plan.evaluation_set_sha256,
+    )
+    pilot = _pilot_report()
+    task = SimpleNamespace(
+        payload={
+            **_scale_task_payload_with_chain(
+                kind="physical_peft_scale_tier",
+                proof=prior,
+            ),
+            "job_id": pilot.job_id,
+            "scale_tier_id": "small",
+        }
+    )
+    material = SimpleNamespace(
+        training_material_sha256=pilot.training_material_sha256,
+    )
+    observed: dict[str, object] = {}
+    authorization = SimpleNamespace(
+        authorization_sha256=pilot.scale_authorization_sha256,
+    )
+
+    monkeypatch.setattr(
+        driver,
+        "reconstruct_training_material_evidence",
+        lambda *_args, **_kwargs: material,
+    )
+
+    def authorize(**kwargs: object) -> SimpleNamespace:
+        observed.update(kwargs)
+        return authorization
+
+    monkeypatch.setattr(driver, "authorize_training_scale", authorize)
+    run = SimpleNamespace(base_artifact=object())
+
+    context = driver._reconstruct_scale_progression_context(
+        task=task,
+        package=object(),
+        workspace_id="evaluation-workspace",
+        pilot=pilot,
+        run=run,
+    )
+
+    assert context is not None
+    assert context.plan.plan_sha256 == plan.plan_sha256
+    assert observed["progression_proof"] == prior
+    assert observed["tier_id"] == "small"
+
+
+def test_durable_progression_loader_rejects_forged_claim_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, claim, _ = _durable_loader_fixture(tmp_path, monkeypatch)
+    forged = dict(claim)
+    forged["comparison_evidence_sha256"] = "8" * 64
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="completed durable scale progression record",
+    ):
+        driver.load_trusted_scale_progression_proof(
+            root,
+            workspace_id="evaluation-workspace",
+            expected_claim=forged,
         )
 
 

@@ -13,6 +13,7 @@ from nika_core.training_materials import (
     TrainingMaterialEvidence,
     TrainingMaterialResolutionError,
     TrainingMaterialSetEvidence,
+    reconstruct_training_material_evidence,
     resolve_training_materials,
 )
 
@@ -173,6 +174,44 @@ def test_resolves_exact_frozen_shard_bytes_and_minimizes_durable_evidence(
     durable = resolved.evidence.canonical_payload()
     assert "path" not in repr(durable)
     assert workspace_id not in repr(durable)
+
+
+def test_reconstructs_same_durable_evidence_without_blob_reads(
+    tmp_path: Path,
+) -> None:
+    workspace_id = "workspace-alpha"
+    store, package, _, _ = _stored_package(tmp_path, workspace_id=workspace_id)
+    resolved = resolve_training_materials(
+        package,
+        workspace_id=workspace_id,
+        blob_store=store,
+    )
+
+    reconstructed = reconstruct_training_material_evidence(
+        package,
+        workspace_id=workspace_id,
+    )
+
+    assert reconstructed.canonical_payload() == resolved.evidence.canonical_payload()
+    assert reconstructed.training_material_sha256 == resolved.training_material_sha256
+
+
+def test_reconstructed_material_evidence_remains_workspace_bound(
+    tmp_path: Path,
+) -> None:
+    _, package, _, _ = _stored_package(tmp_path, workspace_id="workspace-alpha")
+
+    alpha = reconstruct_training_material_evidence(
+        package,
+        workspace_id="workspace-alpha",
+    )
+    beta = reconstruct_training_material_evidence(
+        package,
+        workspace_id="workspace-beta",
+    )
+
+    assert alpha.workspace_sha256 != beta.workspace_sha256
+    assert alpha.training_material_sha256 != beta.training_material_sha256
 
 
 def test_workspace_isolation_blocks_same_digest_from_another_workspace(
