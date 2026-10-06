@@ -385,7 +385,7 @@ def test_continuation_reconciles_uncertain_pf5_once_without_replay(
     ]
 
 
-def test_continuation_defers_cancellation_until_pf5_worker_settles(
+def test_continuation_settles_current_pf5_work_without_starting_next_after_cancel(
     tmp_path,
     monkeypatch,
 ):
@@ -394,45 +394,66 @@ def test_continuation_defers_cancellation_until_pf5_worker_settles(
     continuation = PackagedReviewedBuildContinuation(
         store,
         _startup(tmp_path),
-        _activated({(PROJECT_ID, "repo-a", "component-a")}),
+        _activated(
+            {
+                (PROJECT_ID, "repo-a", "component-a"),
+                (PROJECT_ID, "repo-b", "component-b"),
+            }
+        ),
     )
-    prepared = _prepared([])
-    started = threading.Event()
-    release = threading.Event()
-    settled = threading.Event()
+    prepared = _prepared(
+        [
+            _record("component-a", "repo-a", WorkState.ACCEPTED),
+            _record("component-b", "repo-b", WorkState.ACCEPTED),
+        ]
+    )
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls = []
 
-    def blocked_advance(self, prepared_value):
-        assert self is continuation
-        assert prepared_value is prepared
-        started.set()
-        if not release.wait(timeout=5):
-            raise AssertionError("test PF5 worker was never released")
-        settled.set()
+    class Controller:
+        def advance_component(self, *, state, component_id):
+            assert state is prepared.state
+            calls.append(component_id)
+            if component_id == "component-a":
+                first_started.set()
+                if not release_first.wait(timeout=5):
+                    raise AssertionError("first PF5 work was never released")
+            return SimpleNamespace(
+                state=BuildExecutionState.SUCCEEDED,
+                spec=SimpleNamespace(
+                    request=SimpleNamespace(
+                        project_id=PROJECT_ID,
+                        work_id=f"pf5-{component_id}",
+                    )
+                ),
+            )
 
     monkeypatch.setattr(
-        PackagedReviewedBuildContinuation,
-        "_advance",
-        blocked_advance,
+        continuation_module,
+        "build_configured_packaged_reviewed_build_controller",
+        lambda *_args, **_kwargs: Controller(),
     )
 
     async def scenario():
         task = asyncio.create_task(continuation(prepared))
-        assert await asyncio.to_thread(started.wait, 5)
+        assert await asyncio.to_thread(first_started.wait, 5)
 
         task.cancel()
         await asyncio.sleep(0)
         assert task.done() is False
-        assert settled.is_set() is False
+        assert calls == ["component-a"]
 
         task.cancel()
         await asyncio.sleep(0)
         assert task.done() is False
-        assert settled.is_set() is False
+        assert calls == ["component-a"]
 
-        release.set()
+        release_first.set()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert settled.is_set() is True
 
     asyncio.run(scenario())
+
+    assert calls == ["component-a"]
 

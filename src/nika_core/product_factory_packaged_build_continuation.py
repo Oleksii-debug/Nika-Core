@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import dataclass
 
 from nika_core.data.sqlite import SQLiteStore
@@ -56,12 +57,16 @@ class PackagedReviewedBuildContinuation:
     async def __call__(self, prepared: PreparedProductFactory) -> None:
         if type(prepared) is not PreparedProductFactory:
             raise TypeError("PF5 continuation requires exact PreparedProductFactory")
-        worker = asyncio.create_task(asyncio.to_thread(self._advance, prepared))
+        stop_requested = threading.Event()
+        worker = asyncio.create_task(
+            asyncio.to_thread(self._advance, prepared, stop_requested)
+        )
         cancellation: asyncio.CancelledError | None = None
         while not worker.done():
             try:
                 await asyncio.shield(worker)
             except asyncio.CancelledError as exc:
+                stop_requested.set()
                 if worker.cancelled():
                     raise
                 if cancellation is None:
@@ -70,7 +75,15 @@ class PackagedReviewedBuildContinuation:
         if cancellation is not None:
             raise cancellation
 
-    def _advance(self, prepared: PreparedProductFactory) -> None:
+    def _advance(
+        self,
+        prepared: PreparedProductFactory,
+        stop_requested: threading.Event | None = None,
+    ) -> None:
+        if stop_requested is not None and type(stop_requested) is not threading.Event:
+            raise TypeError("PF5 continuation stop fence must be exact threading.Event")
+        if stop_requested is not None and stop_requested.is_set():
+            return
         state = prepared.state
         project_id = state.authority.project_id
         snapshot = state.coordinator.snapshot()
@@ -89,12 +102,16 @@ class PackagedReviewedBuildContinuation:
         # Validate the whole accepted batch before constructing or advancing PF5.
         # A partially configured launch must never build only a subset silently.
         for record in accepted:
+            if stop_requested is not None and stop_requested.is_set():
+                return
             self.activated.require_component(
                 project_id=project_id,
                 repository_id=record.request.repository_id,
                 component_id=record.request.component_id,
             )
 
+        if stop_requested is not None and stop_requested.is_set():
+            return
         controller = build_configured_packaged_reviewed_build_controller(
             self.store,
             host_task_id=prepared.host_task_id,
@@ -103,6 +120,8 @@ class PackagedReviewedBuildContinuation:
             activation=self.activated,
         )
         for record in accepted:
+            if stop_requested is not None and stop_requested.is_set():
+                return
             advanced = controller.advance_component(
                 state=state,
                 component_id=record.request.component_id,
