@@ -265,6 +265,28 @@ def test_no_voice_activity_snapshot_rejects_forged_component_evidence() -> None:
     assert "неузгоджений стан" in snapshot.message
 
 
+def test_no_voice_activity_snapshot_rejects_oversized_capture_evidence() -> None:
+    result = asyncio.run(
+        _service(
+            _MicrophoneAdapter(amplitude=0),
+            enable_voice_activity=True,
+        ).run(
+            _request("desktop-voice-test", sample_count=3_200)
+        )
+    )
+    assert result.evidence.status is VoiceTurnStatus.NO_VOICE_ACTIVITY
+    object.__setattr__(result.evidence.capture, "sample_count", 1 << 100_000)
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+    assert "неузгоджений стан" in snapshot.message
+
+
 def test_no_voice_activity_snapshot_rejects_forged_transcript() -> None:
     result = asyncio.run(
         _service(

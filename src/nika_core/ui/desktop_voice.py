@@ -657,8 +657,9 @@ def _is_valid_no_voice_activity_evidence(
         and type(capture.sample_rate_hz) is int
         and 8_000 <= capture.sample_rate_hz <= 48_000
         and type(capture.sample_count) is int
-        and capture.sample_count > 0
+        and 1 <= capture.sample_count <= capture.sample_rate_hz * 30
         and type(capture.audio_byte_count) is int
+        and 2 <= capture.audio_byte_count <= 8 * 1024 * 1024
         and capture.audio_byte_count == capture.sample_count * 2
         and _is_sha256(capture.audio_sha256)
         and capture.error_code is None
