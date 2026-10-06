@@ -58,6 +58,10 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _step_id(step_index: int) -> str:
+    return peft._expected_step_id("1" * 64, "b" * 64, step_index)
+
+
 def _body(prompt: str, response: str) -> bytes:
     return (
         json.dumps(
@@ -144,7 +148,7 @@ def _request(tmp_path: Path, *, max_steps: int = 2) -> tuple[dict[str, object], 
         "previous_step_id": None,
         "protocol_version": 3,
         "resume_state": {},
-        "step_id": "2" * 64,
+        "step_id": _step_id(0),
         "step_index": 0,
         "trainer_artifact_id": "a" * 64,
         "trainer_sha256": "b" * 64,
@@ -204,22 +208,32 @@ def test_protocol_v3_materials_are_rehashed_and_parsed(tmp_path: Path) -> None:
     assert consumed.validation == (peft.TrainingExample("validate", "answer"),)
 
 
-def test_request_enforces_previous_step_identity_shape(tmp_path: Path) -> None:
+def test_request_enforces_step_identity_chain(tmp_path: Path) -> None:
     initial, _ = _request(tmp_path)
     initial["previous_step_id"] = "9" * 64
     with pytest.raises(peft.PeftTrainerError, match="previous_step_id_invalid"):
         peft._parse_request(initial)
 
+    wrong_current, _ = _request(tmp_path, max_steps=2)
+    wrong_current["step_id"] = "9" * 64
+    with pytest.raises(peft.PeftTrainerError, match="step_id_mismatch"):
+        peft._parse_request(wrong_current)
+
     resumed, _ = _request(tmp_path, max_steps=2)
     resumed["step_index"] = 1
-    resumed["step_id"] = "3" * 64
+    resumed["step_id"] = _step_id(1)
     resumed["previous_step_id"] = None
     with pytest.raises(peft.PeftTrainerError, match="previous_step_id"):
         peft._parse_request(resumed)
 
     resumed["previous_step_id"] = resumed["step_id"]
-    with pytest.raises(peft.PeftTrainerError, match="previous_step_id_invalid"):
+    with pytest.raises(peft.PeftTrainerError, match="previous_step_id_mismatch"):
         peft._parse_request(resumed)
+
+    resumed["previous_step_id"] = _step_id(0)
+    parsed = peft._parse_request(resumed)
+    assert parsed.step_id == _step_id(1)
+    assert parsed.previous_step_id == _step_id(0)
 
 
 def test_material_tamper_fails_before_training(tmp_path: Path) -> None:
@@ -472,7 +486,7 @@ def test_resume_marker_binds_job_step_and_consumed_materials(tmp_path: Path) -> 
     raw_request, _ = _request(tmp_path)
     raw_request["step_index"] = 1
     raw_request["previous_step_id"] = request.step_id
-    raw_request["step_id"] = "3" * 64
+    raw_request["step_id"] = _step_id(1)
     raw_request["resume_state"] = resume
     second = peft._parse_request(raw_request)
 
@@ -493,14 +507,19 @@ def test_resume_marker_binds_exact_previous_step_id(tmp_path: Path) -> None:
     checkpoint.mkdir(parents=True)
     (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
     payload_sha = peft._checkpoint_payload_manifest_sha256(checkpoint)
-    marker_sha = peft._write_checkpoint_marker(
+    peft._write_checkpoint_marker(
         checkpoint,
         request=request,
         consumed_sha256=request.required_consumed_materials_sha256,
         checkpoint_payload_sha256=payload_sha,
     )
+    marker_path = checkpoint / peft._CHECKPOINT_MARKER
+    marker = json.loads(marker_path.read_bytes())
+    marker["step_id"] = "4" * 64
+    marker_bytes = peft._canonical_json_bytes(marker)
+    marker_path.write_bytes(marker_bytes)
     resume = {
-        "checkpoint_marker_sha256": marker_sha,
+        "checkpoint_marker_sha256": _sha256(marker_bytes),
         "checkpoint_payload_sha256": payload_sha,
         "checkpoint_step": 1,
         "job_fingerprint": request.job_fingerprint,
@@ -509,8 +528,8 @@ def test_resume_marker_binds_exact_previous_step_id(tmp_path: Path) -> None:
     }
     raw_second, _ = _request(tmp_path, max_steps=2)
     raw_second["step_index"] = 1
-    raw_second["step_id"] = "3" * 64
-    raw_second["previous_step_id"] = "4" * 64
+    raw_second["step_id"] = _step_id(1)
+    raw_second["previous_step_id"] = _step_id(0)
     raw_second["resume_state"] = resume
     second = peft._parse_request(raw_second)
 
@@ -697,7 +716,7 @@ def test_resume_rejects_tampered_checkpoint_payload(tmp_path: Path) -> None:
     raw_request, _ = _request(tmp_path)
     raw_request["step_index"] = 1
     raw_request["previous_step_id"] = request.step_id
-    raw_request["step_id"] = "3" * 64
+    raw_request["step_id"] = _step_id(1)
     raw_request["resume_state"] = resume
     second = peft._parse_request(raw_request)
 
@@ -1042,7 +1061,7 @@ def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
     raw_second, _ = _request(tmp_path, max_steps=2)
     raw_second["step_index"] = 1
     raw_second["previous_step_id"] = request.step_id
-    raw_second["step_id"] = "3" * 64
+    raw_second["step_id"] = _step_id(1)
     raw_second["resume_state"] = first_state
     second = peft._parse_request(raw_second)
     second_consumed = peft._consume_materials(second, max_records=10)
@@ -1137,7 +1156,7 @@ def test_completed_checkpoint_replay_uses_staged_base_after_source_loss(
     assert replay_candidate is None
 
 
-def test_completed_checkpoint_replay_rejects_step_id_drift(
+def test_completed_checkpoint_replay_rejects_marker_step_id_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1149,10 +1168,16 @@ def test_completed_checkpoint_replay_rejects_step_id_drift(
     assert first_candidate is None
     assert first_state["checkpoint_step"] == 1
 
-    drifted_raw, _ = _request(tmp_path, max_steps=2)
-    drifted_raw["step_id"] = "9" * 64
-    drifted = peft._parse_request(drifted_raw)
-    drifted_consumed = peft._consume_materials(drifted, max_records=10)
+    checkpoint = (
+        config.output_root
+        / peft._candidate_key(request.candidate_artifact_ref)
+        / "trainer"
+        / "checkpoint-1"
+    )
+    marker_path = checkpoint / peft._CHECKPOINT_MARKER
+    marker = json.loads(marker_path.read_bytes())
+    marker["step_id"] = "9" * 64
+    marker_path.write_bytes(peft._canonical_json_bytes(marker))
     monkeypatch.setattr(
         peft,
         "_import_training_stack",
@@ -1164,9 +1189,9 @@ def test_completed_checkpoint_replay_rejects_step_id_drift(
         match="step_checkpoint_marker_identity_mismatch",
     ):
         peft._train_one_step(
-            drifted,
+            request,
             config,
-            drifted_consumed,
+            consumed,
         )
 
 
@@ -1275,7 +1300,7 @@ def test_resumed_manifest_binds_loaded_pre_step_tensor_state(
     raw_second, _ = _request(tmp_path, max_steps=2)
     raw_second["step_index"] = 1
     raw_second["previous_step_id"] = request.step_id
-    raw_second["step_id"] = "3" * 64
+    raw_second["step_id"] = _step_id(1)
     raw_second["resume_state"] = first_state
     second = peft._parse_request(raw_second)
     second_consumed = peft._consume_materials(second, max_records=10)
@@ -1359,7 +1384,7 @@ def test_resumed_training_loads_from_verified_checkpoint_snapshot(
     raw_second, _ = _request(tmp_path, max_steps=2)
     raw_second["step_index"] = 1
     raw_second["previous_step_id"] = request.step_id
-    raw_second["step_id"] = "3" * 64
+    raw_second["step_id"] = _step_id(1)
     raw_second["resume_state"] = first_state
     second = peft._parse_request(raw_second)
     second_consumed = peft._consume_materials(second, max_records=10)
@@ -1794,7 +1819,7 @@ def test_resumed_training_rejects_unchanged_weights_and_preserves_prior_checkpoi
     raw_second, _ = _request(tmp_path, max_steps=2)
     raw_second["step_index"] = 1
     raw_second["previous_step_id"] = request.step_id
-    raw_second["step_id"] = "3" * 64
+    raw_second["step_id"] = _step_id(1)
     raw_second["resume_state"] = first_state
     second = peft._parse_request(raw_second)
     second_consumed = peft._consume_materials(second, max_records=10)
