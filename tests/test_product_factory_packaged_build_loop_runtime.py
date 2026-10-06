@@ -111,6 +111,15 @@ class _Availability:
         return self.available and node_id == NODE_ID
 
 
+class _FlappingAvailability:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def is_available(self, node_id: str) -> bool:
+        self.calls += 1
+        return node_id == NODE_ID and self.calls == 1
+
+
 class _BuildNode:
     def __init__(self) -> None:
         self.run_calls = 0
@@ -147,6 +156,21 @@ class _BuildNode:
                 32,
             ),
         )
+
+
+class _FailedBuildNode(_BuildNode):
+    def run(self, dispatch: BuildExecutionDispatch) -> BuildExecutionResult:
+        self.run_calls += 1
+        result = BuildExecutionResult(
+            source_sha=dispatch.source_sha,
+            artifact_digest=ARTIFACT_DIGEST,
+            succeeded=False,
+            uncertain=False,
+            evidence_refs=("build://packaged/failed",),
+            completed_at=NOW,
+        )
+        self.receipts[dispatch.dispatch_id] = result
+        return result
 
 
 class _HealthyStagingProvider:
@@ -386,12 +410,13 @@ def _build_host(
     node: ExecutionNode,
     node_port: _BuildNode,
     available: bool = True,
+    availability: Any | None = None,
 ) -> DurableBuildExecutionHost:
     registry = ExecutionNodeRegistry()
     registry.register(node)
     coordinator = BuildExecutionCoordinator(
         registry,
-        _Availability(available),
+        _Availability(available) if availability is None else availability,
         runtime.trusted_execution,
     )
     checkpoints = SQLiteBuildExecutionCheckpointStore(
@@ -627,6 +652,94 @@ def test_waiting_for_node_never_enters_staging(tmp_path: Path) -> None:
     assert node_port.run_calls == 0
     assert node_port.inspect_calls == 0
     assert provider.deploy_calls == 0
+
+
+def test_failed_build_never_enters_staging(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "failed-build-loop.db")
+    store.initialize()
+    node = _node()
+    startup = _startup(tmp_path)
+    runtime = _runtime(store, startup, node, configure=True)
+    host_task_id = _host_task(store)
+    node_port = _FailedBuildNode()
+    provider = _HealthyStagingProvider()
+    loop = _loop(
+        runtime,
+        _build_host(
+            store,
+            host_task_id=host_task_id,
+            runtime=runtime,
+            node=node,
+            node_port=node_port,
+        ),
+        _deployment(store, host_task_id=host_task_id, provider=provider),
+    )
+    graph = _graph()
+
+    result = loop.advance_reviewed_component(
+        authority=_graph_authority(graph),
+        coordinator=_accepted_coordinator(graph),
+        component_id=COMPONENT_ID,
+    )
+
+    assert result.build.state is BuildExecutionState.FAILED
+    assert result.deployment is None
+    assert node_port.run_calls == 1
+    assert provider.deploy_calls == 0
+
+
+def test_pre_dispatch_node_loss_is_durably_settled_without_effect(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "pre-dispatch-node-loss.db")
+    store.initialize()
+    node = _node()
+    startup = _startup(tmp_path)
+    runtime = _runtime(store, startup, node, configure=True)
+    host_task_id = _host_task(store)
+    node_port = _BuildNode()
+    availability = _FlappingAvailability()
+    provider = _HealthyStagingProvider()
+    loop = _loop(
+        runtime,
+        _build_host(
+            store,
+            host_task_id=host_task_id,
+            runtime=runtime,
+            node=node,
+            node_port=node_port,
+            availability=availability,
+        ),
+        _deployment(store, host_task_id=host_task_id, provider=provider),
+    )
+    graph = _graph()
+    coordinator = _accepted_coordinator(graph)
+
+    result = loop.advance_reviewed_component(
+        authority=_graph_authority(graph),
+        coordinator=coordinator,
+        component_id=COMPONENT_ID,
+    )
+
+    assert result.build.state is BuildExecutionState.WAITING_FOR_NODE
+    assert result.deployment is None
+    assert node_port.run_calls == 0
+    assert provider.deploy_calls == 0
+
+    restarted_runtime = _runtime(store, startup, node, configure=False)
+    restarted_node = _BuildNode()
+    restarted_host = _build_host(
+        store,
+        host_task_id=host_task_id,
+        runtime=restarted_runtime,
+        node=node,
+        node_port=restarted_node,
+        available=False,
+    )
+    durable = restarted_host.coordinator.get(result.spec.request.work_id)
+
+    assert durable.state is BuildExecutionState.WAITING_FOR_NODE
+    assert restarted_node.run_calls == 0
 
 
 def test_split_pf5_authority_composition_is_rejected(tmp_path: Path) -> None:
