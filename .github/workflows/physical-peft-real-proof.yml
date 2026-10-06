@@ -1,0 +1,94 @@
+name: Real Physical PEFT Proof
+
+on:
+  pull_request:
+    paths:
+      - "src/nika_core/learning_package/**"
+      - "src/nika_core/research/blobs.py"
+      - "src/nika_core/training_adapters/**"
+      - "src/nika_core/training_materials.py"
+      - "src/nika_core/training_peft_worker.py"
+      - "src/nika_core/training_physical_pilot.py"
+      - "src/nika_core/training_physical_pilot_driver.py"
+      - "src/nika_core/training_runtime/**"
+      - "src/nika_core/training_scale.py"
+      - "scripts/physical_peft_real_proof.py"
+      - "pyproject.toml"
+      - ".github/workflows/physical-peft-real-proof.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+concurrency:
+  group: physical-peft-real-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  physical-peft:
+    name: Windows CPU real PEFT pilot
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.NIKA_CANDIDATE_SHA }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Verify exact candidate checkout identity
+        run: python scripts/qa_assert_checkout_identity.py
+
+      - name: Install canonical PEFT training stack
+        run: python -m pip install -e ".[training]"
+
+      - name: Stage immutable public model and canonical proof authorities
+        shell: pwsh
+        run: |
+          $proofRoot = Join-Path $env:RUNNER_TEMP ("nika-physical-peft-proof-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $proofRoot) {
+            throw "physical proof root already exists"
+          }
+          $trainer = (Get-Command nika-peft-trainer -ErrorAction Stop).Source
+          python scripts/physical_peft_real_proof.py prepare --root $proofRoot --trainer-executable $trainer
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          "NIKA_PHYSICAL_PROOF_ROOT=$proofRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "HF_HUB_OFFLINE=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TRANSFORMERS_OFFLINE=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "HF_DATASETS_OFFLINE=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "TOKENIZERS_PARALLELISM=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Execute canonical Windows physical PEFT pilot
+        shell: pwsh
+        run: |
+          $pilot = (Get-Command nika-peft-physical-pilot -ErrorAction Stop).Source
+          $config = Join-Path $env:NIKA_PHYSICAL_PROOF_ROOT "physical-pilot.json"
+          & $pilot $config
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Verify real candidate bytes and physical evidence
+        shell: pwsh
+        run: |
+          python scripts/physical_peft_real_proof.py verify --root $env:NIKA_PHYSICAL_PROOF_ROOT
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+
+      - name: Upload path-free physical proof evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: physical-peft-real-proof-${{ env.NIKA_CANDIDATE_SHA }}
+          path: ${{ env.NIKA_PHYSICAL_PROOF_ROOT }}/evidence
+          if-no-files-found: error
+          retention-days: 14
