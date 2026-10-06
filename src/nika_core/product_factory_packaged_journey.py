@@ -89,6 +89,7 @@ _PENDING_DECISION_LIST_COMMANDS = (
     "покажи рішення productproject, що очікують",
 )
 _PENDING_DECISION_PAGE_SIZE = 8
+_MAX_PENDING_DECISION_PAGE = ((1 << 63) - 1) // _PENDING_DECISION_PAGE_SIZE + 1
 _DAILY_ACTIVITY_REPORT_COMMANDS = frozenset(
     {
         "daily activity report",
@@ -285,10 +286,18 @@ def packaged_product_decision_query(command: str) -> tuple[str, str | int] | Non
                 raise PackagedProductJourneyError(
                     "Номер сторінки рішень має бути додатним цілим числом."
                 )
-            page = int(raw_page)
-            if page < 1 or page > 1_000_000:
+            if len(raw_page) > len(str(_MAX_PENDING_DECISION_PAGE)):
                 raise PackagedProductJourneyError(
-                    "Номер сторінки рішень має бути в межах 1..1000000."
+                    "Номер сторінки рішень перевищує підтримуваний SQLite offset."
+                )
+            page = int(raw_page)
+            if page < 1:
+                raise PackagedProductJourneyError(
+                    "Номер сторінки рішень має бути додатним цілим числом."
+                )
+            if page > _MAX_PENDING_DECISION_PAGE:
+                raise PackagedProductJourneyError(
+                    "Номер сторінки рішень перевищує підтримуваний SQLite offset."
                 )
             return "list", page
 

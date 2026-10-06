@@ -532,7 +532,11 @@ def test_stale_project_between_request_and_confirmation_fails_closed_then_recove
         ),
         (
             "list pending product decisions page 0",
-            "1..1000000",
+            "додатним цілим",
+        ),
+        (
+            "list pending product decisions page 9999999999999999999",
+            "SQLite offset",
         ),
         (
             "list pending product decisions page many",
