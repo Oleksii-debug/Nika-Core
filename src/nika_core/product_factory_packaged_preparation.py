@@ -182,8 +182,7 @@ class PackagedProductFactoryPreparationService:
         self,
         plan: PackagedProductFactoryExecutionPlan,
     ) -> PreparedProductFactory:
-        if type(plan) is not PackagedProductFactoryExecutionPlan:
-            raise TypeError("plan must be PackagedProductFactoryExecutionPlan")
+        plan = _snapshot_execution_plan(plan)
         project = self._repository.get(plan.project_id)
         self._require_plan_version(project, plan)
         task_id = product_factory_host_task_identity(
@@ -336,6 +335,30 @@ class PackagedProductFactoryPreparationService:
             raise PackagedProductFactoryPreparationError(
                 "deterministic Product Factory host task conflicts with existing authority"
             )
+
+
+def _snapshot_execution_plan(
+    plan: object,
+) -> PackagedProductFactoryExecutionPlan:
+    """Re-admit current fields before any trusted Product Factory preparation effect."""
+
+    if type(plan) is not PackagedProductFactoryExecutionPlan:
+        raise TypeError("plan must be PackagedProductFactoryExecutionPlan")
+    try:
+        return PackagedProductFactoryExecutionPlan(
+            project_id=plan.project_id,
+            expected_spec_version=plan.expected_spec_version,
+            expected_row_version=plan.expected_row_version,
+            graph=plan.graph,
+            graph_version=plan.graph_version,
+            base_shas=plan.base_shas,
+            component_goals=plan.component_goals,
+            permission_ceiling=plan.permission_ceiling,
+        )
+    except (AttributeError, TypeError) as exc:
+        raise PackagedProductFactoryPreparationError(
+            "execution plan is structurally invalid"
+        ) from exc
 
 
 def _snapshot_graph(graph: ProductRepositoryGraph) -> ProductRepositoryGraph:
