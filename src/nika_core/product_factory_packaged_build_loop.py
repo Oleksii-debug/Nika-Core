@@ -183,6 +183,7 @@ def build_packaged_product_factory_build_loop(
         startup=startup,
         trusted_authority=authority_runtime.trusted_execution,
         output_policies=authority_runtime.output_policies,
+        recovery_authority=authority_runtime.recovery_execution,
     )
     handoff = BuildDeploymentHandoff(
         build_host=host,
