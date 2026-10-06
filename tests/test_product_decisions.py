@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from _product_decision_test_support import ApprovedProductDecisionRepository
-
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +9,7 @@ from threading import Barrier
 import pytest
 
 import nika_core.data.sqlite as sqlite_store_module
+from _product_decision_test_support import ApprovedProductDecisionRepository
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
