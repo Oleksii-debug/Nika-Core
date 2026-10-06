@@ -24,6 +24,10 @@ from nika_core.product_project_schema import (
     PRODUCT_PROJECT_SCHEMA_VERSION,
 )
 from nika_core.research.knowledge_schema import initialize_knowledge_schema
+from nika_core.training_scale_progression_schema import (
+    TRAINING_SCALE_PROGRESSION_MIGRATIONS,
+    TRAINING_SCALE_PROGRESSION_SCHEMA_VERSION,
+)
 
 
 class SQLiteStore:
@@ -71,6 +75,7 @@ class SQLiteStore:
             self._initialize_multi_agent_state_schema(conn)
             self._initialize_product_project_schema(conn)
             self._initialize_model_artifact_schema(conn)
+            self._initialize_training_scale_progression_schema(conn)
             initialize_knowledge_schema(conn)
 
     @staticmethod
@@ -189,6 +194,44 @@ class SQLiteStore:
             conn.execute(
                 "INSERT INTO model_artifact_schema_migrations(version, applied_at) "
                 "VALUES (?, ?)",
+                (version, datetime.now(UTC).isoformat()),
+            )
+
+    @staticmethod
+    def _initialize_training_scale_progression_schema(
+        conn: sqlite3.Connection,
+    ) -> None:
+        """Apply durable physical-scale progression authority migrations."""
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS training_scale_progression_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT MAX(version) AS version "
+            "FROM training_scale_progression_schema_migrations"
+        ).fetchone()
+        current = int(row["version"] or 0)
+        if current > TRAINING_SCALE_PROGRESSION_SCHEMA_VERSION:
+            raise RuntimeError(
+                "training scale progression database schema "
+                f"{current} is newer than supported schema "
+                f"{TRAINING_SCALE_PROGRESSION_SCHEMA_VERSION}"
+            )
+        for version in range(
+            current + 1,
+            TRAINING_SCALE_PROGRESSION_SCHEMA_VERSION + 1,
+        ):
+            statements = TRAINING_SCALE_PROGRESSION_MIGRATIONS.get(version)
+            if statements is None:
+                raise RuntimeError(
+                    f"missing training scale progression migration {version}"
+                )
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO training_scale_progression_schema_migrations"
+                "(version, applied_at) VALUES (?, ?)",
                 (version, datetime.now(UTC).isoformat()),
             )
 
