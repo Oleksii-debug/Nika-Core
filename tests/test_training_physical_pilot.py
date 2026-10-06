@@ -759,7 +759,7 @@ def test_build_report_accepts_v3_manifest_and_binds_exact_manifest_hash(
         sort_keys=True,
     ).encode("utf-8")
     assert report.candidate_manifest_sha256 == _sha256(encoded)
-    assert report.schema_version == 5
+    assert report.schema_version == 6
 
 
 def test_build_report_rejects_candidate_manifest_reader_failure(
