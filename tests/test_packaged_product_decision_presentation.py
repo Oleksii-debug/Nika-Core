@@ -183,6 +183,40 @@ def test_state_refresh_uses_bounded_decision_summary_not_full_list(
     assert project["current_decision"] is None
 
 
+def test_bounded_state_refresh_validates_hidden_corrupt_decision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "bounded hidden corruption.db"
+    service, repository, _router, provider = _build(database)
+    for index in range(2):
+        _add_pending(
+            service,
+            repository,
+            package_id=f"research-hidden-{index:02d}",
+            option_id=f"option-hidden-{index:02d}",
+            decision_id=f"decision-hidden-{index:02d}",
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+        )
+
+    store = SQLiteStore(database)
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_decisions SET decision_id=? "
+            "WHERE project_id=? AND decision_id=?",
+            ("decision-hidden\ncontrol", _PROJECT_ID, "decision-hidden-01"),
+        )
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("packaged state refresh must not materialize decision list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
+
+    with pytest.raises(ValueError, match="safe presentation identity"):
+        provider()
+
+
 @pytest.mark.parametrize(
     "command",
     [
