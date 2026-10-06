@@ -2015,9 +2015,12 @@ def _snapshot_resume_checkpoint(
         if _checkpoint_payload_manifest_sha256(target) != expected_digest:
             _fail("resume_checkpoint_snapshot_mismatch")
         return target
-    except (PeftTrainerError, OSError):
+    except PeftTrainerError:
         shutil.rmtree(snapshot_root, ignore_errors=True)
         raise
+    except OSError:
+        shutil.rmtree(snapshot_root, ignore_errors=True)
+        _fail("resume_checkpoint_snapshot_failed")
 
 
 class _TokenizedDataset:
