@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import quote
 
 import pytest
 
@@ -222,6 +223,100 @@ def test_decode_rejects_url_query_or_fragment_in_repository_locator(
         match="URL query or fragment",
     ):
         decode_packaged_product_factory_execution_plan(_encode(claim))
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "Oleksii-debug/Nika-Core?token=must-not-survive",
+        "Oleksii-debug/Nika-Core?api_key=must-not-survive",
+        "Oleksii-debug/Nika-Core?client_secret=must-not-survive",
+        "Oleksii-debug/Nika-Core?access%5Ftoken=must-not-survive",
+        "Oleksii-debug/Nika-Core?token%253Dmust-not-survive",
+        "https%3A%2F%2Ftoken-value%40github.com%2Fexample%2Frepository",
+    ],
+)
+def test_decode_rejects_scheme_less_or_encoded_locator_credentials(
+    locator: str,
+) -> None:
+    claim = _claim()
+    repositories = claim["repositories"]
+    assert isinstance(repositories, list)
+    repository = repositories[0]
+    assert isinstance(repository, dict)
+    repository["locator"] = locator
+
+    with pytest.raises(
+        PackagedExecutionPlanAdmissionError,
+        match="credential",
+    ):
+        decode_packaged_product_factory_execution_plan(_encode(claim))
+
+
+def test_decode_rejects_excessively_nested_locator_encoding() -> None:
+    claim = _claim()
+    repositories = claim["repositories"]
+    assert isinstance(repositories, list)
+    repository = repositories[0]
+    assert isinstance(repository, dict)
+    locator = "Oleksii-debug/Nika-Core?token=must-not-survive"
+    for _index in range(140):
+        locator = quote(locator, safe="/?")
+    repository["locator"] = locator
+
+    with pytest.raises(
+        PackagedExecutionPlanAdmissionError,
+        match="decoding exceeds the bounded limit",
+    ):
+        decode_packaged_product_factory_execution_plan(_encode(claim))
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "Oleksii-debug/Nika-Core\nforged-log-line",
+        "Oleksii-debug/Nika-Core\rforged-log-line",
+        "Oleksii-debug/Nika-Core\x7fforged-log-line",
+    ],
+)
+def test_decode_rejects_control_characters_in_repository_locator(
+    locator: str,
+) -> None:
+    claim = _claim()
+    repositories = claim["repositories"]
+    assert isinstance(repositories, list)
+    repository = repositories[0]
+    assert isinstance(repository, dict)
+    repository["locator"] = locator
+
+    with pytest.raises(
+        PackagedExecutionPlanAdmissionError,
+        match="single-line locator",
+    ):
+        decode_packaged_product_factory_execution_plan(_encode(claim))
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "Oleksii-debug/Nika-Core",
+        "Oleksii-debug/C++-tools",
+        "example/repository?ref=public-catalog",
+    ],
+)
+def test_decode_preserves_benign_scheme_less_repository_locator(
+    locator: str,
+) -> None:
+    claim = _claim()
+    repositories = claim["repositories"]
+    assert isinstance(repositories, list)
+    repository = repositories[0]
+    assert isinstance(repository, dict)
+    repository["locator"] = locator
+
+    plan = decode_packaged_product_factory_execution_plan(_encode(claim))
+
+    assert plan.graph.repositories[0].locator == locator
 
 
 def test_decode_rejects_control_characters_in_credential_reference() -> None:
