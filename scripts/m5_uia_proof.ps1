@@ -586,6 +586,51 @@ try {
         throw "Expected bound read-only UI Automation text '$Expected' did not appear."
     }
 
+    function Wait-BoundTextPrefixEvidence(
+        [string]$Prefix,
+        [int]$Attempts = 80
+    ) {
+        if ([string]::IsNullOrEmpty($Prefix)) {
+            throw 'UI Automation text-evidence prefix must not be empty.'
+        }
+        $typeCondition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Text
+        )
+        for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            Assert-BoundProcessGeneration
+            $currentWindow = Find-ExactWindow
+            if ($null -eq $currentWindow) { continue }
+            try {
+                foreach ($searchRoot in (Get-BoundSearchRoots $currentWindow)) {
+                    $candidates = @()
+                    if ($searchRoot.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text) {
+                        $candidates += $searchRoot
+                    }
+                    $candidates += @(
+                        $searchRoot.FindAll(
+                            [System.Windows.Automation.TreeScope]::Descendants,
+                            $typeCondition
+                        )
+                    )
+                    foreach ($candidate in $candidates) {
+                        $name = $candidate.Current.Name
+                        if (
+                            $name -is [string] -and
+                            $name.StartsWith($Prefix, [System.StringComparison]::Ordinal)
+                        ) {
+                            return
+                        }
+                    }
+                }
+            } catch [System.Windows.Automation.ElementNotAvailableException] {
+                continue
+            }
+        }
+        throw "Expected bound read-only UI Automation text prefix '$Prefix' did not appear."
+    }
+
     function Wait-DescendantName(
         [string]$Expected,
         [System.Windows.Automation.ControlType]$ExpectedControlType = $null,
@@ -885,6 +930,57 @@ print('Packaged intelligence-mode commands changed canonical model settings with
         )) {
             Wait-BoundTextEvidence $operatorEvidence
         }
+
+        Set-BoundControlValue $commandControl 'сплануй поточний ProductProject'
+        Set-BoundControlFocus $startControl
+        [System.Windows.Forms.SendKeys]::SendWait('^n')
+        Wait-FocusName $tasksControl
+        Wait-BoundTextPrefixEvidence 'План Product Factory: '
+
+        $factoryPlanProbe = @'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+project_id = sys.argv[2]
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    row = db.execute(
+        'SELECT current_spec_version FROM product_projects WHERE project_id = ?',
+        (project_id,),
+    ).fetchone()
+    if row is None or row[0] != 2:
+        raise SystemExit('packaged Product Factory planning did not persist spec version 2')
+    spec_row = db.execute(
+        'SELECT spec_json FROM product_project_specs '
+        'WHERE project_id = ? AND spec_version = 2',
+        (project_id,),
+    ).fetchone()
+    if spec_row is None:
+        raise SystemExit('packaged Product Factory planning did not persist spec revision 2')
+    spec = json.loads(spec_row[0])
+    team_refs = spec.get('team_refs')
+    if not isinstance(team_refs, list):
+        raise SystemExit('packaged Product Factory planning persisted invalid team_refs')
+    owned = [
+        ref for ref in team_refs
+        if isinstance(ref, str) and ref.startswith('pf-team-plan:v1:')
+    ]
+    if len(owned) != 1:
+        raise SystemExit('packaged Product Factory planning did not persist one team-plan ref')
+    task_count = db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]
+    if task_count != 0:
+        raise SystemExit('packaged Product Factory planning unexpectedly created a task')
+print('Packaged Product Factory planning persisted one team plan without worker dispatch.')
+'@
+        $factoryPlanProbe | python - $env:NIKA_DB_PATH $productId
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Packaged Product Factory planning did not remain planning-only.'
+        }
+        Wait-BoundTextEvidence $productId
+        Set-BoundControlFocus $commandControl
+        Wait-FocusName $commandControl
 
         Set-BoundControlValue $commandControl 'покажи поточний статус Product Factory'
         Set-BoundControlFocus $startControl
