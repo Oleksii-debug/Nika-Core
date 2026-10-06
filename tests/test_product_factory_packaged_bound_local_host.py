@@ -1621,3 +1621,116 @@ async def test_worker_revalidates_binding_after_private_git_source_copy(
     assert not (job_root / "_nika_private_git").exists()
     assert not (job_root / "worktree").exists()
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation_point", ("commit", "acceptance"))
+@pytest.mark.parametrize("cleanup_fails", (False, True))
+async def test_worker_revalidates_binding_after_private_candidate_effects(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation_point: str,
+    cleanup_fails: bool,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    first_root = _repository(tmp_path, "first repository")
+    second_root = _repository(tmp_path, "second repository")
+    base_sha = _git(first_root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    state = host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
+    )
+    entry = host._require_state_bindings("host-task", state)
+    request = state.coordinator.snapshot().records[0].request
+
+    class StaticPlanner:
+        async def plan(self, job):
+            return LocalCodingPlan(
+                (LocalFileEdit("src/new.py", b"print('candidate')\n"),)
+            )
+
+    entry.program.worker.planner = StaticPlanner()
+    rebound = False
+
+    def rebind_once() -> None:
+        nonlocal rebound
+        assert rebound is False
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=second_root,
+            expected_binding_version=first.binding_version,
+        )
+        rebound = True
+
+    if mutation_point == "commit":
+        original_commit = entry.program.worker._commit_candidate
+
+        def commit_then_rebind(git_plan, fingerprint: str) -> str:
+            result_sha = original_commit(git_plan, fingerprint)
+            rebind_once()
+            return result_sha
+
+        monkeypatch.setattr(
+            entry.program.worker,
+            "_commit_candidate",
+            commit_then_rebind,
+        )
+    else:
+        original_acceptance = entry.program.worker._run_acceptance
+
+        def acceptance_then_rebind(job, candidate_root, cancellation):
+            result = original_acceptance(job, candidate_root, cancellation)
+            rebind_once()
+            return result
+
+        monkeypatch.setattr(
+            entry.program.worker,
+            "_run_acceptance",
+            acceptance_then_rebind,
+        )
+
+    if cleanup_fails:
+        def cleanup_failure(git_plan) -> None:
+            raise OSError("injected cleanup failure")
+
+        monkeypatch.setattr(
+            local_worker_module,
+            "cleanup_private_git_workspace",
+            cleanup_failure,
+        )
+        expected_error = ContainedLocalWorkerError
+        expected_message = "cleanup could not be proven"
+    else:
+        expected_error = PackagedBoundLocalProductFactoryHostError
+        expected_message = "changed during contained-local execution"
+
+    with pytest.raises(expected_error, match=expected_message):
+        await entry.program.host.worker.dispatch(request)
+
+    assert rebound is True
+    job_root = entry.program.worker.workspace_root_for(request.work_id)
+    assert (job_root / "_nika_private_git").exists() is cleanup_fails
+    assert (job_root / "worktree").exists() is cleanup_fails
+    inspected = await entry.program.worker.inspect(request.work_id)
+    assert inspected is not None
+    assert inspected.phase == "manual_reconcile_required"
