@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import cast
 
@@ -203,3 +204,12 @@ def test_prehuman_schema_does_not_silently_accept_unknown_fields(tmp_path: Path)
     findings = _verify(artifact, evidence)
 
     assert "distributable:evidence-keys" in findings
+
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_prehuman_evidence_reader_refuses_preexisting_writer(tmp_path: Path) -> None:
+    artifact, evidence, _payload = _write_bound_evidence(tmp_path)
+
+    with evidence.open("r+b"):
+        assert _verify(artifact, evidence) == ("distributable:invalid-evidence",)
