@@ -71,6 +71,53 @@ def _package() -> FrozenLearningPackage:
     )
 
 
+def test_candidate_training_digests_require_cross_tier_evidence(
+    proof: ModuleType,
+) -> None:
+    previous = _sha(b"previous")
+    trained = _sha(b"trained")
+    tokenization = _sha(b"tokenization")
+
+    assert proof._candidate_training_digests(
+        {
+            "previous_adapter_tensors_sha256": previous,
+            "trained_adapter_tensors_sha256": trained,
+            "tokenization_sha256": tokenization,
+        },
+        name="candidate",
+    ) == (previous, trained, tokenization)
+
+
+@pytest.mark.parametrize(
+    ("patch", "match"),
+    [
+        ({"tokenization_sha256": None}, "tokenization_sha256"),
+        ({"tokenization_sha256": "A" * 64}, "tokenization_sha256"),
+        (
+            {
+                "previous_adapter_tensors_sha256": _sha(b"same"),
+                "trained_adapter_tensors_sha256": _sha(b"same"),
+            },
+            "does not prove adapter tensor mutation",
+        ),
+    ],
+)
+def test_candidate_training_digests_fail_closed(
+    proof: ModuleType,
+    patch: dict[str, object],
+    match: str,
+) -> None:
+    manifest: dict[str, object] = {
+        "previous_adapter_tensors_sha256": _sha(b"previous"),
+        "trained_adapter_tensors_sha256": _sha(b"trained"),
+        "tokenization_sha256": _sha(b"tokenization"),
+    }
+    manifest.update(patch)
+
+    with pytest.raises(proof.ProofError, match=match):
+        proof._candidate_training_digests(manifest, name="candidate")
+
+
 def test_scale_plan_expands_only_full_step_budget(
     proof: ModuleType,
 ) -> None:
