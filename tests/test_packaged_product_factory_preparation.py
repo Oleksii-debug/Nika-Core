@@ -776,27 +776,32 @@ def test_project_revision_during_worker_dispatch_blocks_stale_result_publication
     tmp_path: Path,
 ) -> None:
     (
-        _store,
+        store,
         repository,
-        _tasks,
-        service,
+        tasks,
+        _service,
         project,
         _graph,
         plan,
         _bases,
         _goals,
     ) = _fixture(tmp_path)
-    prepared = service.prepare(plan)
     worker = VersionAdvancingResultWorker(
         repository,
         project.project_id,
         advance_on="dispatch",
     )
-    service._host.worker = worker
-    service._host._program.worker = worker
+    host = MultiRepositoryProductFactoryHost(store, worker)
+    service = PackagedProductFactoryPreparationService(
+        repository=repository,
+        tasks=tasks,
+        host=host,
+        workspace_id="packaged.product-factory",
+    )
+    prepared = service.prepare(plan)
 
     outcomes = asyncio.run(
-        service._host.dispatch_ready(
+        host.dispatch_ready(
             host_task_id=prepared.host_task_id,
             state=prepared.state,
             max_parallel=1,
@@ -817,7 +822,7 @@ def test_project_revision_during_worker_recovery_blocks_stale_result_publication
     tmp_path: Path,
 ) -> None:
     (
-        _store,
+        store,
         repository,
         _tasks,
         service,
@@ -846,11 +851,10 @@ def test_project_revision_during_worker_recovery_blocks_stale_result_publication
         project.project_id,
         advance_on="recover",
     )
-    service._host.worker = worker
-    service._host._program.worker = worker
+    recovery_host = MultiRepositoryProductFactoryHost(store, worker)
 
     outcomes = asyncio.run(
-        service._host.recover_running(
+        recovery_host.recover_running(
             host_task_id=prepared.host_task_id,
             state=prepared.state,
             max_parallel=1,
@@ -874,21 +878,26 @@ def test_repair_lineage_uses_pre_tamper_project_version_snapshot(
     (
         store,
         repository,
-        _tasks,
-        service,
+        tasks,
+        _service,
         project,
         _graph,
         plan,
         _bases,
         _goals,
     ) = _fixture(tmp_path)
-    prepared = service.prepare(plan)
     worker = FailureResultWorker()
-    service._host.worker = worker
-    service._host._program.worker = worker
+    host = MultiRepositoryProductFactoryHost(store, worker)
+    service = PackagedProductFactoryPreparationService(
+        repository=repository,
+        tasks=tasks,
+        host=host,
+        workspace_id="packaged.product-factory",
+    )
+    prepared = service.prepare(plan)
 
     outcomes = asyncio.run(
-        service._host.dispatch_ready(
+        host.dispatch_ready(
             host_task_id=prepared.host_task_id,
             state=prepared.state,
             max_parallel=1,
@@ -1455,9 +1464,14 @@ def test_product_revision_blocks_stale_review_checkpoint(tmp_path: Path) -> None
         ),
     )
     evidence_authority = AllowReviewAuthority()
+    worker = VersionAdvancingResultWorker(
+        repository,
+        project.project_id,
+        advance_on="none",
+    )
     host = MultiRepositoryProductFactoryHost(
         store,
-        NeverDispatchWorker(),
+        worker,
         team_plan=team_plan,
         review_evidence_authority=evidence_authority,
         reviewer_principals=reviewer_principals,
@@ -1479,13 +1493,6 @@ def test_product_revision_blocks_stale_review_checkpoint(tmp_path: Path) -> None
         permission_ceiling=permissions,
     )
     prepared = service.prepare(plan)
-    worker = VersionAdvancingResultWorker(
-        repository,
-        project.project_id,
-        advance_on="none",
-    )
-    service._host.worker = worker
-    service._host._program.worker = worker
 
     outcomes = asyncio.run(
         service._host.dispatch_ready(

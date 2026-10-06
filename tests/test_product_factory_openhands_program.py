@@ -482,6 +482,14 @@ def test_openhands_packaged_multi_repository_accepts_trusted_independent_review(
     assert len(runtime.calls) == 1
     assert len(acceptance.calls) == 1
 
+    program.multi_repository_host.reviewer_principals = ()
+    with pytest.raises(MultiRepositoryExecutionError, match="reviewer principals changed"):
+        program.multi_repository_host._assert_program_composition()
+    program.multi_repository_host.reviewer_principals = reviewer_principals
+    program.multi_repository_host.team_plan = None
+    with pytest.raises(MultiRepositoryExecutionError, match="TeamPlan changed"):
+        program.multi_repository_host._assert_program_composition()
+
 
 def test_openhands_packaged_multi_repository_restores_review_candidate_after_restart(
     tmp_path: pathlib.Path,

@@ -173,6 +173,11 @@ class MultiRepositoryProductFactoryHost:
     _composition_program_host: ProductFactoryProgramHost = field(init=False, repr=False)
     _composition_store: SQLiteStore = field(init=False, repr=False)
     _composition_worker: ProductFactoryProgramWorkerPort = field(init=False, repr=False)
+    _composition_team_plan: TeamPlan | None = field(init=False, repr=False)
+    _composition_reviewer_principals: ReviewerPrincipalBindings = field(
+        init=False,
+        repr=False,
+    )
     _composition_review_evidence_authority: ProductFactoryReviewAuthorityPort | None = field(
         init=False,
         repr=False,
@@ -210,6 +215,8 @@ class MultiRepositoryProductFactoryHost:
         self._composition_program_host = program
         self._composition_store = self.store
         self._composition_worker = self.worker
+        self._composition_team_plan = self.team_plan
+        self._composition_reviewer_principals = self.reviewer_principals
         self._composition_review_evidence_authority = self.review_evidence_authority
         self._program = program
         self._coordinator_checkpoints = ProductFactoryCheckpointHost(self.store)
@@ -239,6 +246,14 @@ class MultiRepositoryProductFactoryHost:
         ):
             raise MultiRepositoryExecutionError(
                 "Product Factory program worker changed after composition"
+            )
+        if self.team_plan is not self._composition_team_plan:
+            raise MultiRepositoryExecutionError(
+                "Product Factory TeamPlan changed after composition"
+            )
+        if self.reviewer_principals is not self._composition_reviewer_principals:
+            raise MultiRepositoryExecutionError(
+                "Product Factory reviewer principals changed after composition"
             )
         if (
             self.review_evidence_authority
