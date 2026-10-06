@@ -277,6 +277,47 @@ def test_collect_commits_exact_validated_candidate_only_in_private_git(
     ).read_text(encoding="utf-8") == "VALUE = 2\n"
 
 
+def test_collect_rejects_git_attribute_blob_normalization(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, _initial_sha = _repository(tmp_path)
+    (repository / ".gitattributes").write_text(
+        "src/core.py text\n",
+        encoding="utf-8",
+    )
+    _git(repository, "add", ".gitattributes")
+    _git(repository, "commit", "-m", "declare text normalization")
+    base_sha = _git(repository, "rev-parse", "HEAD")
+
+    _store, program = _program(tmp_path, repository)
+    request = _request(base_sha, work_id="work-git-attribute-normalization")
+    context = _run(program.ports.context_for(request))
+    job = _job(request, context)
+
+    candidate = context.lease.workspace_root / "src" / "core.py"
+    candidate.write_bytes(b"VALUE = 2\r\n")
+    data = candidate.read_bytes()
+    result = CodingResult(
+        job_id=request.work_id,
+        changed_files=(
+            ChangedFile(
+                "src/core.py",
+                hashlib.sha256(data).hexdigest(),
+                len(data),
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        OpenHandsProductFactoryError,
+        match="commit blob differs from validated worktree bytes",
+    ):
+        _run(program.ports.collect(request, job, result))
+
+    assert candidate.read_bytes() == b"VALUE = 2\r\n"
+    assert (repository / "src" / "core.py").read_bytes() == b"VALUE = 1\n"
+
+
 def test_collect_rejects_commit_bytes_changed_after_tree_validation(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,

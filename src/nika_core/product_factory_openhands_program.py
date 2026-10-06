@@ -528,6 +528,31 @@ class OpenHandsProductFactoryPorts:
             raise OpenHandsProductFactoryError(
                 "private candidate commit does not match validated worktree bytes"
             )
+        for change in delta.changes:
+            worktree_blob = _git(
+                (
+                    *prefix,
+                    "hash-object",
+                    "--no-filters",
+                    str(plan.worktree_root / change.path),
+                ),
+                cwd=plan.private_git_dir.parent,
+                environment=plan.environment,
+            ).stdout.strip().casefold()
+            committed_blob = _git(
+                (
+                    *prefix,
+                    "rev-parse",
+                    "--verify",
+                    f"{result_sha}:{change.path}",
+                ),
+                cwd=plan.private_git_dir.parent,
+                environment=plan.environment,
+            ).stdout.strip().casefold()
+            if worktree_blob != committed_blob:
+                raise OpenHandsProductFactoryError(
+                    "private candidate commit blob differs from validated worktree bytes"
+                )
         tracked = _nul_paths(
             _git(
                 (*prefix, "ls-files", "-z"),
