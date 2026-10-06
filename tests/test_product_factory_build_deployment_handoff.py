@@ -229,15 +229,12 @@ def _handoff_authority(
     )
 
 
-def _setup(tmp_path, *, build_result: BuildExecutionResult | None = None):
-    store = SQLiteStore(tmp_path / "nika.db")
-    store.initialize()
-    task = TaskQueue(store).create(
-        workspace_id="ws-product",
-        agent_id="product-factory",
-        payload={"kind": "product_factory", "product_project_id": "project-1"},
-    )
-
+def _new_build_host(
+    store: SQLiteStore,
+    task_id: str,
+    *,
+    build_result: BuildExecutionResult | None = None,
+) -> DurableBuildExecutionHost:
     registry = ExecutionNodeRegistry()
     registry.register(_node())
     coordinator = BuildExecutionCoordinator(
@@ -245,10 +242,9 @@ def _setup(tmp_path, *, build_result: BuildExecutionResult | None = None):
         Available(),
         BuildAuthorityPort(_execution_authority()),
     )
-    build_port = BuildNodePort(build_result or _build_result())
-    build_host = DurableBuildExecutionHost(
+    return DurableBuildExecutionHost(
         coordinator,
-        build_port,
+        BuildNodePort(build_result or _build_result()),
         FileEvidence(),
         OutputPolicyPort(
             BuildOutputPolicy(
@@ -262,9 +258,24 @@ def _setup(tmp_path, *, build_result: BuildExecutionResult | None = None):
         ),
         SQLiteBuildExecutionCheckpointStore(
             store,
-            task.task_id,
+            task_id,
             "project-1",
         ),
+    )
+
+
+def _setup(tmp_path, *, build_result: BuildExecutionResult | None = None):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "project-1"},
+    )
+    build_host = _new_build_host(
+        store,
+        task.task_id,
+        build_result=build_result,
     )
 
     provider = HealthyProvider()
@@ -303,6 +314,56 @@ def test_successful_build_enters_exact_staging_release_once(tmp_path) -> None:
     assert deployed.intent.release.artifact_digest == ARTIFACT_DIGEST
     assert duplicate == deployed
     assert provider.deploy_calls == 1
+
+
+def test_successful_handoff_survives_full_host_restart_without_replay(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "project-1"},
+    )
+    build_host = _new_build_host(store, task.task_id)
+    _finish_build(build_host)
+
+    first_provider = HealthyProvider()
+    first_deployment = DurableDeploymentFabric(
+        first_provider,
+        checkpoint_host=ProductFactoryDeploymentCheckpointHost(store),
+        host_task_id=task.task_id,
+        project_id="project-1",
+    )
+    authority = HandoffAuthorityPort(_handoff_authority())
+    first = BuildDeploymentHandoff(
+        build_host,
+        first_deployment,
+        authority,
+    ).deploy_staging("work-1")
+    assert first.state is DeploymentState.HEALTHY
+    assert first_provider.deploy_calls == 1
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    restarted_build = _new_build_host(restarted_store, task.task_id)
+    restored_build = restarted_build.restore_latest(now=NOW)
+    assert restored_build.coordinator.records[0].state.value == "succeeded"
+
+    restarted_provider = HealthyProvider()
+    restarted_deployment = DurableDeploymentFabric.restore_latest(
+        restarted_provider,
+        checkpoint_host=ProductFactoryDeploymentCheckpointHost(restarted_store),
+        host_task_id=task.task_id,
+        project_id="project-1",
+    )
+    repeated = BuildDeploymentHandoff(
+        restarted_build,
+        restarted_deployment,
+        HandoffAuthorityPort(_handoff_authority()),
+    ).deploy_staging("work-1")
+
+    assert repeated == first
+    assert restarted_provider.deploy_calls == 0
 
 
 def test_nonterminal_build_is_rejected_before_deployment_effect(tmp_path) -> None:
