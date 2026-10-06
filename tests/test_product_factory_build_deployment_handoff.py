@@ -375,6 +375,17 @@ def test_mutated_staging_environment_is_readmitted_before_effect(tmp_path) -> No
     assert provider.deploy_calls == 0
 
 
+def test_mutated_build_grant_is_rejected_before_effect(tmp_path) -> None:
+    build_host, provider, _, handoff = _setup(tmp_path)
+    completed = _finish_build(build_host)
+    object.__setattr__(completed.grant, "repository_id", "repo-other")
+
+    with pytest.raises(BuildDeploymentHandoffError, match="grant does not match"):
+        handoff.deploy_staging("work-1")
+
+    assert provider.deploy_calls == 0
+
+
 def test_corrupt_build_evidence_is_rejected_before_effect(tmp_path) -> None:
     build_host, provider, _, handoff = _setup(tmp_path)
     completed = _finish_build(build_host)
