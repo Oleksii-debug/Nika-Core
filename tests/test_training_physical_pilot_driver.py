@@ -331,6 +331,127 @@ def test_config_v3_parses_progression_claim_without_granting_authority(
     )
 
 
+def test_cli_higher_tier_requires_explicit_durable_progression_root(
+    tmp_path: Path,
+) -> None:
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v3(tmp_path)))
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="requires --trusted-progression-output-root",
+    ):
+        driver._trusted_progression_proof_for_cli(config, None)
+
+
+def test_cli_legacy_config_rejects_progression_root(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="only valid for higher-tier configs",
+    ):
+        driver._trusted_progression_proof_for_cli(
+            config,
+            tmp_path / "previous-run",
+        )
+
+
+def test_cli_higher_tier_loads_exact_durable_claim(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _payload_v3(tmp_path)
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+    claim = payload["progression_proof"]
+    assert isinstance(claim, dict)
+    proof = _trusted_progression_proof(claim)
+    previous_root = (tmp_path / "previous-run").resolve()
+    previous_root.mkdir()
+    observed: dict[str, object] = {}
+
+    def fake_loader(
+        output_root: Path,
+        *,
+        workspace_id: str,
+        expected_claim: dict[str, object],
+    ) -> scale.TrainingScaleProgressionProof:
+        observed["output_root"] = output_root
+        observed["workspace_id"] = workspace_id
+        observed["expected_claim"] = expected_claim
+        return proof
+
+    monkeypatch.setattr(
+        driver,
+        "_load_trusted_progression_proof_from_output_root",
+        fake_loader,
+    )
+
+    restored = driver._trusted_progression_proof_for_cli(
+        config,
+        previous_root,
+    )
+
+    assert restored is proof
+    assert observed == {
+        "output_root": previous_root,
+        "workspace_id": config.workspace_id,
+        "expected_claim": claim,
+    }
+
+
+def test_main_passes_restored_progression_authority_to_higher_tier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = _payload_v3(tmp_path)
+    config_path = tmp_path / "physical-pilot.json"
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    previous_root = (tmp_path / "previous-run").resolve()
+    previous_root.mkdir()
+    claim = payload["progression_proof"]
+    assert isinstance(claim, dict)
+    proof = _trusted_progression_proof(claim)
+    observed: dict[str, object] = {}
+
+    def fake_restore(
+        config: driver.PhysicalPilotConfig,
+        evidence_root: Path | None,
+    ) -> scale.TrainingScaleProgressionProof:
+        observed["restore_root"] = evidence_root
+        observed["restore_workspace"] = config.workspace_id
+        return proof
+
+    def fake_run(
+        config: driver.PhysicalPilotConfig,
+        *,
+        trusted_progression_proof: scale.TrainingScaleProgressionProof | None = None,
+    ) -> SimpleNamespace:
+        observed["run_tier"] = config.scale_tier_id
+        observed["run_proof"] = trusted_progression_proof
+        return SimpleNamespace(to_json=lambda: '{"schema":"test-report"}')
+
+    monkeypatch.setattr(driver, "_trusted_progression_proof_for_cli", fake_restore)
+    monkeypatch.setattr(driver, "run_physical_pilot_from_config", fake_run)
+
+    result = driver.main(
+        [
+            str(config_path),
+            "--trusted-progression-output-root",
+            str(previous_root),
+        ]
+    )
+
+    assert result == 0
+    assert observed == {
+        "restore_root": previous_root,
+        "restore_workspace": "pilot-workspace",
+        "run_tier": "small",
+        "run_proof": proof,
+    }
+    assert capsys.readouterr().out.strip() == '{"schema":"test-report"}'
+
+
 def test_config_v3_rejects_first_tier_as_progression_target(tmp_path: Path) -> None:
     payload = _payload_v3(tmp_path)
     payload["scale_tier_id"] = "pilot"
