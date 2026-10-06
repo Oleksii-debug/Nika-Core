@@ -184,7 +184,7 @@ class MultiRepositoryProductFactoryHost:
             )
         else:
             program = self.program_host
-            if not isinstance(program, ProductFactoryProgramHost):
+            if type(program) is not ProductFactoryProgramHost:
                 raise MultiRepositoryExecutionError(
                     "reused Product Factory program host has an invalid carrier"
                 )

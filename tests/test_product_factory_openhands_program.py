@@ -33,7 +33,10 @@ from nika_core.product_factory_packaged_preparation import (
     PackagedProductFactoryExecutionPlan,
     PackagedProductFactoryPreparationService,
 )
-from nika_core.product_factory_program_host import ProgramWorkDisposition
+from nika_core.product_factory_program_host import (
+    ProductFactoryProgramHost,
+    ProgramWorkDisposition,
+)
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
 from nika_core.toolsmith.contracts import (
     AcceptanceCommand,
@@ -225,6 +228,25 @@ def test_multi_repository_host_rejects_reusing_program_host_from_other_store(
         )
 
     assert program.host.store is store
+
+
+def test_multi_repository_host_rejects_product_factory_program_host_subclass(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, _base_sha = _repository(tmp_path)
+    store, program = _program(tmp_path, repository)
+
+    class SubvertedProgramHost(ProductFactoryProgramHost):
+        pass
+
+    subverted = SubvertedProgramHost(store, program.host.worker)
+
+    with pytest.raises(MultiRepositoryExecutionError, match="invalid carrier"):
+        MultiRepositoryProductFactoryHost(
+            store=store,
+            worker=program.host.worker,
+            program_host=subverted,
+        )
 
 
 def test_openhands_multi_repository_host_drives_packaged_prepare_and_dispatch(
