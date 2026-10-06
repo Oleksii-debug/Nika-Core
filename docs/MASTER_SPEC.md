@@ -1,5 +1,7 @@
 # Nika Core — final technical baseline
 
+Operating update, 2026-09-09: worker topology, routing and delivery sequencing are defined in `docs/AUTONOMOUS_WORKER_ORCHESTRATION.md` (DELIVERY-2026-09-09). Product requirements and acceptance criteria in this specification remain binding. Historical percentages and worker assignments are not current completion/ownership evidence.
+
 Version 1.7, 2026-08-20. Windows 11 x64, NVDA-first.
 
 The expanded end-state capability scope is binding in `docs/FULL_PRODUCT_VISION_2026-08-19.md`. The Autonomous Product Factory clarification is binding in `docs/AUTONOMOUS_PRODUCT_FACTORY.md`, `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md` and `docs/AUTONOMOUS_BUSINESS_FACTORY.md`. Historical/core milestone progress and Full Product Vision readiness are separate truths.

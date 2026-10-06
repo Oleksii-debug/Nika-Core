@@ -368,7 +368,20 @@ class ProductFactoryProgramHost:
             )
 
         async with semaphore:
-            state = await self.worker.inspect(request.work_id)
+            try:
+                state = await self.worker.inspect(request.work_id)
+            except asyncio.CancelledError:
+                self._mark_uncertain(operation_key)
+                raise
+            except Exception as exc:  # noqa: BLE001 - isolate one external inspect failure
+                self._mark_uncertain(operation_key)
+                return _outcome(
+                    request,
+                    coordinator,
+                    ProgramWorkDisposition.UNCERTAIN,
+                    IdempotencyStatus.UNCERTAIN,
+                    f"worker inspection did not return trusted state: {type(exc).__name__}",
+                )
             if state is None:
                 self._mark_uncertain(operation_key)
                 before = coordinator.snapshot()

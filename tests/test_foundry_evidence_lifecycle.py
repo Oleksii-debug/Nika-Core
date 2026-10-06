@@ -296,17 +296,47 @@ def test_close_refuses_to_race_timed_out_native_inference() -> None:
     assert model.unload_count == 1
 
 
-def test_download_timeout_signals_cancel_and_retains_slot_until_worker_exits() -> None:
-    model = EvidenceModel(cached=False, download_delay=0.05)
+def test_download_timeout_signals_cancel_and_retains_slot_until_worker_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_download = threading.Event()
+
+    class BlockingEvidenceModel(EvidenceModel):
+        def download(self, *, cancel_event: threading.Event | None = None) -> None:
+            self.download_count += 1
+            self.download_cancel_event = cancel_event
+            self.download_started.set()
+            if not release_download.wait(timeout=5.0):
+                raise RuntimeError("test download worker was not released")
+            self.is_cached = True
+
+    model = BlockingEvidenceModel(cached=False)
     provider = FoundryLocalProvider(
         default_model="test-model",
         manager_factory=lambda: Manager(model),
     )
 
     async def scenario() -> None:
+        original_wait_for = asyncio.wait_for
+        forced_worker_timeout = False
+
+        async def controlled_wait_for(awaitable: object, timeout: float | None) -> object:
+            nonlocal forced_worker_timeout
+            if not forced_worker_timeout and isinstance(awaitable, asyncio.Future):
+                forced_worker_timeout = True
+                await asyncio.sleep(0)
+                raise TimeoutError
+            return await original_wait_for(awaitable, timeout=timeout)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(asyncio, "wait_for", controlled_wait_for)
+
         with pytest.raises(ModelGatewayError) as download_error:
-            await provider.download_model(authorization(), timeout_seconds=0.01)
+            await provider.download_model(authorization(), timeout_seconds=1.0)
         assert download_error.value.code is ModelErrorCode.TIMEOUT
+        assert forced_worker_timeout is True
+
+        started = await asyncio.to_thread(model.download_started.wait, 1.0)
+        assert started is True
         assert model.download_cancel_event is not None
         assert model.download_cancel_event.is_set() is True
 
@@ -315,8 +345,10 @@ def test_download_timeout_signals_cancel_and_retains_slot_until_worker_exits() -
         assert inference_error.value.code is ModelErrorCode.TIMEOUT
         assert model.completion_count == 0
 
-        # A second management operation with a real deadline waits for the retained
-        # native-download ownership and can publish cached evidence only after exit.
+        # The native worker still owns both slots after timeout. Releasing it lets
+        # the done callback publish the cached model before the next management
+        # action and inference can proceed.
+        release_download.set()
         cached = await provider.download_model(authorization(), timeout_seconds=1.0)
         assert cached.cached is True
 

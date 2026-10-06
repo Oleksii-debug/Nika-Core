@@ -88,6 +88,7 @@ def build_release_attestation_evidence(
     *,
     source_sha: str,
     artifact_reference: str,
+    expected_product_version: str,
     repository: str,
     signer_workflow: str,
     source_ref: str,
@@ -117,6 +118,7 @@ def build_release_attestation_evidence(
         prehuman_evidence_path,
         source_sha=normalized_source_sha,
         artifact_reference=artifact_reference,
+        expected_product_version=expected_product_version,
     )
     if distributable_findings:
         raise ValueError(
