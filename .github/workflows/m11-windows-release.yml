@@ -18,6 +18,9 @@ on:
       - "src/nika_core/wake_activation.py"
       - "src/nika_core/windows_microphone_capture.py"
       - "src/nika_core/config.py"
+      - "src/nika_core/kernel/default_actions.py"
+      - "src/nika_core/product_factory_packaged_local_settings.py"
+      - "src/nika_core/product_factory_packaged_local_startup.py"
       - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/reliability/backup.py"
       - "src/nika_core/reliability/recovery_lease.py"
@@ -50,6 +53,7 @@ on:
       - "tests/test_packaged_product_decision_presentation.py"
       - "tests/test_packaged_product_status_presentation.py"
       - "tests/test_product_factory_packaged_journey.py"
+      - "tests/test_product_factory_packaged_local_startup.py"
       - "tests/test_packaged_product_factory_preparation.py"
       - "tests/test_product_factory_openhands_runtime_api.py"
       - "tests/test_product_factory_openhands_runtime_program.py"
@@ -117,6 +121,9 @@ on:
       - "src/nika_core/wake_activation.py"
       - "src/nika_core/windows_microphone_capture.py"
       - "src/nika_core/config.py"
+      - "src/nika_core/kernel/default_actions.py"
+      - "src/nika_core/product_factory_packaged_local_settings.py"
+      - "src/nika_core/product_factory_packaged_local_startup.py"
       - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/reliability/backup.py"
       - "src/nika_core/reliability/recovery_lease.py"
@@ -149,6 +156,7 @@ on:
       - "tests/test_packaged_product_decision_presentation.py"
       - "tests/test_packaged_product_status_presentation.py"
       - "tests/test_product_factory_packaged_journey.py"
+      - "tests/test_product_factory_packaged_local_startup.py"
       - "tests/test_packaged_product_factory_preparation.py"
       - "tests/test_product_factory_openhands_runtime_api.py"
       - "tests/test_product_factory_openhands_runtime_program.py"
@@ -269,6 +277,7 @@ jobs:
           tests/test_packaged_product_decision_presentation.py
           tests/test_packaged_product_status_presentation.py
           tests/test_product_factory_packaged_journey.py
+          tests/test_product_factory_packaged_local_startup.py
           tests/test_packaged_product_factory_preparation.py
           tests/test_product_factory_openhands_runtime_api.py
           tests/test_product_factory_openhands_runtime_program.py
