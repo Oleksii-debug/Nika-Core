@@ -55,6 +55,13 @@ on:
       - "tests/test_packaged_product_status_presentation.py"
       - "tests/test_product_factory_packaged_journey.py"
       - "tests/test_product_factory_packaged_local_startup.py"
+      - "tests/test_packaged_product_factory_execution.py"
+      - "tests/test_product_factory_packaged_build_authority.py"
+      - "tests/test_product_factory_packaged_build_settings.py"
+      - "tests/test_product_factory_packaged_build_loop_controller.py"
+      - "tests/test_product_factory_packaged_build_continuation.py"
+      - "tests/test_product_factory_packaged_build_session.py"
+      - "tests/test_product_factory_packaged_build_ui.py"
       - "tests/test_product_factory_packaged_bound_local_host.py"
       - "tests/test_product_factory_local_repository_binding.py"
       - "tests/test_product_factory_local_repository_operator.py"
@@ -174,6 +181,13 @@ on:
       - "tests/test_packaged_product_status_presentation.py"
       - "tests/test_product_factory_packaged_journey.py"
       - "tests/test_product_factory_packaged_local_startup.py"
+      - "tests/test_packaged_product_factory_execution.py"
+      - "tests/test_product_factory_packaged_build_authority.py"
+      - "tests/test_product_factory_packaged_build_settings.py"
+      - "tests/test_product_factory_packaged_build_loop_controller.py"
+      - "tests/test_product_factory_packaged_build_continuation.py"
+      - "tests/test_product_factory_packaged_build_session.py"
+      - "tests/test_product_factory_packaged_build_ui.py"
       - "tests/test_product_factory_packaged_bound_local_host.py"
       - "tests/test_product_factory_local_repository_binding.py"
       - "tests/test_product_factory_local_repository_operator.py"
@@ -310,6 +324,13 @@ jobs:
           tests/test_packaged_product_status_presentation.py
           tests/test_product_factory_packaged_journey.py
           tests/test_product_factory_packaged_local_startup.py
+          tests/test_packaged_product_factory_execution.py
+          tests/test_product_factory_packaged_build_authority.py
+          tests/test_product_factory_packaged_build_settings.py
+          tests/test_product_factory_packaged_build_loop_controller.py
+          tests/test_product_factory_packaged_build_continuation.py
+          tests/test_product_factory_packaged_build_session.py
+          tests/test_product_factory_packaged_build_ui.py
           tests/test_product_factory_packaged_bound_local_host.py
           tests/test_product_factory_local_repository_binding.py
           tests/test_product_factory_local_repository_operator.py
