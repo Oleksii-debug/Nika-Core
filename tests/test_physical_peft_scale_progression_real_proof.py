@@ -110,6 +110,47 @@ def test_read_object_snapshot_rejects_wrong_held_identity(
         proof._read_object_snapshot(target)
 
 
+def test_frozen_package_snapshot_uses_held_file_authority(
+    proof: ModuleType,
+    tmp_path: Path,
+) -> None:
+    package = _package()
+    path = tmp_path / "frozen-package.json"
+    path.write_bytes(package.to_json().encode("utf-8"))
+
+    loaded = proof._load_frozen_package_snapshot(
+        path,
+        expected_manifest_sha256=package.manifest_sha256,
+    )
+
+    assert loaded.manifest_sha256 == package.manifest_sha256
+    assert loaded.evaluation_set_sha256 == package.evaluation_set_sha256
+
+
+def test_frozen_package_snapshot_rejects_wrong_held_identity(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = _package()
+    payload = package.to_json().encode("utf-8")
+    path = tmp_path / "frozen-package.json"
+    decoy = tmp_path / "same-bytes-different-package.json"
+    path.write_bytes(payload)
+    decoy.write_bytes(payload)
+    monkeypatch.setattr(
+        proof,
+        "_open_readonly_snapshot",
+        lambda _path: proof.os.open(decoy, proof.os.O_RDONLY),
+    )
+
+    with pytest.raises(proof.ProofError, match="identity changed"):
+        proof._load_frozen_package_snapshot(
+            path,
+            expected_manifest_sha256=package.manifest_sha256,
+        )
+
+
 def test_candidate_file_authority_binds_digest_and_manifest(
     proof: ModuleType,
     tmp_path: Path,

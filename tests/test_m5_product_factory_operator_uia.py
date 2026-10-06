@@ -87,6 +87,7 @@ def test_release_gates_execute_factory_operator_proof_on_packaged_exe() -> None:
 
     regression_paths = (
         "tests/test_product_factory_packaged_journey.py",
+        "tests/test_packaged_product_factory_preparation.py",
         "tests/test_packaged_product_factory_team_plan.py",
         "tests/test_packaged_product_factory_status.py",
         "tests/test_m5_product_project_semantic_status.py",
