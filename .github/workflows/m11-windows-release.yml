@@ -7,6 +7,7 @@ on:
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
       - "src/nika_core/config.py"
+      - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/windows_autostart.py"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
@@ -17,6 +18,7 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_v01_stable_packaged_data_location.py"
+      - "tests/test_v01_legacy_database_adoption.py"
       - "tests/test_config_db_alias_conflict.py"
       - "tests/test_v01_packaged_config_startup.py"
       - "tests/test_release_sbom.py"
@@ -56,6 +58,7 @@ on:
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
       - "src/nika_core/config.py"
+      - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/windows_autostart.py"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
@@ -66,6 +69,7 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_v01_stable_packaged_data_location.py"
+      - "tests/test_v01_legacy_database_adoption.py"
       - "tests/test_config_db_alias_conflict.py"
       - "tests/test_v01_packaged_config_startup.py"
       - "tests/test_release_sbom.py"
@@ -150,6 +154,7 @@ jobs:
           python -m pytest
           tests/test_m11_m12_release.py
           tests/test_v01_stable_packaged_data_location.py
+          tests/test_v01_legacy_database_adoption.py
           tests/test_config_db_alias_conflict.py
           tests/test_v01_packaged_config_startup.py
           tests/test_release_sbom.py
