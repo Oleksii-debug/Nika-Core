@@ -9,6 +9,7 @@ from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict, SettingsError
 
 APP_CONFIG_SCHEMA_VERSION = 1
+_MAX_PRODUCT_FACTORY_LOCAL_STARTUP_CONFIG_BYTES = 64 * 1024
 
 
 class AppConfig(BaseSettings):
@@ -25,6 +26,7 @@ class AppConfig(BaseSettings):
     v01_source_b: Path | None = None
     log_level: str = "INFO"
     model_provider: str = "mock"
+    product_factory_local_startup_json: str | None = None
 
     model_config = SettingsConfigDict(
         env_prefix="NIKA_",
@@ -84,6 +86,31 @@ class AppConfig(BaseSettings):
         if not normalized:
             raise ValueError("model_provider must not be empty")
         return normalized
+
+    @field_validator("product_factory_local_startup_json", mode="before")
+    @classmethod
+    def validate_product_factory_local_startup_json(
+        cls, value: object
+    ) -> str | None:
+        if value is None:
+            return None
+        if type(value) is not str:
+            raise ValueError("product_factory_local_startup_json must be exact text")
+        if not value or value != value.strip() or "\x00" in value:
+            raise ValueError(
+                "product_factory_local_startup_json must be canonical non-empty text"
+            )
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                "product_factory_local_startup_json must be UTF-8 text"
+            ) from exc
+        if len(encoded) > _MAX_PRODUCT_FACTORY_LOCAL_STARTUP_CONFIG_BYTES:
+            raise ValueError(
+                "product_factory_local_startup_json exceeds the size limit"
+            )
+        return value
 
     @classmethod
     def from_environment(cls) -> AppConfig:
