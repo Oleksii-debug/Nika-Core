@@ -127,6 +127,20 @@ def _candidate_descriptor() -> ModelArtifactDescriptor:
     )
 
 
+def _scale_task_payload(
+    *,
+    kind: str = "physical_peft_pilot",
+    proof_sha256: str | None = None,
+) -> dict[str, object]:
+    return {
+        "job_id": "pilot-job",
+        "kind": kind,
+        "progression_proof_sha256": proof_sha256,
+        "scale_plan_sha256": "8" * 64,
+        "scale_tier_id": "pilot" if kind == "physical_peft_pilot" else "small",
+    }
+
+
 def _pilot_report(
     *,
     descriptor: ModelArtifactDescriptor | None = None,
@@ -298,6 +312,80 @@ def test_find_pilot_task_requires_exact_unique_identity(tmp_path: Path) -> None:
     )
 
     assert actual.task_id == expected.task_id
+
+
+@pytest.mark.parametrize(
+    ("kind", "proof_sha256"),
+    (
+        ("physical_peft_pilot", None),
+        ("physical_peft_scale_tier", "9" * 64),
+    ),
+)
+def test_find_pilot_task_accepts_scale_aware_training_identity(
+    tmp_path: Path,
+    kind: str,
+    proof_sha256: str | None,
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    expected = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload=_scale_task_payload(kind=kind, proof_sha256=proof_sha256),
+    )
+
+    actual = driver._find_pilot_task(
+        store,
+        workspace_id="evaluation-workspace",
+        job_id="pilot-job",
+    )
+
+    assert actual.task_id == expected.task_id
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        _scale_task_payload(
+            kind="physical_peft_pilot",
+            proof_sha256="9" * 64,
+        ),
+        _scale_task_payload(
+            kind="physical_peft_scale_tier",
+            proof_sha256=None,
+        ),
+        {
+            **_scale_task_payload(),
+            "scale_plan_sha256": "A" * 64,
+        },
+        {
+            **_scale_task_payload(),
+            "scale_tier_id": " bad ",
+        },
+        {
+            **_scale_task_payload(),
+            "unexpected": True,
+        },
+    ),
+)
+def test_find_pilot_task_rejects_malformed_scale_identity(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload=payload,
+    )
+
+    with pytest.raises(driver.PhysicalEvaluationDriverError, match="exactly one"):
+        driver._find_pilot_task(
+            store,
+            workspace_id="evaluation-workspace",
+            job_id="pilot-job",
+        )
 
 
 def test_find_pilot_task_rejects_ambiguous_identity(tmp_path: Path) -> None:
