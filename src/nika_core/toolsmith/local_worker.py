@@ -1240,6 +1240,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
 
     def _repository_root(self, repository_id: str) -> pathlib.Path:
         identity = _safe_text(repository_id, "repository_id")
+        self._require_repository_authority(identity)
         try:
             return pathlib.Path(self.repositories[identity])
         except KeyError as exc:
