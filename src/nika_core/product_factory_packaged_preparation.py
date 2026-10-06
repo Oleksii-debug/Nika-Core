@@ -563,6 +563,15 @@ def _text_mapping(value: Mapping[str, str], label: str) -> dict[str, str]:
     return result
 
 
+def _has_single_line_boundary(value: str) -> bool:
+    return any(
+        ord(character) < 32
+        or ord(character) == 127
+        or character in "\u0085\u2028\u2029"
+        for character in value
+    )
+
+
 def _identity_text(value: object, label: str) -> str:
     text = _plain_text(value, label)
     try:
@@ -571,7 +580,7 @@ def _identity_text(value: object, label: str) -> str:
         raise PackagedProductFactoryPreparationError(
             f"{label} must be valid UTF-8 identity text"
         ) from exc
-    if any(ord(character) < 32 or ord(character) == 127 for character in text):
+    if _has_single_line_boundary(text):
         raise PackagedProductFactoryPreparationError(
             f"{label} must be opaque single-line identity text"
         )

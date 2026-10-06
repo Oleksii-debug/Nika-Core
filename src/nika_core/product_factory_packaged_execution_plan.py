@@ -249,12 +249,18 @@ def _require_safe_repository_locator_view(value: str, label: str) -> None:
         )
 
 
+def _has_single_line_boundary(value: str) -> bool:
+    return any(
+        ord(character) < 32
+        or ord(character) == 127
+        or character in "\u0085\u2028\u2029"
+        for character in value
+    )
+
+
 def _credential_ref(value: object, label: str) -> str:
     credential_ref = _canonical_text(value, label)
-    if any(
-        ord(character) < 32 or ord(character) == 127
-        for character in credential_ref
-    ):
+    if _has_single_line_boundary(credential_ref):
         raise PackagedExecutionPlanAdmissionError(
             f"{label} must be an opaque single-line reference"
         )
@@ -525,7 +531,7 @@ def _identity_text(
     kind: str = "identity",
 ) -> str:
     text = _canonical_text(value, label)
-    if any(ord(character) < 32 or ord(character) == 127 for character in text):
+    if _has_single_line_boundary(text):
         raise PackagedExecutionPlanAdmissionError(
             f"{label} must be opaque single-line {kind} text"
         )
