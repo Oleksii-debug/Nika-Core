@@ -1566,6 +1566,126 @@ def _ensure_job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
     )
 
 
+def _publish_initial_adapter_config(path: Path, payload: bytes) -> None:
+    if type(payload) is not bytes or not payload:
+        _fail("initial_adapter_config_write_failed")
+    expected_sha256 = hashlib.sha256(payload).hexdigest()
+    temporary = path.with_name(f".{path.name}.tmp")
+
+    if path.exists():
+        current = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_invalid",
+        )
+        observed_sha256, _ = _hash_regular_snapshot(
+            path,
+            code="initial_adapter_config_invalid",
+        )
+        if observed_sha256 != expected_sha256:
+            _fail("initial_adapter_config_mismatch")
+        if current.st_nlink == 1:
+            if temporary.exists():
+                stale = _require_regular_unlinked(
+                    temporary,
+                    code="initial_adapter_config_invalid",
+                )
+                if stale.st_nlink != 1:
+                    _fail("initial_adapter_config_invalid")
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    _fail("initial_adapter_config_write_failed")
+            return
+        if current.st_nlink != 2:
+            _fail("initial_adapter_config_invalid")
+        linked_temporary = _require_regular_unlinked(
+            temporary,
+            code="initial_adapter_config_invalid",
+        )
+        if (
+            linked_temporary.st_nlink != 2
+            or (linked_temporary.st_dev, linked_temporary.st_ino)
+            != (current.st_dev, current.st_ino)
+        ):
+            _fail("initial_adapter_config_invalid")
+        try:
+            os.unlink(temporary)
+        except OSError:
+            _fail("initial_adapter_config_write_failed")
+        recovered = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_invalid",
+        )
+        if (
+            recovered.st_nlink != 1
+            or (recovered.st_dev, recovered.st_ino)
+            != (current.st_dev, current.st_ino)
+        ):
+            _fail("initial_adapter_config_invalid")
+        return
+
+    if temporary.exists():
+        stale = _require_regular_unlinked(
+            temporary,
+            code="initial_adapter_config_invalid",
+        )
+        if stale.st_nlink != 1:
+            _fail("initial_adapter_config_invalid")
+        try:
+            os.unlink(temporary)
+        except OSError:
+            _fail("initial_adapter_config_write_failed")
+
+    temporary_identity: tuple[int, int] | None = None
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_stat = _require_regular_unlinked(
+            temporary,
+            code="initial_adapter_config_write_failed",
+        )
+        if temporary_stat.st_nlink != 1:
+            _fail("initial_adapter_config_invalid")
+        temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        observed_sha256, _ = _hash_regular_snapshot(
+            temporary,
+            code="initial_adapter_config_write_failed",
+        )
+        if observed_sha256 != expected_sha256:
+            _fail("initial_adapter_config_write_failed")
+        os.link(temporary, path)
+        published = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_write_failed",
+        )
+        if (
+            published.st_nlink != 2
+            or (published.st_dev, published.st_ino) != temporary_identity
+        ):
+            _fail("initial_adapter_config_invalid")
+        os.unlink(temporary)
+        final = _require_regular_unlinked(
+            path,
+            code="initial_adapter_config_write_failed",
+        )
+        if final.st_nlink != 1 or (final.st_dev, final.st_ino) != temporary_identity:
+            _fail("initial_adapter_config_invalid")
+    except FileExistsError:
+        _fail("initial_adapter_config_conflict")
+    except PeftTrainerError:
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(path, temporary_identity)
+            _best_effort_unlink_identity(temporary, temporary_identity)
+        raise
+    except OSError:
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(path, temporary_identity)
+            _best_effort_unlink_identity(temporary, temporary_identity)
+        _fail("initial_adapter_config_write_failed")
+
+
 def _stage_initial_adapter(
     config: TrainerConfig,
     request: ParsedRequest,
@@ -1611,21 +1731,7 @@ def _stage_initial_adapter(
         _fail("initial_adapter_manifest_invalid")
     adapter_config_payload = _canonical_json_bytes(adapter_config)
     adapter_config_path = target_dir / "adapter_config.json"
-    try:
-        with adapter_config_path.open("xb") as handle:
-            handle.write(adapter_config_payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-    except FileExistsError:
-        observed_sha256, _ = _hash_regular_snapshot(
-            adapter_config_path,
-            code="initial_adapter_config_invalid",
-        )
-        expected_sha256 = hashlib.sha256(adapter_config_payload).hexdigest()
-        if observed_sha256 != expected_sha256:
-            _fail("initial_adapter_config_mismatch")
-    except OSError:
-        _fail("initial_adapter_config_write_failed")
+    _publish_initial_adapter_config(adapter_config_path, adapter_config_payload)
     _adapter_config_snapshot(target_dir, request, config)
     return target_dir
 
