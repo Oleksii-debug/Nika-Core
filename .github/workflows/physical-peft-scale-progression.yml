@@ -68,11 +68,25 @@ jobs:
             throw "physical scale proof root already exists"
           }
           $trainer = (Get-Command nika-peft-trainer -ErrorAction Stop).Source
-          python scripts/physical_peft_real_proof.py prepare --root $proofRoot --trainer-executable $trainer
+          $prepareArgs = @(
+            "scripts/physical_peft_real_proof.py",
+            "prepare",
+            "--root",
+            $proofRoot,
+            "--trainer-executable",
+            $trainer
+          )
+          python @prepareArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/physical_peft_evaluation_real_proof.py prepare --root $proofRoot
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/physical_peft_scale_progression_real_proof.py prepare-tier0 --root $proofRoot
+          $tier0Args = @(
+            "scripts/physical_peft_scale_progression_real_proof.py",
+            "prepare-tier0",
+            "--root",
+            $proofRoot
+          )
+          python @tier0Args
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "NIKA_PHYSICAL_SCALE_PROOF_ROOT=$proofRoot" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -96,16 +110,36 @@ jobs:
       - name: Verify exact tier-0 trained candidate
         shell: pwsh
         run: |
-          python scripts/physical_peft_real_proof.py verify --root $env:NIKA_PHYSICAL_SCALE_PROOF_ROOT
+          $verifyArgs = @(
+            "scripts/physical_peft_real_proof.py",
+            "verify",
+            "--root",
+            $env:NIKA_PHYSICAL_SCALE_PROOF_ROOT
+          )
+          python @verifyArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Bind real evaluator and explicit non-regression promotion policy
         shell: pwsh
         run: |
           $evaluator = (Resolve-Path "scripts/physical_peft_real_evaluator.py").Path
-          python scripts/physical_peft_evaluation_real_proof.py configure --root $env:NIKA_PHYSICAL_SCALE_PROOF_ROOT --evaluator-script $evaluator
+          $evaluationArgs = @(
+            "scripts/physical_peft_evaluation_real_proof.py",
+            "configure",
+            "--root",
+            $env:NIKA_PHYSICAL_SCALE_PROOF_ROOT,
+            "--evaluator-script",
+            $evaluator
+          )
+          python @evaluationArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python scripts/physical_peft_scale_progression_real_proof.py configure-promotion --root $env:NIKA_PHYSICAL_SCALE_PROOF_ROOT
+          $promotionArgs = @(
+            "scripts/physical_peft_scale_progression_real_proof.py",
+            "configure-promotion",
+            "--root",
+            $env:NIKA_PHYSICAL_SCALE_PROOF_ROOT
+          )
+          python @promotionArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Execute canonical promoted old-vs-new evaluation
@@ -119,7 +153,13 @@ jobs:
       - name: Rehydrate trusted progression and prepare tier-1 authority
         shell: pwsh
         run: |
-          python scripts/physical_peft_scale_progression_real_proof.py prepare-tier1 --root $env:NIKA_PHYSICAL_SCALE_PROOF_ROOT
+          $tier1Args = @(
+            "scripts/physical_peft_scale_progression_real_proof.py",
+            "prepare-tier1",
+            "--root",
+            $env:NIKA_PHYSICAL_SCALE_PROOF_ROOT
+          )
+          python @tier1Args
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Execute full-budget tier-1 Windows PEFT warm start
@@ -134,7 +174,13 @@ jobs:
       - name: Verify minimized cross-tier physical evidence
         shell: pwsh
         run: |
-          python scripts/physical_peft_scale_progression_real_proof.py verify --root $env:NIKA_PHYSICAL_SCALE_PROOF_ROOT
+          $scaleVerifyArgs = @(
+            "scripts/physical_peft_scale_progression_real_proof.py",
+            "verify",
+            "--root",
+            $env:NIKA_PHYSICAL_SCALE_PROOF_ROOT
+          )
+          python @scaleVerifyArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload path-free physical scale progression evidence
