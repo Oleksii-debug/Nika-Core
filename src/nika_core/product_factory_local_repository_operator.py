@@ -137,6 +137,16 @@ class PackagedLocalRepositoryOperator:
                     repository.repository_id,
                 )
                 if version is None:
+                    if (
+                        self._bindings.current_binding_version(
+                            plan.project_id,
+                            repository.repository_id,
+                        )
+                        is not None
+                    ):
+                        raise ProductFactoryLocalRepositoryBindingError(
+                            "local repository binding changed during snapshot projection"
+                        )
                     repositories.append(
                         _repository_state(
                             repository,
@@ -153,13 +163,21 @@ class PackagedLocalRepositoryOperator:
                     )
                 except ProductFactoryLocalRepositoryBindingError as exc:
                     _log_failure("snapshot binding validation", exc)
+                    current_version = self._bindings.current_binding_version(
+                        plan.project_id,
+                        repository.repository_id,
+                    )
+                    if current_version != version:
+                        raise ProductFactoryLocalRepositoryBindingError(
+                            "local repository binding changed during snapshot projection"
+                        ) from exc
                     invalid_count += 1
                     repositories.append(
                         _repository_state(
                             repository,
                             binding_status="invalid",
                             bound=False,
-                            binding_version=version,
+                            binding_version=current_version,
                         )
                     )
                     continue
@@ -173,7 +191,7 @@ class PackagedLocalRepositoryOperator:
                             repository,
                             binding_status="invalid",
                             bound=False,
-                            binding_version=version,
+                            binding_version=binding.binding_version,
                         )
                     )
                     continue
