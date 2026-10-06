@@ -1141,6 +1141,8 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 "contained local worker could not prove a safe candidate",
             )
 
+        private_plan = prepared.plan
+
         # The source copy is a repository-authority effect: a rebind, unbind or
         # filesystem-identity change while Git is cloning must not be admitted merely
         # because the copied base tree happens to retain the expected digest.
@@ -1148,7 +1150,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             self._require_repository_authority(job.repository.repository_id)
         except Exception:
             try:
-                cleanup_private_git_workspace(git_plan)
+                cleanup_private_git_workspace(private_plan)
             except Exception as cleanup_exc:
                 raise ContainedLocalWorkerError(
                     "repository authority changed during private Git preparation "
@@ -1157,7 +1159,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             raise
 
         try:
-            if self._private_tree_digest(git_plan) != job.repository.tree_digest.casefold():
+            if self._private_tree_digest(private_plan) != job.repository.tree_digest.casefold():
                 raise WorkspaceSecurityError(
                     "private workspace tree identity does not match trusted repository snapshot"
                 )
@@ -1172,7 +1174,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 max_changed_files=job.resource_budget.max_changed_files,
             )
             self._validate_delta(delta, plan)
-            result_sha = self._commit_candidate(git_plan, _job_fingerprint(job))
+            result_sha = self._commit_candidate(private_plan, _job_fingerprint(job))
             changed = self._changed_files(delta)
             evidence = LocalExecutionEvidence(
                 job_id=job.job_id,
@@ -1188,7 +1190,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 ),
             )
             artifacts = self._candidate_artifacts(result_sha, after.digest)
-            self._revalidate_repository_authority_after_private_effect(job, git_plan)
+            self._revalidate_repository_authority_after_private_effect(job, private_plan)
 
             if cancellation.is_set():
                 result = CodingResult(
@@ -1215,7 +1217,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 raise WorkspaceSecurityError(
                     "candidate worktree changed while acceptance evidence was collected"
                 )
-            self._revalidate_repository_authority_after_private_effect(job, git_plan)
+            self._revalidate_repository_authority_after_private_effect(job, private_plan)
             result = CodingResult(
                 job_id=job.job_id,
                 changed_files=changed,
@@ -1240,14 +1242,14 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
         except WorkspaceSecurityError as exc:
             return self._rollback_private_failure(
                 job,
-                git_plan,
+                private_plan,
                 WorkerFailureKind.POLICY_VIOLATION,
                 str(exc),
             )
         except Exception:
             return self._rollback_private_failure(
                 job,
-                git_plan,
+                private_plan,
                 WorkerFailureKind.INTERNAL_ERROR,
                 "contained local worker could not prove a safe candidate",
             )
