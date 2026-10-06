@@ -15,6 +15,8 @@ def build_default_action_registry() -> ActionRegistry:
         ),
         ActionDefinition("task.pause", "Призупинити завдання", "Завдання", "Ctrl+P"),
         ActionDefinition("task.resume", "Відновити завдання", "Завдання", "Ctrl+R"),
+        ActionDefinition("task.page.previous", "Попередня сторінка завдань", "Завдання", None),
+        ActionDefinition("task.page.next", "Наступна сторінка завдань", "Завдання", None),
         ActionDefinition("agent.stop", "Зупинити агента", "Агенти", "Ctrl+Shift+S"),
         ActionDefinition("voice.start", "Почати голосовий ввід", "Голос", None),
         ActionDefinition("voice.cancel", "Скасувати голосовий ввід", "Голос", None),

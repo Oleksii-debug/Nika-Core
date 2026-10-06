@@ -101,6 +101,13 @@
   let autostartPending = false;
   let autostartGeneration = 0;
   const tasksList = document.getElementById("tasks-list");
+  const tasksPageStatus = document.getElementById("tasks-page-status");
+  const tasksPagePrevious = document.getElementById("tasks-page-previous");
+  const tasksPageNext = document.getElementById("tasks-page-next");
+  const tasksSelectedPause = document.getElementById("tasks-selected-pause");
+  const tasksSelectedResume = document.getElementById("tasks-selected-resume");
+  const tasksSelectedStop = document.getElementById("tasks-selected-stop");
+  let selectedTaskId = null;
   const agentsList = document.getElementById("agents-list");
   const workspacesList = document.getElementById("workspaces-list");
   const tasksEmpty = document.getElementById("tasks-empty");
@@ -368,6 +375,110 @@
     }
   }
 
+  const canonicalTaskIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const selectableTaskStates = new Set([
+    "CREATED",
+    "READY",
+    "RUNNING",
+    "WAITING_TOOL",
+    "WAITING_APPROVAL",
+    "PAUSED",
+    "RETRYING",
+    "BLOCKED",
+  ]);
+
+  function setSelectedTaskControlsDisabled(disabled) {
+    for (const control of [tasksSelectedPause, tasksSelectedResume, tasksSelectedStop]) {
+      if (control) control.disabled = disabled;
+    }
+  }
+
+  function clearTaskSelection() {
+    selectedTaskId = null;
+    setSelectedTaskControlsDisabled(true);
+  }
+
+  function renderTasks(items) {
+    const safeItems = Array.isArray(items) ? items : [];
+    tasksList.replaceChildren();
+    tasksEmpty.hidden = safeItems.length > 0;
+    let selectionVisible = false;
+
+    for (const item of safeItems) {
+      const row = document.createElement("li");
+      const description = (
+        `ID: ${item.task_id} — ${presentState(taskStateLabels, item.state)} — `
+        + (item.command || "Без назви")
+      );
+      const canonicalTaskId = (
+        typeof item.task_id === "string"
+        && canonicalTaskIdPattern.test(item.task_id)
+      );
+      if (canonicalTaskId && selectableTaskStates.has(item.state)) {
+        const input = document.createElement("input");
+        const label = document.createElement("label");
+        input.type = "radio";
+        input.name = "selected-task";
+        input.value = String(item.task_id ?? "");
+        input.id = `task-select-${String(item.task_id ?? "")}`;
+        label.htmlFor = input.id;
+        label.textContent = description;
+        if (selectedTaskId === item.task_id) {
+          input.checked = true;
+          selectionVisible = true;
+        }
+        input.addEventListener("change", () => {
+          if (!input.checked) return;
+          selectedTaskId = String(item.task_id);
+          setSelectedTaskControlsDisabled(false);
+          announce(`Вибрано завдання ${selectedTaskId}.`);
+        });
+        row.append(input, label);
+      } else {
+        row.textContent = description;
+      }
+      tasksList.appendChild(row);
+    }
+
+    if (!selectionVisible) clearTaskSelection();
+    else setSelectedTaskControlsDisabled(false);
+  }
+
+  function renderTaskPage(snapshot) {
+    const failClosed = () => {
+      if (tasksPageStatus) tasksPageStatus.textContent = "Сторінки завдань недоступні або несумісні.";
+      if (tasksPagePrevious) tasksPagePrevious.disabled = true;
+      if (tasksPageNext) tasksPageNext.disabled = true;
+      return false;
+    };
+    if (
+      !snapshot
+      || snapshot.schema !== "nika.task-page:v1"
+      || !Number.isSafeInteger(snapshot.page_size)
+      || snapshot.page_size !== 50
+      || !Number.isSafeInteger(snapshot.offset)
+      || snapshot.offset < 0
+      || snapshot.offset % snapshot.page_size !== 0
+      || !Number.isSafeInteger(snapshot.page_number)
+      || snapshot.page_number !== Math.floor(snapshot.offset / snapshot.page_size) + 1
+      || typeof snapshot.has_previous !== "boolean"
+      || typeof snapshot.has_next !== "boolean"
+      || typeof snapshot.unfinished_only !== "boolean"
+      || snapshot.has_previous !== (snapshot.offset > 0)
+      || snapshot.unfinished_only !== (snapshot.has_previous || snapshot.has_next)
+    ) {
+      return failClosed();
+    }
+    if (tasksPageStatus) {
+      tasksPageStatus.textContent = snapshot.unfinished_only
+        ? `Сторінка ${snapshot.page_number} незавершених завдань. Використовуйте кнопки сторінок, щоб отримати task_id інших незавершених завдань.`
+        : "Показано всі незавершені та останні завершені завдання, що вміщаються в поточний список.";
+    }
+    if (tasksPagePrevious) tasksPagePrevious.disabled = !snapshot.has_previous;
+    if (tasksPageNext) tasksPageNext.disabled = !snapshot.has_next;
+    return true;
+  }
+
   function presentState(labels, value) {
     if (typeof value !== "string") return unavailableStateLabel;
     return Object.prototype.hasOwnProperty.call(labels, value)
@@ -400,6 +511,8 @@
   function reportStateUnavailable() {
     renderStartupRecovery(null);
     renderModelSettings(null);
+    clearTaskSelection();
+    renderTaskPage(null);
     renderProductProjectUnavailable(productProjectUnavailableMessage);
     renderTeamTaskUnavailable();
     if (stateUnavailableReported) return;
@@ -1625,15 +1738,8 @@
     renderVoiceModelSetup(state.voice_model_setup ?? null);
     renderSpeech(state.speech ?? null);
     renderVoice(state.voice ?? null);
-    renderItems(
-      tasksList,
-      tasksEmpty,
-      state.tasks || [],
-      (item) => (
-        `ID: ${item.task_id} — ${presentState(taskStateLabels, item.state)} — `
-        + (item.command || "Без назви")
-      ),
-    );
+    const taskPageReady = renderTaskPage(state.task_page ?? null);
+    renderTasks(state.tasks || []);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
     renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
     const productReady = renderProductProject(state.product_project ?? null);
@@ -1641,6 +1747,11 @@
     if (!recoveryRender.ok) {
       lastStateReady = false;
       announce(recoveryRender.message, true);
+      return false;
+    }
+    if (!taskPageReady) {
+      lastStateReady = false;
+      announce("Сторінки завдань недоступні або несумісні.", true);
       return false;
     }
     if (!teamRender.ok) {
@@ -1684,6 +1795,12 @@
       await dispatchModel(actionId, trigger);
       return;
     }
+    const selectedTaskControl = trigger?.dataset?.selectedTaskControl === "true";
+    if (selectedTaskControl && !selectedTaskId) {
+      announce("Спочатку виберіть незавершене завдання у списку «Завдання».", true);
+      trigger?.focus?.();
+      return;
+    }
     // Group task controls: pause/resume/stop must not race an unacknowledged task creation.
     const durableMutation = taskMutationActions.has(actionId) || actionId === "team.sources.configure";
     const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
@@ -1723,6 +1840,12 @@
     foregroundStateRefreshPending += 1;
     try {
       const payload = {};
+      if (
+        selectedTaskControl
+        && ["task.pause", "task.resume", "agent.stop"].includes(actionId)
+      ) {
+        payload.task_id = selectedTaskId;
+      }
       if (actionId === "task.create") payload.command = commandInput.value.trim();
       if (actionId === "voice.model.import") payload.source_root = voiceModelSource?.value ?? "";
       if (actionId === "speech.start") payload.text = speechText?.value ?? "";

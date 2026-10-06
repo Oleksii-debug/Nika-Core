@@ -183,7 +183,7 @@
       <textarea id="command-input" rows="5" aria-describedby="execution-mode command-intelligence-help task-control-help"></textarea>
       <p id="execution-mode">Нове завдання незмінно фіксує вибрану модель разом з іншими налаштуваннями. Поточний контрольований сценарій команди зберігає власні детерміновані кроки; інтерфейс не підміняє runtime-стан або маршрут моделі.</p>
       <p id="command-intelligence-help">Режим інтелекту можна перевірити командою «режим інтелекту» або змінити для нових завдань: «режим інтелекту deterministic», «режим інтелекту foundry &lt;model&gt;», «режим інтелекту ollama &lt;model&gt; &lt;loopback-url&gt;», «режим інтелекту api &lt;provider&gt; &lt;model&gt; &lt;https-url&gt; &lt;env:REF&gt; &lt;public|private&gt;». Уже прийняті завдання не перемикаються.</p>
-      <p id="task-control-help">Якщо одночасно є кілька завдань, скопіюйте task_id зі списку «Завдання» й введіть точну команду: «pause task &lt;task_id&gt;», «resume task &lt;task_id&gt;», «stop task &lt;task_id&gt;» або «task status &lt;task_id&gt;». Українські відповідники: «призупини завдання &lt;task_id&gt;», «продовж завдання &lt;task_id&gt;», «зупини завдання &lt;task_id&gt;», «статус завдання &lt;task_id&gt;».</p>
+      <p id="task-control-help">Для кількох завдань можна вибрати потрібне радіокнопкою у списку «Завдання» й скористатися кнопками керування вибраним завданням. Точні команди з task_id залишаються доступними: «pause task &lt;task_id&gt;», «resume task &lt;task_id&gt;», «stop task &lt;task_id&gt;» або «task status &lt;task_id&gt;». Українські відповідники: «призупини завдання &lt;task_id&gt;», «продовж завдання &lt;task_id&gt;», «зупини завдання &lt;task_id&gt;», «статус завдання &lt;task_id&gt;».</p>
       <div class="actions">
         <button type="button" data-action-id="task.create" data-error-focus-target="command-input">Створити завдання</button>
         <button type="button" data-action-id="task.pause">Призупинити</button>
@@ -195,7 +195,17 @@
     <section aria-labelledby="tasks-heading">
       <h2 id="tasks-heading" tabindex="-1">Завдання</h2>
       <p id="tasks-empty">Завдань ще немає.</p>
-      <ol id="tasks-list" aria-label="Список завдань"></ol>
+      <p id="tasks-page-status">Показано актуальний список завдань.</p>
+      <ol id="tasks-list" aria-label="Список завдань і вибір активного завдання"></ol>
+      <div class="actions" aria-label="Керування вибраним завданням">
+        <button id="tasks-selected-pause" type="button" data-action-id="task.pause" data-selected-task-control="true" disabled>Призупинити вибране</button>
+        <button id="tasks-selected-resume" type="button" data-action-id="task.resume" data-selected-task-control="true" disabled>Продовжити вибране</button>
+        <button id="tasks-selected-stop" type="button" data-action-id="agent.stop" data-selected-task-control="true" disabled>Зупинити вибране</button>
+      </div>
+      <div class="actions" aria-label="Сторінки списку завдань">
+        <button id="tasks-page-previous" type="button" data-action-id="task.page.previous" disabled>Попередня сторінка</button>
+        <button id="tasks-page-next" type="button" data-action-id="task.page.next" disabled>Наступна сторінка</button>
+      </div>
     </section>
 
     <section aria-labelledby="team-task-heading">
