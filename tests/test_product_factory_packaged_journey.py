@@ -560,7 +560,7 @@ def test_packaged_execution_plan_file_resolver_rejects_path_mutation_during_deco
         mutate_after_decode,
     )
 
-    with pytest.raises(PackagedExecutionPlanFileError, match="changed during admission"):
+    with pytest.raises(\n        PackagedExecutionPlanFileError,\n        match="changed during admission",\n    ):
         resolver(project_id)
 
 
@@ -581,7 +581,7 @@ def test_packaged_execution_plan_file_resolver_rejects_directory_replacement(
         _packaged_execution_plan_file_payload(project_id)
     )
 
-    with pytest.raises(PackagedExecutionPlanFileError, match="directory identity changed"):
+    with pytest.raises(\n        PackagedExecutionPlanFileError,\n        match="directory identity changed",\n    ):
         resolver(project_id)
 
 
@@ -592,5 +592,5 @@ def test_packaged_execution_plan_file_resolver_rejects_noncanonical_project_id(
     directory.mkdir()
     resolver = PackagedExecutionPlanFileResolver(directory)
 
-    with pytest.raises(PackagedExecutionPlanFileError, match="canonical ProductProject"):
+    with pytest.raises(\n        PackagedExecutionPlanFileError,\n        match="canonical ProductProject",\n    ):
         resolver("../product-" + "a" * 64)
