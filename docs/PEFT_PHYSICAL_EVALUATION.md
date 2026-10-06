@@ -15,10 +15,13 @@ model, material, and evaluator bytes.
 The first physical scale tier remains the exact two-step pause/reopen/resume
 acceptance pilot. A schema-v3 continuation into tier N > 0 is different: after the
 same durable step-1 pause and restart probe, the canonical TrainingRuntime must
-resume through the selected TrainingScaleTier.max_steps boundary. The physical
-report records that completed step count, and evaluation rejects the run unless it
-exactly equals the durable selected tier's declared max_steps. A two-step run inside
-a higher tier is therefore not accepted as full scale-progression evidence.
+resume through the selected TrainingScaleTier.max_steps boundary. New multi-step
+physical evidence is report schema v6. Schema v5 remains readable with its original
+strict two-step meaning and original evidence-hash domain; it cannot carry a
+multi-step completion. Evaluation rejects a v6 higher-tier run unless its recorded
+completed step count exactly equals the durable selected tier's declared max_steps.
+A two-step run inside a higher tier is therefore not accepted as full
+scale-progression evidence.
 
 This does not remove resource, material, plan, promotion, checkpoint, or evaluator
 bounds. The selected tier remains authorized by the existing TrainingScalePlan and
