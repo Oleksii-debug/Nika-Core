@@ -295,6 +295,11 @@ def test_exact_registration_and_same_task_resume_binding(tmp_path: Path) -> None
     repo = ToolsmithRepository(store)
     gap = _gap()
     repo.create_escalation(gap)
+    service = CapabilityEscalationService(
+        repository=repo,
+        checkpoints=CheckpointService(store),
+        worker=DeterministicCodingWorker(_success),
+    )
     version = repo.transition(
         task_id=gap.task_id,
         capability_id=gap.requested_capability,
@@ -313,22 +318,12 @@ def test_exact_registration_and_same_task_resume_binding(tmp_path: Path) -> None
         expected_version=version,
         target=CandidateState.BUILT,
     )
-    version = repo.transition(
-        task_id=gap.task_id,
-        capability_id=gap.requested_capability,
+    version = service.start_verification(gap=gap, expected_version=version)
+    version = service.accept_verification(
+        gap=gap,
         expected_version=version,
-        target=CandidateState.VERIFYING,
-    )
-    version = repo.transition(
-        task_id=gap.task_id,
-        capability_id=gap.requested_capability,
-        expected_version=version,
-        target=CandidateState.VERIFIED,
-    )
-    service = CapabilityEscalationService(
-        repository=repo,
-        checkpoints=CheckpointService(store),
-        worker=DeterministicCodingWorker(_success),
+        candidate_digest="sha256:verified-tree",
+        verifier_evidence={"verifier": "test-independent"},
     )
     manifest = CapabilityManifestV1(
         capability_id=gap.requested_capability,
@@ -369,7 +364,8 @@ def test_exact_version_collision_with_new_digest_is_rejected(tmp_path: Path) -> 
             (gap.requested_capability, datetime.now(UTC).isoformat()),
         )
         conn.execute(
-            "UPDATE capability_escalations SET state='registering', row_version=1 WHERE task_id=? AND requested_capability=?",
+            "UPDATE capability_escalations SET state='registering', row_version=1, "
+            "pinned_digest='sha256:new' WHERE task_id=? AND requested_capability=?",
             (gap.task_id, gap.requested_capability),
         )
     manifest = CapabilityManifestV1(
