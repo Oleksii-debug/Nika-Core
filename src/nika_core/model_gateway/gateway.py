@@ -456,7 +456,15 @@ class ModelGateway:
     def _normalize_provider_error(
         error: ModelGatewayError, provider_id: str
     ) -> ModelGatewayError:
-        if not isinstance(error.code, ModelErrorCode):
+        if type(error) is not ModelGatewayError:
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an invalid typed error carrier",
+                provider_id=provider_id,
+                retryable=False,
+                failure_effect=ModelFailureEffect.UNKNOWN,
+            )
+        if type(error.code) is not ModelErrorCode:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an invalid error code",
@@ -471,21 +479,29 @@ class ModelGateway:
                 retryable=False,
                 failure_effect=ModelFailureEffect.UNKNOWN,
             )
-        if not isinstance(error.retryable, bool):
+        if type(error.retryable) is not bool:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an invalid retryable flag",
                 provider_id=provider_id,
                 retryable=False,
             )
-        if not isinstance(error.failure_effect, ModelFailureEffect):
+        if type(error.failure_effect) is not ModelFailureEffect:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an invalid failure effect state",
                 provider_id=provider_id,
                 retryable=False,
             )
-        if error.provider_id is not None and error.provider_id != provider_id:
+        error_provider_id = error.provider_id
+        if error_provider_id is not None and type(error_provider_id) is not str:
+            return ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "model provider returned an invalid provider identity",
+                provider_id=provider_id,
+                retryable=False,
+            )
+        if error_provider_id is not None and error_provider_id != provider_id:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an error for another provider identity",
