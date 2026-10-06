@@ -11,6 +11,7 @@ from _product_decision_test_support import ApprovedProductProjectCommandService
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_command.command_center import ProductCommandCenter
+from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductJourneyError,
@@ -152,6 +153,34 @@ def test_pending_product_decision_is_bounded_and_visible_without_authority(
         "decided_by_ref",
     ):
         assert forbidden not in serialized
+
+
+def test_state_refresh_uses_bounded_decision_summary_not_full_list(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, repository, _router, provider = _build(tmp_path / "bounded refresh.db")
+    for index in range(12):
+        _add_pending(
+            service,
+            repository,
+            package_id=f"research-refresh-{index:02d}",
+            option_id=f"option-refresh-{index:02d}",
+            decision_id=f"decision-refresh-{index:02d}",
+            expected_row_version=repository.get(_PROJECT_ID).row_version,
+        )
+
+    def fail_unbounded_list(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("packaged state refresh must not materialize decision list()")
+
+    monkeypatch.setattr(ProductDecisionRepository, "list", fail_unbounded_list)
+
+    project = provider()["product_project"]
+
+    assert project is not None
+    assert project["decision_count"] == 12
+    assert project["decision_state_counts"] == {"pending": 12}
+    assert project["current_decision"] is None
 
 
 @pytest.mark.parametrize(

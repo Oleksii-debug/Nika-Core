@@ -13,7 +13,11 @@ from nika_core.product_command.contracts import (
     ProductUserDecision,
 )
 from nika_core.product_command.reference_safety import safe_evidence_reference
-from nika_core.product_decisions import ProductDecisionRepository, StoredProductDecision
+from nika_core.product_decisions import (
+    ProductDecisionRepository,
+    ProductDecisionSetSummary,
+    StoredProductDecision,
+)
 from nika_core.product_project import (
     ProductDecision,
     ProductDecisionState,
@@ -106,6 +110,39 @@ class ProductProjectCommandService:
                 "retry from a fresh snapshot"
             )
         return project_detail(after, decisions=decisions), after.spec.credential_refs
+
+    def inspect_project_presentation_context(
+        self,
+        project_id: str,
+    ) -> tuple[
+        ProductProjectDetail,
+        tuple[str, ...],
+        ProductDecisionSetSummary,
+    ]:
+        """Read bounded decision presentation data under one ProductProject fence."""
+
+        before = self._repository.get(project_id)
+        decision_summary = self._decisions.summarize_latest(project_id)
+        after = self._repository.get(project_id)
+        if (
+            before.row_version != after.row_version
+            or before.spec_version != after.spec_version
+            or before.status != after.status
+            or before.updated_at != after.updated_at
+        ):
+            raise ProductProjectPresentationConsistencyError(
+                "ProductProject changed while PF5 was composing bounded presentation; retry"
+            )
+        visible_decisions = (
+            (decision_summary.sole_pending,)
+            if decision_summary.sole_pending is not None
+            else ()
+        )
+        return (
+            project_detail(after, decisions=visible_decisions),
+            after.spec.credential_refs,
+            decision_summary,
+        )
 
     def inspect_decision(
         self,

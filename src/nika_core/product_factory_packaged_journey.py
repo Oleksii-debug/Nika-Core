@@ -24,6 +24,7 @@ from nika_core.product_command.product_project_adapter import (
     ProductProjectPresentationConsistencyError,
 )
 from nika_core.product_command.routing import route_command
+from nika_core.product_decisions import ProductDecisionSetSummary
 from nika_core.product_project import (
     ProductDecision,
     ProductDecisionState,
@@ -1077,7 +1078,9 @@ class PackagedProductStateProvider:
         if project_id is None:
             return state
         try:
-            detail = self._command_center.inspect_project(project_id)
+            detail, decision_summary = self._command_center.inspect_packaged_project(
+                project_id
+            )
         except KeyError:
             self._router.clear_stale_selection()
             return state
@@ -1085,13 +1088,26 @@ class PackagedProductStateProvider:
             raise PackagedProductJourneyError(
                 "ProductProject changed while packaged state was composed; refresh required."
             ) from exc
-        state["product_project"] = _safe_product_project_state(detail)
+        state["product_project"] = _safe_product_project_state(
+            detail,
+            decision_summary,
+        )
         return state
 
 
-def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
+def _safe_product_project_state(
+    detail: ProductProjectDetail,
+    decision_summary: ProductDecisionSetSummary,
+) -> dict[str, Any]:
     status_counts = Counter(item.kind.value for item in detail.statuses)
-    decision_counts = Counter(item.state for item in detail.decisions)
+    decision_counts = {
+        "pending": decision_summary.pending_count,
+        "approved": decision_summary.approved_count,
+        "rejected": decision_summary.rejected_count,
+    }
+    decision_counts = {
+        state: count for state, count in decision_counts.items() if count > 0
+    }
     status_items = _safe_product_status_items(detail)
     return {
         "project_id": detail.summary.project_id,
@@ -1104,7 +1120,7 @@ def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
         "status_counts": dict(sorted(status_counts.items())),
         "status_items": status_items,
         "status_items_truncated": len(status_items) < len(detail.statuses),
-        "decision_count": len(detail.decisions),
+        "decision_count": decision_summary.total_count,
         "decision_state_counts": dict(sorted(decision_counts.items())),
         "current_decision": _safe_product_decision(detail.summary.current_decision),
     }
