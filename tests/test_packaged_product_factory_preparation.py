@@ -384,10 +384,11 @@ def _revise_product_after_running_checkpoint(
     service: PackagedProductFactoryPreparationService,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_reserve = service._host._program._reserve_effect
+    program_type = type(service._host._program)
+    original_reserve = program_type._reserve_effect
     revised = False
 
-    def reserve_after_revision(**kwargs):
+    def reserve_after_revision(program, **kwargs):
         nonlocal revised
         if not revised:
             latest = repository.get(project_id)
@@ -403,10 +404,10 @@ def _revise_product_after_running_checkpoint(
                 change_reason="regression: revise before worker effect reservation",
             )
             revised = True
-        return original_reserve(**kwargs)
+        return original_reserve(program, **kwargs)
 
     monkeypatch.setattr(
-        service._host._program,
+        program_type,
         "_reserve_effect",
         reserve_after_revision,
     )
