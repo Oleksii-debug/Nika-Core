@@ -259,6 +259,7 @@ def test_voice_model_setup_inflight_task_cancel_waits_for_worker_settlement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
     data_root = tmp_path / "nika-data"
     data_root.mkdir()
     setup = PackagedVoiceModelSetup(data_root)
@@ -313,7 +314,54 @@ def test_voice_model_setup_inflight_task_cancel_waits_for_worker_settlement(
     assert cancel_event.is_set()
     assert snapshot["status"] == "cancelled"
     assert snapshot["active"] is False
-    assert snapshot["can_import"] is False
+    assert snapshot["can_import"] is True
+
+
+def test_voice_model_setup_precancelled_run_never_starts_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    setup = PackagedVoiceModelSetup(data_root)
+    cancel_event = model_setup.Event()
+    cancel_event.set()
+    started_event = model_setup.Event()
+    calls = 0
+
+    def forbidden_install(
+        source_text: str,
+        *,
+        cancel_event: model_setup.Event | None,
+    ) -> None:
+        del source_text, cancel_event
+        nonlocal calls
+        calls += 1
+
+    monkeypatch.setattr(setup, "_perform_install", forbidden_install)
+    with setup._lock:  # noqa: SLF001 - focused lifecycle state setup
+        setup._generation = 1  # noqa: SLF001
+        setup._active = True  # noqa: SLF001
+        setup._cancelling = True  # noqa: SLF001
+        setup._cancel_event = cancel_event  # noqa: SLF001
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            setup._run_import(  # noqa: SLF001
+                {"source_root": str(tmp_path)},
+                generation=1,
+                cancel_event=cancel_event,
+                started_event=started_event,
+            )
+        )
+
+    snapshot = setup.snapshot()
+    assert calls == 0
+    assert started_event.is_set()
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is True
 
 
 def test_voice_model_setup_existing_install_is_idempotent(
