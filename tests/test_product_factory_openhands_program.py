@@ -394,3 +394,38 @@ def test_source_environment_is_sanitized_before_private_git_use(
     assert "GITHUB_TOKEN" not in program.ports.source_environment
     assert "NIKA_TEST_SECRET" not in program.ports.source_environment
     assert program.ports.source_environment["GIT_TERMINAL_PROMPT"] == "0"
+
+
+def test_builder_rejects_malformed_provider_or_verifier_before_composition(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, _base_sha = _repository(tmp_path)
+    jobs = tmp_path / "contract jobs"
+    jobs.mkdir()
+    store = SQLiteStore(tmp_path / "contract.db")
+    store.initialize()
+    common = {
+        "workspace_parent": jobs,
+        "repositories": {"repo-1": repository},
+        "client_factory": lambda _endpoint: None,
+        "agent_profile_id_factory": lambda _job, _endpoint: (
+            "11111111-1111-4111-8111-111111111111"
+        ),
+        "policy": _policy(),
+    }
+
+    with pytest.raises(OpenHandsProductFactoryError, match="sandbox provider"):
+        build_openhands_product_factory_program(
+            store,
+            sandbox_provider=object(),
+            acceptance_runtime=_AcceptanceRuntime(),
+            **common,
+        )
+
+    with pytest.raises(OpenHandsProductFactoryError, match="acceptance runtime"):
+        build_openhands_product_factory_program(
+            store,
+            sandbox_provider=_SandboxProvider(),
+            acceptance_runtime=object(),
+            **common,
+        )
