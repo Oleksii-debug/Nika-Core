@@ -460,7 +460,7 @@ def test_unresolved_prior_execution_blocks_replay_before_target_effect(
     assert after == before
 
 
-def test_router_failure_marks_owned_reservation_uncertain(tmp_path: Path) -> None:
+def test_router_failure_rolls_back_owned_reservation(tmp_path: Path) -> None:
     store, memory, executor = _runtime(tmp_path)
     candidate = _candidate()
     verification = _verification(candidate)
@@ -504,9 +504,7 @@ def test_router_failure_marks_owned_reservation_uncertain(tmp_path: Path) -> Non
             ),
         )
 
-    records = IdempotencyLedger(store).list_for_task("task-stale")
-    assert len(records) == 1
-    assert records[0].status is IdempotencyStatus.UNCERTAIN
+    assert IdempotencyLedger(store).list_for_task("task-stale") == ()
     current = memory.get(
         scope=MemoryScope.AGENT,
         owner_id=candidate.agent_id,
@@ -515,6 +513,65 @@ def test_router_failure_marks_owned_reservation_uncertain(tmp_path: Path) -> Non
     )
     assert current is not None
     assert current.value == {"kind": "existing"}
+
+
+def test_completion_failure_rolls_back_all_target_effects_and_reservations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = SQLiteStore(tmp_path / "semantic atomic rollback" / "nika.db")
+    store.initialize()
+    memory = MemoryService(store)
+    ledger = IdempotencyLedger(store)
+    router = LearningSemanticUpdateRouter(
+        memory=LearningMemoryApplier(memory),
+        world_model=LearningWorldModelApplier(WorldModelService(memory)),
+        self_model=LearningSelfModelApplier(SelfModelService(memory)),
+        skill=LearningSkillApplier(LearnedSkillService(memory)),
+    )
+    executor = LearningSemanticUpdateExecutor(
+        router=router,
+        idempotency=ledger,
+    )
+    candidate = _candidate()
+    verification = _verification(candidate)
+
+    def fail_completion(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("injected semantic completion failure")
+
+    for task_id, intent, payload, address in _semantic_cases(candidate, verification):
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                ledger,
+                "complete_pending_if_matches_with_connection",
+                fail_completion,
+            )
+            with pytest.raises(RuntimeError, match="injected semantic completion failure"):
+                _apply(
+                    executor,
+                    task_id=task_id,
+                    intent=intent,
+                    candidate=candidate,
+                    verification=verification,
+                    payload=payload,
+                    address=address,
+                )
+
+        assert ledger.list_for_task(task_id) == ()
+        retry = _apply(
+            executor,
+            task_id=task_id,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            payload=payload,
+            address=address,
+        )
+        assert retry.created is True
+        assert retry.replayed is False
+        records = ledger.list_for_task(task_id)
+        assert len(records) == 1
+        assert records[0].status is IdempotencyStatus.COMPLETED
 
 
 def test_completed_intent_cannot_be_rebound_to_another_task(tmp_path: Path) -> None:
@@ -647,3 +704,45 @@ def test_completed_replay_rejects_corrupted_durable_receipt_schema(
         key="memory-1",
     )
     assert after == before
+
+def test_idempotency_rejects_foreign_caller_owned_connection(
+    tmp_path: Path,
+) -> None:
+    primary_store = SQLiteStore(tmp_path / "idempotency-shared.db")
+    foreign_store = SQLiteStore(primary_store.path)
+    primary_store.initialize()
+    ledger = IdempotencyLedger(primary_store)
+
+    with foreign_store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        with pytest.raises(ValueError, match="not opened by this SQLiteStore"):
+            ledger.reserve_with_connection(
+                conn,
+                operation_key="learning-semantic-update:" + "f" * 64,
+                task_id="foreign-connection-task",
+                operation_type="learning.semantic_update",
+                input_fingerprint="f" * 64,
+            )
+
+    assert ledger.list_for_task("foreign-connection-task") == ()
+    assert IdempotencyLedger(foreign_store).list_for_task("foreign-connection-task") == ()
+
+def test_idempotency_requires_active_caller_owned_transaction(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "idempotency-active-transaction.db")
+    store.initialize()
+    ledger = IdempotencyLedger(store)
+
+    with store.connection() as conn:
+        assert conn.in_transaction is False
+        with pytest.raises(ValueError, match="active caller-owned transaction"):
+            ledger.reserve_with_connection(
+                conn,
+                operation_key="learning-semantic-update:" + "e" * 64,
+                task_id="missing-transaction-task",
+                operation_type="learning.semantic_update",
+                input_fingerprint="e" * 64,
+            )
+
+    assert ledger.list_for_task("missing-transaction-task") == ()

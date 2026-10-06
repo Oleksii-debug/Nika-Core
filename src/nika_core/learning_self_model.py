@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import sqlite3
 from dataclasses import dataclass
 
 from nika_core.learning_cognition import (
@@ -28,15 +29,77 @@ class LearningSelfModelApplyReceipt:
 
 
 class LearningSelfModelApplier:
-    """Apply VERIFIED Loop-B SELF_MODEL intents through the canonical self-model owner."""
+    """Apply VERIFIED Loop-B SELF_MODEL intents through the canonical target owner."""
 
     def __init__(self, self_model: SelfModelService) -> None:
         if type(self_model) is not SelfModelService:
             raise TypeError("self_model must be the canonical SelfModelService")
         self._self_model = self_model
 
+    @property
+    def sqlite_store(self):
+        """Return the exact SQLite authority backing this target owner."""
+        return self._self_model.sqlite_store
+
     def apply(
         self,
+        *,
+        intent: LearningUpdateIntent,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+        payload: bytes,
+        workspace_id: str,
+        agent_id: str,
+        facet: str,
+    ) -> LearningSelfModelApplyReceipt:
+        return self._apply(
+            None,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=expected_verification_policy_sha256,
+            expected_requirements=expected_requirements,
+            payload=payload,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            facet=facet,
+        )
+
+    def apply_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        intent: LearningUpdateIntent,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+        payload: bytes,
+        workspace_id: str,
+        agent_id: str,
+        facet: str,
+    ) -> LearningSelfModelApplyReceipt:
+        """Apply one self-model CAS inside a caller-owned SQLite transaction."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        return self._apply(
+            conn,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=expected_verification_policy_sha256,
+            expected_requirements=expected_requirements,
+            payload=payload,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            facet=facet,
+        )
+
+    def _apply(
+        self,
+        conn: sqlite3.Connection | None,
         *,
         intent: LearningUpdateIntent,
         candidate: CognitionCandidate,
@@ -57,9 +120,7 @@ class LearningSelfModelApplier:
             payload=payload,
         )
         if canonical.target is not LearningUpdateTarget.SELF_MODEL:
-            raise ValueError(
-                "learning self-model adapter accepts only SELF_MODEL update intents"
-            )
+            raise ValueError("learning self-model adapter accepts only SELF_MODEL update intents")
         if canonical.update_schema != SELF_MODEL_UPDATE_SCHEMA:
             raise ValueError("unsupported learning self-model update schema")
         if type(workspace_id) is not str or workspace_id != canonical.workspace_id:
@@ -77,13 +138,23 @@ class LearningSelfModelApplier:
 
         value = decode_learning_json_payload(payload)
         created = canonical.expected_revision_sha256 is None
-        snapshot = self._self_model.compare_and_put(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            facet=facet,
-            value=value,
-            expected_revision_sha256=canonical.expected_revision_sha256,
-        )
+        if conn is None:
+            snapshot = self._self_model.compare_and_put(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                facet=facet,
+                value=value,
+                expected_revision_sha256=canonical.expected_revision_sha256,
+            )
+        else:
+            snapshot = self._self_model.compare_and_put_with_connection(
+                conn,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                facet=facet,
+                value=value,
+                expected_revision_sha256=canonical.expected_revision_sha256,
+            )
         return LearningSelfModelApplyReceipt(
             intent_sha256=canonical.intent_sha256,
             target_ref_sha256=snapshot.target_ref_sha256,

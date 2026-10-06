@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import re
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -139,6 +140,11 @@ class LearnedSkillService:
             raise TypeError("memory must be the canonical MemoryService")
         self._memory = memory
 
+    @property
+    def sqlite_store(self):
+        """Return the canonical SQLite authority backing learned skills."""
+        return self._memory.sqlite_store
+
     def get(
         self,
         *,
@@ -173,6 +179,47 @@ class LearnedSkillService:
         value: object,
         expected_revision_sha256: str | None,
     ) -> LearnedSkillSnapshot:
+        return self._compare_and_put(
+            None,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            skill_id=skill_id,
+            value=value,
+            expected_revision_sha256=expected_revision_sha256,
+        )
+
+    def compare_and_put_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        agent_id: str,
+        skill_id: str,
+        value: object,
+        expected_revision_sha256: str | None,
+    ) -> LearnedSkillSnapshot:
+        """Update learned-skill state inside a caller-owned SQLite transaction."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        return self._compare_and_put(
+            conn,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            skill_id=skill_id,
+            value=value,
+            expected_revision_sha256=expected_revision_sha256,
+        )
+
+    def _compare_and_put(
+        self,
+        conn: sqlite3.Connection | None,
+        *,
+        workspace_id: str,
+        agent_id: str,
+        skill_id: str,
+        value: object,
+        expected_revision_sha256: str | None,
+    ) -> LearnedSkillSnapshot:
         canonical_workspace = _require_token(workspace_id, field="workspace_id")
         canonical_agent = _require_token(agent_id, field="agent_id")
         canonical_skill = _require_token(skill_id, field="skill_id")
@@ -186,12 +233,21 @@ class LearnedSkillService:
                 expected_revision_sha256,
                 field="expected_revision_sha256",
             )
-            current = self._memory.get(
-                scope=MemoryScope.AGENT,
-                owner_id=canonical_agent,
-                namespace=LEARNED_SKILL_NAMESPACE,
-                key=key,
-            )
+            if conn is None:
+                current = self._memory.get(
+                    scope=MemoryScope.AGENT,
+                    owner_id=canonical_agent,
+                    namespace=LEARNED_SKILL_NAMESPACE,
+                    key=key,
+                )
+            else:
+                current = self._memory.get_with_connection(
+                    conn,
+                    scope=MemoryScope.AGENT,
+                    owner_id=canonical_agent,
+                    namespace=LEARNED_SKILL_NAMESPACE,
+                    key=key,
+                )
             if current is None:
                 raise MemoryConflictError("learned-skill target no longer exists")
             actual_revision = _learned_skill_revision_sha256(
@@ -204,15 +260,27 @@ class LearnedSkillService:
                 raise MemoryConflictError("learned-skill revision changed")
             expected_updated_at = current.updated_at
 
-        committed = self._memory.compare_and_put(
-            scope=MemoryScope.AGENT,
-            owner_id=canonical_agent,
-            namespace=LEARNED_SKILL_NAMESPACE,
-            key=key,
-            value=value,
-            expected_updated_at=expected_updated_at,
-            user_approved=False,
-        )
+        if conn is None:
+            committed = self._memory.compare_and_put(
+                scope=MemoryScope.AGENT,
+                owner_id=canonical_agent,
+                namespace=LEARNED_SKILL_NAMESPACE,
+                key=key,
+                value=value,
+                expected_updated_at=expected_updated_at,
+                user_approved=False,
+            )
+        else:
+            committed = self._memory.compare_and_put_with_connection(
+                conn,
+                scope=MemoryScope.AGENT,
+                owner_id=canonical_agent,
+                namespace=LEARNED_SKILL_NAMESPACE,
+                key=key,
+                value=value,
+                expected_updated_at=expected_updated_at,
+                user_approved=False,
+            )
         return self._snapshot(
             committed,
             workspace_id=canonical_workspace,
