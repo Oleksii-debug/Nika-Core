@@ -446,6 +446,43 @@ class ProductFactoryLocalRepositoryBindings:
             return None
         return _stored_positive_int(row["binding_version"], "binding_version")
 
+    def current_binding_versions(
+        self,
+        project_id: str,
+        repository_ids: tuple[str, ...],
+    ) -> MappingProxyType[str, int | None]:
+        """Snapshot multiple persisted CAS versions in one SQLite read statement."""
+
+        project_id = _canonical_text(project_id, "project_id")
+        canonical_ids = _canonical_repository_ids(repository_ids)
+        with self._store.connection() as conn:
+            return _binding_versions_from_conn(
+                conn,
+                project_id=project_id,
+                repository_ids=canonical_ids,
+            )
+
+    def validate_plan_and_current_binding_versions(
+        self,
+        plan: PackagedProductFactoryExecutionPlan,
+    ) -> MappingProxyType[str, int | None]:
+        """Snapshot ProductProject validity and all plan binding CAS in one DB read txn."""
+
+        if type(plan) is not PackagedProductFactoryExecutionPlan:
+            raise TypeError("plan must be an exact PackagedProductFactoryExecutionPlan")
+        repository_ids = _canonical_repository_ids(
+            tuple(repository.repository_id for repository in plan.graph.repositories)
+        )
+        with self._store.connection() as conn:
+            conn.execute("BEGIN")
+            project = self._projects._get_conn(conn, plan.project_id)
+            _require_plan_project(plan, project)
+            return _binding_versions_from_conn(
+                conn,
+                project_id=plan.project_id,
+                repository_ids=repository_ids,
+            )
+
     def require(
         self,
         project_id: str,
@@ -478,6 +515,7 @@ class ProductFactoryLocalRepositoryBindings:
             raise ProductFactoryLocalRepositoryBindingError(
                 "local repository binding changed while resolving"
             )
+        _require_filesystem_identity(binding.root, identity)
         return binding
 
     def validate_plan(
@@ -531,6 +569,44 @@ class ProductFactoryLocalRepositoryBindings:
                 "repository locator is not present in current ProductProject"
             )
         return project
+
+
+def _canonical_repository_ids(repository_ids: tuple[str, ...]) -> tuple[str, ...]:
+    if type(repository_ids) is not tuple:
+        raise TypeError("repository_ids must be a tuple")
+    canonical_ids = tuple(
+        _canonical_text(repository_id, "repository_id")
+        for repository_id in repository_ids
+    )
+    if len(canonical_ids) != len(set(canonical_ids)):
+        raise ValueError("repository_ids must be unique")
+    return canonical_ids
+
+
+def _binding_versions_from_conn(
+    conn,
+    *,
+    project_id: str,
+    repository_ids: tuple[str, ...],
+) -> MappingProxyType[str, int | None]:
+    requested = set(repository_ids)
+    versions: dict[str, int | None] = {
+        repository_id: None for repository_id in repository_ids
+    }
+    rows = conn.execute(
+        "SELECT repository_id,binding_version "
+        "FROM product_factory_local_repository_bindings "
+        "WHERE project_id=?",
+        (project_id,),
+    ).fetchall()
+    for row in rows:
+        repository_id = _stored_text(row["repository_id"], "repository_id")
+        if repository_id in requested:
+            versions[repository_id] = _stored_positive_int(
+                row["binding_version"],
+                "binding_version",
+            )
+    return MappingProxyType(versions)
 
 
 def _require_plan_project(

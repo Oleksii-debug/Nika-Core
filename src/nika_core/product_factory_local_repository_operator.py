@@ -130,6 +130,7 @@ class PackagedLocalRepositoryOperator:
         try:
             plan = self._plan(project_id)
             repositories: list[dict[str, object]] = []
+            projected_versions: dict[str, int | None] = {}
             invalid_count = 0
             for repository in plan.graph.repositories:
                 version = self._bindings.current_binding_version(
@@ -155,6 +156,7 @@ class PackagedLocalRepositoryOperator:
                             binding_version=None,
                         )
                     )
+                    projected_versions[repository.repository_id] = None
                     continue
                 try:
                     binding = self._bindings.require(
@@ -180,6 +182,7 @@ class PackagedLocalRepositoryOperator:
                             binding_version=current_version,
                         )
                     )
+                    projected_versions[repository.repository_id] = current_version
                     continue
                 if (
                     binding.provider != repository.provider
@@ -194,6 +197,7 @@ class PackagedLocalRepositoryOperator:
                             binding_version=binding.binding_version,
                         )
                     )
+                    projected_versions[repository.repository_id] = binding.binding_version
                     continue
                 repositories.append(
                     _repository_state(
@@ -203,6 +207,7 @@ class PackagedLocalRepositoryOperator:
                         binding_version=binding.binding_version,
                     )
                 )
+                projected_versions[repository.repository_id] = binding.binding_version
             message = (
                 "Виберіть репозиторій з поточного плану та явно вкажіть "
                 "його локальний Git-корінь."
@@ -212,7 +217,13 @@ class PackagedLocalRepositoryOperator:
                     " Недійсні прив’язки можна безпечно замінити, вказавши "
                     "новий шлях; поточна CAS-версія збережена без розкриття старого шляху."
                 )
-            self._bindings.validate_plan(plan)
+            current_versions = self._bindings.validate_plan_and_current_binding_versions(
+                plan
+            )
+            if dict(current_versions) != projected_versions:
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "local repository binding changed during snapshot projection"
+                )
             return {
                 "status": "ready",
                 "project_id": plan.project_id,

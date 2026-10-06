@@ -349,6 +349,119 @@ def test_snapshot_uses_validated_binding_version_for_identity_mismatch(
     assert item["binding_version"] == 2
 
 
+def test_snapshot_rejects_project_change_after_projection_before_return(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    operator = PackagedLocalRepositoryOperator(
+        bindings=bindings,
+        resolve_plan=lambda project_id: plan
+        if project_id == plan.project_id
+        else (_ for _ in ()).throw(KeyError(project_id)),
+    )
+    original_final_snapshot = bindings.validate_plan_and_current_binding_versions
+    final_snapshot_calls = 0
+
+    def update_project_then_snapshot(
+        plan_to_validate: PackagedProductFactoryExecutionPlan,
+    ):
+        nonlocal final_snapshot_calls
+        final_snapshot_calls += 1
+        ProductProjectRepository(store).update_spec(
+            project.project_id,
+            ProductProjectSpec(
+                goal="Changed after repository projection was assembled",
+                desired_outcome=project.spec.desired_outcome,
+                repository_refs=project.spec.repository_refs,
+            ),
+            expected_row_version=project.row_version,
+            change_reason="operator final authority snapshot TOCTOU regression",
+            idempotency_key="update:product-1:final-snapshot-toctou",
+        )
+        return original_final_snapshot(plan_to_validate)
+
+    monkeypatch.setattr(
+        bindings,
+        "validate_plan_and_current_binding_versions",
+        update_project_then_snapshot,
+    )
+
+    snapshot = operator.snapshot(project.project_id)
+
+    assert snapshot == {
+        "status": "invalid",
+        "project_id": None,
+        "repositories": [],
+        "message": "Стан локальних прив’язок Product Factory недоступний.",
+    }
+    assert final_snapshot_calls == 1
+
+
+def test_snapshot_rejects_binding_change_after_projection_before_return(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    operator = PackagedLocalRepositoryOperator(
+        bindings=bindings,
+        resolve_plan=lambda project_id: plan
+        if project_id == plan.project_id
+        else (_ for _ in ()).throw(KeyError(project_id)),
+    )
+    first_root = _root(tmp_path)
+    replacement_root = tmp_path / "replacement after projection"
+    replacement_root.mkdir()
+    (replacement_root / ".git").mkdir()
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    original_final_snapshot = bindings.validate_plan_and_current_binding_versions
+    final_snapshot_calls = 0
+
+    def rebind_then_snapshot(plan_to_validate: PackagedProductFactoryExecutionPlan):
+        nonlocal final_snapshot_calls
+        final_snapshot_calls += 1
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=replacement_root.resolve(),
+            expected_binding_version=first.binding_version,
+        )
+        return original_final_snapshot(plan_to_validate)
+
+    monkeypatch.setattr(
+        bindings,
+        "validate_plan_and_current_binding_versions",
+        rebind_then_snapshot,
+    )
+
+    snapshot = operator.snapshot(project.project_id)
+
+    assert snapshot == {
+        "status": "invalid",
+        "project_id": None,
+        "repositories": [],
+        "message": "Стан локальних прив’язок Product Factory недоступний.",
+    }
+    assert final_snapshot_calls == 1
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) == first.binding_version + 1
+
+
 def test_explicit_bind_and_version_fenced_unbind_round_trip(
     tmp_path: pathlib.Path,
 ) -> None:

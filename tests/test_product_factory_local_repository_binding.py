@@ -159,6 +159,70 @@ def test_binding_survives_restart_and_resolves_exact_plan(
     assert resolved == {repository.repository_id: root.resolve(strict=True)}
 
 
+def test_current_binding_versions_snapshots_bound_and_unbound_repositories(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    first_repository = _repository_ref()
+    second_repository = _repository_ref(
+        repository_id="repo-2",
+        locator="Oleksii-debug/example-two",
+    )
+    project = _create_project_with_repositories(
+        store,
+        (first_repository, second_repository),
+    )
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=first_repository,
+        root=_root(tmp_path, "first repository"),
+        expected_binding_version=None,
+    )
+
+    versions = bindings.current_binding_versions(
+        project.project_id,
+        (first_repository.repository_id, second_repository.repository_id),
+    )
+
+    assert dict(versions) == {
+        first_repository.repository_id: first.binding_version,
+        second_repository.repository_id: None,
+    }
+
+
+def test_plan_and_binding_snapshot_uses_one_active_store_transaction(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=_root(tmp_path),
+        expected_binding_version=None,
+    )
+    original_get_conn = bindings._projects._get_conn
+    observed_active_transactions: list[bool] = []
+
+    def checked_get_conn(conn, project_id: str):
+        store.require_transaction_connection(conn)
+        observed_active_transactions.append(conn.in_transaction)
+        return original_get_conn(conn, project_id)
+
+    monkeypatch.setattr(bindings._projects, "_get_conn", checked_get_conn)
+
+    versions = bindings.validate_plan_and_current_binding_versions(
+        _plan(project, repository)
+    )
+
+    assert observed_active_transactions == [True]
+    assert dict(versions) == {repository.repository_id: bound.binding_version}
+
+
 def test_binding_update_requires_exact_version(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -616,6 +680,50 @@ def test_require_rejects_binding_changed_during_filesystem_validation(
     assert len(errors) == 1
     assert isinstance(errors[0], ProductFactoryLocalRepositoryBindingError)
     assert "changed while resolving" in str(errors[0])
+
+
+def test_require_rejects_filesystem_identity_changed_after_durable_reread(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = _root(tmp_path, "repository")
+    moved = tmp_path / "moved after durable reread"
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    binding = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    original_binding_from_row = binding_module._binding_from_row
+    row_reads = 0
+
+    def swapping_binding_from_row(row: object):
+        nonlocal row_reads
+        current = original_binding_from_row(row)
+        row_reads += 1
+        if row_reads == 2:
+            binding.root.rename(moved)
+            binding.root.mkdir()
+            (binding.root / ".git").mkdir()
+        return current
+
+    monkeypatch.setattr(
+        binding_module,
+        "_binding_from_row",
+        swapping_binding_from_row,
+    )
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="filesystem identity changed",
+    ):
+        bindings.require(project.project_id, repository.repository_id)
+
+    assert row_reads == 2
 
 
 def test_require_rejects_relative_persisted_root_path(
