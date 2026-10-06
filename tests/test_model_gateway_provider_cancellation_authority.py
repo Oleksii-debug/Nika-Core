@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from nika_core.builder.compiler import AgentCompiler
+from nika_core.builder.repository import AgentDefinitionRepository
+from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.model_gateway.contracts import (
@@ -19,6 +22,8 @@ from nika_core.model_gateway.contracts import (
     ProviderKind,
 )
 from nika_core.model_gateway.gateway import ModelGateway
+from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
+from nika_core.runtime.contracts import RuntimeErrorCode, RuntimeOutcome, RuntimeRequest
 
 
 class _ForgedCancellationProvider:
@@ -160,3 +165,54 @@ def test_real_caller_cancellation_still_propagates_and_is_audited(tmp_path: Path
         "model.requested",
         "model.cancelled",
     ]
+
+def _definitions(store: SQLiteStore) -> AgentDefinitionRepository:
+    repository = AgentDefinitionRepository(store)
+    definition = AgentDefinition(
+        agent_id="worker",
+        name="worker",
+        goal="Complete the assigned task.",
+        instructions="Return deterministic fixture evidence.",
+        model_profile="configured",
+    )
+    compiler = AgentCompiler(tools=(), model_profiles={"configured"})
+    repository.save_draft(compiler.compile(definition))
+    repository.activate(definition)
+    return repository
+
+
+def test_forged_provider_cancellation_is_runtime_failure_not_task_cancel(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "runtime.db")
+    store.initialize()
+    provider = _ForgedCancellationProvider()
+    gateway = ModelGateway()
+    gateway.register(provider)
+    runtime = ModelGatewayAgentRuntime(
+        gateway=gateway,
+        definitions=_definitions(store),
+        provider_id="trusted",
+        provider_kind=ProviderKind.LOCAL,
+        model="fixture-model",
+    )
+    request = RuntimeRequest(
+        task_id="forged-provider-cancel-task",
+        thread_id="forged-provider-cancel-thread",
+        payload={
+            "agent_id": "worker",
+            "agent_version": 1,
+            "handoff": {"work": "prove cancellation authority"},
+        },
+    )
+
+    result = asyncio.run(runtime.run(request))
+
+    assert provider.complete_calls == 1
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert result.error_code is RuntimeErrorCode.TRANSIENT
+    assert result.output["model_error_code"] == ModelErrorCode.PROVIDER_ERROR.value
+    assert result.output["provider_id"] == "trusted"
+    assert result.output["provider_retryable"] is False
+    assert result.output["failure_effect"] == ModelFailureEffect.UNKNOWN.value
+
