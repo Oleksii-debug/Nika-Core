@@ -399,6 +399,85 @@ def test_execution_plan_snapshots_mutable_graph_and_mapping_inputs(tmp_path: Pat
     assert request.allowed_paths == ("src/nika_core",)
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("expected_spec_version", True, "positive integer"),
+        ("expected_row_version", False, "non-negative integer"),
+        ("base_shas", ["repo-core", "a" * 40], "must be a mapping"),
+        ("permission_ceiling", {"read_source"}, "non-empty frozenset"),
+    ),
+)
+def test_prepare_revalidates_tampered_frozen_execution_plan_before_effect(
+    tmp_path: Path,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
+        _fixture(tmp_path)
+    )
+    object.__setattr__(plan, field, value)
+
+    with pytest.raises(PackagedProductFactoryPreparationError, match=message):
+        service.prepare(plan)
+
+    assert _task_count(store) == 0
+
+
+def test_prepare_rejects_structurally_deleted_execution_plan_before_effect(
+    tmp_path: Path,
+) -> None:
+    store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
+        _fixture(tmp_path)
+    )
+    object.__delattr__(plan, "graph")
+
+    with pytest.raises(
+        PackagedProductFactoryPreparationError,
+        match="execution plan is structurally invalid",
+    ):
+        service.prepare(plan)
+
+    assert _task_count(store) == 0
+
+
+def test_prepare_uses_detached_snapshot_if_original_plan_mutates_mid_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        _store,
+        repository,
+        _tasks,
+        service,
+        _project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    original_get = ProductProjectRepository.get
+
+    def get_then_mutate(self, project_id: str):
+        current = original_get(self, project_id)
+        object.__setattr__(plan, "base_shas", {"repo-core": "b" * 40})
+        object.__setattr__(plan, "component_goals", {"core": "mutated caller goal"})
+        object.__setattr__(plan, "permission_ceiling", frozenset({"read_source"}))
+        return current
+
+    monkeypatch.setattr(ProductProjectRepository, "get", get_then_mutate)
+
+    prepared = service.prepare(plan)
+
+    request = prepared.state.coordinator.snapshot().records[0].request
+    assert request.base_sha == "a" * 40
+    assert request.goal == "Implement the exact accepted ProductProject work"
+    assert request.permission_ceiling == frozenset(
+        {"read_source", "write_source", "run_tests"}
+    )
+
+
 def test_deterministic_host_task_collision_fails_closed(tmp_path: Path) -> None:
     (
         store,
