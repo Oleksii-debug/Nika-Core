@@ -576,7 +576,9 @@ def test_historical_authority_is_effect_bound_and_recovery_scoped(
             work_id=work_id,
         )
 
-    with runtime.trusted_execution.historical_recovery(frozenset({work_id})):
+    with runtime.trusted_execution.historical_recovery(
+        frozenset({(work_id, dispatch.dispatch_id)})
+    ):
         assert runtime.trusted_execution.resolve(
             project_id=PROJECT_ID,
             repository_id=REPOSITORY_ID,
@@ -592,6 +594,19 @@ def test_historical_authority_is_effect_bound_and_recovery_scoped(
             repository_id=REPOSITORY_ID,
             work_id=work_id,
         )
+
+    with runtime.trusted_execution.historical_recovery(
+        frozenset({(work_id, f"{dispatch.dispatch_id}:rebound")})
+    ):
+        with pytest.raises(
+            PackagedBuildAuthorityError,
+            match="dispatch identity does not match recovery",
+        ):
+            runtime.trusted_execution.resolve(
+                project_id=PROJECT_ID,
+                repository_id=REPOSITORY_ID,
+                work_id=work_id,
+            )
 
     assert runtime.output_policies.resolve(
         project_id=PROJECT_ID,
@@ -654,7 +669,9 @@ def test_missing_historical_template_payload_fails_closed_after_effect_marker(
         expected_revision=1,
     )
 
-    with runtime.trusted_execution.historical_recovery(frozenset({work_id})):
+    with runtime.trusted_execution.historical_recovery(
+        frozenset({(work_id, dispatch.dispatch_id)})
+    ):
         with pytest.raises(
             PackagedBuildAuthorityError,
             match="unavailable or corrupt",
@@ -672,13 +689,16 @@ def test_historical_authority_rejects_work_without_effect_admission(
     _store, _startup_value, _node_value, runtime = _runtime(tmp_path)
     spec = _admit(runtime)
     work_id = spec.request.work_id
+    dispatch = _dispatch_for(runtime, spec)
 
     runtime.authorities.configure(
         _template(argv_suffix=("--wheel",)),
         expected_revision=1,
     )
 
-    with runtime.trusted_execution.historical_recovery(frozenset({work_id})):
+    with runtime.trusted_execution.historical_recovery(
+        frozenset({(work_id, dispatch.dispatch_id)})
+    ):
         with pytest.raises(
             PackagedBuildAuthorityError,
             match="lacks durable effect admission",
