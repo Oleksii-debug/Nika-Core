@@ -102,6 +102,15 @@ class PackagedBuildAuthorityTemplate:
             raise PackagedBuildAuthorityError(
                 "build authority resources must be exact ResourceEnvelope"
             )
+        for label, value in (
+            ("cpu_cores", self.resources.cpu_cores),
+            ("memory_mb", self.resources.memory_mb),
+            ("disk_mb", self.resources.disk_mb),
+        ):
+            if type(value) is not int or value <= 0:
+                raise PackagedBuildAuthorityError(
+                    f"build authority {label} must be an exact positive integer"
+                )
         if type(self.require_gpu) is not bool:
             raise PackagedBuildAuthorityError(
                 "build authority require_gpu must be exact bool"
