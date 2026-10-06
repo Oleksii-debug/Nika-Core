@@ -8,7 +8,6 @@ import pathlib
 import shutil
 import stat
 import subprocess
-import tempfile
 import threading
 import time
 
@@ -128,64 +127,20 @@ def _write_descriptor_bytes(descriptor: int, payload: bytes) -> None:
         view = view[written:]
 
 
-def _open_posix_executable_snapshot() -> tuple[int, bool]:
+def _open_posix_executable_snapshot() -> int:
     memfd_create = getattr(os, "memfd_create", None)
     sealing_flag = getattr(os, "MFD_ALLOW_SEALING", 0)
-    if memfd_create is not None and sealing_flag:
-        flags = getattr(os, "MFD_CLOEXEC", 0) | sealing_flag
-        try:
-            return memfd_create("nika-runtime-executable", flags), True
-        except OSError as exc:
-            raise ProcessExecutionError(
-                "unable to create sealed runtime executable snapshot"
-            ) from exc
-
+    if memfd_create is None or not sealing_flag:
+        raise ProcessExecutionError(
+            "immutable runtime executable snapshot is unavailable"
+        )
+    flags = getattr(os, "MFD_CLOEXEC", 0) | sealing_flag
     try:
-        with tempfile.TemporaryFile(prefix="nika-runtime-executable-") as temporary:
-            return os.dup(temporary.fileno()), False
+        return memfd_create("nika-runtime-executable", flags)
     except OSError as exc:
         raise ProcessExecutionError(
-            "unable to create private runtime executable snapshot"
+            "unable to create sealed runtime executable snapshot"
         ) from exc
-
-
-def _reopen_posix_snapshot_read_only(descriptor: int) -> int:
-    try:
-        import fcntl
-    except ImportError as exc:
-        raise ProcessExecutionError(
-            "runtime executable snapshot access-mode verification is unavailable"
-        ) from exc
-
-    source_stat = os.fstat(descriptor)
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
-    for descriptor_root in (
-        pathlib.Path("/proc/self/fd"),
-        pathlib.Path("/dev/fd"),
-    ):
-        descriptor_path = descriptor_root / str(descriptor)
-        try:
-            reopened = os.open(descriptor_path, flags)
-        except OSError:
-            continue
-        try:
-            reopened_stat = os.fstat(reopened)
-            reopened_flags = fcntl.fcntl(reopened, fcntl.F_GETFL)
-            if (
-                reopened_stat.st_dev == source_stat.st_dev
-                and reopened_stat.st_ino == source_stat.st_ino
-                and (reopened_flags & os.O_ACCMODE) == os.O_RDONLY
-            ):
-                return reopened
-        except OSError:
-            pass
-        try:
-            os.close(reopened)
-        except OSError:
-            pass
-    raise ProcessExecutionError(
-        "read-only runtime executable snapshot descriptor is unavailable"
-    )
 
 
 def _seal_posix_executable_snapshot(descriptor: int) -> None:
@@ -234,7 +189,7 @@ def _snapshot_posix_executable(
     byte_count: int,
     expected_sha256: str,
 ) -> int:
-    snapshot_descriptor, requires_sealing = _open_posix_executable_snapshot()
+    snapshot_descriptor = _open_posix_executable_snapshot()
     try:
         digest = hashlib.sha256()
         offset = 0
@@ -263,21 +218,7 @@ def _snapshot_posix_executable(
             )
 
         os.fchmod(snapshot_descriptor, 0o500)
-        if requires_sealing:
-            _seal_posix_executable_snapshot(snapshot_descriptor)
-        else:
-            read_descriptor = _reopen_posix_snapshot_read_only(
-                snapshot_descriptor
-            )
-            try:
-                os.close(snapshot_descriptor)
-            except OSError:
-                try:
-                    os.close(read_descriptor)
-                except OSError:
-                    pass
-                raise
-            snapshot_descriptor = read_descriptor
+        _seal_posix_executable_snapshot(snapshot_descriptor)
 
         os.lseek(snapshot_descriptor, 0, os.SEEK_SET)
         if (

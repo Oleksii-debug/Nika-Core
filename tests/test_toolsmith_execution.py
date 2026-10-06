@@ -430,40 +430,45 @@ def test_posix_launch_snapshot_is_write_sealed(tmp_path: pathlib.Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
-def test_posix_launch_snapshot_falls_back_without_memfd(
+def test_posix_launch_snapshot_fails_closed_without_memfd(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     executable = tmp_path / "runner"
-    executable.write_text(
-        "#!/bin/sh\nprintf 'fallback-snapshot\\n'\n",
-        encoding="utf-8",
-    )
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     executable.chmod(0o700)
     monkeypatch.setattr(execution_module.os, "memfd_create", None, raising=False)
 
     guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
-    with guard as launch_executable:
-        assert len(guard.pass_fds) == 1
-        with pytest.raises(OSError):
-            os.pwrite(guard.pass_fds[0], b"x", 0)
-        result = subprocess.run(
-            (str(executable),),
-            executable=str(launch_executable),
-            pass_fds=guard.pass_fds,
-            cwd=tmp_path,
-            env=sterile_git_environment({"PATH": os.environ.get("PATH", "")}),
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="immutable runtime executable snapshot is unavailable",
+    ):
+        with guard:
+            raise AssertionError("launch must fail without immutable snapshot")
 
-    assert result.returncode == 0
-    assert result.stdout.strip() == "fallback-snapshot"
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_launch_snapshot_fails_closed_when_memfd_creation_is_denied(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "runner"
+    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    executable.chmod(0o700)
+
+    def denied_memfd(_name: str, _flags: int) -> int:
+        raise OSError("memfd denied")
+
+    monkeypatch.setattr(execution_module.os, "memfd_create", denied_memfd)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="unable to create sealed runtime executable snapshot",
+    ):
+        with guard:
+            raise AssertionError("launch must fail when immutable snapshot is denied")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
@@ -517,49 +522,6 @@ def test_posix_execute_permission_check_stays_on_held_inode(
 
     assert replaced is True
     assert executable.stat().st_ino != original_inode
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
-def test_posix_snapshot_reopen_rejects_writable_dup_semantics(
-    tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    snapshot = tmp_path / "snapshot"
-    descriptor = os.open(
-        snapshot,
-        os.O_RDWR | os.O_CREAT | os.O_EXCL,
-        0o600,
-    )
-    duplicated: list[int] = []
-    original_open = execution_module.os.open
-
-    def duplicating_open(
-        path: object,
-        flags: int,
-        *args: object,
-        **kwargs: object,
-    ) -> int:
-        value = os.fspath(path)
-        if value.startswith("/proc/self/fd/") or value.startswith("/dev/fd/"):
-            duplicate = os.dup(descriptor)
-            duplicated.append(duplicate)
-            return duplicate
-        return original_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(execution_module.os, "open", duplicating_open)
-    try:
-        with pytest.raises(
-            execution_module.ProcessExecutionError,
-            match="read-only runtime executable snapshot descriptor is unavailable",
-        ):
-            execution_module._reopen_posix_snapshot_read_only(descriptor)
-    finally:
-        os.close(descriptor)
-
-    assert duplicated
-    for duplicate in duplicated:
-        with pytest.raises(OSError):
-            os.fstat(duplicate)
 
 
 def test_typed_runner_rejects_same_path_replacement_after_runtime_admission(
