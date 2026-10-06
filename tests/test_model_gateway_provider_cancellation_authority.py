@@ -17,6 +17,7 @@ from nika_core.model_gateway.contracts import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    ModelUsage,
     PrivacyClass,
     ProviderCapabilities,
     ProviderKind,
@@ -175,6 +176,67 @@ class _BehavioralCompleteLookupProvider:
             provider_id="trusted",
             provider_kind=ProviderKind.LOCAL,
             model=request.model or "fixture-model",
+        )
+
+
+class _BehavioralResponse(ModelResponse):
+    def __getattribute__(self, name: str) -> object:
+        if name == "request_id":
+            raise asyncio.CancelledError()
+        return super().__getattribute__(name)
+
+
+class _BehavioralUsage(ModelUsage):
+    def __getattribute__(self, name: str) -> object:
+        if name == "input_tokens":
+            raise asyncio.CancelledError()
+        return super().__getattribute__(name)
+
+
+class _BehavioralResponseProvider:
+    def __init__(self) -> None:
+        self.complete_calls = 0
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            provider_id="trusted",
+            kind=ProviderKind.LOCAL,
+            supports_private_data=True,
+        )
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.complete_calls += 1
+        return _BehavioralResponse(
+            request_id=request.request_id,
+            text="untrusted",
+            provider_id="trusted",
+            provider_kind=ProviderKind.LOCAL,
+            model=request.model or "fixture-model",
+        )
+
+
+class _BehavioralUsageProvider:
+    def __init__(self) -> None:
+        self.complete_calls = 0
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            provider_id="trusted",
+            kind=ProviderKind.LOCAL,
+            supports_private_data=True,
+        )
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        self.complete_calls += 1
+        return ModelResponse(
+            request_id=request.request_id,
+            text="untrusted",
+            provider_id="trusted",
+            provider_kind=ProviderKind.LOCAL,
+            model=request.model or "fixture-model",
+            usage=_BehavioralUsage(),
         )
 
 
@@ -458,6 +520,39 @@ def test_provider_complete_lookup_cannot_cancel_gateway_task(
     ]
 
 
+@pytest.mark.parametrize(
+    "provider_factory",
+    [_BehavioralResponseProvider, _BehavioralUsageProvider],
+)
+def test_behavioral_success_dto_cannot_inject_gateway_cancellation(
+    tmp_path: Path,
+    provider_factory: type[_BehavioralResponseProvider] | type[_BehavioralUsageProvider],
+) -> None:
+    audit = _audit(tmp_path)
+    primary = provider_factory()
+    gateway = ModelGateway(audit_log=audit)
+    gateway.register(primary)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(gateway.complete(_request(fallback=False)))
+
+    error = caught.value
+    assert error.code is ModelErrorCode.PROVIDER_ERROR
+    assert error.provider_id == "trusted"
+    assert error.retryable is False
+    assert error.failure_effect is ModelFailureEffect.UNKNOWN
+    assert primary.complete_calls == 1
+
+    events = audit.list_for(
+        entity_type="model_request",
+        entity_id="provider-cancellation-authority",
+    )
+    assert [event.event_type for event in events] == [
+        "model.requested",
+        "model.failed",
+    ]
+
+
 @pytest.mark.parametrize("outcome", ["success", "typed_error", "untyped_error"])
 def test_caller_cancellation_wins_when_provider_swallows_child_cancel(
     tmp_path: Path,
@@ -515,6 +610,7 @@ def test_real_caller_cancellation_still_propagates_and_is_audited(tmp_path: Path
         "model.requested",
         "model.cancelled",
     ]
+
 
 def _definitions(store: SQLiteStore) -> AgentDefinitionRepository:
     repository = AgentDefinitionRepository(store)
