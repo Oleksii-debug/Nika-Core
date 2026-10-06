@@ -1942,7 +1942,7 @@
     renderVoiceModelSetup(state.voice_model_setup ?? null);
     renderSpeech(state.speech ?? null);
     renderVoice(state.voice ?? null);
-    const productFactoryExecutionPlanReady = renderProductFactoryExecutionPlan(
+    renderProductFactoryExecutionPlan(
       state.product_factory_execution_plan ?? null,
     );
     const taskPageReady = renderTaskPage(state.task_page ?? null);
@@ -1966,7 +1966,7 @@
       announce(teamTaskUnavailableMessage, true);
       return false;
     }
-    if (!productFactoryExecutionPlanReady || !productReady) {
+    if (!productReady) {
       lastStateReady = false;
       return false;
     }
