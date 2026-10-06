@@ -17,7 +17,9 @@ from nika_core.training_peft_worker import (
     candidate_artifact_path,
 )
 from nika_core.training_physical_evaluation_driver import (
+    _SCALE_PROGRESSION_OPERATION_TYPE,
     _find_pilot_task,
+    _iter_task_idempotency_records,
     load_trusted_scale_progression_proof,
 )
 from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
@@ -28,6 +30,7 @@ _TIER1_STEPS = 3
 _TIER1_CANDIDATE_REF = "models/nika-physical-scale-tier1-adapter"
 _EXPERIMENT_ID = "physical-scale-progression-real-proof-v1"
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_JSON_BYTES = 1024 * 1024
 
 
@@ -133,6 +136,27 @@ def _sha256_file(path: Path) -> tuple[str, int]:
     if total <= 0:
         _fail(f"authority is empty: {path.name}")
     return digest.hexdigest(), total
+
+
+def _candidate_training_digests(
+    manifest: dict[str, object],
+    *,
+    name: str,
+) -> tuple[str, str, str]:
+    values: list[str] = []
+    for field in (
+        "previous_adapter_tensors_sha256",
+        "trained_adapter_tensors_sha256",
+        "tokenization_sha256",
+    ):
+        value = manifest.get(field)
+        if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+            _fail(f"{name} lacks canonical {field}")
+        values.append(value)
+    previous, trained, tokenization = values
+    if previous == trained:
+        _fail(f"{name} does not prove adapter tensor mutation")
+    return previous, trained, tokenization
 
 
 def _material_limits(
@@ -246,11 +270,16 @@ def _trusted_progression(
         job_id=report.job_id,
     )
     ledger = IdempotencyLedger(store)
-    claims: list[dict[str, object]] = []
-    for record in ledger.list_for_task(
-        task.task_id,
-        status=IdempotencyStatus.COMPLETED,
+    claim: dict[str, object] | None = None
+    for record in _iter_task_idempotency_records(
+        ledger,
+        task_id=task.task_id,
     ):
+        if (
+            record.status is not IdempotencyStatus.COMPLETED
+            or record.operation_type != _SCALE_PROGRESSION_OPERATION_TYPE
+        ):
+            continue
         result = record.result
         if (
             type(result) is dict
@@ -258,15 +287,17 @@ def _trusted_progression(
             == "nika-physical-scale-progression-record-v1"
             and type(result.get("proof")) is dict
         ):
-            claims.append(dict(result["proof"]))
-    if len(claims) != 1:
+            if claim is not None:
+                _fail("exactly one durable scale progression proof is required")
+            claim = dict(result["proof"])
+    if claim is None:
         _fail("exactly one durable scale progression proof is required")
     proof = load_trusted_scale_progression_proof(
         output_root,
         workspace_id=workspace_id,
-        expected_claim=claims[0],
+        expected_claim=claim,
     )
-    if proof.canonical_payload() != claims[0]:
+    if proof.canonical_payload() != claim:
         _fail("restored scale progression proof changed canonical payload")
     return proof
 
@@ -435,11 +466,20 @@ def verify(root: Path) -> None:
     ):
         _fail("tier-1 warm-start adapter changed after promotion")
     initial_manifest = candidate_adapter_manifest(initial_adapter)
-    initial_tensors_sha256 = initial_manifest.get(
-        "trained_adapter_tensors_sha256"
+    (
+        tier0_previous_tensors_sha256,
+        initial_tensors_sha256,
+        tier0_tokenization_sha256,
+    ) = _candidate_training_digests(
+        initial_manifest,
+        name="tier-0 promoted adapter",
     )
-    if type(initial_tensors_sha256) is not str:
-        _fail("tier-0 promoted adapter lacks canonical tensor identity")
+    if (
+        tier0_previous_tensors_sha256
+        != tier0.previous_adapter_tensors_sha256
+        or initial_tensors_sha256 != tier0.trained_adapter_tensors_sha256
+    ):
+        _fail("tier-0 candidate manifest does not match physical tensor evidence")
 
     tier1_root = root / "tier1-run"
     tier1 = _pilot_report(tier1_root)
@@ -508,6 +548,14 @@ def verify(root: Path) -> None:
     ):
         _fail("tier-1 candidate bytes do not match physical evidence")
     manifest = candidate_adapter_manifest(candidate)
+    (
+        tier1_previous_tensors_sha256,
+        tier1_trained_tensors_sha256,
+        tier1_tokenization_sha256,
+    ) = _candidate_training_digests(
+        manifest,
+        name="tier-1 candidate adapter",
+    )
     base_gguf_sha256, _ = _sha256_file(root / "base.gguf")
     if (
         manifest.get("schema") != "nika-peft-candidate-v3"
@@ -515,8 +563,12 @@ def verify(root: Path) -> None:
         != tier0.candidate_artifact_ref
         or manifest.get("candidate_artifact_ref") != _TIER1_CANDIDATE_REF
         or manifest.get("base_artifact_sha256") != tier0.candidate_sha256
-        or manifest.get("previous_adapter_tensors_sha256")
-        != initial_tensors_sha256
+        or tier1_previous_tensors_sha256 != initial_tensors_sha256
+        or tier1_previous_tensors_sha256
+        != tier1.previous_adapter_tensors_sha256
+        or tier1_trained_tensors_sha256
+        != tier1.trained_adapter_tensors_sha256
+        or tier1_tokenization_sha256 != tier0_tokenization_sha256
         or manifest.get("foundation_model_sha256") != base_gguf_sha256
     ):
         _fail("tier-1 candidate manifest does not bind warm-start foundation authority")
@@ -546,6 +598,11 @@ def verify(root: Path) -> None:
         "tier0_frozen_package_sha256": tier0.frozen_package_sha256,
         "tier0_candidate_sha256": tier0.candidate_sha256,
         "tier0_completed_steps": tier0.completed_steps,
+        "tier0_previous_adapter_tensors_sha256": (
+            tier0_previous_tensors_sha256
+        ),
+        "tier0_trained_adapter_tensors_sha256": initial_tensors_sha256,
+        "tokenization_sha256": tier0_tokenization_sha256,
         "tier1_frozen_package_sha256": tier1.frozen_package_sha256,
         "tier1_candidate_sha256": tier1.candidate_sha256,
         "tier1_completed_steps": tier1.completed_steps,

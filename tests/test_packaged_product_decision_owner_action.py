@@ -1,0 +1,442 @@
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from nika_core.config import AppConfig
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.product_command.product_project_adapter import ProductProjectCommandService
+from nika_core.product_decisions import ProductDecisionRepository
+from nika_core.product_factory_packaged_journey import (
+    PackagedProductCommandRouter,
+    PackagedProductJourneyError,
+    PackagedProductSelectionStore,
+    product_project_identity,
+)
+from nika_core.product_project import (
+    EvidenceRef,
+    ProductDecision,
+    ProductDecisionState,
+    ProductOption,
+    ProductProjectRepository,
+    ProductProjectSpec,
+    ResearchEvidencePackage,
+)
+from nika_core.security import ApprovalAuthority
+from nika_core.ui.bridge_models import UIResult
+from scripts import nika_windows
+
+_PROJECT_ID = "product-decision-owner-action"
+_REQUEST_RE = re.compile(r"approval-request-[A-Za-z0-9_-]+")
+
+
+def _ordinary_handler(_payload: Mapping[str, Any]) -> UIResult:
+    raise AssertionError("owner decision command must not create an ordinary task")
+
+
+def _build(
+    database: Path,
+) -> tuple[
+    SQLiteStore,
+    ProductProjectRepository,
+    ProductProjectCommandService,
+    PackagedProductCommandRouter,
+]:
+    store = SQLiteStore(database)
+    store.initialize()
+    repository = ProductProjectRepository(store)
+    authority = ApprovalAuthority()
+    service = ProductProjectCommandService(
+        repository,
+        approval_verifier=authority.verifier(),
+    )
+    service.create_project(
+        project_id=_PROJECT_ID,
+        name="Packaged owner decision",
+        spec=ProductProjectSpec(
+            goal="Resolve an owner decision without caller-forged authority",
+            desired_outcome="One exact owner action is committed durably",
+        ),
+        idempotency_key="create:packaged-owner-decision",
+    )
+    repository.record_research_handoff(
+        _PROJECT_ID,
+        ResearchEvidencePackage(
+            "research-owner-decision",
+            (
+                EvidenceRef(
+                    "evidence-owner-decision",
+                    "research://owner-decision/claim/1",
+                    "Evidence-backed option for packaged owner action",
+                ),
+            ),
+        ),
+        (
+            ProductOption(
+                "option-owner",
+                "Owner option",
+                "Canonical evidence-backed option",
+                ("research-owner-decision",),
+            ),
+        ),
+    )
+    service.record_decision(
+        _PROJECT_ID,
+        ProductDecision(
+            decision_id="decision-owner",
+            option_id="option-owner",
+            state=ProductDecisionState.PROPOSED,
+            rationale="Owner must explicitly choose",
+            decided_by_ref="user://owner",
+        ),
+        expected_row_version=0,
+        idempotency_key="decision:owner:proposed",
+    )
+    selection = PackagedProductSelectionStore(store)
+    selection.select(_PROJECT_ID)
+    router = PackagedProductCommandRouter(
+        products=service,
+        ordinary_handler=_ordinary_handler,
+        selection_store=selection,
+        decision_approval_authority=authority,
+    )
+    return store, repository, service, router
+
+
+def _approval_request_id(message: str) -> str:
+    match = _REQUEST_RE.search(message)
+    assert match is not None
+    return match.group(0)
+
+
+def test_approval_is_two_step_and_replay_does_not_mint_second_effect(
+    tmp_path: Path,
+) -> None:
+    store, repository, service, router = _build(tmp_path / "approve.db")
+    assert repository.get(_PROJECT_ID).row_version == 1
+
+    requested = router.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    request_id = _approval_request_id(requested.message)
+
+    assert requested.status == "completed"
+    assert requested.focus_id == "command-input"
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
+    assert repository.get(_PROJECT_ID).row_version == 1
+
+    confirmed = router.create(
+        {"command": f"confirm product decision approval {request_id}"}
+    )
+
+    assert confirmed.status == "completed"
+    assert confirmed.focus_id == "product-project-heading"
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "approved"
+    assert repository.get(_PROJECT_ID).row_version == 2
+    stored = ProductDecisionRepository(store).get(_PROJECT_ID, "decision-owner")
+    assert stored.decision.decided_by_ref.startswith("approval://")
+
+    replay = router.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    assert "уже схвалено" in replay.message
+    assert "approval-request-" not in replay.message
+    assert repository.get(_PROJECT_ID).row_version == 2
+    assert len(service.decision_history(_PROJECT_ID, "decision-owner")) == 2
+
+
+def test_repeated_approval_request_reuses_same_live_host_request(
+    tmp_path: Path,
+) -> None:
+    _store, repository, service, router = _build(tmp_path / "repeat-request.db")
+
+    first = router.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    second = router.create(
+        {"command": "схвали рішення ProductProject decision-owner"}
+    )
+
+    assert _approval_request_id(first.message) == _approval_request_id(second.message)
+    assert repository.get(_PROJECT_ID).row_version == 1
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
+
+
+def test_changing_active_product_project_cancels_old_approval_request(
+    tmp_path: Path,
+) -> None:
+    _store, repository, service, router = _build(tmp_path / "selection-change.db")
+    requested = router.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    request_id = _approval_request_id(requested.message)
+
+    switched = router.create(
+        {"command": "Create product application for a different owner decision"}
+    )
+    assert switched.status == "completed"
+    assert router.active_project_id != _PROJECT_ID
+
+    with pytest.raises(PackagedProductJourneyError, match="змінився"):
+        router.create(
+            {"command": f"confirm product decision approval {request_id}"}
+        )
+    with pytest.raises(PackagedProductJourneyError, match="невідомий|прострочений"):
+        router.create(
+            {"command": f"confirm product decision approval {request_id}"}
+        )
+
+    assert repository.get(_PROJECT_ID).row_version == 1
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
+
+
+def test_changed_research_evidence_between_request_and_confirm_fails_closed(
+    tmp_path: Path,
+) -> None:
+    store, repository, service, router = _build(tmp_path / "evidence-change.db")
+    requested = router.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    request_id = _approval_request_id(requested.message)
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM product_research_handoffs "
+            "WHERE project_id=? AND package_id=?",
+            (_PROJECT_ID, "research-owner-decision"),
+        ).fetchone()
+        assert row is not None
+        conn.execute(
+            "UPDATE product_research_handoffs SET payload_json=? "
+            "WHERE project_id=? AND package_id=?",
+            (
+                row["payload_json"] + " ",
+                _PROJECT_ID,
+                "research-owner-decision",
+            ),
+        )
+
+    with pytest.raises(PackagedProductJourneyError, match="змінилися після запиту"):
+        router.create(
+            {"command": f"confirm product decision approval {request_id}"}
+        )
+
+    assert repository.get(_PROJECT_ID).row_version == 1
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
+
+
+def test_reject_is_exact_id_durable_and_idempotent(tmp_path: Path) -> None:
+    _store, repository, service, router = _build(tmp_path / "reject.db")
+
+    rejected = router.create(
+        {"command": "reject product decision decision-owner"}
+    )
+    replay = router.create(
+        {"command": "відхили рішення ProductProject decision-owner"}
+    )
+
+    assert rejected.status == "completed"
+    assert replay.status == "completed"
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "rejected"
+    assert len(service.decision_history(_PROJECT_ID, "decision-owner")) == 2
+    assert repository.get(_PROJECT_ID).row_version == 2
+
+
+def test_unknown_or_forged_confirmation_cannot_create_authority(
+    tmp_path: Path,
+) -> None:
+    _store, repository, service, router = _build(tmp_path / "forged.db")
+
+    with pytest.raises(PackagedProductJourneyError, match="невідомий|прострочений"):
+        router.create(
+            {
+                "command": (
+                    "confirm product decision approval "
+                    "approval-request-caller-forged"
+                )
+            }
+        )
+
+    assert repository.get(_PROJECT_ID).row_version == 1
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
+
+
+def test_stale_project_between_request_and_confirmation_fails_closed_then_recovers(
+    tmp_path: Path,
+) -> None:
+    _store, repository, service, router = _build(tmp_path / "stale.db")
+
+    requested = router.create(
+        {"command": "approve product decision decision-owner"}
+    )
+    stale_request = _approval_request_id(requested.message)
+
+    service.update_project(
+        _PROJECT_ID,
+        expected_spec_version=1,
+        goal="Changed after approval request",
+    )
+    assert repository.get(_PROJECT_ID).row_version == 2
+
+    with pytest.raises(PackagedProductJourneyError, match="змінилися після запиту"):
+        router.create(
+            {"command": f"confirm product decision approval {stale_request}"}
+        )
+
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
+    fresh = router.create(
+        {"command": "схвали рішення ProductProject decision-owner"}
+    )
+    fresh_request = _approval_request_id(fresh.message)
+    assert fresh_request != stale_request
+
+    router.create(
+        {
+            "command": (
+                "підтвердь схвалення рішення ProductProject "
+                f"{fresh_request}"
+            )
+        }
+    )
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "approved"
+    assert repository.get(_PROJECT_ID).row_version == 3
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("approve product decision", "decision_id"),
+        ("reject product decision", "decision_id"),
+        ("confirm product decision approval", "approval request_id"),
+        (
+            "confirm product decision approval forged",
+            "approval request_id",
+        ),
+    ],
+)
+def test_owner_decision_commands_fail_closed_on_missing_or_malformed_identity(
+    tmp_path: Path,
+    command: str,
+    expected: str,
+) -> None:
+    _store, repository, service, router = _build(
+        tmp_path / f"malformed-{abs(hash(command))}.db"
+    )
+
+    with pytest.raises(PackagedProductJourneyError, match=expected):
+        router.create({"command": command})
+
+    assert repository.get(_PROJECT_ID).row_version == 1
+    assert service.decision_history(_PROJECT_ID, "decision-owner")[-1].state == "pending"
+
+
+def test_packaged_help_exposes_keyboard_two_step_owner_flow() -> None:
+    html = Path("src/nika_core/ui/web/index.html").read_text(encoding="utf-8")
+
+    assert "approve product decision &lt;decision_id&gt;" in html
+    assert "reject product decision &lt;decision_id&gt;" in html
+    assert (
+        "confirm product decision approval &lt;approval-request-id&gt;"
+        in html
+    )
+    assert "схвали рішення ProductProject &lt;decision_id&gt;" in html
+    assert "відхили рішення ProductProject &lt;decision_id&gt;" in html
+
+
+def test_real_windows_bridge_commits_owner_approval_without_creating_task(
+    tmp_path: Path,
+) -> None:
+    database = (tmp_path / "Windows owner approval.db").resolve()
+    config = AppConfig(database_path=database)
+    command = "Створи застосунок для перевірки рішення власника"
+    project_id = product_project_identity(command)
+
+    bridge, products = nika_windows.build_windows_bridge(
+        config,
+        start_startup_recovery=False,
+    )
+    created = bridge.dispatch(
+        {
+            "request_id": "owner-product-create",
+            "action_id": "task.create",
+            "payload": {"command": command},
+        }
+    )
+    assert created["status"] == "completed"
+
+    store = SQLiteStore(database)
+    store.initialize()
+    repository = ProductProjectRepository(store)
+    repository.record_research_handoff(
+        project_id,
+        ResearchEvidencePackage(
+            "research-owner-windows",
+            (
+                EvidenceRef(
+                    "evidence-owner-windows",
+                    "research://owner-windows/claim/1",
+                    "Windows packaged owner decision evidence",
+                ),
+            ),
+        ),
+        (
+            ProductOption(
+                "option-owner-windows",
+                "Windows owner option",
+                "Owner-approved Windows option",
+                ("research-owner-windows",),
+            ),
+        ),
+    )
+    products.record_decision(
+        project_id,
+        ProductDecision(
+            decision_id="decision-owner-windows",
+            option_id="option-owner-windows",
+            state=ProductDecisionState.PROPOSED,
+            rationale="Windows owner confirmation required",
+            decided_by_ref="user://owner",
+        ),
+        expected_row_version=0,
+        idempotency_key="decision:owner-windows:proposed",
+    )
+
+    requested = bridge.dispatch(
+        {
+            "request_id": "owner-approval-request",
+            "action_id": "task.create",
+            "payload": {
+                "command": "approve product decision decision-owner-windows"
+            },
+        }
+    )
+    approval_request = _approval_request_id(requested["message"])
+    assert products.decision_history(
+        project_id, "decision-owner-windows"
+    )[-1].state == "pending"
+
+    confirmed = bridge.dispatch(
+        {
+            "request_id": "owner-approval-confirm",
+            "action_id": "task.create",
+            "payload": {
+                "command": (
+                    "confirm product decision approval "
+                    f"{approval_request}"
+                )
+            },
+        }
+    )
+
+    assert confirmed["status"] == "completed"
+    assert products.decision_history(
+        project_id, "decision-owner-windows"
+    )[-1].state == "approved"
+    state = bridge.get_state()["state"]
+    assert state["product_project"]["current_decision"] is None
+    assert state["product_project"]["decision_state_counts"] == {"approved": 1}
+    assert state["tasks"] == []

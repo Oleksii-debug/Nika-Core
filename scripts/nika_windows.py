@@ -40,6 +40,7 @@ from nika_core.product_factory_packaged_journey import (
     product_project_identity,
 )
 from nika_core.product_project import ProductProjectRepository
+from nika_core.security import ApprovalAuthority
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
@@ -259,6 +260,7 @@ def build_windows_bridge(
     activity_reports = DailyActivityReportService(store)
     training_status = TrainingStatusService(CheckpointService(store))
     task_queue = TaskQueue(store)
+    audit_log = AuditLog(store)
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
@@ -290,7 +292,7 @@ def build_windows_bridge(
         queue=task_queue,
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
-        audit=AuditLog(store),
+        audit=audit_log,
         runtime=runtime,
         prepare_task_payload=prepare_task_payload,
         admit_created_task=cloud_permissions.admit_created_task,
@@ -319,7 +321,11 @@ def build_windows_bridge(
     speech: PackagedSpeechFeature = build_packaged_speech()
     if register_cleanup is not None:
         register_cleanup(speech.close)
-    products = ProductProjectCommandService(ProductProjectRepository(store))
+    decision_approval_authority = ApprovalAuthority(audit_sink=audit_log)
+    products = ProductProjectCommandService(
+        ProductProjectRepository(store),
+        approval_verifier=decision_approval_authority.verifier(),
+    )
     agent_definitions = AgentDefinitionRepository(store)
 
     def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
@@ -365,6 +371,7 @@ def build_windows_bridge(
         ),
         intelligence_mode_handler=intelligence_mode_commands.execute,
         selection_store=PackagedProductSelectionStore(store),
+        decision_approval_authority=decision_approval_authority,
     )
     agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
     command_center = ProductCommandCenter(products)

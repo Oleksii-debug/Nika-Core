@@ -142,6 +142,51 @@ class ProductProjectCommandService:
         )
         return self.inspect_project(project_id)
 
+    def prepare_owner_decision(
+        self,
+        project_id: str,
+        decision_id: str,
+        target_state: ProductDecisionState,
+    ) -> tuple[ProductDecision, int]:
+        """Snapshot one existing decision for an explicit owner transition.
+
+        The returned row version is only a concurrency token. The existing decision
+        intent and write paths remain authoritative and revalidate current project,
+        decision and sealed-evidence state before mutation.
+        """
+        if target_state not in {
+            ProductDecisionState.APPROVED,
+            ProductDecisionState.REJECTED,
+        }:
+            raise ValueError("owner decision target must be APPROVED or REJECTED")
+        before = self._repository.get(project_id)
+        stored = self._decisions.get(project_id, decision_id)
+        after = self._repository.get(project_id)
+        if (
+            before.row_version != after.row_version
+            or before.spec_version != after.spec_version
+            or before.status != after.status
+            or before.updated_at != after.updated_at
+        ):
+            raise ProductProjectPresentationConsistencyError(
+                "ProductProject changed while PF5 was preparing an owner decision; retry"
+            )
+        current = stored.decision
+        if current.state not in {ProductDecisionState.PROPOSED, target_state}:
+            raise ValueError("product decision is already final with a different outcome")
+        return (
+            replace(
+                current,
+                state=target_state,
+                decided_by_ref=(
+                    "user://packaged-owner"
+                    if target_state is ProductDecisionState.REJECTED
+                    else current.decided_by_ref
+                ),
+            ),
+            after.row_version,
+        )
+
     def decision_approval_intent(
         self,
         project_id: str,
