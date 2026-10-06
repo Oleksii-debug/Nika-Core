@@ -18,6 +18,7 @@ from nika_core.product_command.contracts import (
     ProductStatusKind,
     ProductUserDecision,
 )
+from nika_core.product_command.operator_projection import project_operator_status
 from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
     ProductProjectDecisionNotFoundError,
@@ -1228,6 +1229,25 @@ def _safe_product_project_state(
         "decision_count": decision_summary.total_count,
         "decision_state_counts": dict(sorted(decision_counts.items())),
         "current_decision": _safe_product_decision(detail.summary.current_decision),
+        "operator": _safe_product_operator_state(detail),
+    }
+
+
+def _safe_product_operator_state(
+    detail: ProductProjectDetail,
+) -> dict[str, str]:
+    projection = project_operator_status(detail)
+    return {
+        "project": projection.project,
+        "work": projection.work,
+        "owner": projection.owner,
+        "state": projection.state,
+        "blocker": projection.blocker,
+        "candidate": projection.candidate,
+        "test": projection.test,
+        "qa": projection.qa,
+        "integration": projection.integration,
+        "next": projection.next,
     }
 
 

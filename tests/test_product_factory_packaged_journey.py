@@ -130,6 +130,18 @@ def test_packaged_state_is_bounded_product_command_center_projection(tmp_path: P
         "decision_count": 0,
         "decision_state_counts": {},
         "current_decision": None,
+        "operator": {
+            "project": project_id,
+            "work": command,
+            "owner": "unassigned",
+            "state": "active",
+            "blocker": "none",
+            "candidate": "unknown",
+            "test": "unknown",
+            "qa": "unknown",
+            "integration": "not_started",
+            "next": "inspect_project",
+        },
     }
     assert set(product_state).isdisjoint(
         {
@@ -141,6 +153,18 @@ def test_packaged_state_is_bounded_product_command_center_projection(tmp_path: P
             "protected_store_handle",
         }
     )
+    assert set(product_state["operator"]) == {
+        "project",
+        "work",
+        "owner",
+        "state",
+        "blocker",
+        "candidate",
+        "test",
+        "qa",
+        "integration",
+        "next",
+    }
 
 
 def test_ordinary_agent_command_does_not_select_product_state(tmp_path: Path) -> None:
