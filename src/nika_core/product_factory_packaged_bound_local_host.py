@@ -15,11 +15,11 @@ from nika_core.product_factory_local_repository_binding import (
 from nika_core.product_factory_multi_repository import MultiRepositoryExecutionState
 from nika_core.product_factory_orchestration import ProductRepositoryGraph
 from nika_core.product_factory_packaged_local_startup import (
-    PackagedLocalOllamaAuthority,
+    _PackagedLocalOllamaAuthority,
     PackagedLocalProductFactoryStartup,
     PackagedLocalProductFactoryStartupError,
-    build_repository_bound_packaged_local_product_factory_program,
-    resolve_packaged_local_ollama_authority,
+    _build_repository_bound_packaged_local_product_factory_program_with_authority,
+    _resolve_packaged_local_ollama_authority,
 )
 from nika_core.product_factory_packaged_preparation import (
     PackagedProductFactoryExecutionPlan,
@@ -139,7 +139,7 @@ class PackagedBoundLocalProductFactoryHost:
         settings: V01ModelSettings,
         startup: PackagedLocalProductFactoryStartup,
         bindings: ProductFactoryLocalRepositoryBindings | None = None,
-        model_authority: PackagedLocalOllamaAuthority | None = None,
+        model_authority: _PackagedLocalOllamaAuthority | None = None,
     ) -> None:
         if type(store) is not SQLiteStore:
             raise TypeError("store must be SQLiteStore")
@@ -148,8 +148,8 @@ class PackagedBoundLocalProductFactoryHost:
         if type(startup) is not PackagedLocalProductFactoryStartup:
             raise TypeError("startup carrier is invalid")
         if model_authority is None:
-            model_authority = resolve_packaged_local_ollama_authority(store, settings)
-        elif type(model_authority) is not PackagedLocalOllamaAuthority:
+            model_authority = _resolve_packaged_local_ollama_authority(store, settings)
+        elif type(model_authority) is not _PackagedLocalOllamaAuthority:
             raise TypeError("model_authority carrier is invalid")
         self.store = store
         self._settings = settings
@@ -290,7 +290,7 @@ class PackagedBoundLocalProductFactoryHost:
 
     def _require_model_authority_current(self) -> None:
         try:
-            current = resolve_packaged_local_ollama_authority(
+            current = _resolve_packaged_local_ollama_authority(
                 self.store,
                 self._settings,
             )
@@ -436,7 +436,7 @@ class PackagedBoundLocalProductFactoryHost:
             for repository_id, snapshot in snapshots.items()
         }
         self._require_model_authority_current()
-        program = build_repository_bound_packaged_local_product_factory_program(
+        program = _build_repository_bound_packaged_local_product_factory_program_with_authority(
             self.store,
             settings=self._settings,
             startup=self._startup,
