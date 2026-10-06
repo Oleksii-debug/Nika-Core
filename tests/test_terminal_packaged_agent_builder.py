@@ -13,7 +13,13 @@ from nika_core.packaged_agent_builder import (
     PackagedAgentBuilderStateProjector,
 )
 from nika_core.product_command.contracts import CommandRouteKind
+from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
+from nika_core.product_factory_packaged_journey import (
+    PackagedProductCommandRouter,
+    PackagedProductJourneyError,
+)
+from nika_core.product_project import ProductProjectRepository
 from scripts import nika_windows
 
 
@@ -113,6 +119,60 @@ def test_latest_definition_projection_is_bounded(tmp_path: Path, limit: object) 
 
     with pytest.raises(ValueError, match="exact integer from 1 to 100"):
         repository.list_latest(limit=limit)  # type: ignore[arg-type]
+
+
+
+
+class _HostileString(str):
+    def split(self, *args: object, **kwargs: object) -> list[str]:
+        del args, kwargs
+        raise AssertionError("untrusted string method must not run")
+
+
+class _OrdinaryStringSubclass(str):
+    pass
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        _HostileString("Create an agent for accessible report triage"),
+        _OrdinaryStringSubclass("Create an agent for accessible report triage"),
+    ),
+)
+def test_direct_builder_rejects_str_subclasses_before_methods_or_writes(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    handler, _repository, store = _handler(tmp_path / "hostile.db")
+
+    with pytest.raises(TypeError, match="має бути текстом"):
+        handler({"command": command})
+
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM agent_definitions").fetchone()[0] == 0
+
+
+def test_router_without_builder_handler_fails_closed_before_ordinary_task(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "no-handler.db")
+    store.initialize()
+
+    def ordinary_handler(_payload: object):
+        raise AssertionError("Builder intent must not become an ordinary task")
+
+    router = PackagedProductCommandRouter(
+        products=ProductProjectCommandService(ProductProjectRepository(store)),
+        ordinary_handler=ordinary_handler,
+    )
+
+    with pytest.raises(PackagedProductJourneyError, match="Agent Builder"):
+        router.create({"command": "Create an agent for accessible report triage"})
+
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM product_projects").fetchone()[0] == 0
 
 
 def test_current_windows_bridge_routes_builder_without_creating_task_or_project(
