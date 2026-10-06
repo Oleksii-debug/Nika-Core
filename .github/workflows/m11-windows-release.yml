@@ -42,6 +42,7 @@ on:
       - "tests/test_speech_streaming.py"
       - "tests/test_packaged_voice_entrypoint.py"
       - "tests/test_packaged_voice_model_setup.py"
+      - "tests/test_packaged_startup_cleanup.py"
       - "tests/test_desktop_voice.py"
       - "tests/test_microphone_capture.py"
       - "tests/test_microphone_capture_timeout_truth.py"
@@ -122,6 +123,7 @@ on:
       - "tests/test_speech_streaming.py"
       - "tests/test_packaged_voice_entrypoint.py"
       - "tests/test_packaged_voice_model_setup.py"
+      - "tests/test_packaged_startup_cleanup.py"
       - "tests/test_desktop_voice.py"
       - "tests/test_microphone_capture.py"
       - "tests/test_microphone_capture_timeout_truth.py"
@@ -227,6 +229,7 @@ jobs:
           tests/test_speech_streaming.py
           tests/test_packaged_voice_entrypoint.py
           tests/test_packaged_voice_model_setup.py
+          tests/test_packaged_startup_cleanup.py
           tests/test_desktop_voice.py
           tests/test_microphone_capture.py
           tests/test_microphone_capture_timeout_truth.py
