@@ -20,7 +20,7 @@ on:
       - "src/nika_core/config.py"
       - "src/nika_core/kernel/default_actions.py"
       - "src/nika_core/product_factory_packaged_local_settings.py"
-      - "src/nika_core/product_factory_packaged_local_startup.py"
+      - "src/nika_core/product_factory_packaged_local_startup.py"\n      - "src/nika_core/product_factory_packaged_bound_local_host.py"
       - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/reliability/backup.py"
       - "src/nika_core/reliability/recovery_lease.py"
@@ -53,7 +53,7 @@ on:
       - "tests/test_packaged_product_decision_presentation.py"
       - "tests/test_packaged_product_status_presentation.py"
       - "tests/test_product_factory_packaged_journey.py"
-      - "tests/test_product_factory_packaged_local_startup.py"
+      - "tests/test_product_factory_packaged_local_startup.py"\n      - "tests/test_product_factory_packaged_bound_local_host.py"
       - "tests/test_product_factory_local_repository_binding.py"
       - "tests/test_product_factory_local_repository_operator.py"
       - "tests/test_product_factory_local_repository_operator_ui.py"
@@ -126,7 +126,7 @@ on:
       - "src/nika_core/config.py"
       - "src/nika_core/kernel/default_actions.py"
       - "src/nika_core/product_factory_packaged_local_settings.py"
-      - "src/nika_core/product_factory_packaged_local_startup.py"
+      - "src/nika_core/product_factory_packaged_local_startup.py"\n      - "src/nika_core/product_factory_packaged_bound_local_host.py"
       - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/reliability/backup.py"
       - "src/nika_core/reliability/recovery_lease.py"
@@ -159,7 +159,7 @@ on:
       - "tests/test_packaged_product_decision_presentation.py"
       - "tests/test_packaged_product_status_presentation.py"
       - "tests/test_product_factory_packaged_journey.py"
-      - "tests/test_product_factory_packaged_local_startup.py"
+      - "tests/test_product_factory_packaged_local_startup.py"\n      - "tests/test_product_factory_packaged_bound_local_host.py"
       - "tests/test_product_factory_local_repository_binding.py"
       - "tests/test_product_factory_local_repository_operator.py"
       - "tests/test_product_factory_local_repository_operator_ui.py"
@@ -283,7 +283,7 @@ jobs:
           tests/test_packaged_product_decision_presentation.py
           tests/test_packaged_product_status_presentation.py
           tests/test_product_factory_packaged_journey.py
-          tests/test_product_factory_packaged_local_startup.py
+          tests/test_product_factory_packaged_local_startup.py\n          tests/test_product_factory_packaged_bound_local_host.py
           tests/test_product_factory_local_repository_binding.py
           tests/test_product_factory_local_repository_operator.py
           tests/test_product_factory_local_repository_operator_ui.py
