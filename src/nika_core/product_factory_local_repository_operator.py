@@ -218,14 +218,14 @@ class PackagedLocalRepositoryOperator:
                     "новий шлях; поточна CAS-версія збережена без розкриття старого шляху."
                 )
             self._bindings.validate_plan(plan)
-            for repository in plan.graph.repositories:
-                if self._bindings.current_binding_version(
-                    plan.project_id,
-                    repository.repository_id,
-                ) != projected_versions[repository.repository_id]:
-                    raise ProductFactoryLocalRepositoryBindingError(
-                        "local repository binding changed during snapshot projection"
-                    )
+            current_versions = self._bindings.current_binding_versions(
+                plan.project_id,
+                tuple(repository.repository_id for repository in plan.graph.repositories),
+            )
+            if dict(current_versions) != projected_versions:
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "local repository binding changed during snapshot projection"
+                )
             return {
                 "status": "ready",
                 "project_id": plan.project_id,

@@ -446,6 +446,42 @@ class ProductFactoryLocalRepositoryBindings:
             return None
         return _stored_positive_int(row["binding_version"], "binding_version")
 
+    def current_binding_versions(
+        self,
+        project_id: str,
+        repository_ids: tuple[str, ...],
+    ) -> MappingProxyType[str, int | None]:
+        """Snapshot multiple persisted CAS versions in one SQLite read statement."""
+
+        project_id = _canonical_text(project_id, "project_id")
+        if type(repository_ids) is not tuple:
+            raise TypeError("repository_ids must be a tuple")
+        canonical_ids = tuple(
+            _canonical_text(repository_id, "repository_id")
+            for repository_id in repository_ids
+        )
+        if len(canonical_ids) != len(set(canonical_ids)):
+            raise ValueError("repository_ids must be unique")
+        requested = set(canonical_ids)
+        versions: dict[str, int | None] = {
+            repository_id: None for repository_id in canonical_ids
+        }
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT repository_id,binding_version "
+                "FROM product_factory_local_repository_bindings "
+                "WHERE project_id=?",
+                (project_id,),
+            ).fetchall()
+        for row in rows:
+            repository_id = _stored_text(row["repository_id"], "repository_id")
+            if repository_id in requested:
+                versions[repository_id] = _stored_positive_int(
+                    row["binding_version"],
+                    "binding_version",
+                )
+        return MappingProxyType(versions)
+
     def require(
         self,
         project_id: str,

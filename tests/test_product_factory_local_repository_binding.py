@@ -159,6 +159,38 @@ def test_binding_survives_restart_and_resolves_exact_plan(
     assert resolved == {repository.repository_id: root.resolve(strict=True)}
 
 
+def test_current_binding_versions_snapshots_bound_and_unbound_repositories(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    first_repository = _repository_ref()
+    second_repository = _repository_ref(
+        repository_id="repo-2",
+        locator="Oleksii-debug/example-two",
+    )
+    project = _create_project_with_repositories(
+        store,
+        (first_repository, second_repository),
+    )
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=first_repository,
+        root=_root(tmp_path, "first repository"),
+        expected_binding_version=None,
+    )
+
+    versions = bindings.current_binding_versions(
+        project.project_id,
+        (first_repository.repository_id, second_repository.repository_id),
+    )
+
+    assert dict(versions) == {
+        first_repository.repository_id: first.binding_version,
+        second_repository.repository_id: None,
+    }
+
+
 def test_binding_update_requires_exact_version(
     tmp_path: pathlib.Path,
 ) -> None:
