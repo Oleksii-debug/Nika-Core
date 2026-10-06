@@ -168,11 +168,7 @@ def _read_pf11_evidence(path: Path) -> dict[str, object]:
 
     descriptor = -1
     try:
-        flags = os.O_RDONLY
-        flags |= getattr(os, "O_BINARY", 0)
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(path, flags)
+        descriptor = _open_readonly_nofollow_snapshot(path)
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
@@ -228,8 +224,8 @@ def _read_pf11_evidence(path: Path) -> dict[str, object]:
     return payload
 
 
-def _open_canonical_installer_source(path: Path) -> int:
-    """Open installer source bytes without following a mutable Windows reparse point."""
+def _open_readonly_nofollow_snapshot(path: Path) -> int:
+    """Open one authority file while denying Windows write/delete sharing and links."""
 
     if os.name == "nt":
         try:
@@ -303,7 +299,7 @@ def _stage_canonical_installer(project_root: Path, bundle_dir: Path) -> Path:
     descriptor = -1
     temporary: Path | None = None
     try:
-        descriptor = _open_canonical_installer_source(source)
+        descriptor = _open_readonly_nofollow_snapshot(source)
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
