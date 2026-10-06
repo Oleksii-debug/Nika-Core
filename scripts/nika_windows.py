@@ -33,6 +33,12 @@ from nika_core.packaged_agent_builder import (
 from nika_core.packaged_intelligence_mode import PackagedIntelligenceModeCommandAdapter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
+from nika_core.product_factory_local_repository_binding import (
+    ProductFactoryLocalRepositoryBindings,
+)
+from nika_core.product_factory_local_repository_operator import (
+    PackagedLocalRepositoryOperator,
+)
 from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
 from nika_core.product_factory_packaged_execution import (
     PackagedProductFactoryExecutionController,
@@ -578,6 +584,14 @@ def build_windows_bridge(
         product_repository,
         approval_verifier=decision_approval_authority.verifier(),
     )
+    product_factory_local_repository_operator = (
+        PackagedLocalRepositoryOperator(
+            bindings=ProductFactoryLocalRepositoryBindings(store),
+            resolve_plan=product_factory_execution_plan_files.resolve,
+        )
+        if product_factory_execution_plan_files is not None
+        else None
+    )
     product_factory_execution_handler = None
     if product_factory_execution_host is not None:
         execution_plan_resolver = product_factory_execution_plan_resolver
@@ -679,6 +693,75 @@ def build_windows_bridge(
         store=store,
     )
 
+    def execution_plan_state() -> dict[str, object] | None:
+        if product_factory_execution_plan_files is None:
+            return None
+        snapshot = product_factory_execution_plan_files.snapshot()
+        active_project_id = product_router.active_project_id
+        if active_project_id is None:
+            return {
+                "status": "missing",
+                "loaded": False,
+                "project_id": None,
+                "message": (
+                    "Спочатку створіть або відкрийте поточний ProductProject, "
+                    "а потім завантажте його JSON-план."
+                ),
+            }
+        if (
+            snapshot.get("loaded") is True
+            and snapshot.get("project_id") != active_project_id
+        ):
+            return {
+                "status": "missing",
+                "loaded": False,
+                "project_id": None,
+                "message": (
+                    "Для поточного ProductProject JSON-план виконання не завантажено. "
+                    "Виберіть його план перед роботою з репозиторіями."
+                ),
+            }
+        return snapshot
+
+    def local_repository_binding_state() -> dict[str, object]:
+        operator = product_factory_local_repository_operator
+        if operator is None:
+            return {
+                "status": "unavailable",
+                "project_id": None,
+                "repositories": [],
+                "message": (
+                    "Локальні прив’язки репозиторіїв недоступні "
+                    "в поточній конфігурації виконання."
+                ),
+            }
+        assert product_factory_execution_plan_files is not None
+        active_project_id = product_router.active_project_id
+        plan_snapshot = product_factory_execution_plan_files.snapshot()
+        if active_project_id is None:
+            return {
+                "status": "missing_plan",
+                "project_id": None,
+                "repositories": [],
+                "message": (
+                    "Спочатку виберіть поточний ProductProject, а потім "
+                    "завантажте його JSON-план виконання."
+                ),
+            }
+        if plan_snapshot.get("loaded") is not True:
+            return operator.snapshot(None)
+        if plan_snapshot.get("project_id") != active_project_id:
+            return {
+                "status": "invalid",
+                "project_id": active_project_id,
+                "repositories": [],
+                "message": (
+                    "Завантажений JSON-план належить іншому ProductProject. "
+                    "Завантажте план для поточного ProductProject."
+                ),
+            }
+        return operator.snapshot(active_project_id)
+
     def source_state() -> Mapping[str, Any]:
         state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
         state["v01_model_settings"] = model_settings.snapshot()
@@ -691,11 +774,8 @@ def build_windows_bridge(
         state["speech"] = speech.snapshot()
         state["voice"] = voice.snapshot()
         state["voice_model_setup"] = voice_model_setup.snapshot()
-        state["product_factory_execution_plan"] = (
-            product_factory_execution_plan_files.snapshot()
-            if product_factory_execution_plan_files is not None
-            else None
-        )
+        state["product_factory_execution_plan"] = execution_plan_state()
+        state["product_factory_local_repositories"] = local_repository_binding_state()
         return agent_builder_state.decorate(state)
 
     def refresh_local_product_factory_settings(
@@ -738,6 +818,61 @@ def build_windows_bridge(
             focus_id="model-route-kind",
         )
 
+    def _repository_mutation_project_guard(
+        payload: Mapping[str, Any],
+    ) -> UIResult | None:
+        active_project_id = product_router.active_project_id
+        if (
+            active_project_id is None
+            or payload.get("project_id") != active_project_id
+        ):
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=(
+                    "Поточний ProductProject змінився. Перечитайте стан, "
+                    "завантажте його JSON-план і повторіть дію."
+                ),
+                focus_id="product-factory-local-repository-select",
+            )
+        return None
+
+    def bind_product_factory_local_repository(
+        payload: Mapping[str, Any],
+    ) -> UIResult:
+        if product_factory_local_repository_operator is None:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=(
+                    "Локальна прив’язка репозиторію недоступна "
+                    "в поточній конфігурації виконання."
+                ),
+                focus_id="product-factory-local-repository-select",
+            )
+        guard = _repository_mutation_project_guard(payload)
+        if guard is not None:
+            return guard
+        return product_factory_local_repository_operator.bind(payload)
+
+    def unbind_product_factory_local_repository(
+        payload: Mapping[str, Any],
+    ) -> UIResult:
+        if product_factory_local_repository_operator is None:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=(
+                    "Скасування локальної прив’язки недоступне "
+                    "в поточній конфігурації виконання."
+                ),
+                focus_id="product-factory-local-repository-select",
+            )
+        guard = _repository_mutation_project_guard(payload)
+        if guard is not None:
+            return guard
+        return product_factory_local_repository_operator.unbind(payload)
+
     def load_product_factory_execution_plan(payload: Mapping[str, Any]) -> UIResult:
         if product_factory_execution_plan_files is None:
             return UIResult(
@@ -749,7 +884,21 @@ def build_windows_bridge(
                 ),
                 focus_id="product-factory-execution-plan-path",
             )
-        return product_factory_execution_plan_files.load(payload)
+        active_project_id = product_router.active_project_id
+        if active_project_id is None:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=(
+                    "Спочатку створіть або відкрийте поточний ProductProject, "
+                    "а потім завантажте його JSON-план."
+                ),
+                focus_id="product-factory-execution-plan-path",
+            )
+        return product_factory_execution_plan_files.load(
+            payload,
+            expected_project_id=active_project_id,
+        )
 
     bridge = UIActionBridge(
         actions,
@@ -766,6 +915,12 @@ def build_windows_bridge(
             "voice.model.import": voice_model_setup.start,
             "voice.model.cancel": voice_model_setup.cancel,
             "product.factory.execution_plan.load": load_product_factory_execution_plan,
+            "product.factory.local_repository.bind": (
+                bind_product_factory_local_repository
+            ),
+            "product.factory.local_repository.unbind": (
+                unbind_product_factory_local_repository
+            ),
             "settings.product_factory_local.configure": (
                 local_product_factory_settings.configure
             ),
