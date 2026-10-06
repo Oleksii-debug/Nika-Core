@@ -55,6 +55,33 @@ def _payload(tmp_path: Path) -> dict[str, object]:
     }
 
 
+def _payload_v2(tmp_path: Path) -> dict[str, object]:
+    payload = _payload(tmp_path)
+    payload["schema_version"] = 2
+    payload["scale_plan"] = {
+        "plan_id": "physical-scale",
+        "tiers": [
+            {
+                "tier_id": "pilot",
+                "max_training_records": 10,
+                "max_training_bytes": 4096,
+                "max_validation_records": 10,
+                "max_validation_bytes": 4096,
+                "max_steps": 2,
+            },
+            {
+                "tier_id": "small",
+                "max_training_records": 100,
+                "max_training_bytes": 65536,
+                "max_validation_records": 20,
+                "max_validation_bytes": 8192,
+                "max_steps": 8,
+            },
+        ],
+    }
+    return payload
+
+
 def _write_minimal_pe(path: Path) -> None:
     payload = bytearray(132)
     payload[:2] = b"MZ"
@@ -124,6 +151,110 @@ def test_config_parses_exact_runtime_and_resource_authority(tmp_path: Path) -> N
     assert config.resource_budget.max_memory_percent == 90.0
     assert config.trainer_parameters.lora_target_modules == ("q_proj", "v_proj")
     assert config.output_root == tmp_path / "pilot-output"
+
+
+def test_config_v1_preserves_legacy_implicit_scale_plan(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    assert config.scale_plan is None
+
+
+def test_config_v2_accepts_canonical_multi_tier_scale_plan(tmp_path: Path) -> None:
+    payload = _payload_v2(tmp_path)
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+    assert config.scale_plan is not None
+    assert config.scale_plan.plan_id == "physical-scale"
+    assert tuple(tier.tier_id for tier in config.scale_plan.tiers) == (
+        "pilot",
+        "small",
+    )
+    assert tuple(tier.max_steps for tier in config.scale_plan.tiers) == (2, 8)
+
+
+def test_config_v2_rejects_non_monotonic_scale_plan(tmp_path: Path) -> None:
+    payload = _payload_v2(tmp_path)
+    plan = payload["scale_plan"]
+    assert isinstance(plan, dict)
+    tiers = plan["tiers"]
+    assert isinstance(tiers, list)
+    second = tiers[1]
+    assert isinstance(second, dict)
+    second["max_training_records"] = 1
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="scale_plan is invalid"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_v2_requires_exact_scale_plan_fields(tmp_path: Path) -> None:
+    payload = _payload_v2(tmp_path)
+    plan = payload["scale_plan"]
+    assert isinstance(plan, dict)
+    plan["unexpected"] = True
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="scale_plan fields"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize("schema_version", (True, 1.0, "1"))
+def test_config_rejects_non_integer_schema_version(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
+    payload = _payload(tmp_path)
+    payload["schema_version"] = schema_version
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="unsupported"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_v2_requires_scale_plan(tmp_path: Path) -> None:
+    payload = _payload_v2(tmp_path)
+    del payload["scale_plan"]
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="fields are invalid"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_configured_multi_tier_plan_binds_frozen_evaluation_set(tmp_path: Path) -> None:
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v2(tmp_path)))
+
+    plan = driver._scale_plan_for_physical_pilot(
+        config,
+        evaluation_set_sha256="e" * 64,
+        training_records=3,
+        training_bytes=1024,
+        validation_records=2,
+        validation_bytes=512,
+    )
+
+    assert plan.evaluation_set_sha256 == "e" * 64
+    assert plan.plan_id == "physical-scale"
+    assert tuple(tier.tier_id for tier in plan.tiers) == ("pilot", "small")
+    assert plan.tiers[0].max_steps == 2
+    assert plan.tiers[1].max_steps == 8
+
+
+def test_legacy_scale_plan_uses_observed_pilot_bounds(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    plan = driver._scale_plan_for_physical_pilot(
+        config,
+        evaluation_set_sha256="e" * 64,
+        training_records=3,
+        training_bytes=1024,
+        validation_records=2,
+        validation_bytes=512,
+    )
+
+    assert plan.plan_id == "physical-pilot"
+    assert len(plan.tiers) == 1
+    assert plan.tiers[0].tier_id == "pilot"
+    assert plan.tiers[0].max_training_records == 3
+    assert plan.tiers[0].max_training_bytes == 1024
+    assert plan.tiers[0].max_validation_records == 2
+    assert plan.tiers[0].max_validation_bytes == 512
+    assert plan.tiers[0].max_steps == 2
 
 
 def test_config_rejects_unknown_top_level_field(tmp_path: Path) -> None:
