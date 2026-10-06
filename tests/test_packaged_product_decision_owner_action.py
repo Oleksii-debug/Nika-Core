@@ -382,10 +382,19 @@ def test_stale_project_between_request_and_confirmation_fails_closed_then_recove
     [
         ("approve product decision", "decision_id"),
         ("reject product decision", "decision_id"),
+        ("show product decision", "decision_id"),
         ("confirm product decision approval", "approval request_id"),
         (
             "confirm product decision approval forged",
             "approval request_id",
+        ),
+        (
+            "list pending product decisions page 0",
+            "1..1000000",
+        ),
+        (
+            "list pending product decisions page many",
+            "додатним цілим",
         ),
     ],
 )
