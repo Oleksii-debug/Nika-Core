@@ -877,5 +877,5 @@ def test_packaged_local_startup_js_preserves_revision_dirty_and_fail_closed_stat
         "payload.config_json = raw || null;",
         revision_payload,
     )
-    dispatch = javascript.index("window.pywebview.api.dispatch", config_payload)
+    dispatch = javascript.index("globalThis.pywebview.api.dispatch", config_payload)
     assert configure_payload < revision_payload < config_payload < dispatch

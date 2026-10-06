@@ -146,7 +146,10 @@ def test_packaged_bridge_reuses_integrated_model_settings_and_freezes_task_choic
     assert "model_settings = V01ModelSettings(store)" in script
     assert "source_bound = source_settings.prepare_task_payload(payload)" in script
     assert 'if model_snapshot.get("status") == "missing":' not in script
-    assert "model_snapshot = model_settings.snapshot()" not in script
+    prepare_start = script.index("    def prepare_task_payload(")
+    prepare_end = script.index("\n    runtime =", prepare_start)
+    prepare_body = script[prepare_start:prepare_end]
+    assert "model_settings.snapshot()" not in prepare_body
     assert "return model_settings.prepare_task_payload(source_bound)" in script
     assert "except ModelSetupError as exc:" in script
     assert 'focus_id="model-route-kind"' in script
