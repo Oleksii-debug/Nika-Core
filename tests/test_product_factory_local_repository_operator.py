@@ -160,6 +160,51 @@ def test_explicit_bind_and_version_fenced_unbind_round_trip(
     assert operator.snapshot(project.project_id)["repositories"][0]["bound"] is False
 
 
+def test_binding_projection_survives_restart_without_exposing_root(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    root = _root(tmp_path)
+    operator = _operator(store, plan)
+
+    result = operator.bind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "root_path": str(root),
+            "expected_binding_version": None,
+        }
+    )
+    assert result.status == "completed"
+
+    reopened = SQLiteStore(store.path)
+    reopened.initialize()
+    restarted_operator = _operator(reopened, plan)
+    snapshot = restarted_operator.snapshot(project.project_id)
+
+    assert snapshot == {
+        "status": "ready",
+        "project_id": project.project_id,
+        "repositories": [
+            {
+                "repository_id": repository.repository_id,
+                "provider": repository.provider,
+                "locator": repository.locator,
+                "bound": True,
+                "binding_version": 1,
+            }
+        ],
+        "message": (
+            "Виберіть репозиторій з поточного плану та явно вкажіть "
+            "його локальний Git-корінь."
+        ),
+    }
+    assert str(root) not in repr(snapshot)
+
+
 @pytest.mark.parametrize(
     "payload",
     [
