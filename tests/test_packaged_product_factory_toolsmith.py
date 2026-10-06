@@ -528,6 +528,73 @@ def test_gap_plan_rejects_noncanonical_or_unbounded_authority(
         replace(plan, **kwargs)
 
 
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("expected_spec_version", True, "positive integer"),
+        ("expected_row_version", False, "non-negative integer"),
+        ("capability_id", "unsafe\ncapability", "without control characters"),
+        ("attempted_methods", ["registry"], "must be a tuple"),
+    ],
+)
+def test_begin_gap_revalidates_tampered_frozen_plan_before_effect(
+    tmp_path: Path,
+    field: str,
+    value,
+    message: str,
+) -> None:
+    _store, _repository, preparation, _prepared, _request, plan = _fixture(tmp_path)
+    bridge = RecordingBridge()
+    object.__setattr__(plan, field, value)
+
+    with pytest.raises(PackagedProductFactoryToolsmithError, match=message):
+        _service(preparation, bridge).begin_gap(plan)
+
+    assert bridge.begin_calls == []
+
+
+def test_resume_revalidates_tampered_frozen_plan_before_effect(tmp_path: Path) -> None:
+    _store, _repository, preparation, _prepared, _request, plan = _fixture(tmp_path)
+    bridge = RecordingBridge()
+    object.__setattr__(plan, "expected_spec_version", True)
+
+    with pytest.raises(PackagedProductFactoryToolsmithError, match="positive integer"):
+        _service(preparation, bridge).resume_registered_gap(plan)
+
+    assert bridge.resume_calls == []
+
+
+def test_effect_uses_detached_plan_snapshot_when_original_is_mutated(
+    tmp_path: Path,
+) -> None:
+    _store, _repository, preparation, _prepared, _request, plan = _fixture(tmp_path)
+    bridge = RecordingBridge()
+
+    class MutatingPreparation:
+        def restore(self, project_id: str):
+            restored = preparation.restore(project_id)
+            object.__setattr__(plan, "capability_id", "mutated-after-entry")
+            object.__setattr__(plan, "attempted_methods", ("mutated-after-entry",))
+            return restored
+
+        def require_repair_request(self, project_id: str, component_id: str):
+            return preparation.require_repair_request(project_id, component_id)
+
+    service = PackagedProductFactoryToolsmithService(
+        preparation=cast(
+            PackagedProductFactoryPreparationService,
+            MutatingPreparation(),
+        ),
+        bridge=cast(ProductFactoryToolsmithBridge, bridge),
+    )
+
+    service.begin_gap(plan)
+
+    assert len(bridge.begin_calls) == 1
+    assert bridge.begin_calls[0][2] == "toml-editor"
+    assert bridge.begin_calls[0][4] == ("canonical-registry-search",)
+
 def test_bridge_exact_work_guard_blocks_before_resume_effect(tmp_path: Path) -> None:
     store, _repository, _preparation, prepared, request, _plan = _fixture(tmp_path)
     escalation = RecordingEscalation()
