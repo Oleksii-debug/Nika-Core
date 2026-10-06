@@ -9,7 +9,12 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
-from nika_core.product_factory_build_execution import BuildExecutionState
+from nika_core.product_factory_build_execution import (
+    BuildExecutionDispatch,
+    BuildExecutionPortError,
+    BuildExecutionState,
+    ExecutionGrant,
+)
 from nika_core.product_factory_coordinator import (
     ProductFactoryCoordinator,
     ReviewDecision,
@@ -286,6 +291,54 @@ def _admit(
     )
 
 
+def _dispatch_for(
+    runtime: PackagedBuildAuthorityRuntime,
+    spec,
+) -> BuildExecutionDispatch:
+    authority = runtime.trusted_execution.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+    )
+    command = next(
+        command
+        for command in authority.commands
+        if command.command_id == spec.scope.command_id
+    )
+    grant = ExecutionGrant(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+        workspace_relpath=spec.scope.workspace_relpath,
+        allowed_node_ids=spec.scope.requested_node_ids,
+        network_scopes=spec.scope.network_scopes,
+        credential_refs=spec.scope.credential_refs,
+        command_id=command.command_id,
+        argv=command.argv,
+        authority_evidence_refs=authority.evidence_refs,
+    )
+    return BuildExecutionDispatch(
+        dispatch_id=f"dispatch:{PROJECT_ID}:{spec.request.work_id}:1",
+        project_id=PROJECT_ID,
+        work_id=spec.request.work_id,
+        node_id=NODE_ID,
+        platform=_platform(),
+        source_sha=spec.source_sha,
+        grant=grant,
+        attempt=1,
+    )
+
+
+def _mark_effect_started(
+    store: SQLiteStore,
+    runtime: PackagedBuildAuthorityRuntime,
+    dispatch: BuildExecutionDispatch,
+) -> None:
+    with store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        runtime.trusted_execution.mark_effect_started_with_connection(conn, dispatch)
+
+
 def test_packaged_authority_drives_admission_execution_output_and_restart(
     tmp_path: Path,
 ) -> None:
@@ -431,6 +484,183 @@ def test_template_drift_invalidates_already_bound_work(
         match="different packaged authority",
     ):
         _admit(runtime)
+
+
+def test_historical_authority_is_effect_bound_and_recovery_scoped(
+    tmp_path: Path,
+) -> None:
+    store, _startup_value, _node_value, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    work_id = spec.request.work_id
+    execution = runtime.trusted_execution.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=work_id,
+    )
+    output = runtime.output_policies.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=work_id,
+    )
+    dispatch = _dispatch_for(runtime, spec)
+    _mark_effect_started(store, runtime, dispatch)
+
+    runtime.authorities.configure(
+        _template(argv_suffix=("--wheel",)),
+        expected_revision=1,
+    )
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="changed after PF5 work admission",
+    ):
+        runtime.trusted_execution.resolve(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            work_id=work_id,
+        )
+
+    with runtime.trusted_execution.historical_recovery(frozenset({work_id})):
+        assert runtime.trusted_execution.resolve(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            work_id=work_id,
+        ) == execution
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="changed after PF5 work admission",
+    ):
+        runtime.trusted_execution.resolve(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            work_id=work_id,
+        )
+
+    assert runtime.output_policies.resolve(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=work_id,
+    ) == output
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT bound_template_json, effect_dispatch_id "
+            "FROM product_factory_build_authority_bindings WHERE work_id = ?",
+            (work_id,),
+        ).fetchone()
+    assert row is not None
+    assert type(row["bound_template_json"]) is str
+    assert row["effect_dispatch_id"] == dispatch.dispatch_id
+
+
+def test_historical_authority_rejects_work_without_effect_admission(
+    tmp_path: Path,
+) -> None:
+    _store, _startup_value, _node_value, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    work_id = spec.request.work_id
+
+    runtime.authorities.configure(
+        _template(argv_suffix=("--wheel",)),
+        expected_revision=1,
+    )
+
+    with runtime.trusted_execution.historical_recovery(frozenset({work_id})):
+        with pytest.raises(
+            PackagedBuildAuthorityError,
+            match="lacks durable effect admission",
+        ):
+            runtime.trusted_execution.resolve(
+                project_id=PROJECT_ID,
+                repository_id=REPOSITORY_ID,
+                work_id=work_id,
+            )
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="lacks durable effect admission",
+    ):
+        runtime.output_policies.resolve(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            work_id=work_id,
+        )
+
+
+class _UncertainBuildPort:
+    def run(self, dispatch: BuildExecutionDispatch):
+        raise BuildExecutionPortError("simulated effect acknowledgement loss")
+
+    def inspect(self, dispatch: BuildExecutionDispatch):
+        return None
+
+
+def test_packaged_restart_uses_historical_authority_only_for_dispatched_work(
+    tmp_path: Path,
+) -> None:
+    store, startup, node, runtime = _runtime(tmp_path)
+    spec = _admit(runtime)
+    task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="product-factory",
+        payload={
+            "kind": "product_factory",
+            "product_project_id": PROJECT_ID,
+        },
+    )
+    host = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task.task_id,
+        project_id=PROJECT_ID,
+        node=node,
+        startup=startup,
+        trusted_authority=runtime.trusted_execution,
+        output_policies=runtime.output_policies,
+    )
+    host.submit(spec)
+    host.prepare(spec.request.work_id)
+    dispatch = host.begin_dispatch(spec.request.work_id)
+    host.node_port = _UncertainBuildPort()
+    uncertain = host.execute(spec.request.work_id)
+    assert uncertain.state is BuildExecutionState.RECONCILE_REQUIRED
+    _mark_effect_started(store, runtime, dispatch)
+
+    runtime.authorities.configure(
+        _template(argv_suffix=("--wheel",)),
+        expected_revision=1,
+    )
+    restarted_runtime = PackagedBuildAuthorityRuntime(
+        PackagedBuildAuthorityStore(
+            store,
+            node=node,
+            startup=startup,
+        )
+    )
+    restarted = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=task.task_id,
+        project_id=PROJECT_ID,
+        node=node,
+        startup=startup,
+        trusted_authority=restarted_runtime.trusted_execution,
+        output_policies=restarted_runtime.output_policies,
+    )
+
+    record = restarted.snapshot().coordinator.records[0]
+    assert record.state is BuildExecutionState.RECONCILE_REQUIRED
+    assert record.dispatch == dispatch
+    assert restarted.reconcile(spec.request.work_id).state is (
+        BuildExecutionState.RECONCILE_REQUIRED
+    )
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="changed after PF5 work admission",
+    ):
+        restarted_runtime.trusted_execution.resolve(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            work_id=spec.request.work_id,
+        )
 
 
 def test_stale_configure_revision_is_fail_closed(tmp_path: Path) -> None:
