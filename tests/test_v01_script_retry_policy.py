@@ -35,6 +35,15 @@ class _SpoofingIntentVersion(int):
         return False
 
 
+class _SpoofingPayloadKey(str):
+    def __eq__(self, other: object) -> bool:
+        del other
+        return True
+
+    def __hash__(self) -> int:
+        return hash("condition")
+
+
 class _SpoofingRetryAfter(float):
     def __float__(self) -> float:
         return 0.0
@@ -429,6 +438,22 @@ def test_retry_intent_rejects_behavioral_payload_container() -> None:
 
     with pytest.raises(TypeError, match="exact dict"):
         ScriptRetryIntent.from_payload(_BehavioralRetryPayload(payload))
+
+
+def test_retry_intent_rejects_nonexact_payload_keys() -> None:
+    payload = ScriptRetryIntent(
+        operation_id="codec-op",
+        condition=ScriptRetryCondition.TEMPORARY_BUSY,
+        retry_number=1,
+        not_before_utc=NOW + timedelta(seconds=1),
+    ).to_payload()
+    condition = payload.pop("condition")
+    spoofed_key = _SpoofingPayloadKey("not-condition")
+    payload[spoofed_key] = condition
+
+    assert "condition" in payload
+    with pytest.raises(TypeError, match="keys must be exact strings"):
+        ScriptRetryIntent.from_payload(payload)
 
 
 def test_retry_intent_rejects_spoofed_condition_and_version_carriers() -> None:

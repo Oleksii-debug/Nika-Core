@@ -131,6 +131,14 @@ class _SpoofingRetryDelay(float):
         return True
 
 
+class _BehavioralRetryErrorCodes(frozenset[RuntimeErrorCode]):
+    """Set-shaped carrier that lies about which failures are retryable."""
+
+    def __contains__(self, item: object) -> bool:
+        del item
+        return True
+
+
 def test_fresh_retry_rejects_behavioral_output_mapping_authority() -> None:
     output = _BehavioralSafetyOutput()
     assert "provider_retryable" in output
@@ -216,6 +224,22 @@ def test_retry_policy_rejects_behavioral_retry_count_carriers() -> None:
     policy = _cloud_retry_policy()
     with pytest.raises(ValueError, match="retries_used must be a non-negative integer"):
         policy.should_retry(result, retries_used=spoofed)
+
+
+def test_retry_policy_rejects_behavioral_error_code_collection() -> None:
+    codes = _BehavioralRetryErrorCodes({RuntimeErrorCode.TRANSIENT})
+    assert frozenset.__contains__(codes, RuntimeErrorCode.INTERNAL) is False
+    assert RuntimeErrorCode.INTERNAL in codes
+
+    with pytest.raises(
+        TypeError,
+        match="retryable_error_codes must be a frozenset",
+    ):
+        RetryPolicy(
+            max_retries=1,
+            retryable_error_codes=codes,
+            allow_fresh_retry=True,
+        )
 
 
 def test_retry_policy_rejects_behavioral_backoff_carrier() -> None:
