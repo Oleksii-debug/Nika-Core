@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 from importlib.metadata import version
 from pathlib import Path
 from typing import NoReturn
@@ -15,6 +16,7 @@ from nika_core.learning_package import FrozenLearningPackage
 from nika_core.model_engineering import EvaluationCase, EvaluationPurpose, EvaluationSet
 from nika_core.model_gateway.contracts import ModelMessage, PrivacyClass
 from nika_core.training_peft_worker import (
+    candidate_adapter_manifest,
     candidate_artifact_path,
     model_directory_manifest_sha256,
 )
@@ -308,6 +310,90 @@ def _write_new_file(path: Path, payload: bytes) -> None:
             os.fsync(handle.fileno())
     except OSError as exc:
         raise ProofError("physical evaluation evidence could not be published") from exc
+
+
+def _require_candidate_tokenization_sha256(manifest: dict[str, object]) -> str:
+    value = manifest.get("tokenization_sha256")
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        _fail("physical evaluation candidate lacks canonical tokenization evidence")
+    return value
+
+
+def _verified_candidate_tokenization_from_snapshot(
+    root: Path,
+    candidate_bytes: bytes,
+    *,
+    pilot: PhysicalTrainingPilotReport,
+) -> str:
+    """Bind tokenization provenance to the exact snapshotted candidate tensor bytes."""
+
+    if type(candidate_bytes) is not bytes or not candidate_bytes:
+        _fail("physical evaluation candidate snapshot is invalid")
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".nika-peft-evaluation-candidate-",
+            dir=root,
+        ) as snapshot_root:
+            snapshot_path = Path(snapshot_root) / "adapter_model.safetensors"
+            _write_new_file(snapshot_path, candidate_bytes)
+            descriptor: int | None = None
+            try:
+                descriptor = _open_readonly_snapshot(snapshot_path)
+                if (
+                    _stable_file_bytes(
+                        snapshot_path,
+                        max_bytes=_MAX_EVIDENCE_CANDIDATE_BYTES,
+                        name="candidate verification snapshot",
+                    )
+                    != candidate_bytes
+                ):
+                    _fail(
+                        "physical evaluation candidate snapshot changed before manifest read"
+                    )
+                manifest = candidate_adapter_manifest(snapshot_path.resolve(strict=True))
+                if (
+                    _stable_file_bytes(
+                        snapshot_path,
+                        max_bytes=_MAX_EVIDENCE_CANDIDATE_BYTES,
+                        name="candidate verification snapshot",
+                    )
+                    != candidate_bytes
+                ):
+                    _fail(
+                        "physical evaluation candidate snapshot changed during manifest read"
+                    )
+            finally:
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+    except ProofError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ProofError(
+            "physical evaluation candidate manifest could not be verified"
+        ) from exc
+
+    if manifest.get("schema") != "nika-peft-candidate-v2":
+        _fail("old-vs-new proof requires a candidate-v2 tensor-evidence manifest")
+    if manifest.get("candidate_artifact_ref") != pilot.candidate_artifact_ref:
+        _fail("physical evaluation candidate logical reference changed")
+    if (
+        manifest.get("previous_adapter_tensors_sha256")
+        != pilot.previous_adapter_tensors_sha256
+    ):
+        _fail("candidate previous tensor digest does not match pilot")
+    if (
+        manifest.get("trained_adapter_tensors_sha256")
+        != pilot.trained_adapter_tensors_sha256
+    ):
+        _fail("candidate trained tensor digest does not match pilot")
+    return _require_candidate_tokenization_sha256(manifest)
 
 
 def _runtime_versions() -> dict[str, str]:
@@ -839,6 +925,11 @@ def verify(root: Path) -> None:
         or candidate_size != report.candidate_byte_count
     ):
         _fail("candidate bytes changed after old-vs-new evaluation")
+    tokenization_sha256 = _verified_candidate_tokenization_from_snapshot(
+        root,
+        candidate_bytes,
+        pilot=report,
+    )
 
     staged_assets_bytes = _stable_file_bytes(
         root / "staged-assets.json",
@@ -873,7 +964,8 @@ def verify(root: Path) -> None:
         "staged_assets_sha256": _sha256_bytes(staged_assets_bytes),
         "asset_repository": staged_assets["repository"],
         "asset_revision": staged_assets["revision"],
-        "schema": "nika-physical-old-new-real-proof-v2",
+        "tokenization_sha256": tokenization_sha256,
+        "schema": "nika-physical-old-new-real-proof-v3",
     }
 
     evidence_dir = root / "evaluation-evidence"

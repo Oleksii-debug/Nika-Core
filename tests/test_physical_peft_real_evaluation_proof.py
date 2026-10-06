@@ -500,3 +500,167 @@ def test_prepare_replaces_placeholder_with_real_held_out_identity(
     assert replacement.evaluation_set_sha256 == evaluation.content_sha256
     assert updated_config["frozen_package_sha256"] == replacement.manifest_sha256
     assert (tmp_path / "held-out-evaluation.json").is_file()
+
+def _candidate_manifest_fixture(
+    *,
+    tokenization_sha256: object,
+    candidate_artifact_ref: str = "candidate-ref",
+    previous_adapter_tensors_sha256: str | None = None,
+    trained_adapter_tensors_sha256: str | None = None,
+) -> dict[str, object]:
+    return {
+        "schema": "nika-peft-candidate-v2",
+        "candidate_artifact_ref": candidate_artifact_ref,
+        "previous_adapter_tensors_sha256": previous_adapter_tensors_sha256,
+        "trained_adapter_tensors_sha256": (
+            trained_adapter_tensors_sha256 or _sha(b"trained-tensors")
+        ),
+        "tokenization_sha256": tokenization_sha256,
+    }
+
+
+def test_candidate_tokenization_snapshot_binds_exact_bytes(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_bytes = b"exact-candidate-snapshot"
+    tokenization_sha256 = _sha(b"canonical-tokenization")
+    pilot = SimpleNamespace(
+        candidate_artifact_ref="candidate-ref",
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256=_sha(b"trained-tensors"),
+    )
+    observed: dict[str, object] = {}
+
+    def fake_manifest(path: Path) -> dict[str, object]:
+        observed["path"] = path
+        observed["bytes"] = Path(path).read_bytes()
+        return _candidate_manifest_fixture(
+            tokenization_sha256=tokenization_sha256,
+        )
+
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", fake_manifest)
+
+    result = proof._verified_candidate_tokenization_from_snapshot(
+        tmp_path.resolve(),
+        candidate_bytes,
+        pilot=pilot,
+    )
+
+    assert result == tokenization_sha256
+    assert observed["bytes"] == candidate_bytes
+    snapshot_path = observed["path"]
+    assert isinstance(snapshot_path, Path)
+    assert not snapshot_path.exists()
+
+
+@pytest.mark.parametrize(
+    "tokenization_sha256",
+    [None, 7, "", "A" * 64, "0" * 63],
+)
+def test_candidate_tokenization_snapshot_requires_canonical_digest(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tokenization_sha256: object,
+) -> None:
+    pilot = SimpleNamespace(
+        candidate_artifact_ref="candidate-ref",
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256=_sha(b"trained-tensors"),
+    )
+    monkeypatch.setattr(
+        proof,
+        "candidate_adapter_manifest",
+        lambda path: _candidate_manifest_fixture(
+            tokenization_sha256=tokenization_sha256,
+        ),
+    )
+
+    with pytest.raises(
+        proof.ProofError,
+        match="lacks canonical tokenization evidence",
+    ):
+        proof._verified_candidate_tokenization_from_snapshot(
+            tmp_path.resolve(),
+            b"candidate-bytes",
+            pilot=pilot,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("schema", "nika-peft-candidate-v3", "candidate-v2"),
+        ("candidate_artifact_ref", "different", "logical reference changed"),
+        (
+            "previous_adapter_tensors_sha256",
+            _sha(b"unexpected-previous"),
+            "previous tensor digest",
+        ),
+        (
+            "trained_adapter_tensors_sha256",
+            _sha(b"unexpected-trained"),
+            "trained tensor digest",
+        ),
+    ],
+)
+def test_candidate_tokenization_snapshot_binds_pilot_tensor_identity(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    pilot = SimpleNamespace(
+        candidate_artifact_ref="candidate-ref",
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256=_sha(b"trained-tensors"),
+    )
+    manifest = _candidate_manifest_fixture(
+        tokenization_sha256=_sha(b"canonical-tokenization"),
+    )
+    manifest[field] = value
+    monkeypatch.setattr(
+        proof,
+        "candidate_adapter_manifest",
+        lambda path: dict(manifest),
+    )
+
+    with pytest.raises(proof.ProofError, match=message):
+        proof._verified_candidate_tokenization_from_snapshot(
+            tmp_path.resolve(),
+            b"candidate-bytes",
+            pilot=pilot,
+        )
+
+
+def test_candidate_tokenization_snapshot_fails_closed_if_manifest_path_mutates(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_bytes = b"exact-candidate-snapshot"
+    pilot = SimpleNamespace(
+        candidate_artifact_ref="candidate-ref",
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256=_sha(b"trained-tensors"),
+    )
+
+    def mutating_manifest(path: Path) -> dict[str, object]:
+        Path(path).write_bytes(b"mutated-after-snapshot")
+        return _candidate_manifest_fixture(
+            tokenization_sha256=_sha(b"unbound-tokenization"),
+        )
+
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", mutating_manifest)
+
+    with pytest.raises(proof.ProofError):
+        proof._verified_candidate_tokenization_from_snapshot(
+            tmp_path.resolve(),
+            candidate_bytes,
+            pilot=pilot,
+        )
+
