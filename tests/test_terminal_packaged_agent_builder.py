@@ -308,3 +308,25 @@ def test_builder_route_preserves_current_product_selection(tmp_path: Path) -> No
     assert router.active_project_id == selected
     assert ordinary.calls == []
     assert len(builder.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        "Create an agent with hidden \u202eoverride",
+        "Create an agent with hidden \u2066isolate",
+        "Create an agent with invalid \ud800text",
+    ),
+)
+def test_builder_handler_rejects_hidden_or_invalid_unicode(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    handler, _repository, store = _builder(tmp_path / "unicode.db")
+
+    with pytest.raises(ValueError):
+        handler({"command": command})
+
+    with store.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM agent_definitions").fetchone()[0]
+    assert count == 0
