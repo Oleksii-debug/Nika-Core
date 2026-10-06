@@ -819,6 +819,36 @@ print('Controlled packaged task froze canonical local model selection.')
             if ($LASTEXITCODE -ne 0) {
                 throw 'Packaged model selection was not durably frozen into the controlled task.'
             }
+
+            # Prove the packaged command center can answer a direct long-task status
+            # command through the same keyboard-only UI without creating another task.
+            Wait-FocusName $commandControl
+            Set-BoundControlValue $commandControl 'current task'
+            Set-BoundControlFocus $startControl
+            [System.Windows.Forms.SendKeys]::SendWait('^n')
+            Wait-FocusName $tasksControl
+            Wait-BoundTextEvidence 'Немає незавершеного завдання.'
+
+            $directStatusProbe = @'
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    rows = db.execute(
+        'SELECT state FROM tasks ORDER BY created_at ASC'
+    ).fetchall()
+    if len(rows) != 1:
+        raise SystemExit('direct current-task command unexpectedly changed task count')
+    if str(rows[0][0]).upper() != 'COMPLETED':
+        raise SystemExit('controlled task is not terminal after direct status command')
+print('Packaged direct current-task command was read-only.')
+'@
+            $directStatusProbe | python - $env:NIKA_DB_PATH
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Packaged direct current-task status was not a read-only command.'
+            }
         } catch {
             # Diagnostics are restricted to this proof's clean, controlled database
             # and the exact bound Nika window. No source contents or stored payloads.

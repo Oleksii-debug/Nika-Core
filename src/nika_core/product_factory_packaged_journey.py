@@ -21,6 +21,8 @@ from nika_core.ui.bridge_models import UIResult
 
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
 AgentBuilderCommandHandler = Callable[[Mapping[str, Any]], UIResult]
+TaskControlHandler = Callable[[Mapping[str, Any]], UIResult]
+TaskStatusHandler = Callable[[], UIResult]
 ActivityReportHandler = Callable[[], UIResult]
 TrainingStatusHandler = Callable[[str], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
@@ -56,6 +58,51 @@ _TRAINING_STATUS_PREFIXES = (
     "training status",
     "покажи статус навчання",
     "статус навчання",
+)
+
+
+_TASK_PAUSE_COMMANDS = frozenset(
+    {
+        "pause task",
+        "pause current task",
+        "призупини завдання",
+        "призупинити завдання",
+        "призупини поточне завдання",
+    }
+)
+_TASK_RESUME_COMMANDS = frozenset(
+    {
+        "resume task",
+        "resume current task",
+        "continue task",
+        "віднови завдання",
+        "відновити завдання",
+        "продовж завдання",
+        "продовжити завдання",
+    }
+)
+_TASK_STOP_COMMANDS = frozenset(
+    {
+        "stop task",
+        "cancel task",
+        "stop current task",
+        "зупини завдання",
+        "зупинити завдання",
+        "скасуй завдання",
+        "скасувати завдання",
+    }
+)
+_TASK_STATUS_COMMANDS = frozenset(
+    {
+        "current task",
+        "show current task",
+        "task status",
+        "current task status",
+        "поточне завдання",
+        "покажи поточне завдання",
+        "статус завдання",
+        "статус поточного завдання",
+    }
 )
 
 
@@ -149,6 +196,22 @@ def packaged_training_status_target(command: str) -> str | None:
     return task_id
 
 
+def packaged_task_direct_action(command: str) -> str | None:
+    """Recognize exact long-task control commands without broad natural-language capture."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split()).casefold().strip(" :.!?")
+    for action, commands in (
+        ("pause", _TASK_PAUSE_COMMANDS),
+        ("resume", _TASK_RESUME_COMMANDS),
+        ("stop", _TASK_STOP_COMMANDS),
+        ("status", _TASK_STATUS_COMMANDS),
+    ):
+        if normalized in commands:
+            return action
+    return None
+
+
 def _valid_selection_id(value: object) -> bool:
     if type(value) is not str or not value or value != value.strip():
         return False
@@ -215,10 +278,10 @@ class PackagedProductCommandRouter:
     """Route packaged command input to durable ProductProject, read-only report, or task handling.
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
-    Explicit daily-report and training-status intents may call injected read-only handlers.
-    Explicit Agent Builder intent delegates only to an injected safe-draft handler. Toolsmith
-    remains a separate fail-closed route. No high-impact external action is launched merely by
-    command classification.
+    Explicit daily-report, training-status and long-task control intents delegate only to
+    injected incumbent handlers. Explicit Agent Builder intent delegates only to an injected
+    safe-draft handler. Toolsmith remains a separate fail-closed route. No high-impact external
+    action is launched merely by command classification.
     """
 
     def __init__(
@@ -227,6 +290,10 @@ class PackagedProductCommandRouter:
         products: ProductProjectCommandService,
         ordinary_handler: OrdinaryCommandHandler,
         agent_builder_handler: AgentBuilderCommandHandler | None = None,
+        task_pause_handler: TaskControlHandler | None = None,
+        task_resume_handler: TaskControlHandler | None = None,
+        task_stop_handler: TaskControlHandler | None = None,
+        task_status_handler: TaskStatusHandler | None = None,
         activity_report_handler: ActivityReportHandler | None = None,
         training_status_handler: TrainingStatusHandler | None = None,
         selection_store: PackagedProductSelectionStore | None = None,
@@ -234,6 +301,10 @@ class PackagedProductCommandRouter:
         self._products = products
         self._ordinary_handler = ordinary_handler
         self._agent_builder_handler = agent_builder_handler
+        self._task_pause_handler = task_pause_handler
+        self._task_resume_handler = task_resume_handler
+        self._task_stop_handler = task_stop_handler
+        self._task_status_handler = task_status_handler
         self._activity_report_handler = activity_report_handler
         self._training_status_handler = training_status_handler
         self._selection_store = selection_store
@@ -333,6 +404,27 @@ class PackagedProductCommandRouter:
                     "Статус навчання недоступний у цьому запуску."
                 )
             return self._training_status_handler(training_task_id)
+
+        task_action = packaged_task_direct_action(command)
+        if task_action == "status":
+            if self._task_status_handler is None:
+                raise PackagedProductJourneyError(
+                    "Статус поточного завдання недоступний у цьому запуску."
+                )
+            return self._task_status_handler()
+        if task_action is not None:
+            handler = {
+                "pause": self._task_pause_handler,
+                "resume": self._task_resume_handler,
+                "stop": self._task_stop_handler,
+            }[task_action]
+            if handler is None:
+                raise PackagedProductJourneyError(
+                    f"Керування завданням «{task_action}» недоступне у цьому запуску."
+                )
+            # Direct command text and unrelated UI payload fields are classification input only.
+            # The incumbent task-control authority selects/validates the actual target.
+            return handler({})
 
         if packaged_current_product_command(command):
             return self._describe_current_project()
