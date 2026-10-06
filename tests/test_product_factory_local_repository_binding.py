@@ -319,6 +319,59 @@ def test_binding_rejects_same_physical_root_for_different_repository_ids(
         bindings.require(project.project_id, second_repository.repository_id)
 
 
+def test_binding_rejects_same_physical_root_after_git_metadata_replacement(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    first_repository = _repository_ref(
+        repository_id="repo-1",
+        locator="Oleksii-debug/first",
+    )
+    second_repository = _repository_ref(
+        repository_id="repo-2",
+        locator="Oleksii-debug/second",
+    )
+    project = _create_project_with_repositories(
+        store,
+        (first_repository, second_repository),
+    )
+    root = _root(tmp_path)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=first_repository,
+        root=root,
+        expected_binding_version=None,
+    )
+
+    original_git = tmp_path / "original git metadata"
+    (root / ".git").rename(original_git)
+    (root / ".git").mkdir()
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="already bound to another repository identity",
+    ):
+        bindings.bind(
+            project_id=project.project_id,
+            repository=second_repository,
+            root=root,
+            expected_binding_version=None,
+        )
+
+    assert bindings.current_binding_version(
+        project.project_id,
+        second_repository.repository_id,
+    ) is None
+
+    (root / ".git").rmdir()
+    original_git.rename(root / ".git")
+    assert bindings.require(
+        project.project_id,
+        first_repository.repository_id,
+    ).binding_version == first.binding_version
+
+
 def test_binding_allows_distinct_roots_for_distinct_repository_ids(
     tmp_path: pathlib.Path,
 ) -> None:

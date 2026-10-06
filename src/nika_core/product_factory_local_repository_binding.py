@@ -876,15 +876,6 @@ def _same_physical_repository(
     return (
         first.root_device == second.root_device
         and first.root_inode == second.root_inode
-        and first.git_metadata_kind == second.git_metadata_kind
-        and first.git_metadata_device == second.git_metadata_device
-        and first.git_metadata_inode == second.git_metadata_inode
-        and first.gitfile_sha256 == second.gitfile_sha256
-        and first.git_target_device == second.git_target_device
-        and first.git_target_inode == second.git_target_inode
-        and first.git_commondir_sha256 == second.git_commondir_sha256
-        and first.git_common_device == second.git_common_device
-        and first.git_common_inode == second.git_common_inode
     )
 
 
