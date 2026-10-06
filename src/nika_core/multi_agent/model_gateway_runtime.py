@@ -218,7 +218,7 @@ class ModelGatewayAgentRuntime:
         key = (request.task_id, request.thread_id)
         async with self._active_lock:
             existing = self._active.get(key)
-            if existing is not None and not existing[0].done():
+            if existing is not None:
                 return RuntimeResult(
                     outcome=RuntimeOutcome.FAILED,
                     output={"recoverable": True, "provider_id": self._provider_id},
