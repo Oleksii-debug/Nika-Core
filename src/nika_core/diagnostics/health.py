@@ -21,6 +21,7 @@ from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.model_artifact_schema import MODEL_ARTIFACT_SCHEMA_VERSION
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
+from nika_core.research.knowledge_schema import KNOWLEDGE_SCHEMA_VERSION
 from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
 
 SUPPORTED_CONFIG_SCHEMA_VERSION = 1
@@ -286,6 +287,18 @@ class HealthService:
                         ),
                         supported_version=MODEL_ARTIFACT_SCHEMA_VERSION,
                         check_id="database.schema.model-artifact",
+                    )
+                )
+                checks.append(
+                    self._check_migration_history(
+                        conn,
+                        query=(
+                            "SELECT version, typeof(version) "
+                            "FROM knowledge_schema_migrations "
+                            "ORDER BY version LIMIT ?"
+                        ),
+                        supported_version=KNOWLEDGE_SCHEMA_VERSION,
+                        check_id="database.schema.knowledge",
                     )
                 )
                 checks.append(
