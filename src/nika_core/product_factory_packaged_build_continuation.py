@@ -56,7 +56,19 @@ class PackagedReviewedBuildContinuation:
     async def __call__(self, prepared: PreparedProductFactory) -> None:
         if type(prepared) is not PreparedProductFactory:
             raise TypeError("PF5 continuation requires exact PreparedProductFactory")
-        await asyncio.to_thread(self._advance, prepared)
+        worker = asyncio.create_task(asyncio.to_thread(self._advance, prepared))
+        cancellation: asyncio.CancelledError | None = None
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError as exc:
+                if worker.cancelled():
+                    raise
+                if cancellation is None:
+                    cancellation = exc
+        worker.result()
+        if cancellation is not None:
+            raise cancellation
 
     def _advance(self, prepared: PreparedProductFactory) -> None:
         state = prepared.state

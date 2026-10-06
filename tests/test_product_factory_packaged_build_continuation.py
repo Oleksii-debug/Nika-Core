@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -333,3 +334,55 @@ def test_continuation_reconciles_uncertain_pf5_once_without_replay(
         ("advance", "component-a"),
         ("reconcile", "pf5-component-a"),
     ]
+
+def test_continuation_defers_cancellation_until_pf5_worker_settles(
+    tmp_path,
+    monkeypatch,
+):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    continuation = PackagedReviewedBuildContinuation(
+        store,
+        _startup(tmp_path),
+        _activated({(PROJECT_ID, "repo-a", "component-a")}),
+    )
+    prepared = _prepared([])
+    started = threading.Event()
+    release = threading.Event()
+    settled = threading.Event()
+
+    def blocked_advance(self, prepared_value):
+        assert self is continuation
+        assert prepared_value is prepared
+        started.set()
+        if not release.wait(timeout=5):
+            raise AssertionError("test PF5 worker was never released")
+        settled.set()
+
+    monkeypatch.setattr(
+        PackagedReviewedBuildContinuation,
+        "_advance",
+        blocked_advance,
+    )
+
+    async def scenario():
+        task = asyncio.create_task(continuation(prepared))
+        assert await asyncio.to_thread(started.wait, 5)
+
+        task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
+        assert settled.is_set() is False
+
+        task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
+        assert settled.is_set() is False
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert settled.is_set() is True
+
+    asyncio.run(scenario())
+
