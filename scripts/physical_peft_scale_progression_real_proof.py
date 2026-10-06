@@ -36,6 +36,7 @@ _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_JSON_BYTES = 1024 * 1024
 _MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
+_MAX_FOUNDATION_BYTES = 64 * 1024 * 1024
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_OPEN_EXISTING = 3
@@ -162,17 +163,52 @@ def _write_new(path: Path, payload: bytes) -> None:
 
 
 def _sha256_file(path: Path) -> tuple[str, int]:
-    digest = hashlib.sha256()
-    total = 0
+    """Hash one stable single-link regular-file authority through a held descriptor."""
+
+    descriptor: int | None = None
     try:
-        with path.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-                total += len(chunk)
+        before = os.lstat(path)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+            or int(getattr(before, "st_nlink", 1)) != 1
+            or before.st_size <= 0
+            or before.st_size > _MAX_FOUNDATION_BYTES
+        ):
+            _fail(f"authority file type or size is invalid: {path.name}")
+        descriptor = _open_readonly_snapshot(path)
+        _require_open_snapshot_identity(
+            path,
+            descriptor,
+            name=f"authority {path.name}",
+        )
+        opened = os.fstat(descriptor)
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        digest = hashlib.sha256()
+        total = 0
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+            total += len(chunk)
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+    except ProofError:
+        raise
     except OSError as exc:
         raise ProofError(f"cannot hash authority: {path.name}") from exc
-    if total <= 0:
-        _fail(f"authority is empty: {path.name}")
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    identities = tuple(
+        _snapshot_identity(value)
+        for value in (before, opened, after, current)
+    )
+    if len(set(identities)) != 1 or total != before.st_size:
+        _fail(f"authority changed while hashing: {path.name}")
     return digest.hexdigest(), total
 
 
@@ -237,8 +273,11 @@ def _open_readonly_snapshot(path: Path) -> int:
             close_handle(ctypes.c_void_p(handle))
             raise
 
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise OSError("POSIX no-follow evidence snapshot support is unavailable")
     flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
-    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(nofollow)
     flags |= int(getattr(os, "O_NONBLOCK", 0))
     return os.open(path, flags)
 
@@ -336,23 +375,36 @@ def _stable_file_bytes(path: Path, *, max_bytes: int, name: str) -> bytes:
     return payload
 
 
-def _load_frozen_package_snapshot(
+def _frozen_package_snapshot(
     path: Path,
     *,
     expected_manifest_sha256: str,
-) -> FrozenLearningPackage:
+) -> tuple[FrozenLearningPackage, bytes]:
     raw = _stable_file_bytes(
         path,
         max_bytes=_MAX_JSON_BYTES,
         name=f"frozen learning package {path.name}",
     )
     try:
-        return FrozenLearningPackage.from_json(
+        package = FrozenLearningPackage.from_json(
             raw,
             expected_manifest_sha256=expected_manifest_sha256,
         )
     except (RuntimeError, TypeError, UnicodeError, ValueError) as exc:
         raise ProofError(f"frozen learning package is invalid: {path.name}") from exc
+    return package, raw
+
+
+def _load_frozen_package_snapshot(
+    path: Path,
+    *,
+    expected_manifest_sha256: str,
+) -> FrozenLearningPackage:
+    package, _ = _frozen_package_snapshot(
+        path,
+        expected_manifest_sha256=expected_manifest_sha256,
+    )
+    return package
 
 
 def _candidate_manifest_from_payload(
@@ -967,6 +1019,7 @@ def verify(root: Path) -> None:
         != tier0.previous_adapter_tensors_sha256
         or initial_tensors_sha256 != tier0.trained_adapter_tensors_sha256
         or initial_manifest.get("foundation_model_sha256") != base_gguf_sha256
+        or tier0_package.base_artifact_sha256 != base_gguf_sha256
     ):
         _fail("tier-0 candidate manifest does not match physical tensor evidence")
 
@@ -995,7 +1048,7 @@ def verify(root: Path) -> None:
     ).resolve(strict=True)
     if tier1_package_path != expected_tier1_package_path:
         _fail("tier-1 config points at an unexpected frozen package")
-    tier1_package = _load_frozen_package_snapshot(
+    tier1_package, tier1_package_bytes = _frozen_package_snapshot(
         tier1_package_path,
         expected_manifest_sha256=tier1.frozen_package_sha256,
     )
@@ -1095,6 +1148,7 @@ def verify(root: Path) -> None:
         "progression_proof": proof.canonical_payload(),
         "progression_proof_sha256": proof.proof_sha256,
         "staged_assets_sha256": staged_assets_sha256,
+        "foundation_model_sha256": base_gguf_sha256,
         "resource_budget": tier0_config.get("resource_budget"),
         "runtime_versions": tier0_config.get("runtime_versions"),
         "trainer_parameters": tier0_config.get("trainer_parameters"),
