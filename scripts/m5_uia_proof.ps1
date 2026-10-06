@@ -820,14 +820,50 @@ print('Controlled packaged task froze canonical local model selection.')
                 throw 'Packaged model selection was not durably frozen into the controlled task.'
             }
 
-            # Prove the packaged command center can answer a direct long-task status
-            # command through the same keyboard-only UI without creating another task.
+            # Prove that the packaged task list exposes the canonical task identity
+            # through UI Automation, then use that exact identity in a keyboard-only
+            # targeted status command. The read-only probe emits only the task UUID.
+            $taskIdentityProbe = @'
+import sqlite3
+import sys
+import uuid
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    rows = db.execute(
+        'SELECT task_id, state FROM tasks ORDER BY created_at ASC'
+    ).fetchall()
+    if len(rows) != 1:
+        raise SystemExit('controlled proof must own exactly one task before targeted status')
+    task_id, state = rows[0]
+    try:
+        parsed = uuid.UUID(task_id)
+    except (TypeError, ValueError, AttributeError):
+        raise SystemExit('controlled proof task id is not a UUID')
+    if str(parsed) != task_id:
+        raise SystemExit('controlled proof task id is not canonical')
+    if str(state).upper() != 'COMPLETED':
+        raise SystemExit('controlled proof task is not completed before targeted status')
+    print(task_id)
+'@
+            $taskId = ($taskIdentityProbe | python - $env:NIKA_DB_PATH).Trim()
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($taskId)) {
+                throw 'Could not read the controlled canonical task identity.'
+            }
+            $parsedTaskId = [guid]::Empty
+            if (-not [guid]::TryParseExact($taskId, 'D', [ref]$parsedTaskId) -or
+                $parsedTaskId.ToString('D') -cne $taskId) {
+                throw 'Controlled task identity is not a canonical lowercase UUID.'
+            }
+            Wait-BoundTextEvidence "ID: $taskId — Завершено — Порівняй два контрольовані джерела."
+
             Wait-FocusName $commandControl
-            Set-BoundControlValue $commandControl 'current task'
+            Set-BoundControlValue $commandControl "task status $taskId"
             Set-BoundControlFocus $startControl
             [System.Windows.Forms.SendKeys]::SendWait('^n')
             Wait-FocusName $tasksControl
-            Wait-BoundTextEvidence 'Немає незавершеного завдання.'
+            Wait-BoundTextEvidence "Завдання: $taskId; state COMPLETED."
 
             $directStatusProbe = @'
 import sqlite3
@@ -840,14 +876,14 @@ with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
         'SELECT state FROM tasks ORDER BY created_at ASC'
     ).fetchall()
     if len(rows) != 1:
-        raise SystemExit('direct current-task command unexpectedly changed task count')
+        raise SystemExit('targeted status command unexpectedly changed task count')
     if str(rows[0][0]).upper() != 'COMPLETED':
-        raise SystemExit('controlled task is not terminal after direct status command')
-print('Packaged direct current-task command was read-only.')
+        raise SystemExit('controlled task changed after targeted status command')
+print('Packaged targeted task status command was read-only.')
 '@
             $directStatusProbe | python - $env:NIKA_DB_PATH
             if ($LASTEXITCODE -ne 0) {
-                throw 'Packaged direct current-task status was not a read-only command.'
+                throw 'Packaged targeted task status was not a read-only command.'
             }
         } catch {
             # Diagnostics are restricted to this proof's clean, controlled database
