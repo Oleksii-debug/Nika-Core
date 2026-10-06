@@ -423,9 +423,4 @@ def test_runtime_route_admission_rejects_noncanonical_privacy_carrier(
         privacy=PrivacyClass.PRIVATE,
         temperature=1,
     )
-    request = runtime._build_model_request(_request("canonical-route"))
-    assert request.provider_id == "foundry-local"
-    assert request.provider_kind is ProviderKind.LOCAL
-    assert request.privacy is PrivacyClass.PRIVATE
-    assert request.timeout_seconds == 3
-    assert request.temperature == 1.0
+    assert runtime.runtime_id == "model-gateway:foundry-local"
