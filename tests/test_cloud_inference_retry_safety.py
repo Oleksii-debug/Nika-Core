@@ -30,9 +30,10 @@ from nika_core.runtime.contracts import (
     RuntimeErrorCode,
     RuntimeOutcome,
     RuntimeRequest,
+    RuntimeResult,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
-from nika_core.runtime.retry import RetryPolicy
+from nika_core.runtime.retry import RetryPolicy, fresh_retry_safety_evidence
 
 _PROVIDER_ID = "cloud-retry-fixture"
 _MODEL_ID = "fixture-model"
@@ -82,6 +83,100 @@ class _SequenceCloudProvider:
             usage=ModelUsage(input_tokens=2, output_tokens=1, total_tokens=3),
             latency_ms=1.0,
         )
+
+
+class _BehavioralSafetyOutput(dict[str, object]):
+    """Mapping-shaped output that lies about provider replay evidence."""
+
+    def __contains__(self, key: object) -> bool:
+        return key in {"provider_retryable", "failure_effect"}
+
+    def get(self, key: str, default: object = None) -> object:
+        if key == "provider_retryable":
+            return True
+        if key == "failure_effect":
+            return "no_effect"
+        return default
+
+
+class _SpoofingFailureEffect(str):
+    def __eq__(self, other: object) -> bool:
+        del other
+        return True
+
+    __hash__ = str.__hash__
+
+
+class _SpoofingSafetyKey(str):
+    """String-shaped key whose carrier type must not cross the retry boundary."""
+
+
+def test_fresh_retry_rejects_behavioral_output_mapping_authority() -> None:
+    output = _BehavioralSafetyOutput()
+    assert "provider_retryable" in output
+    assert output.get("failure_effect") == "no_effect"
+
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.FAILED,
+        output=output,
+        error="temporary provider failure",
+        error_code=RuntimeErrorCode.TRANSIENT,
+    )
+    policy = _cloud_retry_policy()
+
+    assert fresh_retry_safety_evidence(result) is False
+    assert policy.should_retry(result, retries_used=0) is False
+
+
+def test_fresh_retry_rejects_behavioral_failure_effect_scalar() -> None:
+    spoofed = _SpoofingFailureEffect("attacker-controlled")
+    assert spoofed == "no_effect"
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.FAILED,
+        output={
+            "provider_retryable": True,
+            "failure_effect": spoofed,
+        },
+        error="temporary provider failure",
+        error_code=RuntimeErrorCode.TRANSIENT,
+    )
+    policy = _cloud_retry_policy()
+
+    assert fresh_retry_safety_evidence(result) is False
+    assert policy.should_retry(result, retries_used=0) is False
+
+
+def test_fresh_retry_rejects_nonexact_provider_evidence_keys() -> None:
+    output = {
+        _SpoofingSafetyKey("provider_retryable"): True,
+        _SpoofingSafetyKey("failure_effect"): "no_effect",
+    }
+    assert type(output) is dict
+    assert set(output) == {"provider_retryable", "failure_effect"}
+
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.FAILED,
+        output=output,
+        error="temporary provider failure",
+        error_code=RuntimeErrorCode.TRANSIENT,
+    )
+    policy = _cloud_retry_policy()
+
+    assert fresh_retry_safety_evidence(result) is False
+    assert policy.should_retry(result, retries_used=0) is False
+
+
+def test_fresh_retry_preserves_exact_generic_output_compatibility() -> None:
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.FAILED,
+        output={"diagnostic": "temporary"},
+        error="temporary generic runtime failure",
+        error_code=RuntimeErrorCode.TRANSIENT,
+    )
+    policy = _cloud_retry_policy()
+
+    assert fresh_retry_safety_evidence(result) is None
+    assert policy.should_retry(result, retries_used=0) is True
 
 
 class _ForeignRetryRuntime:
