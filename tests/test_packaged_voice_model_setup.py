@@ -163,6 +163,35 @@ def test_voice_model_setup_background_unexpected_failure_recovers_state(
     assert not (data_root / "voice" / "whisper").exists()
 
 
+def test_voice_model_setup_rejects_invalid_host_future_without_sticking_active_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> object:
+        del coroutine
+        return object()
+
+    setup = PackagedVoiceModelSetup(
+        data_root,
+        submit=submit,  # type: ignore[arg-type]
+    )
+
+    result = setup.start({"source_root": str(source)})
+    terminal = setup.snapshot()
+
+    assert result.status == "failed"
+    assert terminal["status"] == "failed"
+    assert terminal["active"] is False
+    assert terminal["can_import"] is True
+    assert terminal["restart_required"] is False
+    assert not (data_root / "voice" / "whisper").exists()
+
+
 @pytest.mark.parametrize("future_mode", ["failed", "cancelled"])
 def test_voice_model_setup_background_host_future_interruption_recovers_state(
     tmp_path: Path,
