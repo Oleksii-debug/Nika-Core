@@ -96,7 +96,7 @@ def test_named_control_resolution_collects_all_bound_root_candidates_and_rejects
 
     assert ".FindFirst(" not in resolver
     assert ".FindAll(" in resolver
-    assert "Add-UniqueAutomationElement" in resolver
+    assert "Add-AddressableBoundCandidate" in resolver
     assert "ControlTypeProperty" in resolver
     assert "[System.Windows.Automation.AndCondition]::new" in resolver
     assert "$candidates.Count -gt 1" in resolver

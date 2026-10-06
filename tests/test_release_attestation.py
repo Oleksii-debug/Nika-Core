@@ -12,12 +12,40 @@ from nika_core.packaging.attestation import (
 )
 
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
+PRODUCT_VERSION = "1.0.0"
 REPOSITORY = "Oleksii-debug/Nika-Core"
 SIGNER = f"{REPOSITORY}/.github/workflows/m12-prehuman-release-gate.yml"
 SOURCE_REF = "refs/heads/main"
 ARTIFACT_REFERENCE = "./dist/NikaCore-1.0.0-windows-x64.zip"
 ATTESTATION_ID = "123456"
 ATTESTATION_URL = f"https://github.com/{REPOSITORY}/attestations/{ATTESTATION_ID}"
+REQUIRED_TRUE_FIELDS = (
+    "release_manifest_source_sha_bound",
+    "exact_checkout_sha_verified",
+    "core_ci_equivalent",
+    "full_test_suite",
+    "runtime_restart_recovery",
+    "memory_scheduler_resource_regressions",
+    "model_mock_nollm_regressions",
+    "deterministic_brain_regressions",
+    "foundry_local_adapter_regressions",
+    "plugin_workspace_regressions",
+    "security_sandbox_regressions",
+    "integrated_ubuntu",
+    "integrated_windows",
+    "browser_semantic_proof",
+    "windows_uia_semantic_proof",
+    "windows_package_built",
+    "manifest_verified",
+    "third_party_notices_verified",
+    "packaged_uia_keyboard_focus",
+)
+REQUIRED_FALSE_FIELDS = (
+    "physical_windows_foundry_inference_proven",
+    "human_tested",
+    "nvda_verified",
+    "production_release_ready",
+)
 
 
 def _artifact(tmp_path: Path) -> Path:
@@ -32,13 +60,13 @@ def _prehuman_evidence(tmp_path: Path, artifact: Path) -> Path:
         json.dumps(
             {
                 "schema_version": 3,
+                "product_version": PRODUCT_VERSION,
                 "commit_sha": SOURCE_SHA,
                 "distributable_zip_path": ARTIFACT_REFERENCE,
                 "distributable_zip_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
                 "distributable_zip_size": artifact.stat().st_size,
-                "human_tested": False,
-                "nvda_verified": False,
-                "production_release_ready": False,
+                **{field: True for field in REQUIRED_TRUE_FIELDS},
+                **{field: False for field in REQUIRED_FALSE_FIELDS},
             }
         ),
         encoding="utf-8",
@@ -50,7 +78,24 @@ def _verification(tmp_path: Path, artifact: Path, *, digest: str | None = None) 
     path = tmp_path / "verification.json"
     path.write_text(
         json.dumps(
-            [{"verificationResult": {"statement": {"predicateType": "https://slsa.dev/provenance/v1", "subject": [{"name": artifact.name, "digest": {"sha256": digest or hashlib.sha256(artifact.read_bytes()).hexdigest()}}]}}}]
+            [
+                {
+                    "verificationResult": {
+                        "statement": {
+                            "predicateType": "https://slsa.dev/provenance/v1",
+                            "subject": [
+                                {
+                                    "name": artifact.name,
+                                    "digest": {
+                                        "sha256": digest
+                                        or hashlib.sha256(artifact.read_bytes()).hexdigest()
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                }
+            ]
         ),
         encoding="utf-8",
     )
@@ -63,7 +108,16 @@ def _build(tmp_path: Path):
 
 
 def _kwargs() -> dict[str, str]:
-    return {"source_sha": SOURCE_SHA, "artifact_reference": ARTIFACT_REFERENCE, "repository": REPOSITORY, "signer_workflow": SIGNER, "source_ref": SOURCE_REF, "attestation_id": ATTESTATION_ID, "attestation_url": ATTESTATION_URL}
+    return {
+        "source_sha": SOURCE_SHA,
+        "artifact_reference": ARTIFACT_REFERENCE,
+        "expected_product_version": PRODUCT_VERSION,
+        "repository": REPOSITORY,
+        "signer_workflow": SIGNER,
+        "source_ref": SOURCE_REF,
+        "attestation_id": ATTESTATION_ID,
+        "attestation_url": ATTESTATION_URL,
+    }
 
 
 def test_exact_verified_attestation_builds_non_human_sidecar(tmp_path: Path) -> None:
@@ -95,17 +149,30 @@ def test_attestation_rejects_verified_result_for_other_digest(tmp_path: Path) ->
         build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
 
 
-@pytest.mark.parametrize(("field", "value", "message"), [("source_ref", "refs/pull/99/merge", "restricted to integrated main"), ("signer_workflow", "attacker/repo/.github/workflows/build.yml", "canonical M12 workflow"), ("attestation_id", "0", "positive decimal"), ("attestation_url", "https://example.invalid/attestations/123456", "does not match")])
-def test_attestation_identity_policy_fails_closed(tmp_path: Path, field: str, value: str, message: str) -> None:
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_ref", "refs/pull/99/merge", "restricted to integrated main"),
+        ("signer_workflow", "attacker/repo/.github/workflows/build.yml", "canonical M12 workflow"),
+        ("attestation_id", "0", "positive decimal"),
+        ("attestation_url", "https://example.invalid/attestations/123456", "does not match"),
+    ],
+)
+def test_attestation_identity_policy_fails_closed(
+    tmp_path: Path, field: str, value: str, message: str
+) -> None:
     artifact, prehuman, verification = _build(tmp_path)
-    kwargs = _kwargs(); kwargs[field] = value
+    kwargs = _kwargs()
+    kwargs[field] = value
     with pytest.raises(ValueError, match=message):
         build_release_attestation_evidence(artifact, prehuman, verification, **kwargs)
 
 
 def test_attestation_verification_output_must_be_nonempty_json_array(tmp_path: Path) -> None:
-    artifact = _artifact(tmp_path); prehuman = _prehuman_evidence(tmp_path, artifact)
-    verification = tmp_path / "verification.json"; verification.write_text("[]", encoding="utf-8")
+    artifact = _artifact(tmp_path)
+    prehuman = _prehuman_evidence(tmp_path, artifact)
+    verification = tmp_path / "verification.json"
+    verification.write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match="at least one result"):
         build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
 
@@ -114,5 +181,22 @@ def test_m12_workflow_keeps_signing_privilege_on_trusted_main_only() -> None:
     workflow = Path(".github/workflows/m12-prehuman-release-gate.yml").read_text(encoding="utf-8")
     assert "attest-main-distributable:" in workflow
     assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in workflow
-    for expected in ("id-token: write", "attestations: write", "artifact-metadata: write", "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6", "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093", "actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065", "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", "--signer-workflow", "--source-digest '${{ github.sha }}'", "--source-ref '${{ github.ref }}'", "--deny-self-hosted-runners"):
+    main_job = workflow.split("  attest-main-distributable:", 1)[1]
+    permission_block = main_job.split("    permissions:\n", 1)[1].split("    steps:\n", 1)[0]
+    assert permission_block == (
+        "      contents: read\n"
+        "      id-token: write\n"
+        "      attestations: write\n"
+    )
+    for expected in (
+        "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6",
+        "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093",
+        "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+        "actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065",
+        "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+        "--signer-workflow",
+        "--source-digest '${{ github.sha }}'",
+        "--source-ref '${{ github.ref }}'",
+        "--deny-self-hosted-runners",
+    ):
         assert expected in workflow

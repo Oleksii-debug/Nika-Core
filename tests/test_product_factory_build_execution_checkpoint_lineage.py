@@ -295,7 +295,7 @@ def test_middle_checkpoint_deletion_is_rejected_as_sequence_gap(tmp_path) -> Non
 
 
 def test_deterministic_checkpoint_id_substitution_is_rejected(tmp_path) -> None:
-    host, checkpoints, port, store, task_id = _make_host(tmp_path)
+    host, checkpoints, port, store, _ = _make_host(tmp_path)
     _complete_once(host)
     terminal = checkpoints.latest()
     assert terminal.snapshot.sequence == 5

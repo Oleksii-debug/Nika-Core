@@ -14,6 +14,8 @@ from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
+    RuntimeResumeProbe,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
@@ -27,6 +29,19 @@ class _SlowGraph:
         return {"done": True}
 
 
+class _SlowCheckpointedGraph(_SlowGraph):
+    async def aget_state(self, config):
+        thread_id = config["configurable"]["thread_id"]
+        return {
+            "config": {
+                "configurable": {
+                    "thread_id": thread_id,
+                    "checkpoint_id": "checkpoint-before-timeout",
+                }
+            }
+        }
+
+
 class _TransientDurableRuntime:
     runtime_id = "transient-proof"
     capabilities = frozenset({RuntimeCapability.DURABLE_RESUME})
@@ -34,6 +49,11 @@ class _TransientDurableRuntime:
     def __init__(self) -> None:
         self.run_calls = 0
         self.resume_calls = 0
+
+    @staticmethod
+    def initial_resume_token(*, task_id: str, thread_id: str) -> str:
+        del task_id
+        return thread_id
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         self.run_calls += 1
@@ -51,6 +71,15 @@ class _TransientDurableRuntime:
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         return False
 
+    async def probe_resume(self, *, task_id: str, thread_id: str, resume_token: str):
+        del task_id
+        assert resume_token == thread_id
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="retry checkpoint exists",
+            checkpoint_id=f"checkpoint:{thread_id}",
+        )
+
 
 class _UnsafeTransientRuntime(_TransientDurableRuntime):
     runtime_id = "unsafe-transient-proof"
@@ -60,6 +89,32 @@ class _UnsafeTransientRuntime(_TransientDurableRuntime):
         return RuntimeResult(
             outcome=RuntimeOutcome.FAILED,
             error="temporary but no durable resume point",
+            error_code=RuntimeErrorCode.TRANSIENT,
+        )
+
+
+class _ResumeLosesCursorRuntime(_TransientDurableRuntime):
+    runtime_id = "resume-loses-cursor-proof"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.side_effects = 0
+
+    async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        self.run_calls += 1
+        self.side_effects += 1
+        return RuntimeResult(
+            outcome=RuntimeOutcome.FAILED,
+            error="checkpointed effect needs durable continuation",
+            error_code=RuntimeErrorCode.TRANSIENT,
+            resume_token=request.thread_id,
+        )
+
+    async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
+        self.resume_calls += 1
+        return RuntimeResult(
+            outcome=RuntimeOutcome.FAILED,
+            error="resume failed and no safe cursor remains",
             error_code=RuntimeErrorCode.TRANSIENT,
         )
 
@@ -84,7 +139,7 @@ def test_runtime_request_rejects_non_positive_timeout() -> None:
         RuntimeRequest("task", "thread", timeout_seconds=0)
 
 
-def test_langgraph_timeout_is_typed_failure_not_user_cancellation() -> None:
+def test_langgraph_timeout_without_checkpoint_has_no_fake_resume_token() -> None:
     result = asyncio.run(
         LangGraphRuntime(_SlowGraph()).run(
             RuntimeRequest("task", "thread", timeout_seconds=0.01)
@@ -93,8 +148,20 @@ def test_langgraph_timeout_is_typed_failure_not_user_cancellation() -> None:
 
     assert result.outcome == RuntimeOutcome.FAILED
     assert result.error_code == RuntimeErrorCode.TIMEOUT
-    assert result.resume_token == "thread"
+    assert result.resume_token is None
     assert "exceeded" in (result.error or "")
+
+
+def test_langgraph_timeout_preserves_resume_token_only_after_checkpoint_proof() -> None:
+    result = asyncio.run(
+        LangGraphRuntime(_SlowCheckpointedGraph()).run(
+            RuntimeRequest("task", "thread", timeout_seconds=0.01)
+        )
+    )
+
+    assert result.outcome == RuntimeOutcome.FAILED
+    assert result.error_code == RuntimeErrorCode.TIMEOUT
+    assert result.resume_token == "thread"
 
 
 def test_retry_policy_uses_durable_resume_and_audits_retry(tmp_path) -> None:
@@ -122,12 +189,13 @@ def test_retry_policy_uses_durable_resume_and_audits_retry(tmp_path) -> None:
     events = audit.list_for(entity_type="task", entity_id=task_id)
     assert [event.event_type for event in events] == [
         "runtime.started",
+        "runtime.session_bound",
         "runtime.retry_scheduled",
         "runtime.retry_started",
         "runtime.finished",
     ]
-    assert events[1].payload["error_code"] == RuntimeErrorCode.TRANSIENT.value
-    assert events[2].payload["resume"] is True
+    assert events[2].payload["error_code"] == RuntimeErrorCode.TRANSIENT.value
+    assert events[3].payload["resume"] is True
 
 
 def test_retry_policy_fails_closed_without_resume_token(tmp_path) -> None:
@@ -150,6 +218,42 @@ def test_retry_policy_fails_closed_without_resume_token(tmp_path) -> None:
     assert runtime.run_calls == 1
     assert runtime.resume_calls == 0
     assert _task_state(store, task_id) == TaskState.FAILED
+
+
+def test_fresh_retry_is_blocked_after_claimed_resume_loses_cursor(tmp_path) -> None:
+    store, queue, task_id = _ready_task(tmp_path)
+    audit = AuditLog(store)
+    runtime = _ResumeLosesCursorRuntime()
+    policy = RetryPolicy(
+        max_retries=3,
+        retryable_error_codes=frozenset({RuntimeErrorCode.TRANSIENT}),
+        allow_fresh_retry=True,
+    )
+
+    result = asyncio.run(
+        TaskRuntimeCoordinator(queue, audit).start(
+            runtime,
+            RuntimeRequest(task_id, "thread-no-replay"),
+            retry_policy=policy,
+        )
+    )
+
+    assert result.outcome == RuntimeOutcome.FAILED
+    assert runtime.run_calls == 1
+    assert runtime.resume_calls == 1
+    assert runtime.side_effects == 1
+    assert _task_state(store, task_id) == TaskState.FAILED
+    event_types = [
+        event.event_type for event in audit.list_for(entity_type="task", entity_id=task_id)
+    ]
+    assert event_types == [
+        "runtime.started",
+        "runtime.session_bound",
+        "runtime.retry_scheduled",
+        "runtime.retry_started",
+        "runtime.retry_blocked_unsafe_fresh_replay",
+        "runtime.finished",
+    ]
 
 
 def test_retry_policy_backoff_is_bounded() -> None:
