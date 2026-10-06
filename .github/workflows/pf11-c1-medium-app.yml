@@ -84,10 +84,20 @@ jobs:
             throw 'Exact C1 ZIP does not contain its executable.'
           }
 
+          $installerSha = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($installerSha -ne [string]$evidence.installer_sha256) {
+            throw 'Exact C1 ZIP installer SHA-256 differs from Factory evidence.'
+          }
+          $packagedExeSha = (Get-FileHash -LiteralPath $packagedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+
           & $installer -BundlePath $bundle -Destination $installRoot | Out-Host
           $installedExe = Join-Path $installRoot 'NikaC1ExpenseManager.exe'
           if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
             throw 'Exact C1 ZIP installer did not materialize its executable.'
+          }
+          $installedExeSha = (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($installedExeSha -ne $packagedExeSha) {
+            throw 'Exact C1 ZIP installed executable differs from packaged executable bytes.'
           }
 
           New-Item -ItemType Directory -Path $dataRoot -Force | Out-Null
@@ -144,8 +154,9 @@ jobs:
             package_file = [System.IO.Path]::GetFileName($package)
             package_sha256 = $actualSha
             factory_evidence_sha256 = (Get-FileHash -LiteralPath $evidencePath -Algorithm SHA256).Hash.ToLowerInvariant()
-            installer_sha256 = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-            installed_executable_sha256 = (Get-FileHash -LiteralPath $installedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+            installer_sha256 = $installerSha
+            packaged_executable_sha256 = $packagedExeSha
+            installed_executable_sha256 = $installedExeSha
             proof_scope = 'exact-generated-zip-after-extract-install'
             installed_executable_proven = $true
             packaged_restart_proven = $true
@@ -175,6 +186,8 @@ jobs:
           if ($exact.schema -ne 'nika-pf11-c1-exact-package-evidence-v1') { throw 'Exact C1 package evidence schema is invalid' }
           if ($exact.source_sha -ne '${{ env.NIKA_CANDIDATE_SHA }}') { throw 'Exact C1 package evidence source SHA is stale' }
           if ($exact.package_sha256 -ne [string]$evidence.package_sha256) { throw 'Exact C1 package evidence is not bound to Factory package SHA' }
+          if ($exact.installer_sha256 -ne [string]$evidence.installer_sha256) { throw 'Exact C1 package installer identity is not bound to Factory evidence' }
+          if ($exact.packaged_executable_sha256 -ne $exact.installed_executable_sha256) { throw 'Exact C1 installed executable identity differs from packaged executable identity' }
           if ($exact.proof_scope -ne 'exact-generated-zip-after-extract-install') { throw 'Exact C1 package proof scope is invalid' }
           if ($exact.installed_executable_proven -ne $true) { throw 'Exact C1 package install proof is missing' }
           if ($exact.packaged_restart_proven -ne $true) { throw 'Exact C1 package restart proof is missing' }

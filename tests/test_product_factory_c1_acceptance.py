@@ -53,6 +53,17 @@ def test_c1_workflow_reproves_the_exact_generated_zip_before_upload() -> None:
     assert "factory_evidence_sha256" in workflow
     assert "installed_executable_sha256" in workflow
     assert "dist/pf11-c1-exact-package-evidence.json" in workflow
+    assert "$installerSha -ne [string]$evidence.installer_sha256" in workflow
+    assert workflow.index("$installerSha -ne [string]$evidence.installer_sha256") < workflow.index(
+        "& $installer -BundlePath $bundle -Destination $installRoot"
+    )
+    assert "$installedExeSha -ne $packagedExeSha" in workflow
+    assert "packaged_executable_sha256 = $packagedExeSha" in workflow
+    assert "$exact.installer_sha256 -ne [string]$evidence.installer_sha256" in workflow
+    assert (
+        "$exact.packaged_executable_sha256 -ne $exact.installed_executable_sha256"
+        in workflow
+    )
     assert workflow.index("Re-prove exact generated C1 ZIP") < workflow.index(
         "Upload exact C1 package evidence"
     )
