@@ -4,8 +4,8 @@ import json
 
 import pytest
 
+from _product_decision_test_support import ApprovedProductDecisionRepository
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
     EvidenceRef,
     ProductDecision,
@@ -69,7 +69,7 @@ def _project(tmp_path):
             ),
         ),
     )
-    ProductDecisionRepository(store).record(
+    ApprovedProductDecisionRepository(store).record(
         "project-1",
         ProductDecision(
             decision_id="decision-1",
