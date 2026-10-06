@@ -2089,6 +2089,124 @@ def test_environment_builder_binds_promoted_initial_adapter(
     assert loaded.initial_adapter_sha256 == _sha256(b"promoted-adapter")
 
 
+def test_configured_initial_adapter_digest_is_enforced_by_staging_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, foundation = _request(tmp_path, max_steps=1)
+    promoted = tmp_path / "promoted.safetensors"
+    promoted.write_bytes(b"promoted-adapter")
+    promoted_sha256 = _sha256(promoted.read_bytes())
+    raw_request["job"]["base_artifact"] = {
+        "artifact_ref": "models/candidate/pilot",
+        "sha256": promoted_sha256,
+    }
+    raw_request["training_materials"]["base_artifact_sha256"] = promoted_sha256
+    request = peft._parse_request(raw_request)
+    base_config = _config(tmp_path, request, foundation)
+    config = replace(
+        base_config,
+        initial_adapter=promoted.resolve(),
+        initial_adapter_sha256=promoted_sha256,
+    )
+    monkeypatch.setattr(
+        peft.importlib.metadata,
+        "version",
+        _RUNTIME_VERSIONS.__getitem__,
+    )
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        initial_adapter=promoted.resolve(),
+        output_root=config.output_root,
+        trainer_artifact=_trainer_artifact(tmp_path),
+    )
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    promoted.write_bytes(b"tampered-promoted-adapter")
+
+    loaded = peft._read_config()
+    job_root = peft._ensure_job_root(loaded, request)
+    with pytest.raises(peft.PeftTrainerError, match="initial_adapter_source_changed"):
+        peft._stage_initial_adapter(loaded, request, job_root)
+
+
+def test_configured_initial_adapter_reuses_staged_copy_after_source_loss(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, foundation = _request(tmp_path, max_steps=1)
+    promoted = tmp_path / "promoted.safetensors"
+    promoted.write_bytes(b"promoted-adapter")
+    promoted_sha256 = _sha256(promoted.read_bytes())
+    raw_request["job"]["base_artifact"] = {
+        "artifact_ref": "models/candidate/pilot",
+        "sha256": promoted_sha256,
+    }
+    raw_request["training_materials"]["base_artifact_sha256"] = promoted_sha256
+    request = peft._parse_request(raw_request)
+    base_config = _config(tmp_path, request, foundation)
+    config = replace(
+        base_config,
+        initial_adapter=promoted.resolve(),
+        initial_adapter_sha256=promoted_sha256,
+    )
+    job_root = peft._ensure_job_root(config, request)
+    target_dir = peft._ensure_child_directory(
+        job_root,
+        "initial-adapter",
+        code="initial_adapter_stage_failed",
+    )
+    target = target_dir / peft._CANDIDATE_FILE
+    peft._copy_initial_adapter_snapshot(
+        promoted.resolve(),
+        target,
+        expected_sha256=promoted_sha256,
+    )
+
+    monkeypatch.setattr(
+        peft.importlib.metadata,
+        "version",
+        _RUNTIME_VERSIONS.__getitem__,
+    )
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        initial_adapter=promoted.resolve(),
+        output_root=config.output_root,
+        trainer_artifact=_trainer_artifact(tmp_path),
+    )
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    promoted.unlink()
+    loaded = peft._read_config()
+
+    prior_manifest = {
+        "adapter_config": {
+            "base_model_name_or_path": "models/base",
+            "bias": "none",
+            "lora_alpha": loaded.lora_alpha,
+            "lora_dropout": loaded.lora_dropout,
+            "r": loaded.lora_r,
+            "target_modules": list(loaded.lora_target_modules),
+            "task_type": "CAUSAL_LM",
+        },
+        "base_artifact_sha256": loaded.base_gguf_sha256,
+        "candidate_artifact_ref": request.base_artifact_ref,
+        "schema": "nika-peft-candidate-v2",
+    }
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        lambda _: prior_manifest,
+    )
+
+    staged = peft._stage_initial_adapter(loaded, request, job_root)
+
+    assert staged == target_dir
+    assert target.read_bytes() == b"promoted-adapter"
+
+
 def test_read_config_rejects_partial_initial_adapter_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
