@@ -657,6 +657,39 @@ def test_process_output_is_not_persisted_in_receipt(tmp_path) -> None:
     assert command[2] not in serialized
 
 
+def test_cleanup_failure_downgrades_success_and_persists_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    root, sha = _repository(tmp_path)
+    store = _store(tmp_path)
+    command = _command()
+    adapter = _adapter(
+        tmp_path,
+        store,
+        root,
+        Authority(_authority("work-cleanup", command)),
+        Policies(_policy("work-cleanup")),
+    )
+    dispatch = _dispatch(sha, "work-cleanup", command)
+
+    def broken_cleanup(plan) -> None:
+        raise OSError("simulated cleanup failure")
+
+    monkeypatch.setattr(
+        "nika_core.product_factory_local_build_execution.cleanup_private_git_workspace",
+        broken_cleanup,
+    )
+
+    result = adapter.run(dispatch)
+
+    assert result.succeeded is False
+    assert result.uncertain is False
+    assert adapter.inspect(dispatch) == result
+    assert adapter.collect(dispatch, result) == ()
+    assert (root / "products" / "build" / "artifact.bin").exists() is False
+
+
 def test_duplicate_receipt_fails_closed_as_durable_corruption(tmp_path) -> None:
     root, sha = _repository(tmp_path)
     store = _store(tmp_path)
