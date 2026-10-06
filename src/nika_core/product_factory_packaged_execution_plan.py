@@ -158,7 +158,7 @@ def decode_packaged_product_factory_execution_plan(
         )
     except (RepositoryGraphError, PackagedProductFactoryPreparationError) as exc:
         raise PackagedExecutionPlanAdmissionError(
-            f"execution plan authority claim is invalid: {exc}"
+            f"execution plan claim is invalid: {exc}"
         ) from exc
 
 
@@ -171,7 +171,7 @@ def _decode_repository(value: object, index: int) -> RepositoryRef:
     credential_ref = (
         None
         if credential_value is None
-        else _canonical_text(credential_value, f"{label}.credential_ref")
+        else _credential_ref(credential_value, f"{label}.credential_ref")
     )
     if type(item["case_sensitive_paths"]) is not bool:
         raise PackagedExecutionPlanAdmissionError(
@@ -213,7 +213,23 @@ def _repository_locator(value: object, label: str) -> str:
         raise PackagedExecutionPlanAdmissionError(
             f"{label} must not contain inline URL credentials"
         )
+    if parsed.query or parsed.fragment:
+        raise PackagedExecutionPlanAdmissionError(
+            f"{label} must not contain URL query or fragment data"
+        )
     return locator
+
+
+def _credential_ref(value: object, label: str) -> str:
+    credential_ref = _canonical_text(value, label)
+    if any(
+        ord(character) < 32 or ord(character) == 127
+        for character in credential_ref
+    ):
+        raise PackagedExecutionPlanAdmissionError(
+            f"{label} must be an opaque single-line reference"
+        )
+    return credential_ref
 
 
 def _decode_component(value: object, index: int) -> ProductComponent:
