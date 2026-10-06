@@ -405,6 +405,17 @@ class PackagedVoiceModelSetup:
         restart_required = False
         cancellation: asyncio.CancelledError | None = None
         started_event.set()
+        if cancel_event.is_set():
+            with self._lock:
+                if generation == self._generation:
+                    self._active = False
+                    self._cancelling = False
+                    self._cancel_event = None
+                    self._restart_required = False
+                    self._last_status = "cancelled"
+                    self._last_message = "Імпорт голосової моделі скасовано."
+            raise asyncio.CancelledError
+
         source_text = self._require_start_payload(payload)
         worker = asyncio.create_task(
             asyncio.to_thread(
