@@ -360,11 +360,13 @@ class PackagedBoundLocalProductFactoryHost:
                 "ProductProject identity is invalid"
             )
 
-        if bind_if_missing:
-            self._require_model_authority_current()
-
         with self.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE" if bind_if_missing else "BEGIN")
+            if bind_if_missing:
+                # Hold the same-database writer fence while revalidating the
+                # launch-frozen authority so settings cannot advance between
+                # the current-authority check and this task's durable bind.
+                self._require_model_authority_current()
             row = conn.execute(
                 "SELECT payload_json FROM tasks WHERE task_id = ?",
                 (host_task_id,),
