@@ -106,7 +106,7 @@ class PackagedProductFactoryToolsmithService:
         self,
         plan: PackagedProductFactoryCapabilityGapPlan,
     ) -> ComponentCapabilityGap:
-        _require_plan(plan)
+        plan = _snapshot_plan(plan)
         prepared = self._restore_exact(plan)
         try:
             host_task_id, request = self.preparation.require_repair_request(
@@ -144,7 +144,7 @@ class PackagedProductFactoryToolsmithService:
         self,
         plan: PackagedProductFactoryCapabilityGapPlan,
     ) -> ComponentCapabilityResume | None:
-        _require_plan(plan)
+        plan = _snapshot_plan(plan)
         prepared = self._restore_exact(plan)
         try:
             return self.bridge.resume_durable_registered_gap(
@@ -181,11 +181,28 @@ class PackagedProductFactoryToolsmithService:
         return prepared
 
 
-def _require_plan(plan: object) -> None:
+def _snapshot_plan(
+    plan: object,
+) -> PackagedProductFactoryCapabilityGapPlan:
+    """Re-admit current plan fields so frozen-dataclass tampering cannot cross the effect boundary."""
+
     if type(plan) is not PackagedProductFactoryCapabilityGapPlan:
-        raise TypeError(
-            "plan must be PackagedProductFactoryCapabilityGapPlan"
+        raise TypeError("plan must be PackagedProductFactoryCapabilityGapPlan")
+    try:
+        return PackagedProductFactoryCapabilityGapPlan(
+            project_id=plan.project_id,
+            expected_spec_version=plan.expected_spec_version,
+            expected_row_version=plan.expected_row_version,
+            expected_graph_digest=plan.expected_graph_digest,
+            component_id=plan.component_id,
+            expected_work_id=plan.expected_work_id,
+            capability_id=plan.capability_id,
+            attempted_methods=plan.attempted_methods,
         )
+    except AttributeError as exc:
+        raise PackagedProductFactoryToolsmithError(
+            "capability-gap plan is structurally invalid"
+        ) from exc
 
 
 def _plain_text(value: object, label: str) -> str:
