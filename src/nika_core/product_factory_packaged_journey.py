@@ -50,6 +50,7 @@ ProductFactoryStatusInspector = Callable[
     [str],
     tuple[ProductProjectDetail, ProductDecisionSetSummary],
 ]
+ProductFactoryExecutionHandler = Callable[[str], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
 _PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
 _REOPEN_PREFIXES = (
@@ -92,6 +93,16 @@ _CURRENT_PRODUCT_FACTORY_STATUS_COMMANDS = frozenset(
         "поточний стан product factory",
         "покажи поточний стан product factory",
         "статус поточного product factory",
+    }
+)
+_RUN_CURRENT_PRODUCT_FACTORY_COMMANDS = frozenset(
+    {
+        "run current product factory",
+        "start current product factory",
+        "запусти поточний product factory",
+        "запустити поточний product factory",
+        "виконай поточний product factory",
+        "виконати поточний product factory",
     }
 )
 _PRODUCT_STATUS_PREVIEW_LIMIT = 24
@@ -267,6 +278,14 @@ def packaged_current_product_factory_status_command(command: str) -> bool:
         raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split()).casefold().strip(" :.!?")
     return normalized in _CURRENT_PRODUCT_FACTORY_STATUS_COMMANDS
+
+
+def packaged_run_current_product_factory_command(command: str) -> bool:
+    """Recognize an exact operator command that starts canonical Product Factory work."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split()).casefold().strip(" :.!?")
+    return normalized in _RUN_CURRENT_PRODUCT_FACTORY_COMMANDS
 
 
 def packaged_current_product_decision_command(command: str) -> bool:
@@ -556,6 +575,7 @@ class PackagedProductCommandRouter:
         decision_approval_authority: ApprovalAuthority | None = None,
         team_planner: PackagedProductFactoryTeamPlanner | None = None,
         product_factory_status_inspector: ProductFactoryStatusInspector | None = None,
+        product_factory_execution_handler: ProductFactoryExecutionHandler | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
@@ -571,6 +591,7 @@ class PackagedProductCommandRouter:
         self._decision_approval_authority = decision_approval_authority
         self._team_planner = team_planner
         self._product_factory_status_inspector = product_factory_status_inspector
+        self._product_factory_execution_handler = product_factory_execution_handler
         self._pending_decision_approvals: dict[
             str, _PendingPackagedDecisionApproval
         ] = {}
@@ -1065,6 +1086,19 @@ class PackagedProductCommandRouter:
             focus_id="product-project-operator-heading",
         )
 
+    def _run_current_product_factory(self) -> UIResult:
+        project_id = self._active_project_id
+        if project_id is None:
+            raise PackagedProductJourneyError(
+                "Поточний ProductProject не вибрано. Створіть продукт або відкрийте його за ID."
+            )
+        handler = self._product_factory_execution_handler
+        if handler is None:
+            raise PackagedProductJourneyError(
+                "Виконання Product Factory недоступне у цьому packaged-контексті."
+            )
+        return handler(project_id)
+
     def _require_team_planner_and_project(
         self,
     ) -> tuple[PackagedProductFactoryTeamPlanner, str]:
@@ -1171,6 +1205,8 @@ class PackagedProductCommandRouter:
             return self._describe_current_product_factory_plan()
         if packaged_current_product_factory_status_command(command):
             return self._describe_current_product_factory_status()
+        if packaged_run_current_product_factory_command(command):
+            return self._run_current_product_factory()
 
         reopen_target = packaged_product_reopen_target(command)
         if reopen_target is not None:

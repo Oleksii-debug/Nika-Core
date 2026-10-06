@@ -519,6 +519,41 @@ def _candidate_manifest_fixture(
     }
 
 
+def test_candidate_tokenization_snapshot_rejects_held_identity_drift(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate_bytes = b"exact-candidate-snapshot"
+    decoy = tmp_path / "same-bytes-different-file.safetensors"
+    decoy.write_bytes(candidate_bytes)
+    pilot = SimpleNamespace(
+        candidate_artifact_ref="candidate-ref",
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256=_sha(b"trained-tensors"),
+    )
+
+    monkeypatch.setattr(
+        proof,
+        "_open_readonly_snapshot",
+        lambda _path: proof.os.open(decoy, proof.os.O_RDONLY),
+    )
+
+    def unexpected_manifest_parse(_path: Path) -> dict[str, object]:
+        raise AssertionError(
+            "manifest parser must not run for a mismatched held identity"
+        )
+
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", unexpected_manifest_parse)
+
+    with pytest.raises(proof.ProofError, match="identity changed"):
+        proof._verified_candidate_tokenization_from_snapshot(
+            tmp_path.resolve(),
+            candidate_bytes,
+            pilot=pilot,
+        )
+
+
 def test_candidate_tokenization_snapshot_binds_exact_bytes(
     proof: ModuleType,
     tmp_path: Path,
