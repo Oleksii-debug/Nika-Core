@@ -29,6 +29,7 @@ from nika_core.packaged_agent_builder import (
     PackagedAgentBuilderDraftHandler,
     PackagedAgentBuilderStateProjector,
 )
+from nika_core.packaged_intelligence_mode import PackagedIntelligenceModeCommandAdapter
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
@@ -69,6 +70,9 @@ _TERMINAL_TASK_STATES = frozenset(
         TaskState.CANCELLED,
         TaskState.ARCHIVED,
     }
+)
+_NONTERMINAL_TASK_STATES = tuple(
+    state for state in TaskState if state not in _TERMINAL_TASK_STATES
 )
 
 
@@ -181,12 +185,26 @@ def _training_status_result(
     )
 
 
-def _current_task_status_result(queue: TaskQueue) -> UIResult:
+def _current_task_status_result(
+    queue: TaskQueue,
+    task_id: str | None = None,
+) -> UIResult:
     try:
-        unfinished = tuple(
-            record
-            for record in queue.list_recent(limit=50)
-            if record.state not in _TERMINAL_TASK_STATES
+        if task_id is not None:
+            record = queue.get(task_id)
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message=f"Завдання: {record.task_id}; state {record.state.value}.",
+                focus_id="tasks-heading",
+            )
+        unfinished = queue.list_by_states(_NONTERMINAL_TASK_STATES, limit=2)
+    except KeyError:
+        return UIResult(
+            request_id="desktop-handler",
+            status="rejected",
+            message=f"Завдання не знайдено: {task_id}.",
+            focus_id="tasks-heading",
         )
     except Exception as exc:  # noqa: BLE001 - packaged boundary must fail closed
         logging.getLogger(__name__).error(
@@ -211,7 +229,7 @@ def _current_task_status_result(queue: TaskQueue) -> UIResult:
             request_id="desktop-handler",
             status="rejected",
             message=(
-                f"Є кілька незавершених завдань ({len(unfinished)}); "
+                "Є кілька незавершених завдань; "
                 "відкрийте список «Завдання» для явного вибору."
             ),
             focus_id="tasks-heading",
@@ -243,6 +261,7 @@ def build_windows_bridge(
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
     model_settings = V01ModelSettings(store)
+    intelligence_mode_commands = PackagedIntelligenceModeCommandAdapter(model_settings)
     cloud_permissions = V01CloudModelPermissionService(
         store=store,
         settings=model_settings,
@@ -316,7 +335,10 @@ def build_windows_bridge(
         task_pause_handler=backend.pause_task,
         task_resume_handler=resume_ordinary_task,
         task_stop_handler=backend.stop_agent,
-        task_status_handler=lambda: _current_task_status_result(task_queue),
+        task_status_handler=lambda task_id: _current_task_status_result(
+            task_queue,
+            task_id,
+        ),
         activity_report_handler=lambda: _daily_activity_report_result(
             activity_reports,
             day_provider=activity_report_day,
@@ -325,6 +347,7 @@ def build_windows_bridge(
             training_status,
             task_id,
         ),
+        intelligence_mode_handler=intelligence_mode_commands.execute,
         selection_store=PackagedProductSelectionStore(store),
     )
     agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)

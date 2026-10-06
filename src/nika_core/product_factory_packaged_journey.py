@@ -9,6 +9,7 @@ from typing import Any
 from uuid import UUID
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.packaged_intelligence_mode import is_packaged_intelligence_mode_command
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.contracts import CommandRouteKind, ProductProjectDetail
 from nika_core.product_command.product_project_adapter import (
@@ -22,9 +23,10 @@ from nika_core.ui.bridge_models import UIResult
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
 AgentBuilderCommandHandler = Callable[[Mapping[str, Any]], UIResult]
 TaskControlHandler = Callable[[Mapping[str, Any]], UIResult]
-TaskStatusHandler = Callable[[], UIResult]
+TaskStatusHandler = Callable[[str | None], UIResult]
 ActivityReportHandler = Callable[[], UIResult]
 TrainingStatusHandler = Callable[[str], UIResult]
+IntelligenceModeCommandHandler = Callable[[str], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
 _PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
 _REOPEN_PREFIXES = (
@@ -194,20 +196,47 @@ def packaged_training_status_target(command: str) -> str | None:
     return task_id
 
 
-def packaged_task_direct_action(command: str) -> str | None:
-    """Recognize exact long-task control commands without broad natural-language capture."""
+def packaged_task_direct_target(command: str) -> tuple[str, str | None] | None:
+    """Recognize exact long-task controls and an optional canonical task UUID."""
     if type(command) is not str:
         raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
-    normalized = " ".join(command.split()).casefold().strip(" :.!?")
+    normalized = " ".join(command.split()).strip(" :.!?")
+    lowered = normalized.casefold()
     for action, commands in (
         ("pause", _TASK_PAUSE_COMMANDS),
         ("resume", _TASK_RESUME_COMMANDS),
         ("stop", _TASK_STOP_COMMANDS),
         ("status", _TASK_STATUS_COMMANDS),
     ):
-        if normalized in commands:
-            return action
+        if lowered in commands:
+            return action, None
+        prefixes = tuple(
+            item for item in commands if lowered.startswith(item + " ")
+        )
+        if not prefixes:
+            continue
+        prefix = max(prefixes, key=len)
+        task_id = normalized[len(prefix) :].strip(" :#")
+        if len(task_id.split()) != 1:
+            return None
+        try:
+            parsed = UUID(task_id)
+        except (ValueError, AttributeError) as exc:
+            raise PackagedProductJourneyError(
+                "Вкажіть task_id у канонічному UUID-форматі після команди керування."
+            ) from exc
+        if str(parsed) != task_id:
+            raise PackagedProductJourneyError(
+                "Вкажіть task_id у канонічному UUID-форматі після команди керування."
+            )
+        return action, task_id
     return None
+
+
+def packaged_task_direct_action(command: str) -> str | None:
+    """Return the action part of an exact direct task command."""
+    target = packaged_task_direct_target(command)
+    return target[0] if target is not None else None
 
 
 def _valid_selection_id(value: object) -> bool:
@@ -276,8 +305,9 @@ class PackagedProductCommandRouter:
     """Route packaged command input to durable ProductProject, read-only report, or task handling.
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
-    Explicit daily-report, training-status and long-task control intents delegate only to
-    injected incumbent handlers. Explicit Agent Builder intent delegates only to an injected
+    Explicit daily-report, training-status, intelligence-mode and long-task control intents
+    delegate only to injected incumbent handlers. Explicit Agent Builder intent delegates only
+    to an injected
     safe-draft handler. Toolsmith remains a separate fail-closed route. No high-impact external
     action is launched merely by command classification.
     """
@@ -294,6 +324,7 @@ class PackagedProductCommandRouter:
         task_status_handler: TaskStatusHandler | None = None,
         activity_report_handler: ActivityReportHandler | None = None,
         training_status_handler: TrainingStatusHandler | None = None,
+        intelligence_mode_handler: IntelligenceModeCommandHandler | None = None,
         selection_store: PackagedProductSelectionStore | None = None,
     ) -> None:
         self._products = products
@@ -305,6 +336,7 @@ class PackagedProductCommandRouter:
         self._task_status_handler = task_status_handler
         self._activity_report_handler = activity_report_handler
         self._training_status_handler = training_status_handler
+        self._intelligence_mode_handler = intelligence_mode_handler
         self._selection_store = selection_store
         self._active_project_id = selection_store.load() if selection_store is not None else None
 
@@ -395,6 +427,13 @@ class PackagedProductCommandRouter:
                 )
             return self._activity_report_handler()
 
+        if is_packaged_intelligence_mode_command(command):
+            if self._intelligence_mode_handler is None:
+                raise PackagedProductJourneyError(
+                    "Керування режимом інтелекту недоступне у цьому запуску."
+                )
+            return self._intelligence_mode_handler(command)
+
         training_task_id = packaged_training_status_target(command)
         if training_task_id is not None:
             if self._training_status_handler is None:
@@ -403,14 +442,15 @@ class PackagedProductCommandRouter:
                 )
             return self._training_status_handler(training_task_id)
 
-        task_action = packaged_task_direct_action(command)
-        if task_action == "status":
-            if self._task_status_handler is None:
-                raise PackagedProductJourneyError(
-                    "Статус поточного завдання недоступний у цьому запуску."
-                )
-            return self._task_status_handler()
-        if task_action is not None:
+        task_direct = packaged_task_direct_target(command)
+        if task_direct is not None:
+            task_action, task_id = task_direct
+            if task_action == "status":
+                if self._task_status_handler is None:
+                    raise PackagedProductJourneyError(
+                        "Статус поточного завдання недоступний у цьому запуску."
+                    )
+                return self._task_status_handler(task_id)
             handler = {
                 "pause": self._task_pause_handler,
                 "resume": self._task_resume_handler,
@@ -420,10 +460,9 @@ class PackagedProductCommandRouter:
                 raise PackagedProductJourneyError(
                     f"Керування завданням «{task_action}» недоступне у цьому запуску."
                 )
-            # Direct command text and unrelated UI payload fields are classification input only.
-            # The incumbent task-control authority selects/validates the actual target.
-            return handler({})
-
+            # Direct command text and unrelated UI fields are classification input only.
+            # Only the canonical target identity crosses into incumbent task-control authority.
+            return handler({"task_id": task_id} if task_id is not None else {})
         if packaged_current_product_command(command):
             return self._describe_current_project()
 
