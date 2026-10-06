@@ -101,7 +101,8 @@ class PackagedReviewedBuildPass:
                     or any(type(value) is not str or not value.strip() for value in key)
                 ):
                     raise TypeError(
-                        "configured component keys must be exact project/repository/component tuples"
+                        "configured component keys must be exact "
+                        "project/repository/component tuples"
                     )
 
     def advance(self, prepared: PreparedProductFactory) -> PackagedBuildPassResult:
