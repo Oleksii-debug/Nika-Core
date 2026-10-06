@@ -1768,6 +1768,177 @@ def test_resumed_training_loads_from_verified_checkpoint_snapshot(
     assert manifest["previous_adapter_tensors_sha256"] != forged_previous_sha256
 
 
+def test_resume_load_authority_rejects_transient_adapter_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    first_state, first_candidate = peft._train_one_step(
+        request,
+        config,
+        consumed,
+    )
+    assert first_candidate is None
+    observed = {"blocked": False, "mutated": False}
+
+    class _TransientResumeAdapterMutation:
+        @staticmethod
+        def from_pretrained(
+            model: _FakeModel,
+            path: str,
+            *,
+            is_trainable: bool,
+            local_files_only: bool,
+        ) -> _FakeModel:
+            target = Path(path) / peft._CANDIDATE_FILE
+            original = target.read_bytes()
+            try:
+                target.write_bytes(original + b"-transient")
+                target.write_bytes(original)
+                observed["mutated"] = True
+            except OSError:
+                observed["blocked"] = True
+            return _FakePeftModel.from_pretrained(
+                model,
+                path,
+                is_trainable=is_trainable,
+                local_files_only=local_files_only,
+            )
+
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["previous_step_id"] = request.step_id
+    raw_second["step_id"] = _step_id(1)
+    raw_second["resume_state"] = first_state
+    second = peft._parse_request(raw_second)
+    second_consumed = peft._consume_materials(second, max_records=10)
+    stack = list(_fake_stack())
+    stack[2] = _TransientResumeAdapterMutation
+    monkeypatch.setattr(peft, "_import_training_stack", lambda: tuple(stack))
+
+    if peft.os.name == "nt":
+        _, candidate_sha256 = peft._train_one_step(
+            second,
+            config,
+            second_consumed,
+        )
+        assert candidate_sha256 is not None
+        assert observed == {"blocked": True, "mutated": False}
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="resume_checkpoint_changed_during_load",
+        ):
+            peft._train_one_step(
+                second,
+                config,
+                second_consumed,
+            )
+        assert observed == {"blocked": False, "mutated": True}
+
+
+def test_resume_load_authority_pins_non_adapter_checkpoint_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StatefulCheckpointTrainer(_FakeTrainer):
+        def train(self, *, resume_from_checkpoint: str | bool) -> None:
+            super().train(resume_from_checkpoint=resume_from_checkpoint)
+            checkpoint = (
+                Path(self.args.output_dir)
+                / f"checkpoint-{self.args.max_steps}"
+            )
+            (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    first_stack = list(_fake_stack())
+    first_stack[11] = _StatefulCheckpointTrainer
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        lambda: tuple(first_stack),
+    )
+    first_state, first_candidate = peft._train_one_step(
+        request,
+        config,
+        consumed,
+    )
+    assert first_candidate is None
+    observed = {"blocked": False, "mutated": False}
+
+    class _TransientResumeStateMutationTrainer(_FakeTrainer):
+        def train(self, *, resume_from_checkpoint: str | bool) -> None:
+            target = Path(str(resume_from_checkpoint)) / "optimizer.pt"
+            original = target.read_bytes()
+            try:
+                target.write_bytes(original + b"-transient")
+                target.write_bytes(original)
+                observed["mutated"] = True
+            except OSError:
+                observed["blocked"] = True
+            super().train(resume_from_checkpoint=resume_from_checkpoint)
+
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["previous_step_id"] = request.step_id
+    raw_second["step_id"] = _step_id(1)
+    raw_second["resume_state"] = first_state
+    second = peft._parse_request(raw_second)
+    second_consumed = peft._consume_materials(second, max_records=10)
+    second_stack = list(_fake_stack())
+    second_stack[11] = _TransientResumeStateMutationTrainer
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        lambda: tuple(second_stack),
+    )
+
+    if peft.os.name == "nt":
+        _, candidate_sha256 = peft._train_one_step(
+            second,
+            config,
+            second_consumed,
+        )
+        assert candidate_sha256 is not None
+        assert observed == {"blocked": True, "mutated": False}
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="resume_checkpoint_changed_during_load",
+        ):
+            peft._train_one_step(
+                second,
+                config,
+                second_consumed,
+            )
+        assert observed == {"blocked": False, "mutated": True}
+
+
+def test_resume_load_authority_bounds_open_file_count(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint-1"
+    checkpoint.mkdir()
+    for index in range(peft._MAX_RESUME_LOAD_AUTHORITY_FILES + 1):
+        (checkpoint / f"state-{index:03d}.bin").write_bytes(b"state")
+    expected_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="resume_load_authority_file_limit",
+    ):
+        peft._open_resume_checkpoint_load_authority(
+            checkpoint,
+            expected_payload_sha256=expected_sha256,
+        )
+
+
 def test_initial_adapter_config_publish_recovers_partial_prelink_temp(
     tmp_path: Path,
 ) -> None:
