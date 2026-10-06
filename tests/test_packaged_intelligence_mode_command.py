@@ -172,10 +172,14 @@ def test_malformed_mode_command_is_rejected_without_falling_through_or_mutating_
     _store, settings, router, ordinary = _composition(tmp_path / "rejected.db")
 
     result = router.create({"command": "intelligence mode ollama qwen3:8b"})
+    controlled = router.create(
+        {"command": "intelligence mode \u202e deterministic"}
+    )
 
     assert result.status == "rejected"
     assert "loopback-url" in result.message
     assert result.focus_id == "command-input"
+    assert controlled.status == "rejected"
     assert settings.snapshot() == {"status": "missing", "revision": 0}
     assert ordinary.calls == []
     assert router.active_project_id is None
