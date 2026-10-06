@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import NoReturn
@@ -33,6 +34,12 @@ _EXPERIMENT_ID = "physical-scale-progression-real-proof-v1"
 _SHA40_RE = re.compile(r"^[0-9a-f]{40}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_JSON_BYTES = 1024 * 1024
+_MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _TIER1_REPLACED_CONFIG_FIELDS = frozenset(
     {
         "base_artifact_ref",
@@ -82,9 +89,11 @@ def _reject_constant(value: str) -> NoReturn:
 
 def _read_object_snapshot(path: Path) -> tuple[dict[str, object], bytes]:
     try:
-        raw = path.read_bytes()
-        if not raw or len(raw) > _MAX_JSON_BYTES:
-            _fail(f"JSON authority has invalid size: {path.name}")
+        raw = _stable_file_bytes(
+            path,
+            max_bytes=_MAX_JSON_BYTES,
+            name=f"JSON authority {path.name}",
+        )
         value = json.loads(
             raw.decode("utf-8", errors="strict"),
             object_pairs_hook=_strict_object,
@@ -164,6 +173,237 @@ def _sha256_file(path: Path) -> tuple[str, int]:
     if total <= 0:
         _fail(f"authority is empty: {path.name}")
     return digest.hexdigest(), total
+
+
+def _is_reparse(value: os.stat_result) -> bool:
+    attributes = int(getattr(value, "st_file_attributes", 0))
+    flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return bool(attributes & flag)
+
+
+def _open_readonly_snapshot(path: Path) -> int:
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows evidence snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(getattr(os, "O_NONBLOCK", 0))
+    return os.open(path, flags)
+
+
+def _require_open_snapshot_identity(path: Path, descriptor: int, *, name: str) -> None:
+    try:
+        opened = os.fstat(descriptor)
+        current = os.lstat(path)
+    except OSError as exc:
+        raise ProofError(f"{name} identity could not be verified") from exc
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        _fail(f"{name} identity changed")
+
+
+def _read_held_bytes(
+    descriptor: int,
+    *,
+    max_bytes: int,
+    name: str,
+) -> bytes:
+    if type(max_bytes) is not int or max_bytes <= 0:
+        _fail(f"{name} size bound is invalid")
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            remaining = max_bytes + 1 - total
+            if remaining <= 0:
+                _fail(f"{name} size is invalid")
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                _fail(f"{name} size is invalid")
+            chunks.append(chunk)
+    except ProofError:
+        raise
+    except OSError as exc:
+        raise ProofError(f"{name} could not be read") from exc
+    if total <= 0:
+        _fail(f"{name} is empty")
+    return b"".join(chunks)
+
+
+def _stable_file_bytes(path: Path, *, max_bytes: int, name: str) -> bytes:
+    descriptor: int | None = None
+    try:
+        before = os.lstat(path)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > max_bytes
+        ):
+            _fail(f"{name} size or file type is invalid")
+        descriptor = _open_readonly_snapshot(path)
+        _require_open_snapshot_identity(path, descriptor, name=name)
+        opened = os.fstat(descriptor)
+        payload = _read_held_bytes(
+            descriptor,
+            max_bytes=max_bytes,
+            name=name,
+        )
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+    except ProofError:
+        raise
+    except OSError as exc:
+        raise ProofError(f"{name} could not be snapshotted") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    identities = (
+        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
+        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+        (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+    )
+    if len(set(identities)) != 1 or len(payload) != before.st_size:
+        _fail(f"{name} changed while it was being snapshotted")
+    return payload
+
+
+def _load_frozen_package_snapshot(
+    path: Path,
+    *,
+    expected_manifest_sha256: str,
+) -> FrozenLearningPackage:
+    raw = _stable_file_bytes(
+        path,
+        max_bytes=_MAX_JSON_BYTES,
+        name=f"frozen learning package {path.name}",
+    )
+    try:
+        return FrozenLearningPackage.from_json(
+            raw,
+            expected_manifest_sha256=expected_manifest_sha256,
+        )
+    except (RuntimeError, TypeError, UnicodeError, ValueError) as exc:
+        raise ProofError(f"frozen learning package is invalid: {path.name}") from exc
+
+
+def _candidate_file_authority(
+    path: Path,
+    *,
+    name: str,
+) -> tuple[str, int, dict[str, object]]:
+    """Bind one candidate digest and manifest parse to one held file authority."""
+
+    descriptor: int | None = None
+    try:
+        before = os.lstat(path)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or _is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_size <= 0
+            or before.st_size > _MAX_CANDIDATE_BYTES
+        ):
+            _fail(f"{name} size or file type is invalid")
+        descriptor = _open_readonly_snapshot(path)
+        _require_open_snapshot_identity(path, descriptor, name=name)
+        opened = os.fstat(descriptor)
+        payload = _read_held_bytes(
+            descriptor,
+            max_bytes=_MAX_CANDIDATE_BYTES,
+            name=name,
+        )
+        if len(payload) != before.st_size:
+            _fail(f"{name} changed while it was being read")
+
+        manifest = candidate_adapter_manifest(path.resolve(strict=True))
+
+        _require_open_snapshot_identity(path, descriptor, name=name)
+        after = os.fstat(descriptor)
+        current = os.lstat(path)
+        if (
+            _read_held_bytes(
+                descriptor,
+                max_bytes=_MAX_CANDIDATE_BYTES,
+                name=name,
+            )
+            != payload
+        ):
+            _fail(f"{name} changed during manifest verification")
+        identities = (
+            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
+            (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
+            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
+            (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+        )
+        if len(set(identities)) != 1:
+            _fail(f"{name} identity changed during manifest verification")
+    except ProofError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ProofError(f"{name} manifest authority could not be verified") from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    return hashlib.sha256(payload).hexdigest(), len(payload), manifest
 
 
 def _candidate_manifest_sha256(manifest: dict[str, object]) -> str:
@@ -379,8 +619,8 @@ def prepare_tier0(root: Path) -> None:
     config = _read_object(config_path)
     if config.get("schema_version") != 1 or "scale_plan" in config:
         _fail("tier-0 proof config must start from canonical schema-v1 preparation")
-    package = FrozenLearningPackage.from_json(
-        package_path.read_bytes(),
+    package = _load_frozen_package_snapshot(
+        package_path,
         expected_manifest_sha256=str(config.get("frozen_package_sha256", "")),
     )
     config["schema_version"] = 2
@@ -496,15 +736,18 @@ def prepare_tier1(root: Path) -> None:
         tier0_root,
         report.candidate_artifact_ref,
     ).resolve(strict=True)
-    adapter_sha256, adapter_size = _sha256_file(initial_adapter)
+    adapter_sha256, adapter_size, _ = _candidate_file_authority(
+        initial_adapter,
+        name="tier-0 promoted adapter",
+    )
     if (
         adapter_sha256 != report.candidate_sha256
         or adapter_size != report.candidate_byte_count
     ):
         _fail("promoted adapter bytes do not match tier-0 report")
 
-    source_package = FrozenLearningPackage.from_json(
-        (root / "frozen-package.json").read_bytes(),
+    source_package = _load_frozen_package_snapshot(
+        root / "frozen-package.json",
         expected_manifest_sha256=str(
             tier0_config.get("frozen_package_sha256", "")
         ),
@@ -572,8 +815,8 @@ def verify(root: Path) -> None:
     if type(workspace_id) is not str or not workspace_id:
         _fail("tier-0 workspace identity is invalid")
     tier0_package_path = root / "frozen-package.json"
-    tier0_package = FrozenLearningPackage.from_json(
-        tier0_package_path.read_bytes(),
+    tier0_package = _load_frozen_package_snapshot(
+        tier0_package_path,
         expected_manifest_sha256=str(
             tier0_config.get("frozen_package_sha256", "")
         ),
@@ -620,13 +863,15 @@ def verify(root: Path) -> None:
         tier0=tier0,
         proof=proof,
     )
-    initial_sha256, initial_size = _sha256_file(initial_adapter)
+    initial_sha256, initial_size, initial_manifest = _candidate_file_authority(
+        initial_adapter,
+        name="tier-0 promoted adapter",
+    )
     if (
         initial_sha256 != tier0.candidate_sha256
         or initial_size != tier0.candidate_byte_count
     ):
         _fail("tier-1 warm-start adapter changed after promotion")
-    initial_manifest = candidate_adapter_manifest(initial_adapter)
     base_gguf_sha256, _ = _sha256_file(root / "base.gguf")
     (
         tier0_previous_tensors_sha256,
@@ -671,9 +916,8 @@ def verify(root: Path) -> None:
     ).resolve(strict=True)
     if tier1_package_path != expected_tier1_package_path:
         _fail("tier-1 config points at an unexpected frozen package")
-    tier1_package_bytes = tier1_package_path.read_bytes()
-    tier1_package = FrozenLearningPackage.from_json(
-        tier1_package_bytes,
+    tier1_package = _load_frozen_package_snapshot(
+        tier1_package_path,
         expected_manifest_sha256=tier1.frozen_package_sha256,
     )
     if (
@@ -708,14 +952,16 @@ def verify(root: Path) -> None:
         tier1_root,
         tier1.candidate_artifact_ref,
     ).resolve(strict=True)
-    candidate_sha256, candidate_size = _sha256_file(candidate)
+    candidate_sha256, candidate_size, manifest = _candidate_file_authority(
+        candidate,
+        name="tier-1 candidate adapter",
+    )
     if (
         candidate_sha256 != tier1.candidate_sha256
         or candidate_size != tier1.candidate_byte_count
         or candidate_sha256 == tier0.candidate_sha256
     ):
         _fail("tier-1 candidate bytes do not match physical evidence")
-    manifest = candidate_adapter_manifest(candidate)
     (
         tier1_previous_tensors_sha256,
         tier1_trained_tensors_sha256,
