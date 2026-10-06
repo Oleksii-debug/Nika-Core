@@ -71,6 +71,37 @@ def _package() -> FrozenLearningPackage:
     )
 
 
+def test_candidate_manifest_digest_uses_physical_canonical_json(
+    proof: ModuleType,
+) -> None:
+    manifest = {
+        "schema": "nika-peft-candidate-v3",
+        "candidate_artifact_ref": "models/candidate",
+        "step_number": 3,
+    }
+    expected = _sha(
+        json.dumps(
+            manifest,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    )
+
+    assert proof._candidate_manifest_sha256(manifest) == expected
+
+
+def test_candidate_manifest_digest_rejects_nonfinite_json(
+    proof: ModuleType,
+) -> None:
+    with pytest.raises(
+        proof.ProofError,
+        match="not canonical JSON evidence",
+    ):
+        proof._candidate_manifest_sha256({"value": float("nan")})
+
+
 def test_candidate_training_digests_require_cross_tier_evidence(
     proof: ModuleType,
 ) -> None:
