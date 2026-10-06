@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import importlib.metadata
 import json
 import math
@@ -1985,6 +1986,41 @@ def _validate_serialized_adapter_weights(
         _fail(invalid_code)
 
 
+def _canonical_adapter_tensor_sha256(
+    tensors: dict[str, Any],
+    *,
+    safe_serialize: Any,
+    torch: Any,
+    invalid_code: str,
+    non_finite_code: str,
+) -> str:
+    """Hash one loaded finite adapter tensor state using the canonical formula."""
+
+    if type(tensors) is not dict or not tensors:
+        _fail(invalid_code)
+    canonical: dict[str, Any] = {}
+    try:
+        for name in sorted(tensors):
+            if type(name) is not str or not name or len(name.encode("utf-8")) > 4096:
+                _fail(invalid_code)
+            tensor = tensors[name]
+            count = tensor.numel()
+            finite = torch.isfinite(tensor).all().item()
+            if type(count) is not int or count <= 0:
+                _fail(invalid_code)
+            if finite is not True:
+                _fail(non_finite_code)
+            canonical[name] = tensor
+        serialized = safe_serialize(canonical)
+    except PeftTrainerError:
+        raise
+    except Exception:
+        _fail(invalid_code)
+    if type(serialized) is not bytes or not serialized:
+        _fail(invalid_code)
+    return hashlib.sha256(serialized).hexdigest()
+
+
 def _adapter_tensor_sha256(
     path: Path,
     *,
@@ -1996,25 +2032,23 @@ def _adapter_tensor_sha256(
 ) -> str:
     """Hash canonical finite adapter tensor state, excluding container metadata."""
 
-    _validate_serialized_adapter_weights(
-        path,
-        safe_open=safe_open,
-        torch=torch,
-        invalid_code=invalid_code,
-        non_finite_code=non_finite_code,
-    )
+    _require_regular_unlinked(path, code=invalid_code)
     try:
         with safe_open(os.fspath(path), framework="pt", device="cpu") as source:
             names = tuple(sorted(source.keys()))
             tensors = {name: source.get_tensor(name) for name in names}
-        serialized = safe_serialize(tensors)
     except PeftTrainerError:
         raise
     except Exception:
         _fail(invalid_code)
-    if type(serialized) is not bytes or not serialized:
-        _fail(invalid_code)
-    return hashlib.sha256(serialized).hexdigest()
+    return _canonical_adapter_tensor_sha256(
+        tensors,
+        safe_serialize=safe_serialize,
+        torch=torch,
+        invalid_code=invalid_code,
+        non_finite_code=non_finite_code,
+    )
+
 
 
 def _snapshot_adapter_weights_sha256(
@@ -2022,9 +2056,10 @@ def _snapshot_adapter_weights_sha256(
     job_root: Path,
     *,
     safe_open: Any,
+    safe_serialize: Any,
     torch: Any,
-) -> str:
-    """Hash one valid finite serialized PEFT adapter without retaining the snapshot."""
+) -> tuple[str, str]:
+    """Bind exact bytes and canonical tensors from one loaded-model adapter snapshot."""
     try:
         with tempfile.TemporaryDirectory(
             prefix=".adapter-weight-snapshot-",
@@ -2047,13 +2082,21 @@ def _snapshot_adapter_weights_sha256(
                 adapter_file,
                 code="adapter_weight_snapshot_failed",
             )
+            tensor_sha256 = _adapter_tensor_sha256(
+                adapter_file,
+                safe_open=safe_open,
+                safe_serialize=safe_serialize,
+                torch=torch,
+                invalid_code="adapter_weight_snapshot_failed",
+                non_finite_code="adapter_weight_snapshot_non_finite",
+            )
     except PeftTrainerError:
         raise
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         _fail("adapter_weight_snapshot_failed")
     if size <= 0:
         _fail("adapter_weight_snapshot_failed")
-    return digest
+    return digest, tensor_sha256
 
 
 def _train_one_step(
@@ -2143,10 +2186,14 @@ def _train_one_step(
                 local_files_only=True,
             )
 
-        before_step_adapter_sha256 = _snapshot_adapter_weights_sha256(
+        (
+            before_step_adapter_sha256,
+            loaded_adapter_tensors_sha256,
+        ) = _snapshot_adapter_weights_sha256(
             model,
             job_root,
             safe_open=safe_open,
+            safe_serialize=safe_serialize,
             torch=torch,
         )
 
@@ -2242,26 +2289,16 @@ def _train_one_step(
         invalid_code="adapter_candidate_invalid",
         non_finite_code="adapter_candidate_non_finite",
     )
-    previous_adapter_file: Path | None = None
-    if previous_checkpoint is not None:
-        previous_adapter_file = previous_checkpoint / "adapter" / _CANDIDATE_FILE
-    elif initial_adapter_dir is not None:
-        previous_adapter_file = initial_adapter_dir / _CANDIDATE_FILE
-    previous_adapter_tensors_sha256: str | None = None
-    if previous_adapter_file is not None:
-        previous_adapter_tensors_sha256 = _adapter_tensor_sha256(
-            previous_adapter_file,
-            safe_open=safe_open,
-            safe_serialize=safe_serialize,
-            torch=torch,
-            invalid_code="previous_adapter_candidate_invalid",
-            non_finite_code="previous_adapter_candidate_non_finite",
-        )
-        if hmac.compare_digest(
-            previous_adapter_tensors_sha256,
-            trained_adapter_tensors_sha256,
-        ):
-            _fail("training_step_no_tensor_mutation")
+    previous_adapter_tensors_sha256 = (
+        loaded_adapter_tensors_sha256
+        if previous_checkpoint is not None or initial_adapter_dir is not None
+        else None
+    )
+    if previous_adapter_tensors_sha256 is not None and hmac.compare_digest(
+        previous_adapter_tensors_sha256,
+        trained_adapter_tensors_sha256,
+    ):
+        _fail("training_step_no_tensor_mutation")
     checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
     marker_sha256 = _write_checkpoint_marker(
         checkpoint,
@@ -2677,12 +2714,20 @@ def _validate_candidate_manifest_payload(
     return dict(value)
 
 
-def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
-    """Read and strictly validate the self-contained manifest bound into a PEFT candidate."""
+def _candidate_tensor_dependencies() -> tuple[Any, Any, Any]:
     try:
+        import torch
         from safetensors import safe_open
+        from safetensors.torch import save as safe_serialize
     except ImportError:
         _fail("training_dependencies_unavailable")
+    return torch, safe_open, safe_serialize
+
+
+def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
+    """Read and validate one manifest plus its exact published tensor state."""
+
+    torch, safe_open, safe_serialize = _candidate_tensor_dependencies()
     path = Path(candidate_path)
     if not path.is_absolute():
         raise ValueError("candidate_path must be absolute")
@@ -2690,7 +2735,8 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
     try:
         with safe_open(os.fspath(path), framework="pt", device="cpu") as handle:
             metadata = handle.metadata()
-            tensor_keys = tuple(handle.keys())
+            tensor_keys = tuple(sorted(handle.keys()))
+            tensors = {name: handle.get_tensor(name) for name in tensor_keys}
     except (OSError, RuntimeError, TypeError, ValueError):
         _fail("candidate_safetensors_invalid")
     if not tensor_keys or any(
@@ -2698,6 +2744,13 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
         for name in tensor_keys
     ):
         _fail("candidate_safetensors_empty")
+    published_tensor_sha256 = _canonical_adapter_tensor_sha256(
+        tensors,
+        safe_serialize=safe_serialize,
+        torch=torch,
+        invalid_code="candidate_safetensors_invalid",
+        non_finite_code="candidate_safetensors_non_finite",
+    )
     if type(metadata) is not dict or set(metadata) != {"nika_adapter_manifest"}:
         _fail("candidate_manifest_missing")
     raw = metadata["nika_adapter_manifest"]
@@ -2716,7 +2769,14 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
         _fail("candidate_manifest_invalid")
     if _canonical_json_bytes(value).decode("utf-8") != raw:
         _fail("candidate_manifest_not_canonical")
-    return _validate_candidate_manifest_payload(value)
+    manifest = _validate_candidate_manifest_payload(value)
+    trained_sha256 = manifest["trained_adapter_tensors_sha256"]
+    if type(trained_sha256) is not str or not hmac.compare_digest(
+        published_tensor_sha256,
+        trained_sha256,
+    ):
+        _fail("candidate_tensor_state_mismatch")
+    return manifest
 
 
 def _response(

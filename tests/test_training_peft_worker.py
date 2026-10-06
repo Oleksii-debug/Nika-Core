@@ -815,6 +815,70 @@ def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
     assert second_state["checkpoint_step"] == 2
 
 
+class _PriorCheckpointTamperingFakeTrainer(_FakeTrainer):
+    def train(self, *, resume_from_checkpoint: str | bool) -> None:
+        prior_checkpoint = Path(str(resume_from_checkpoint))
+        assert prior_checkpoint.name == "checkpoint-1"
+        prior_adapter = prior_checkpoint / "adapter" / peft._CANDIDATE_FILE
+        assert prior_adapter.is_file()
+        super().train(resume_from_checkpoint=resume_from_checkpoint)
+        prior_adapter.write_bytes(b"forged-prior-adapter-after-load")
+
+
+def _prior_checkpoint_tampering_fake_stack() -> tuple[object, ...]:
+    return _trainer_variant_stack(_PriorCheckpointTamperingFakeTrainer)
+
+
+def test_resumed_manifest_binds_loaded_pre_step_tensor_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    first_state, first_candidate = peft._train_one_step(request, config, consumed)
+    assert first_candidate is None
+
+    job_root = config.output_root / peft._candidate_key(request.candidate_artifact_ref)
+    prior_adapter = (
+        job_root / "trainer" / "checkpoint-1" / "adapter" / peft._CANDIDATE_FILE
+    )
+    loaded_bytes = prior_adapter.read_bytes()
+    expected_previous_sha256 = _sha256(
+        b"tensor-only-v1\x00lora.weight\x00" + loaded_bytes
+    )
+
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["previous_step_id"] = request.step_id
+    raw_second["step_id"] = "3" * 64
+    raw_second["resume_state"] = first_state
+    second = peft._parse_request(raw_second)
+    second_consumed = peft._consume_materials(second, max_records=10)
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _prior_checkpoint_tampering_fake_stack,
+    )
+
+    peft._train_one_step(second, config, second_consumed)
+
+    assert prior_adapter.read_bytes() == b"forged-prior-adapter-after-load"
+    forged_previous_sha256 = _sha256(
+        b"tensor-only-v1\x00lora.weight\x00" + prior_adapter.read_bytes()
+    )
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        second.candidate_artifact_ref,
+    )
+    carrier = json.loads(candidate.read_bytes())
+    manifest = json.loads(carrier["metadata"]["nika_adapter_manifest"])
+    assert manifest["previous_adapter_tensors_sha256"] == expected_previous_sha256
+    assert manifest["previous_adapter_tensors_sha256"] != forged_previous_sha256
+
+
 def test_new_job_can_warm_start_from_promoted_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -888,8 +952,13 @@ def test_new_job_can_warm_start_from_promoted_candidate(
         request.candidate_artifact_ref,
     )
     assert candidate_sha256 == _sha256(candidate.read_bytes())
-    manifest = peft.candidate_adapter_manifest(candidate)
+    carrier = json.loads(candidate.read_bytes())
+    manifest = json.loads(carrier["metadata"]["nika_adapter_manifest"])
+    expected_previous_sha256 = _sha256(
+        b"tensor-only-v1\x00lora.weight\x00" + promoted_bytes
+    )
     assert manifest["schema"] == "nika-peft-candidate-v3"
+    assert manifest["previous_adapter_tensors_sha256"] == expected_previous_sha256
     assert manifest["foundation_model_sha256"] == config.base_gguf_sha256
     assert manifest["previous_adapter_tensors_sha256"] is not None
     assert manifest["trained_adapter_tensors_sha256"] is not None
@@ -1041,6 +1110,7 @@ def test_adapter_weight_snapshot_fails_closed_and_cleans_temporary_directory(
             _EmptyAdapterSnapshotModel(),
             job_root,
             safe_open=_fake_safe_open,
+            safe_serialize=_fake_safe_serialize,
             torch=_fake_stack()[0],
         )
 
@@ -1598,7 +1668,30 @@ def test_candidate_manifest_producer_rejects_reader_invalid_adapter_config(
         )
 
 
-def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
+def test_loaded_tensor_digest_matches_path_digest_formula(tmp_path: Path) -> None:
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(b"same-canonical-tensor-state")
+    torch = _fake_stack()[0]
+    from_path = peft._adapter_tensor_sha256(
+        candidate,
+        safe_open=_fake_safe_open,
+        safe_serialize=_fake_safe_serialize,
+        torch=torch,
+        invalid_code="invalid",
+        non_finite_code="non_finite",
+    )
+    from_loaded = peft._canonical_adapter_tensor_sha256(
+        {"lora.weight": _FakeTensor(candidate.read_bytes())},
+        safe_serialize=_fake_safe_serialize,
+        torch=torch,
+        invalid_code="invalid",
+        non_finite_code="non_finite",
+    )
+
+    assert from_loaded == from_path
+
+
+def test_candidate_manifest_reader_rejects_non_finite_published_tensor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1624,6 +1717,7 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
     )
     candidate = tmp_path / "candidate.safetensors"
     candidate.write_bytes(b"persisted-candidate")
+    published_tensor = _FakeTensor(b"published-nan-tensor")
 
     class Reader:
         def __enter__(self) -> "Reader":
@@ -1635,6 +1729,10 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
         def keys(self) -> list[str]:
             return ["lora.weight"]
 
+        def get_tensor(self, name: str) -> _FakeTensor:
+            assert name == "lora.weight"
+            return published_tensor
+
         def metadata(self) -> dict[str, str]:
             return {"nika_adapter_manifest": raw}
 
@@ -1644,13 +1742,143 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
         assert device == "cpu"
         return Reader()
 
-    monkeypatch.setitem(sys.modules, "safetensors", SimpleNamespace(safe_open=safe_open))
+    monkeypatch.setattr(
+        peft,
+        "_candidate_tensor_dependencies",
+        lambda: (_fake_stack()[0], safe_open, _fake_safe_serialize),
+    )
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_safetensors_non_finite"):
+        peft.candidate_adapter_manifest(candidate.resolve())
+
+
+def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    published_tensor = _FakeTensor(b"published-candidate-tensor")
+    published_tensor_sha256 = _sha256(
+        _fake_safe_serialize({"lora.weight": published_tensor})
+    )
+    raw = peft._candidate_manifest_json(
+        request=request,
+        config=config,
+        consumed=consumed,
+        adapter_config=adapter_config,
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256=published_tensor_sha256,
+    )
+    candidate = tmp_path / "candidate.safetensors"
+    candidate.write_bytes(b"persisted-candidate")
+
+    class Reader:
+        def __enter__(self) -> "Reader":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def keys(self) -> list[str]:
+            return ["lora.weight"]
+
+        def get_tensor(self, name: str) -> _FakeTensor:
+            assert name == "lora.weight"
+            return published_tensor
+
+        def metadata(self) -> dict[str, str]:
+            return {"nika_adapter_manifest": raw}
+
+    def safe_open(path: str, *, framework: str, device: str) -> Reader:
+        assert Path(path) == candidate
+        assert framework == "pt"
+        assert device == "cpu"
+        return Reader()
+
+    monkeypatch.setattr(
+        peft,
+        "_candidate_tensor_dependencies",
+        lambda: (_fake_stack()[0], safe_open, _fake_safe_serialize),
+    )
 
     manifest = peft.candidate_adapter_manifest(candidate.resolve())
 
     assert manifest["trainer_artifact_id"] == request.trainer_artifact_id
     assert manifest["trainer_sha256"] == request.trainer_sha256
     assert manifest["training_runtime_versions"] == _RUNTIME_VERSIONS
+    assert manifest["trained_adapter_tensors_sha256"] == published_tensor_sha256
+
+
+def test_candidate_manifest_reader_rejects_tensor_state_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    raw = peft._candidate_manifest_json(
+        request=request,
+        config=config,
+        consumed=consumed,
+        adapter_config=adapter_config,
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256="9" * 64,
+    )
+    candidate = tmp_path / "candidate.safetensors"
+    candidate.write_bytes(b"persisted-candidate")
+    published_tensor = _FakeTensor(b"different-published-tensor-state")
+
+    class Reader:
+        def __enter__(self) -> "Reader":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def keys(self) -> list[str]:
+            return ["lora.weight"]
+
+        def get_tensor(self, name: str) -> _FakeTensor:
+            assert name == "lora.weight"
+            return published_tensor
+
+        def metadata(self) -> dict[str, str]:
+            return {"nika_adapter_manifest": raw}
+
+    def safe_open(path: str, *, framework: str, device: str) -> Reader:
+        assert Path(path) == candidate
+        assert framework == "pt"
+        assert device == "cpu"
+        return Reader()
+
+    monkeypatch.setattr(
+        peft,
+        "_candidate_tensor_dependencies",
+        lambda: (_fake_stack()[0], safe_open, _fake_safe_serialize),
+    )
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_tensor_state_mismatch"):
+        peft.candidate_adapter_manifest(candidate.resolve())
 
 
 def test_candidate_manifest_v2_and_v3_contracts_are_exact_and_disjoint(
@@ -1718,12 +1946,41 @@ def test_candidate_manifest_v2_and_v3_contracts_are_exact_and_disjoint(
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
         peft._validate_candidate_manifest_payload(v3_alias)
 
-def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
+def test_candidate_manifest_reader_accepts_v3_published_tensor_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    candidate = tmp_path / "candidate.safetensors"
-    candidate.write_bytes(b"persisted-candidate")
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    warm_config = replace(
+        config,
+        initial_adapter=(tmp_path / "promoted.safetensors").resolve(),
+        initial_adapter_sha256="e" * 64,
+    )
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    published_tensor = _FakeTensor(b"published-v3-candidate-tensor")
+    published_tensor_sha256 = _sha256(
+        _fake_safe_serialize({"lora.weight": published_tensor})
+    )
+    raw = peft._candidate_manifest_json(
+        request=request,
+        config=warm_config,
+        consumed=consumed,
+        adapter_config=adapter_config,
+        previous_adapter_tensors_sha256="8" * 64,
+        trained_adapter_tensors_sha256=published_tensor_sha256,
+    )
+    candidate = tmp_path / "candidate-v3.safetensors"
+    candidate.write_bytes(b"persisted-v3-candidate")
 
     class Reader:
         def __enter__(self) -> "Reader":
@@ -1735,6 +1992,54 @@ def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
         def keys(self) -> list[str]:
             return ["lora.weight"]
 
+        def get_tensor(self, name: str) -> _FakeTensor:
+            assert name == "lora.weight"
+            return published_tensor
+
+        def metadata(self) -> dict[str, str]:
+            return {"nika_adapter_manifest": raw}
+
+    def safe_open(path: str, *, framework: str, device: str) -> Reader:
+        assert Path(path) == candidate
+        assert framework == "pt"
+        assert device == "cpu"
+        return Reader()
+
+    monkeypatch.setattr(
+        peft,
+        "_candidate_tensor_dependencies",
+        lambda: (_fake_stack()[0], safe_open, _fake_safe_serialize),
+    )
+
+    manifest = peft.candidate_adapter_manifest(candidate.resolve())
+
+    assert manifest["schema"] == "nika-peft-candidate-v3"
+    assert manifest["foundation_model_sha256"] == config.base_gguf_sha256
+    assert manifest["trained_adapter_tensors_sha256"] == published_tensor_sha256
+
+
+def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate.safetensors"
+    candidate.write_bytes(b"persisted-candidate")
+    published_tensor = _FakeTensor(b"published-candidate-tensor")
+
+    class Reader:
+        def __enter__(self) -> "Reader":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def keys(self) -> list[str]:
+            return ["lora.weight"]
+
+        def get_tensor(self, name: str) -> _FakeTensor:
+            assert name == "lora.weight"
+            return published_tensor
+
         def metadata(self) -> dict[str, str]:
             return {"nika_adapter_manifest": '{ "schema": "nika-peft-candidate-v2" }'}
 
@@ -1744,7 +2049,11 @@ def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
         assert device == "cpu"
         return Reader()
 
-    monkeypatch.setitem(sys.modules, "safetensors", SimpleNamespace(safe_open=safe_open))
+    monkeypatch.setattr(
+        peft,
+        "_candidate_tensor_dependencies",
+        lambda: (_fake_stack()[0], safe_open, _fake_safe_serialize),
+    )
 
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_not_canonical"):
         peft.candidate_adapter_manifest(candidate.resolve())
