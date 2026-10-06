@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -8,6 +9,7 @@ import pytest
 
 import nika_core.product_factory_packaged_build_continuation as continuation_module
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.product_factory_build_execution import BuildExecutionState
 from nika_core.product_factory_coordinator import WorkState
 from nika_core.product_factory_deployment import (
     ExecutionNode,
@@ -168,7 +170,13 @@ def test_continuation_advances_each_accepted_component_in_snapshot_order(
         def advance_component(self, *, state, component_id):
             calls.append((state, component_id))
             return SimpleNamespace(
-                spec=SimpleNamespace(request=SimpleNamespace(project_id=PROJECT_ID))
+                state=BuildExecutionState.SUCCEEDED,
+                spec=SimpleNamespace(
+                    request=SimpleNamespace(
+                        project_id=PROJECT_ID,
+                        work_id=f"pf5-{component_id}",
+                    )
+                ),
             )
 
     def build_controller(
@@ -206,3 +214,246 @@ def test_continuation_advances_each_accepted_component_in_snapshot_order(
         "component-b",
     ]
     assert all(state is prepared.state for state, _component_id in calls)
+
+
+def test_continuation_default_bound_allows_second_pf4_wave(
+    tmp_path,
+    monkeypatch,
+):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    component_count = 33
+    configured = {
+        (PROJECT_ID, f"repo-{index}", f"component-{index}")
+        for index in range(component_count)
+    }
+    continuation = PackagedReviewedBuildContinuation(
+        store,
+        _startup(tmp_path),
+        _activated(configured),
+    )
+    calls = []
+
+    class Controller:
+        def advance_component(self, *, state, component_id):
+            calls.append(component_id)
+            return SimpleNamespace(
+                state=BuildExecutionState.SUCCEEDED,
+                spec=SimpleNamespace(
+                    request=SimpleNamespace(
+                        project_id=PROJECT_ID,
+                        work_id=f"pf5-{component_id}",
+                    )
+                ),
+            )
+
+    monkeypatch.setattr(
+        continuation_module,
+        "build_configured_packaged_reviewed_build_controller",
+        lambda *_args, **_kwargs: Controller(),
+    )
+    records = [
+        _record(
+            f"component-{index}",
+            f"repo-{index}",
+            WorkState.ACCEPTED,
+        )
+        for index in range(component_count)
+    ]
+
+    continuation._advance(_prepared(records))
+
+    assert calls == [f"component-{index}" for index in range(component_count)]
+
+
+def test_continuation_rejects_accepted_batch_over_bound_before_pf5(
+    tmp_path,
+    monkeypatch,
+):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    continuation = PackagedReviewedBuildContinuation(
+        store,
+        _startup(tmp_path),
+        _activated(
+            {
+                (PROJECT_ID, "repo-a", "component-a"),
+                (PROJECT_ID, "repo-b", "component-b"),
+            }
+        ),
+        max_components=1,
+    )
+    built = False
+
+    def forbidden_controller(*_args, **_kwargs):
+        nonlocal built
+        built = True
+        raise AssertionError("oversized accepted batch must not compose PF5")
+
+    monkeypatch.setattr(
+        continuation_module,
+        "build_configured_packaged_reviewed_build_controller",
+        forbidden_controller,
+    )
+
+    with pytest.raises(
+        continuation_module.PackagedBuildContinuationError,
+        match="component bound",
+    ):
+        continuation._advance(
+            _prepared(
+                [
+                    _record("component-a", "repo-a", WorkState.ACCEPTED),
+                    _record("component-b", "repo-b", WorkState.ACCEPTED),
+                ]
+            )
+        )
+
+    assert built is False
+
+
+@pytest.mark.parametrize("value", [0, 129, True, 1.5])
+def test_continuation_rejects_invalid_component_bound(tmp_path, value):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+
+    with pytest.raises(ValueError, match="max_components"):
+        PackagedReviewedBuildContinuation(
+            store,
+            _startup(tmp_path),
+            _activated({(PROJECT_ID, "repo-a", "component-a")}),
+            max_components=value,
+        )
+
+
+def test_continuation_reconciles_uncertain_pf5_once_without_replay(
+    tmp_path,
+    monkeypatch,
+):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    continuation = PackagedReviewedBuildContinuation(
+        store,
+        _startup(tmp_path),
+        _activated({(PROJECT_ID, "repo-a", "component-a")}),
+    )
+    calls = []
+
+    class InnerController:
+        def reconcile_work(self, work_id):
+            calls.append(("reconcile", work_id))
+            return SimpleNamespace(
+                state=BuildExecutionState.SUCCEEDED,
+                spec=SimpleNamespace(
+                    request=SimpleNamespace(
+                        project_id=PROJECT_ID,
+                        work_id=work_id,
+                    )
+                ),
+            )
+
+    class Controller:
+        controller = InnerController()
+
+        def advance_component(self, *, state, component_id):
+            calls.append(("advance", component_id))
+            return SimpleNamespace(
+                state=BuildExecutionState.RECONCILE_REQUIRED,
+                spec=SimpleNamespace(
+                    request=SimpleNamespace(
+                        project_id=PROJECT_ID,
+                        work_id="pf5-component-a",
+                    )
+                ),
+            )
+
+    monkeypatch.setattr(
+        continuation_module,
+        "build_configured_packaged_reviewed_build_controller",
+        lambda *_args, **_kwargs: Controller(),
+    )
+
+    continuation._advance(
+        _prepared(
+            [_record("component-a", "repo-a", WorkState.ACCEPTED)]
+        )
+    )
+
+    assert calls == [
+        ("advance", "component-a"),
+        ("reconcile", "pf5-component-a"),
+    ]
+
+
+def test_continuation_settles_current_pf5_work_without_starting_next_after_cancel(
+    tmp_path,
+    monkeypatch,
+):
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    continuation = PackagedReviewedBuildContinuation(
+        store,
+        _startup(tmp_path),
+        _activated(
+            {
+                (PROJECT_ID, "repo-a", "component-a"),
+                (PROJECT_ID, "repo-b", "component-b"),
+            }
+        ),
+    )
+    prepared = _prepared(
+        [
+            _record("component-a", "repo-a", WorkState.ACCEPTED),
+            _record("component-b", "repo-b", WorkState.ACCEPTED),
+        ]
+    )
+    first_started = threading.Event()
+    release_first = threading.Event()
+    calls = []
+
+    class Controller:
+        def advance_component(self, *, state, component_id):
+            assert state is prepared.state
+            calls.append(component_id)
+            if component_id == "component-a":
+                first_started.set()
+                if not release_first.wait(timeout=5):
+                    raise AssertionError("first PF5 work was never released")
+            return SimpleNamespace(
+                state=BuildExecutionState.SUCCEEDED,
+                spec=SimpleNamespace(
+                    request=SimpleNamespace(
+                        project_id=PROJECT_ID,
+                        work_id=f"pf5-{component_id}",
+                    )
+                ),
+            )
+
+    monkeypatch.setattr(
+        continuation_module,
+        "build_configured_packaged_reviewed_build_controller",
+        lambda *_args, **_kwargs: Controller(),
+    )
+
+    async def scenario():
+        task = asyncio.create_task(continuation(prepared))
+        assert await asyncio.to_thread(first_started.wait, 5)
+
+        task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
+        assert calls == ["component-a"]
+
+        task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
+        assert calls == ["component-a"]
+
+        release_first.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    assert calls == ["component-a"]
+
