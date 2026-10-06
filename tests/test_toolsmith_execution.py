@@ -775,18 +775,22 @@ def test_typed_runner_uses_final_executable_launch_guard(
     assert observed[0] == pathlib.Path(sys.executable).resolve(strict=True)
 
 
-def test_prepared_git_workspace_rejects_behavioral_head_sha() -> None:
+def test_prepared_git_workspace_rejects_behavioral_head_sha(
+    tmp_path: pathlib.Path,
+) -> None:
     class HeadSha(str):
         pass
 
-    plan = execution_module.SterileGitPlan(
-        repository_root=pathlib.Path("production"),
-        private_git_dir=pathlib.Path("jobs") / "_nika_private_git",
-        worktree_root=pathlib.Path("jobs") / "worktree",
+    production = tmp_path / "production-head"
+    job_root = tmp_path / "jobs" / "job-head"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+    plan = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
         branch_name="toolsmith/job",
         base_sha="a" * 40,
-        environment={},
-        config_args=(),
+        source_environment={"PATH": os.environ.get("PATH", "")},
     )
 
     with pytest.raises(WorkspaceSecurityError, match="private workspace HEAD"):
