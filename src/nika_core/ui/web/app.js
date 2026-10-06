@@ -150,6 +150,7 @@
   let productFactoryRepositoryRows = new Map();
   let productFactoryRepositoryMessage = "";
   let productFactoryRepositoryBindingDirty = false;
+  let productFactoryRepositoryEditVersion = null;
   const productProjectStatuses = document.getElementById("product-project-statuses");
   const productProjectStatusesList = document.getElementById("product-project-statuses-list");
   const productProjectStatusesEmpty = document.getElementById("product-project-statuses-empty");
@@ -812,6 +813,7 @@
     const repositoryId = productFactoryRepositoryId?.value ?? "";
     const row = productFactoryRepositoryRows.get(repositoryId);
     if (!row) {
+      productFactoryRepositoryEditVersion = null;
       if (productFactoryRepositoryRoot) {
         productFactoryRepositoryRoot.value = "";
         productFactoryRepositoryRoot.disabled = true;
@@ -822,6 +824,7 @@
     if (productFactoryRepositoryRoot) {
       productFactoryRepositoryRoot.disabled = false;
       if (!productFactoryRepositoryBindingDirty) {
+        productFactoryRepositoryEditVersion = row.binding_version;
         productFactoryRepositoryRoot.value =
           typeof row.root === "string" ? row.root : "";
       }
@@ -864,6 +867,7 @@
         productFactoryRepositoryStatus.textContent = message;
       }
       productFactoryRepositoryBindingDirty = false;
+      productFactoryRepositoryEditVersion = null;
       return false;
     };
     if (snapshot === null) {
@@ -914,6 +918,7 @@
         productFactoryRepositoryStatus.textContent = snapshot.message;
       }
       productFactoryRepositoryBindingDirty = false;
+      productFactoryRepositoryEditVersion = null;
       return true;
     }
     if (typeof snapshot.project_id !== "string" || snapshot.repositories.length < 1) {
@@ -960,8 +965,24 @@
       rows.set(row.repository_id, row);
     }
     const previous = productFactoryRepositoryId?.value ?? "";
+    const nextSelectedRow = rows.get(previous);
+    const concurrentBindingChange = Boolean(
+      productFactoryRepositoryBindingDirty
+      && nextSelectedRow
+      && nextSelectedRow.binding_version !== productFactoryRepositoryEditVersion
+    );
+    if (concurrentBindingChange) {
+      productFactoryRepositoryBindingDirty = false;
+      productFactoryRepositoryEditVersion = nextSelectedRow.binding_version;
+    }
     productFactoryRepositoryRows = rows;
-    productFactoryRepositoryMessage = snapshot.message;
+    productFactoryRepositoryMessage = concurrentBindingChange
+      ? (
+        snapshot.message
+        + " Прив’язка змінилася під час редагування; незбережений шлях скинуто "
+        + "до актуального durable стану."
+      )
+      : snapshot.message;
     if (productFactoryRepositoryId) {
       productFactoryRepositoryId.replaceChildren();
       for (const row of rows.values()) {
@@ -974,6 +995,7 @@
         productFactoryRepositoryId.value = previous;
       } else {
         productFactoryRepositoryBindingDirty = false;
+        productFactoryRepositoryEditVersion = null;
       }
       productFactoryRepositoryId.disabled = false;
     }
@@ -2157,9 +2179,15 @@
   });
   productFactoryRepositoryId?.addEventListener("change", () => {
     productFactoryRepositoryBindingDirty = false;
+    productFactoryRepositoryEditVersion = null;
     syncProductFactoryRepositorySelection();
   });
   productFactoryRepositoryRoot?.addEventListener("input", () => {
+    if (!productFactoryRepositoryBindingDirty) {
+      const repositoryId = productFactoryRepositoryId?.value ?? "";
+      const repository = productFactoryRepositoryRows.get(repositoryId);
+      productFactoryRepositoryEditVersion = repository?.binding_version ?? null;
+    }
     productFactoryRepositoryBindingDirty = true;
     syncProductFactoryRepositorySelection();
   });
@@ -2363,7 +2391,9 @@
         const repository = productFactoryRepositoryRows.get(repositoryId);
         payload.repository_id = repositoryId;
         payload.root = productFactoryRepositoryRoot?.value ?? "";
-        payload.expected_binding_version = repository?.binding_version ?? null;
+        payload.expected_binding_version = productFactoryRepositoryBindingDirty
+          ? productFactoryRepositoryEditVersion
+          : (repository?.binding_version ?? null);
       }
       if (actionId === "settings.product_factory_local.configure") {
         const raw = productFactoryLocalStartupJson?.value.trim() ?? "";
@@ -2415,6 +2445,7 @@
         && result.status === "completed"
       ) {
         productFactoryRepositoryBindingDirty = false;
+        productFactoryRepositoryEditVersion = null;
       }
       announce(message, failed);
       appendLog(message);

@@ -312,6 +312,12 @@ def test_packaged_repository_binding_controls_and_bridge_contract() -> None:
     assert "payload.repository_id = repositoryId;" in app
     assert 'payload.root = productFactoryRepositoryRoot?.value ?? "";' in app
     assert "payload.expected_binding_version" in app
+    assert "productFactoryRepositoryEditVersion" in app
+    assert (
+        "nextSelectedRow.binding_version !== productFactoryRepositoryEditVersion"
+        in app
+    )
+    assert "незбережений шлях скинуто" in app
 
     assert "ProductFactoryLocalRepositoryBindings(" in script
     assert "PackagedProductFactoryRepositoryBindingController(" in script
