@@ -12,13 +12,29 @@ import pytest
 
 import nika_core.product_factory_openhands_program as openhands_program
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_coding_worker_adapter import CodingWorkerComponentAdapter
 from nika_core.product_factory_coordinator import ComponentWorkRequest
+from nika_core.product_factory_multi_repository import (
+    MultiRepositoryExecutionError,
+    MultiRepositoryProductFactoryHost,
+)
 from nika_core.product_factory_openhands_program import (
     OpenHandsProductFactoryError,
     OpenHandsProductFactoryPolicy,
     build_openhands_product_factory_program,
 )
+from nika_core.product_factory_orchestration import (
+    ProductComponent,
+    ProductRepositoryGraph,
+    RepositoryRef,
+)
+from nika_core.product_factory_packaged_preparation import (
+    PackagedProductFactoryExecutionPlan,
+    PackagedProductFactoryPreparationService,
+)
+from nika_core.product_factory_program_host import ProgramWorkDisposition
+from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
 from nika_core.toolsmith.contracts import (
     AcceptanceCommand,
     AllowedPathPolicy,
@@ -178,6 +194,11 @@ def test_builder_composes_one_worker_host_recovery_ledger_and_explicit_policy(
 
     assert program.host.store is store
     assert isinstance(program.host.worker, CodingWorkerComponentAdapter)
+    assert program.multi_repository_host.store is store
+    assert program.multi_repository_host.worker is program.host.worker
+    assert program.multi_repository_host._program is program.host
+    assert program.multi_repository_host._program._ledger is program.host._ledger
+    assert program.multi_repository_host._program._ownership is program.host._ownership
     assert program.host.worker.worker is program.worker
     assert program.host.worker.contexts is program.ports
     assert program.host.worker.evidence is program.ports
@@ -186,6 +207,110 @@ def test_builder_composes_one_worker_host_recovery_ledger_and_explicit_policy(
     assert program.worker._recovery_probe is program.recovery
     assert program.worker._recovery_binding_store is program.recovery
     assert program.worker._acceptance_runtime is not None
+
+
+def test_multi_repository_host_rejects_reusing_program_host_from_other_store(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, _base_sha = _repository(tmp_path)
+    store, program = _program(tmp_path, repository)
+    foreign_store = SQLiteStore(tmp_path / "foreign.db")
+    foreign_store.initialize()
+
+    with pytest.raises(MultiRepositoryExecutionError, match="exact SQLiteStore"):
+        MultiRepositoryProductFactoryHost(
+            store=foreign_store,
+            worker=program.host.worker,
+            program_host=program.host,
+        )
+
+    assert program.host.store is store
+
+
+def test_openhands_multi_repository_host_drives_packaged_prepare_and_dispatch(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository_root, base_sha = _repository(tmp_path)
+    store, program = _program(tmp_path, repository_root)
+    provider = _WorkingSandboxProvider()
+    runtime = _MutatingRemoteRuntime()
+    acceptance = _PassingAcceptanceRuntime()
+    program.worker._sandbox_provider = provider
+    program.worker._runtime = runtime
+    program.worker._acceptance_runtime = acceptance
+
+    projects = ProductProjectRepository(store)
+    locator = "Oleksii-debug/Nika-Core"
+    project = projects.create(
+        project_id="product-openhands-packaged",
+        name="OpenHands packaged Product Factory",
+        spec=ProductProjectSpec(
+            goal="Build one isolated tested component",
+            desired_outcome="A private reviewed candidate exists",
+            repository_refs=(locator,),
+        ),
+        idempotency_key="create:product-openhands-packaged",
+    )
+    python = str(pathlib.Path(sys.executable).resolve(strict=True))
+    graph = ProductRepositoryGraph(
+        project_id=project.project_id,
+        repositories=(
+            RepositoryRef(
+                repository_id="repo-1",
+                provider="github",
+                locator=locator,
+                default_branch="main",
+            ),
+        ),
+        components=(
+            ProductComponent(
+                component_id="core",
+                repository_id="repo-1",
+                paths=("src",),
+                test_commands=((python, "-c", "print('ok')"),),
+            ),
+        ),
+    )
+    plan = PackagedProductFactoryExecutionPlan(
+        project_id=project.project_id,
+        expected_spec_version=project.spec_version,
+        expected_row_version=project.row_version,
+        graph=graph,
+        graph_version=1,
+        base_shas={"repo-1": base_sha},
+        component_goals={"core": "update core without publishing"},
+        permission_ceiling=PERMISSIONS,
+    )
+    service = PackagedProductFactoryPreparationService(
+        repository=projects,
+        tasks=TaskQueue(store),
+        host=program.multi_repository_host,
+        workspace_id="packaged.product-factory",
+    )
+
+    prepared = service.prepare(plan)
+    outcomes = _run(
+        program.multi_repository_host.dispatch_ready(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            max_parallel=1,
+            max_count=1,
+        )
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    assert provider.released == [
+        (prepared.state.coordinator.snapshot().records[0].request.work_id,
+         "sandbox-host-seam", True)
+    ]
+    assert len(runtime.calls) == 1
+    assert len(acceptance.calls) == 1
+    assert (repository_root / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    work_id = prepared.state.coordinator.snapshot().records[0].request.work_id
+    assert program.ports.candidate_worktree(work_id).joinpath(
+        "src", "core.py"
+    ).read_text(encoding="utf-8") == "VALUE = 2\n"
 
 
 def test_context_prepares_exact_private_base_without_git_remote_or_visible_metadata(
