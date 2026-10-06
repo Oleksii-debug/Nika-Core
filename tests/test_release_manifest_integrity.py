@@ -575,6 +575,7 @@ def test_outer_evidence_rejects_duplicate_json_keys(tmp_path: Path) -> None:
         expected_product_version=PRODUCT_VERSION,
     ) == ("distributable:invalid-evidence",)
 
+@pytest.mark.skipif(release_module.os.name == "nt", reason="POSIX descriptor flags")
 def test_snapshot_open_uses_nonblocking_descriptor_flag(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -608,6 +609,59 @@ def test_snapshot_open_uses_nonblocking_descriptor_flag(
     nonblock = getattr(release_module.os, "O_NONBLOCK", 0)
     if nonblock:
         assert observed_flags[0] & nonblock
+
+@pytest.mark.skipif(release_module.os.name != "nt", reason="Windows file-share semantics")
+def test_snapshot_open_refuses_writer_and_holds_write_fence(tmp_path: Path) -> None:
+    payload = tmp_path / "payload.bin"
+    renamed = tmp_path / "renamed.bin"
+    payload.write_bytes(b"payload")
+
+    with payload.open("r+b"):
+        with pytest.raises(OSError):
+            release_module._open_release_file_for_snapshot(payload)
+
+    with release_module._open_release_file_for_snapshot(payload) as handle:
+        assert handle.read() == b"payload"
+        with pytest.raises(OSError):
+            payload.write_bytes(b"replacement")
+        with pytest.raises(OSError):
+            payload.replace(renamed)
+
+    payload.replace(renamed)
+    renamed.replace(payload)
+    payload.write_bytes(b"replacement")
+    assert payload.read_bytes() == b"replacement"
+
+
+@pytest.mark.skipif(release_module.os.name != "nt", reason="Windows file-share semantics")
+def test_manifest_builder_refuses_preexisting_writer(tmp_path: Path) -> None:
+    bundle, _ = _bundle(tmp_path)
+    executable = bundle / "NikaCore.exe"
+
+    with executable.open("r+b"):
+        with pytest.raises(ValueError, match="release file changed while building manifest"):
+            build_release_manifest(
+                bundle,
+                product="NikaCore",
+                version=PRODUCT_VERSION,
+                source_sha=SOURCE_SHA,
+            )
+
+
+@pytest.mark.skipif(release_module.os.name != "nt", reason="Windows file-share semantics")
+def test_manifest_verifier_refuses_preexisting_writer(tmp_path: Path) -> None:
+    bundle, _ = _bundle(tmp_path)
+    manifest = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version=PRODUCT_VERSION,
+        source_sha=SOURCE_SHA,
+    )
+    executable = bundle / "NikaCore.exe"
+
+    with executable.open("r+b"):
+        assert verify_release_manifest(bundle, manifest) == ("unstable:NikaCore.exe",)
+
 
 def test_snapshot_rejects_nonregular_descriptor_before_read(
     tmp_path: Path,

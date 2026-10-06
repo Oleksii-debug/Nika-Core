@@ -9,6 +9,9 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+from pydantic_settings import SettingsError
+
 from nika_core.activity_report import DailyActivityReportService
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
@@ -34,7 +37,7 @@ from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.training_runtime import TrainingStatusService
-from nika_core.ui.shell import launch_windows_shell
+from nika_core.ui.shell import launch_windows_shell, preflight_windows_shell
 from nika_core.v01_cloud_model_permission import (
     CloudModelGrantRequest,
     CloudModelPermissionConfirm,
@@ -166,6 +169,8 @@ def build_windows_bridge(
     *,
     cloud_permission_confirm: CloudModelPermissionConfirm | None = None,
     activity_report_day: Callable[[], date] | None = None,
+    start_startup_recovery: bool = True,
+    defer_startup_recovery: Callable[[Callable[[], None]], None] | None = None,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
     store = SQLiteStore(config.database_path)
     store.initialize()
@@ -213,14 +218,6 @@ def build_windows_bridge(
             else None
         ),
     )
-    try:
-        backend.start_startup_recovery()
-    except Exception as exc:
-        backend.close()
-        raise _StartupRecoveryInventoryError(
-            "packaged startup recovery inventory failed"
-        ) from exc
-
     products = ProductProjectCommandService(ProductProjectRepository(store))
 
     def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
@@ -320,6 +317,21 @@ def build_windows_bridge(
         },
         state_provider=source_state,
     )
+
+    def start_recovery() -> None:
+        try:
+            backend.start_startup_recovery()
+        except Exception as exc:
+            backend.close()
+            raise _StartupRecoveryInventoryError(
+                "packaged startup recovery inventory failed"
+            ) from exc
+
+    if start_startup_recovery:
+        if defer_startup_recovery is None:
+            start_recovery()
+        else:
+            defer_startup_recovery(start_recovery)
     return bridge, products
 
 
@@ -386,7 +398,7 @@ def _run_pf11_proof(
     command: str,
     output_path: Path | None,
 ) -> int:
-    bridge, products = build_windows_bridge(config)
+    bridge, products = build_windows_bridge(config, start_startup_recovery=False)
     decision = route_command(command)
     if decision.normalized_goal is None:
         raise RuntimeError("PF11 proof command did not produce a normalized ProductProject goal")
@@ -467,6 +479,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     except LegacyDatabaseConflict as exc:
         show_recovery_error(str(exc))
         return 1
+    except (ValidationError, SettingsError):
+        # Validation errors can embed private paths or environment values.
+        show_recovery_error(
+            "Некоректні налаштування Nika (NIKA_*). Перевірте конфігурацію "
+            "та перезапустіть програму. Дані не змінено."
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001 - redact configuration failures
+        logging.getLogger(__name__).error(
+            "Packaged configuration failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося прочитати налаштування Nika. Збережіть наявні дані, "
+            "перевірте конфігурацію та повторіть запуск."
+        )
+        return 1
     if args.pf11_proof:
         return _run_pf11_proof(
             config,
@@ -474,14 +502,61 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_path=args.pf11_proof_output,
         )
     try:
-        bridge, _products = build_windows_bridge(config)
+        preflight_windows_shell()
+    except Exception as exc:  # noqa: BLE001 - redact packaged UI preflight failures
+        logging.getLogger(__name__).error(
+            "Packaged shell preflight failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося підготувати інтерфейс Nika. Перевірте цілісність "
+            "встановлення та повторіть запуск. Незавершені завдання не відновлювалися."
+        )
+        return 1
+    deferred_recovery: list[Callable[[], None]] = []
+    try:
+        bridge, _products = build_windows_bridge(
+            config,
+            defer_startup_recovery=deferred_recovery.append,
+        )
+        if len(deferred_recovery) != 1:
+            raise RuntimeError("packaged startup recovery runner was not scheduled exactly once")
     except _StartupRecoveryInventoryError:
         show_recovery_error(
             "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
             "Запуск зупинено без автоматичного повторення дій."
         )
         return 1
-    launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
+    except Exception as exc:  # noqa: BLE001 - redact startup failures
+        logging.getLogger(__name__).error(
+            "Packaged startup failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося відкрити дані або підготувати запуск Nika. "
+            "Перевірте доступність папки даних; наявну базу не видаляйте."
+        )
+        return 1
+    try:
+        launch_windows_shell(
+            bridge,
+            title=f"Nika Core {config.app_version}",
+            on_gui_started=deferred_recovery[0],
+        )
+    except _StartupRecoveryInventoryError:
+        show_recovery_error(
+            "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
+            "Запуск зупинено без автоматичного повторення дій."
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001 - redact packaged GUI startup failures
+        logging.getLogger(__name__).error(
+            "Packaged shell launch failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося відкрити інтерфейс Nika. Перезапустіть програму. "
+            "Якщо помилка повторюється, перевірте компонент WebView2 або "
+            "перевстановіть застосунок."
+        )
+        return 1
     return 0
 
 

@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import stat
 import sys
 from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager
@@ -26,6 +27,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.model_artifact_schema import MODEL_ARTIFACT_SCHEMA_VERSION
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 from nika_core.reliability.backup import BackupRecoveryError, SQLiteRecoveryManager
+from nika_core.reliability.recovery_lease import RecoveryFileLease, RecoveryLeaseError
 from nika_core.research.knowledge_schema import KNOWLEDGE_SCHEMA_VERSION
 
 _RECEIPT_TABLE = "legacy_database_adoption_v1"
@@ -88,15 +90,29 @@ def _require_empty_target(db: sqlite3.Connection) -> None:
         raise LegacyDatabaseConflict(_MESSAGE)
 
 
-def _inspect(path: Path, *, canonical: bool = False) -> _State | None:
+def _inspect(
+    path: Path, *, canonical: bool = False, immutable: bool = False
+) -> _State | None:
     if not path.exists():
         return None
     if not path.is_file() or path.is_symlink():
         raise LegacyDatabaseConflict(_MESSAGE)
+    # Use the canonical restore-family guard before opening any WAL/SHM
+    # sidecar. Indirect or non-regular siblings must not redirect a snapshot.
+    SQLiteRecoveryManager._ensure_restore_family_coherent(path)
+    if immutable:
+        # Completed backup artifacts are frozen. Live sources must continue to
+        # read their real WAL; the canonical live target may never be immutable.
+        if canonical:
+            raise ValueError("canonical database inspection cannot be immutable")
+        SQLiteRecoveryManager._ensure_backup_artifact_coherent(path)
     # rw permits SQLite's own hot-journal recovery on the canonical database;
     # it does not create a missing file. Legacy inspection is strictly read-only.
     mode = "rw" if canonical else "ro"
-    with closing(sqlite3.connect(path.as_uri() + f"?mode={mode}", uri=True, timeout=2)) as db:
+    suffix = "&immutable=1" if immutable else ""
+    with closing(
+        sqlite3.connect(path.as_uri() + f"?mode={mode}{suffix}", uri=True, timeout=2)
+    ) as db:
         db.execute("PRAGMA query_only = ON")
         db.execute("PRAGMA trusted_schema = OFF")
         db.execute("BEGIN")
@@ -176,41 +192,180 @@ def _validate_receipt(receipt: dict[str, str]) -> None:
         raise LegacyDatabaseConflict(_MESSAGE)
 
 
-def _source_unchanged(path: Path, digest: str) -> bool:
-    state = _inspect(path)
+def _source_unchanged(path: Path, digest: str, *, immutable: bool = False) -> bool:
+    state = _inspect(path, immutable=immutable)
     return state is not None and state.digest == digest
 
 
 @contextmanager
 def _startup_lock(target: Path) -> Iterator[None]:
-    target.parent.mkdir(parents=True, exist_ok=True)
+    # Reuse the canonical no-follow, regular-file and inode-identity lease.
+    # A plain is_symlink()/open() pair allows a lock-file substitution.
     lock = target.with_name(f".{target.name}.startup.lock")
-    if lock.is_symlink():
-        raise LegacyDatabaseConflict(_MESSAGE)
-    with lock.open("a+b") as handle:
-        if handle.tell() == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
+    try:
+        with RecoveryFileLease(lock):
+            yield
+    except RecoveryLeaseError:
+        raise LegacyDatabaseConflict(_MESSAGE) from None
+
+
+def _is_indirect(info: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    file_attributes = getattr(info, "st_file_attributes", 0)
+    return stat.S_ISLNK(info.st_mode) or bool(file_attributes & reparse_flag)
+
+
+def _snapshot_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
+
+
+def _open_readonly_snapshot(path: Path) -> int:
+    if os.name == "nt":
         try:
-            if os.name == "nt":
-                import msvcrt
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows snapshot support is unavailable") from exc
 
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
 
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(getattr(os, "O_NONBLOCK", 0))
+    return os.open(path, flags)
+
+
+def _read_pending_record(
+    path: Path,
+) -> tuple[object, tuple[int, int, int, int, int]] | None:
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if _is_indirect(before) or not stat.S_ISREG(before.st_mode):
+        raise LegacyDatabaseConflict(_MESSAGE)
+    if before.st_size > _MAX_PENDING_BYTES:
+        raise LegacyDatabaseConflict(_MESSAGE)
+
+    try:
+        fd = _open_readonly_snapshot(path)
+    except OSError:
+        raise LegacyDatabaseConflict(_MESSAGE) from None
+    try:
+        opened = os.fstat(fd)
+        try:
+            current = os.lstat(path)
         except OSError:
             raise LegacyDatabaseConflict(_MESSAGE) from None
+        if (
+            _is_indirect(opened)
+            or _is_indirect(current)
+            or not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or _snapshot_identity(opened) != _snapshot_identity(before)
+            or _snapshot_identity(current) != _snapshot_identity(opened)
+        ):
+            raise LegacyDatabaseConflict(_MESSAGE)
+
+        chunks: list[bytes] = []
+        remaining = _MAX_PENDING_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > _MAX_PENDING_BYTES:
+            raise LegacyDatabaseConflict(_MESSAGE)
+
+        after = os.fstat(fd)
         try:
-            yield
-        finally:
-            handle.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            final_path = os.lstat(path)
+        except OSError:
+            raise LegacyDatabaseConflict(_MESSAGE) from None
+        if (
+            _is_indirect(after)
+            or _is_indirect(final_path)
+            or _snapshot_identity(after) != _snapshot_identity(opened)
+            or _snapshot_identity(final_path) != _snapshot_identity(after)
+        ):
+            raise LegacyDatabaseConflict(_MESSAGE)
+    finally:
+        os.close(fd)
+    try:
+        record = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        raise LegacyDatabaseConflict(_MESSAGE) from None
+    return record, _snapshot_identity(after)
+
+
+def _remove_pending_record(
+    path: Path,
+    *,
+    expected_identity: tuple[int, int, int, int, int],
+) -> None:
+    try:
+        current = os.lstat(path)
+    except OSError:
+        raise LegacyDatabaseConflict(_MESSAGE) from None
+    if (
+        _is_indirect(current)
+        or not stat.S_ISREG(current.st_mode)
+        or _snapshot_identity(current) != expected_identity
+    ):
+        raise LegacyDatabaseConflict(_MESSAGE)
+    try:
+        path.unlink()
+    except OSError:
+        raise LegacyDatabaseConflict(_MESSAGE) from None
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise LegacyDatabaseConflict(_MESSAGE) from None
+    raise LegacyDatabaseConflict(_MESSAGE)
 
 
 def _publish_pending(path: Path, record: dict[str, object]) -> None:
@@ -231,16 +386,39 @@ def _publish_pending(path: Path, record: dict[str, object]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _has_sqlite_sidecars(path: Path) -> bool:
+    return any(
+        sidecar.exists() or sidecar.is_symlink()
+        for sidecar in (
+            path.with_name(path.name + "-wal"),
+            path.with_name(path.name + "-shm"),
+        )
+    )
+
+
 def _known_sources(target: Path, candidates: Sequence[Path]) -> list[Path]:
     paths: list[Path] = []
     for candidate in candidates:
         if candidate.is_symlink():
             raise LegacyDatabaseConflict(_MESSAGE)
         path = candidate.resolve()
-        if not path.exists() or path == target or (target.exists() and path.samefile(target)):
+        if not path.exists() or path == target:
             continue
-        if not any(path.samefile(other) for other in paths):
-            paths.append(path)
+        if target.exists() and path.samefile(target):
+            # A canonical database and its hard-link alias share main bytes,
+            # but SQLite's live WAL/SHM belongs to each path, not the inode.
+            if _has_sqlite_sidecars(path) or _has_sqlite_sidecars(target):
+                raise LegacyDatabaseConflict(_MESSAGE)
+            continue
+        duplicate = next((other for other in paths if path.samefile(other)), None)
+        if duplicate is not None:
+            # Hard links share SQLite's main file but not path-named WAL/SHM.
+            if path != duplicate and (
+                _has_sqlite_sidecars(path) or _has_sqlite_sidecars(duplicate)
+            ):
+                raise LegacyDatabaseConflict(_MESSAGE)
+            continue
+        paths.append(path)
     return paths
 
 
@@ -266,11 +444,10 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
     manager = SQLiteRecoveryManager(SQLiteStore(target))
     manager.recover_interrupted_restore()
     pending_path = target.with_name(f".{target.name}.legacy-adoption.json")
-    pending = None
-    if pending_path.exists():
-        if pending_path.is_symlink() or pending_path.stat().st_size > 65536:
-            raise LegacyDatabaseConflict(_MESSAGE)
-        pending = json.loads(pending_path.read_text(encoding="utf-8"))
+    pending_snapshot = _read_pending_record(pending_path)
+    pending = pending_snapshot[0] if pending_snapshot is not None else None
+    pending_identity = pending_snapshot[1] if pending_snapshot is not None else None
+    if pending_snapshot is not None:
         if (
             not isinstance(pending, dict)
             or set(pending)
@@ -307,7 +484,8 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
             same_source = path == original or (original.exists() and path.samefile(original))
             if not same_source or state.digest != receipt["source_digest"]:
                 raise LegacyDatabaseConflict(_MESSAGE)
-        pending_path.unlink(missing_ok=True)
+        if pending_identity is not None:
+            _remove_pending_record(pending_path, expected_identity=pending_identity)
         return
     if not sources and not pending:
         return
@@ -328,8 +506,9 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
         with TemporaryDirectory(prefix="prepare-", dir=backup_root) as folder:
             baseline = backup_root / f"{adoption_id}.original.sqlite3"
             SQLiteRecoveryManager(SQLiteStore(source)).create_backup(baseline, record_audit=False)
-            if not _source_unchanged(baseline, state.digest) or not _source_unchanged(
-                source, state.digest
+            if (
+                not _source_unchanged(baseline, state.digest, immutable=True)
+                or not _source_unchanged(source, state.digest)
             ):
                 raise LegacyDatabaseConflict(_MESSAGE)
             staged = SQLiteStore(Path(folder) / "prepared.sqlite3")
@@ -362,9 +541,13 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
             "target_was_absent": current is None,
         }
         _publish_pending(pending_path, pending)
+        published_snapshot = _read_pending_record(pending_path)
+        if published_snapshot is None or published_snapshot[0] != pending:
+            raise LegacyDatabaseConflict(_MESSAGE)
+        pending_identity = published_snapshot[1]
     backup = target.parent / "legacy-adoption-backups" / f"{adoption_id}.sqlite3"
     manager.verify_backup(backup)
-    backup_receipt = _inspect(backup).receipt
+    backup_receipt = _inspect(backup, immutable=True).receipt
     if not backup_receipt or any(backup_receipt[key] != pending[key] for key in backup_receipt):
         raise LegacyDatabaseConflict(_MESSAGE)
     if not _source_unchanged(source, state.digest):
@@ -385,4 +568,6 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
         raise LegacyDatabaseConflict(_MESSAGE)
     if not _source_unchanged(source, state.digest):
         raise LegacyDatabaseConflict(_MESSAGE)
-    pending_path.unlink(missing_ok=True)
+    if pending_identity is None:
+        raise LegacyDatabaseConflict(_MESSAGE)
+    _remove_pending_record(pending_path, expected_identity=pending_identity)

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
 
+from nika_core.packaging import attestation as attestation_module
 from nika_core.packaging.attestation import (
     build_release_attestation_evidence,
     write_release_attestation_evidence,
@@ -202,3 +204,158 @@ def test_m12_workflow_keeps_signing_privilege_on_trusted_main_only() -> None:
         "--deny-self-hosted-runners",
     ):
         assert expected in workflow
+
+
+def test_attestation_refuses_archive_swapped_after_prehuman_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, prehuman, _ = _build(tmp_path)
+    changed_bytes = b"x" * artifact.stat().st_size
+    verification = _verification(
+        tmp_path,
+        artifact,
+        digest=hashlib.sha256(changed_bytes).hexdigest(),
+    )
+    original_verify = attestation_module.verify_distributable_evidence
+    calls = 0
+
+    def swap_after_first_gate(*args: object, **kwargs: object) -> tuple[str, ...]:
+        nonlocal calls
+        findings = original_verify(*args, **kwargs)
+        calls += 1
+        if calls == 1 and not findings:
+            artifact.write_bytes(changed_bytes)
+        return findings
+
+    monkeypatch.setattr(
+        attestation_module,
+        "verify_distributable_evidence",
+        swap_after_first_gate,
+    )
+    with pytest.raises(ValueError, match="attestation artifact changed"):
+        build_release_attestation_evidence(
+            artifact, prehuman, verification, **_kwargs()
+        )
+    assert calls == 1
+
+
+def test_attestation_refuses_coherent_archive_and_prehuman_swap_after_first_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, prehuman, _ = _build(tmp_path)
+    changed_bytes = b"z" * artifact.stat().st_size
+    verification = _verification(
+        tmp_path,
+        artifact,
+        digest=hashlib.sha256(changed_bytes).hexdigest(),
+    )
+    original_verify = attestation_module.verify_distributable_evidence
+    calls = 0
+
+    def swap_pair_after_first_gate(*args: object, **kwargs: object) -> tuple[str, ...]:
+        nonlocal calls
+        findings = original_verify(*args, **kwargs)
+        calls += 1
+        if calls == 1 and not findings:
+            artifact.write_bytes(changed_bytes)
+            assert _prehuman_evidence(tmp_path, artifact) == prehuman
+        return findings
+
+    monkeypatch.setattr(
+        attestation_module,
+        "verify_distributable_evidence",
+        swap_pair_after_first_gate,
+    )
+    with pytest.raises(ValueError, match="attestation artifact changed"):
+        build_release_attestation_evidence(
+            artifact, prehuman, verification, **_kwargs()
+        )
+    assert calls == 1
+
+def test_attestation_refuses_archive_changed_after_second_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, prehuman, verification = _build(tmp_path)
+    changed_bytes = b"x" * artifact.stat().st_size
+    original_verify = attestation_module.verify_distributable_evidence
+    calls = 0
+
+    def change_after_recheck(*args: object, **kwargs: object) -> tuple[str, ...]:
+        nonlocal calls
+        findings = original_verify(*args, **kwargs)
+        calls += 1
+        if calls == 2 and not findings:
+            artifact.write_bytes(changed_bytes)
+        return findings
+
+    monkeypatch.setattr(
+        attestation_module,
+        "verify_distributable_evidence",
+        change_after_recheck,
+    )
+    with pytest.raises(ValueError, match="attestation artifact changed"):
+        build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
+    assert calls == 2
+
+
+def test_attestation_verification_reader_accepts_exact_byte_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limit = 64
+    payload = b'[{"verificationResult":{}}]'
+    payload += b" " * (limit - len(payload))
+    verification = tmp_path / "verification.json"
+    verification.write_bytes(payload)
+    monkeypatch.setattr(attestation_module, "_MAX_ATTESTATION_VERIFICATION_BYTES", limit)
+
+    assert attestation_module._read_verification(verification) == [
+        {"verificationResult": {}}
+    ]
+
+
+def test_attestation_verification_reader_rejects_one_byte_over_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    limit = 64
+    payload = b'[{"verificationResult":{}}]'
+    payload += b" " * (limit + 1 - len(payload))
+    verification = tmp_path / "verification.json"
+    verification.write_bytes(payload)
+    monkeypatch.setattr(attestation_module, "_MAX_ATTESTATION_VERIFICATION_BYTES", limit)
+
+    with pytest.raises(ValueError, match="size limit"):
+        attestation_module._read_verification(verification)
+
+
+def test_attestation_verification_reader_rejects_excessive_json_depth(
+    tmp_path: Path,
+) -> None:
+    verification = tmp_path / "verification.json"
+    verification.write_bytes(b"[" * 65 + b"{}" + b"]" * 65)
+
+    with pytest.raises(ValueError, match="structural limits"):
+        attestation_module._read_verification(verification)
+
+
+def test_attestation_verification_reader_accepts_utf8_bom(tmp_path: Path) -> None:
+    verification = tmp_path / "verification.json"
+    verification.write_bytes(b'\xef\xbb\xbf[{"verificationResult":{}}]')
+
+    assert attestation_module._read_verification(verification) == [
+        {"verificationResult": {}}
+    ]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_attestation_verification_reader_refuses_preexisting_writer(tmp_path: Path) -> None:
+    verification = tmp_path / "verification.json"
+    verification.write_text('[{"verificationResult":{}}]', encoding="utf-8")
+
+    with verification.open("r+b"):
+        with pytest.raises(ValueError, match="unreadable, unstable"):
+            attestation_module._read_verification(verification)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +16,22 @@ def index_path() -> Path:
     return web_asset_root() / "index.html"
 
 
-def launch_windows_shell(bridge: UIActionBridge, *, title: str = "Nika Core") -> Any:
+def preflight_windows_shell() -> None:
+    """Validate packaged UI inputs before startup recovery may produce effects."""
+
+    for required in ("index.html", "app.js", "styles.css"):
+        path = web_asset_root() / required
+        if not path.is_file() or path.stat().st_size == 0:
+            raise FileNotFoundError(f"Відсутній або порожній ресурс інтерфейсу: {path}")
+    import_module("webview")
+
+
+def launch_windows_shell(
+    bridge: UIActionBridge,
+    *,
+    title: str = "Nika Core",
+    on_gui_started: Callable[[], None] | None = None,
+) -> Any:
     """Launch the local HTML shell with EdgeChromium/WebView2.
 
     Import pywebview lazily so headless/core installations can import Nika without
@@ -27,14 +44,8 @@ def launch_windows_shell(bridge: UIActionBridge, *, title: str = "Nika Core") ->
     packaged WebView2 host.
     """
 
-    # index.html can exist even when the JavaScript bridge or stylesheet was
-    # lost after packaging. Fail before opening a blank/unusable NVDA window.
-    for required in ("index.html", "app.js", "styles.css"):
-        path = web_asset_root() / required
-        if not path.is_file() or path.stat().st_size == 0:
-            raise FileNotFoundError(f"Відсутній або порожній ресурс інтерфейсу: {path}")
-
-    import webview
+    preflight_windows_shell()
+    webview = import_module("webview")
 
     asset = index_path().resolve()
     window = webview.create_window(
@@ -44,6 +55,33 @@ def launch_windows_shell(bridge: UIActionBridge, *, title: str = "Nika Core") ->
         width=1180,
         height=760,
         min_size=(760, 520),
+        hidden=on_gui_started is not None,
     )
-    webview.start(gui="edgechromium")
+    callback_failure: list[BaseException] = []
+
+    def finish_startup() -> None:
+        try:
+            if not window.events.loaded.wait(20):
+                raise RuntimeError("packaged WebView did not reach loaded state")
+            if on_gui_started is not None:
+                on_gui_started()
+                # The hidden bootstrap rendered a pre-recovery snapshot. Reload while
+                # still hidden so the first visible DOM is reconciled post-recovery.
+                window.load_url(str(asset))
+                if not window.events.loaded.wait(20):
+                    raise RuntimeError(
+                        "packaged WebView did not reload post-recovery state"
+                    )
+            window.show()
+        except BaseException as exc:  # noqa: BLE001 - relay control-flow to main thread
+            callback_failure.append(exc)
+            if window.events.shown.is_set():
+                window.destroy()
+
+    if on_gui_started is None:
+        webview.start(gui="edgechromium")
+    else:
+        webview.start(finish_startup, gui="edgechromium")
+    if callback_failure:
+        raise callback_failure[0]
     return window

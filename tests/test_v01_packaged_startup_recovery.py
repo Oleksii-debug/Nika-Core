@@ -104,9 +104,12 @@ def _run_packaged_entrypoint(monkeypatch, config: AppConfig, runtime, launch_ass
         "from_environment",
         staticmethod(lambda: config),
     )
+    monkeypatch.setattr(nika_windows, "preflight_windows_shell", lambda: None)
 
-    def fake_launch(bridge, *, title):
+    def fake_launch(bridge, *, title, on_gui_started=None):
         assert title.startswith("Nika Core ")
+        assert on_gui_started is not None
+        on_gui_started()
         launch_assertion(bridge)
 
     monkeypatch.setattr(nika_windows, "launch_windows_shell", fake_launch)
