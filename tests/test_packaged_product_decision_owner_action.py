@@ -246,6 +246,33 @@ def test_multiple_pending_decisions_are_discoverable_by_bounded_pages_and_exact_
     assert repository.get(_PROJECT_ID) == before
 
 
+def test_pending_page_rejects_corrupt_current_decision_beyond_visible_window(
+    tmp_path: Path,
+) -> None:
+    store, repository, _service, router = _build(tmp_path / "hidden-corrupt.db")
+    with store.connection() as conn:
+        for index in range(8):
+            conn.execute(
+                "INSERT INTO product_decisions("
+                "project_id,decision_id,decision_version,option_id,state,rationale,"
+                "decided_by_ref,evidence_package_ids_json,created_at) "
+                "SELECT project_id,?,1,option_id,state,rationale,decided_by_ref,"
+                "evidence_package_ids_json,created_at FROM product_decisions "
+                "WHERE project_id=? AND decision_id=? AND decision_version=1",
+                (f"decision-{index:02d}", _PROJECT_ID, "decision-owner"),
+            )
+        conn.execute(
+            "UPDATE product_decisions SET state=? "
+            "WHERE project_id=? AND decision_id=?",
+            ("corrupt-hidden-state", _PROJECT_ID, "decision-owner"),
+        )
+
+    with pytest.raises(ValueError, match="persisted product decision state is invalid"):
+        router.create({"command": "list pending product decisions"})
+
+    assert repository.get(_PROJECT_ID).row_version == 1
+
+
 def test_approval_is_two_step_and_replay_does_not_mint_second_effect(
     tmp_path: Path,
 ) -> None:
