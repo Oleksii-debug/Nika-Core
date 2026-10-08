@@ -56,8 +56,8 @@ def _slice() -> TimeSlice:
 
 @pytest.mark.parametrize(
     "reason",
-    [None, 1, True, "", "   ", "line one\\nline two", "escape\\x1bsequence",
-     "spoof\\u202etext", "x" * 513],
+    [None, 1, True, "", "   ", "line one\nline two", "escape\x1bsequence",
+     "spoof\u202etext", "x" * 513],
 )
 def test_invalid_cancel_reason_rejected_without_paper_state_effects(reason: object) -> None:
     book = ReplayBook(PortfolioLedger(Decimal("1000")))
@@ -117,7 +117,7 @@ def test_invalid_reason_after_partial_fill_preserves_recovery() -> None:
     old_last_slice = dict(book._last_slice)
     old_scope = book._scope
     with pytest.raises(TradingResearchError, match="cancellation reason"):
-        book.cancel(order, reason="forged\\noperator log entry")
+        book.cancel(order, reason="forged\noperator log entry")
     assert book.ledger.cash == old_cash
     assert book._remaining == old_remaining
     assert book._last_slice == old_last_slice
