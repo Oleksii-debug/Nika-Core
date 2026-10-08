@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nika Core — Web: стан завдання</title>
+  <link rel="stylesheet" href="/app/styles.css">
+  <script src="/app/client.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Перейти до основного вмісту</a>
+  <header>
+    <h1>Nika Core — Web</h1>
+    <p>Перевірка завдання через спільний серверний API. Браузер не встановлює права доступу.</p>
+  </header>
+  <main id="main" tabindex="-1">
+    <section aria-labelledby="inspect-heading">
+      <h2 id="inspect-heading">Стан завдання</h2>
+      <form id="inspect-form" autocomplete="off">
+        <label for="task-id">Ідентифікатор завдання</label>
+        <input id="task-id" name="task_id" type="text" maxlength="120"
+               required aria-describedby="task-help" spellcheck="false">
+        <p id="task-help">Введіть ідентифікатор наданого вам завдання. Інші робочі простори недоступні.</p>
+        <button id="inspect-submit" type="submit">Перевірити стан</button>
+      </form>
+      <p id="app-status" role="status" aria-live="polite" aria-atomic="true"
+         tabindex="-1">Готово до перевірки.</p>
+      <dl id="task-details" hidden>
+        <dt>Ідентифікатор</dt>
+        <dd id="result-id"></dd>
+        <dt>Стан</dt>
+        <dd id="result-state"></dd>
+      </dl>
+    </section>
+  </main>
+  <footer><p>Доступність і безпека перевіряються окремо від Windows-клієнта.</p></footer>
+</body>
+</html>

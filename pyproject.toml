@@ -53,6 +53,9 @@ qa = ["pip-audit>=2,<3", "pyinstaller>=6,<7"]
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"nika_core.web_api.client" = ["*.html", "*.js", "*.css"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
