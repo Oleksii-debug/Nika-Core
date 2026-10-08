@@ -53,7 +53,7 @@ def _reject_json_constant(_value: str) -> object:
 
 
 def _bounded_json_int(value: str) -> int:
-    digits = value[1:] if value.startswith("-") else value
+    digits = value.removeprefix("-")
     if len(digits) > _MAX_JSON_INT_DIGITS:
         raise ValueError("JSON integer literal exceeds transport limit")
     return int(value)
@@ -167,7 +167,7 @@ class HttpCommandAdapter:
                 "Command outcome is unknown; reconcile before retry.",
                 request_id=exc.request_id,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - isolate untrusted application adapters
             return self._error(500, "internal_error", "Server command processing failed.")
         return self._from_result(result)
 

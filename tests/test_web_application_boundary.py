@@ -8,8 +8,8 @@ from nika_core.web_api import (
     WebApplicationBoundary,
     WebCommand,
     WebCommandAdmissionError,
-    WebCommandResult,
     WebCommandOutcomeUnknownError,
+    WebCommandResult,
     WebPrincipal,
 )
 

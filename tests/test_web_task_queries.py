@@ -128,6 +128,35 @@ def test_database_read_error_is_bounded_definite_failure_not_unknown_effect(
     assert b"private-token" not in response.body
 
 
+def test_corrupt_canonical_task_payload_is_sanitized_not_unknown_effect(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    record = queue.create(
+        workspace_id="workspace-a", agent_id="agent-a",
+        payload={"private_token": "secret-must-not-escape"},
+    )
+    # Simulate a damaged SQLite record on disk: TaskQueue.get deserializes
+    # payload_json before WebTaskQueryHandler projects public task state.
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            ('{"private_token":"do-not-leak",', record.task_id),
+        )
+    response = _inspect(_adapter(queue), _principal(), record.task_id)
+    body = json.loads(response.body)
+    assert response.status_code == 200
+    assert body["status"] == "failed"
+    assert body["code"] == "storage_unavailable"
+    assert body["request_id"] == "query-1"
+    assert body["data"] == {}
+    assert b"do-not-leak" not in response.body
+    assert b"secret-must-not-escape" not in response.body
+    assert b"outcome_unknown" not in response.body
+
+
 def test_read_only_failure_does_not_poison_recovery_after_sqlite_reopen(
     tmp_path, monkeypatch,
 ) -> None:
