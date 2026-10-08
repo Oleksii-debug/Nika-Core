@@ -23,6 +23,12 @@ OWNED_BOUNDARIES = (
     "src/nika_core/scheduler/contracts.py",
     "src/nika_core/product_command/contracts.py",
     "src/nika_core/plugins/sdk.py",
+    # Core trust, storage, chronology and action authorities must likewise
+    # never import replaceable runtime/host SDKs directly.
+    "src/nika_core/security/policy.py",
+    "src/nika_core/kernel/audit.py",
+    "src/nika_core/data/schema.py",
+    "src/nika_core/kernel/action_registry.py",
 )
 
 FOREIGN_ENGINE_ROOTS = frozenset(
