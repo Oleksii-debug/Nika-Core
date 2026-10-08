@@ -40,9 +40,10 @@ class WebTaskQueryHandler:
             record = self._queue.get(task_id)
         except KeyError:
             return self._reject(command.request_id, "not_found")
-        except sqlite3.Error:
-            # Inspection is read-only: a database read fault is a definite
-            # failed query, never an unknown task creation/cancellation effect.
+        except (sqlite3.Error, ValueError):
+            # Corrupt persisted task JSON/state as well as SQLite read failures
+            # are definite read-only query failures, never uncertain writes.
+            # Do not disclose database content or permit automatic retry.
             # Preserve the request ID, but do not expose file paths or SQL.
             return WebCommandResult.create(
                 request_id=command.request_id,
