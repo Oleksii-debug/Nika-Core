@@ -149,3 +149,24 @@ def test_valid_mappingproxy_odds_still_passes_market_snapshot_admission() -> Non
     )
     assert result.state is OrderState.ACTIVE
     assert result.fill is None
+
+
+def test_mappingproxy_over_behavioral_mapping_never_calls_backing_methods() -> None:
+    from types import MappingProxyType
+
+    invoked: list[str] = []
+
+    class BehavioralDict(dict):
+        def items(self):
+            invoked.append("items")
+            raise AssertionError("untrusted mapping proxy backing was iterated")
+
+    odds = OddsSnapshot(
+        INSTRUMENT, EventTime(NOW, NOW, NOW), {"home": Decimal("2")},
+    )
+    slice_ = TimeSlice(1, NOW, (odds,))
+    proxy = MappingProxyType(BehavioralDict({"home": Decimal("2")}))
+    object.__setattr__(odds, "selections", proxy)
+    with pytest.raises(TradingResearchError, match="behavioral paper odds mapping"):
+        SimulationExecutionEngine().execute(_order(), slice_)
+    assert invoked == []
