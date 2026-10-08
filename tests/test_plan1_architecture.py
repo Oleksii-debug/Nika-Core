@@ -134,6 +134,16 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
             )
         )
 
+    # The implicit Python __builtins__ namespace may be a dict or module.
+    # Retaining it exposes an importer/evaluator without any explicit import,
+    # so stable Core authorities must not acquire this implicit namespace.
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id == "__builtins__"
+        ):
+            imports.add("<dynamic-authority-namespace>")
     # Importer/evaluator references can be stored and invoked later. Block the
     # acquisition in Core contracts, without losing precise diagnostics for
     # an immediate direct call such as importlib.import_module("mcp").
@@ -740,3 +750,18 @@ def test_architecture_guard_rejects_hoisted_function_authorities(
     source: str, expected: tuple[str, ...]
 ) -> None:
     assert direct_engine_imports(source) == expected
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "__builtins__['__import__']('mcp')\n",
+        "loader = __builtins__.__import__\nloader('langgraph')\n",
+        "authority = __builtins__\n",
+    ],
+)
+def test_architecture_guard_blocks_implicit_builtin_authority(source: str) -> None:
+    assert direct_engine_imports(source) == ("<dynamic-authority-namespace>",)
+
+
+def test_architecture_guard_ignores_quoted_implicit_builtin_name() -> None:
+    assert direct_engine_imports('label = "__builtins__"\n') == ()
