@@ -400,6 +400,25 @@ class DeterministicBrain:
                 actions=available_actions,
                 planning_deadline=planning_deadline,
             )
+            # Reject oversized exact plans *before* scanning or copying their steps.
+            # The untrusted planner cannot force a large snapshot merely by
+            # returning a tuple larger than this run's remaining step allowance.
+            if (
+                type(plan) is DeterministicPlan
+                and type(plan.steps) is tuple
+                and len(plan.steps) > remaining_steps
+            ):
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.PLAN_TOO_LONG,
+                    message=(
+                        f"plan exceeds max_steps budget: {len(plan.steps)} > {remaining_steps}"
+                    ),
+                )
             # Inspect the exact carrier *before* deepcopy: invalid planner objects
             # may define behavioral __deepcopy__ hooks that must never run here.
             if not _require_plain_plan(plan):
