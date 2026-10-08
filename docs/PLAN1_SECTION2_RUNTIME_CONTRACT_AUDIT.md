@@ -38,3 +38,6 @@ live Web/Cloud or packaged-product acceptance.
 At the first change, branch ancestry includes Plan 1 Section 1 candidate
 `f29d26cd179499e5ac3406b4291bf67203d7ecc2`; exact Section 2
 head/CI/integration evidence must be checked before claiming terminal DONE.
+
+## Follow-up identity admission repair
+Durable run/task/thread/resume/checkpoint identities are now validated as real Python strings, NFC-normalized, nonblank, without surrounding whitespace, Unicode control/format/surrogate characters or embedded line separators before they can become runtime or recovery authority. Additional negative regression cases cover type confusion, Unicode bidi/zero-width, and forged multiline identifiers. Existing runtime adapter and persistent recovery paths stay unchanged; exact-head CI and integration readback remain mandatory before DONE.
