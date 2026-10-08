@@ -46,6 +46,7 @@ class PaperRepository:
 
 
 def setup(tmp_path, *, grant=True, expired=False):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     permissions = StandingPermissionStore(store)
