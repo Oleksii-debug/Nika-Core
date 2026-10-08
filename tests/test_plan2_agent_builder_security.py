@@ -129,6 +129,7 @@ def test_compiler_rejects_mutated_nested_grant_before_authorizing() -> None:
     with pytest.raises(ValidationError):
         _compiler(ToolSpec("web.read", "Read", ToolRisk.READ_ONLY)).compile(document)
 
+
 def test_durable_duplicate_json_key_fails_closed_at_activation_and_restart(
     tmp_path,
 ) -> None:
@@ -173,7 +174,10 @@ def test_durable_duplicate_json_key_fails_closed_at_activation_and_restart(
             (original, definition.agent_id, definition.version),
         )
     repository.activate(definition)
-    assert repository.require_active(definition.agent_id, definition.version).definition == definition
+    assert (
+        repository.require_active(definition.agent_id, definition.version).definition
+        == definition
+    )
 
     # A previously active version must also fail closed after on-disk tampering.
     with store.connection() as conn:
