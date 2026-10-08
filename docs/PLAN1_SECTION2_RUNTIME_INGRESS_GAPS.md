@@ -45,3 +45,20 @@ service interoperability are still to be qualified.
 
 This PR is **NOT terminal DONE**. Do not claim product/physical/NVDA evidence,
 or update GitHub/Drive closure status, until the full Section 2 criteria pass.
+
+## Nested JSON-object identity and bounded inspection (nonterminal)
+
+The existing `RuntimeRequest`, `RuntimeEvent` and `RuntimeResult` mapping
+validator now inspects maps nested through mapping/list/tuple carriers, rather
+than checking only the top-level keys. It rejects plain-int, boolean or other
+non-string nested keys which would silently alias during JSON projection.
+An iterative bounded depth-first traversal also rejects cyclic containers
+without Python recursion, while permitting reused acyclic subtrees and
+read-only mapping proxies. An explicit 20,000-node inspection budget bounds
+resource consumption before runtime dispatch; it is not a general serializer,
+deep value-schema validator or lifetime job quota.
+
+Negative/compatibility tests cover nested key collisions, cycles, shared
+subtrees and oversized carriers. The broader versioned command/query,
+recovery, restart and all-client interoperability contract remains unproved
+until exact-head CI and integration evidence; **Plan 1 Section 2 NOT DONE**.
