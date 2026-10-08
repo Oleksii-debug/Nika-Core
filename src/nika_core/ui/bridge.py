@@ -147,12 +147,16 @@ class UIActionBridge:
         """Keep returned action text bounded and single-line for NVDA/status logs."""
         if type(message) is not str:
             return False
+        # A plugin may supply very large text: reject before allocating UTF-8.
+        if len(message) > 2048:
+            return False
         try:
             if len(message.encode("utf-8")) > 2048:
                 return False
         except UnicodeEncodeError:
             return False
-        return not any(category(char) in {"Cc", "Cf", "Cs"} for char in message)
+        # Unicode line and paragraph separators are multiline status text too.
+        return not any(category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for char in message)
 
     @staticmethod
     def _safe_focus_target(focus_id: object) -> bool:
@@ -226,6 +230,7 @@ class UIActionBridge:
                 # multiline or bidi/control text into the keyboard/NVDA UI.
                 if (
                     not self._safe_focus_target(action.action_id)
+                    or type(action.may_be_unbound) is not bool
                     or not all(
                         type(field) is str
                         and bool(field)
@@ -347,11 +352,11 @@ class UIActionBridge:
             return fallback
         message = exc.args[0]
         try:
-            if not message or len(message.encode("utf-8")) > 2048:
+            if not message or len(message) > 2048 or len(message.encode("utf-8")) > 2048:
                 return fallback
         except UnicodeEncodeError:
             return fallback
-        if any(category(char) in {"Cc", "Cf", "Cs"} for char in message):
+        if any(category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for char in message):
             return fallback
         return message
 

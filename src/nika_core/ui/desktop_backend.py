@@ -167,6 +167,7 @@ class DesktopBackend:
         )
 
     def pause_task(self, payload: Mapping[str, Any]) -> UIResult:
+        payload = self._admit_task_control_payload(payload)
         record = self._only_controllable(action="призупинення", payload=payload)
         if record is None:
             raise ValueError("Немає активного завдання, яке можна призупинити.")
@@ -194,6 +195,7 @@ class DesktopBackend:
         )
 
     def resume_task(self, payload: Mapping[str, Any]) -> UIResult:
+        payload = self._admit_task_control_payload(payload)
         record = self._only_with_state(TaskState.PAUSED, action="продовження", payload=payload)
         if record is None:
             raise ValueError("Немає призупиненого завдання для продовження.")
@@ -249,6 +251,7 @@ class DesktopBackend:
         )
 
     def stop_agent(self, payload: Mapping[str, Any]) -> UIResult:
+        payload = self._admit_task_control_payload(payload)
         record = self._only_controllable(action="зупинки", payload=payload)
         if record is None:
             cancelled = self._only_with_state(
@@ -536,6 +539,27 @@ class DesktopBackend:
                     description="Основний локальний робочий простір Nika Core.",
                 )
             )
+
+    @staticmethod
+    def _admit_task_control_payload(payload: object) -> dict[str, Any]:
+        """Admit a detached selector before reading durable task state.
+
+        Direct desktop callers bypass the WebView Pydantic command boundary.
+        A behavioral Mapping could otherwise lie about task_id presence and
+        turn an intended explicit control into an unqualified task control.
+        Only an empty selector or one builtin task_id key is valid.
+        """
+        if type(payload) is not dict or len(payload) > 1:
+            raise ValueError("Некоректні параметри керування завданням.")
+        if not payload:
+            return {}
+        key = next(iter(payload))
+        if type(key) is not str or key != "task_id":
+            raise ValueError("Некоректні параметри керування завданням.")
+        task_id = payload["task_id"]
+        if type(task_id) is not str:
+            raise ValueError("Потрібен коректний текстовий ідентифікатор завдання.")
+        return {"task_id": task_id}
 
     def _selected_task(self, payload: Mapping[str, Any]) -> TaskRecord | None:
         """Resolve an explicit durable task ID; never guess across workspace or agent scope."""
