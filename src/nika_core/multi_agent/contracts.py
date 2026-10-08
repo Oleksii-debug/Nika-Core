@@ -64,6 +64,17 @@ class TeamQuota:
     max_parallel: int = 4
 
     def __post_init__(self) -> None:
+        # These limits flow into SQLite admission and asyncio.Semaphore. Python's
+        # numeric comparisons admit bool and fractional floats, which can silently
+        # grant an extra runtime slot or persist misleading team limits.
+        for name in (
+            "max_depth",
+            "max_children_per_parent",
+            "max_total_agents",
+            "max_parallel",
+        ):
+            if type(getattr(self, name)) is not int:
+                raise TypeError(f"{name} must be an integer")
         if self.max_depth < 1:
             raise ValueError("max_depth must be at least 1")
         if self.max_children_per_parent < 1:
