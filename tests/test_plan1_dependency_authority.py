@@ -24,21 +24,37 @@ VALID_ACTIVATION = frozenset({"required", "optional", "test-only", "build-only"}
 # Changing an engine's canonical owner or REUSE/ADAPT mode requires an explicit
 # reviewed code change, not a manifest-only edit that passes the drift guard.
 EXPECTED_GROUP_AUTHORITIES = {
-    "base": ("REUSE", "Nika-owned application DTOs, persistence, file/HTTP adapters"),
-    "agent": ("ADAPT", "AgentRuntimePort, SchedulerPort and ModelGateway"),
-    "embedded-ai": ("ADAPT", "ModelGateway provider adapter"),
-    "planning": ("ADAPT", "Deterministic Brain contracts and ToolExecutor"),
-    "gui": ("ADAPT", "Desktop UI action bridge"),
-    "browser": ("ADAPT", "Semantic browser interaction port"),
-    "windows-interaction": ("ADAPT", "Semantic UIA interaction port"),
-    "learning": ("ADAPT", "Experiments/promotion authority"),
-    "media": ("ADAPT", "Media acquisition/transcription boundaries"),
-    "credentials": ("REUSE", "Credential/Identity Broker reference boundary"),
-    "deployment": ("ADAPT", "Authorized deployment/staging adapter"),
-    "dev": ("REUSE", "Repository CI and source-verification harness"),
-    "qa": ("REUSE", "Release/QA provenance gate"),
-    "build-system": ("REUSE", "Nika package build backend and source distribution"),
+    "base": ("REUSE", "Nika-owned application DTOs, persistence, file/HTTP adapters",
+        "Platform/data/document parsing"),
+    "agent": ("ADAPT", "AgentRuntimePort, SchedulerPort and ModelGateway",
+        "Replaceable orchestration, model and scheduling engines"),
+    "embedded-ai": ("ADAPT", "ModelGateway provider adapter",
+        "Local model inference"),
+    "planning": ("ADAPT", "Deterministic Brain contracts and ToolExecutor",
+        "Model-free planning engine"),
+    "gui": ("ADAPT", "Desktop UI action bridge",
+        "Windows shell"),
+    "browser": ("ADAPT", "Semantic browser interaction port",
+        "Browser DOM automation"),
+    "windows-interaction": ("ADAPT", "Semantic UIA interaction port",
+        "Windows object-model automation"),
+    "learning": ("ADAPT", "Experiments/promotion authority",
+        "Measured learning capability"),
+    "media": ("ADAPT", "Media acquisition/transcription boundaries",
+        "Optional media engines"),
+    "credentials": ("REUSE", "Credential/Identity Broker reference boundary",
+        "Protected OS credential access"),
+    "deployment": ("ADAPT", "Authorized deployment/staging adapter",
+        "Remote deployment worker"),
+    "dev": ("REUSE", "Repository CI and source-verification harness",
+        "Automated development verification"),
+    "qa": ("REUSE", "Release/QA provenance gate",
+        "Security and packaging verification"),
+    "build-system": ("REUSE", "Nika package build backend and source distribution",
+        "Build-system dependency and packaging authority"),
 }
+EXPECTED_EVIDENCE_POLICY = "This file inventories requested dependency constraints and authority boundaries; it is not a lockfile, resolved version assertion, upstream maintenance audit, license certification, installation proof or Section DONE."
+
 EXPECTED_REJECTED_AUTHORITIES = {
     "Microsoft Agent Framework": "SECONDARY_ONLY",
     "CrewAI / Agno / Agent Zero": "REFERENCE_ONLY",
@@ -77,6 +93,9 @@ def validate_manifest(manifest: dict[str, object], project: dict[str, object]) -
         or manifest.get("build_backend") != project["build-system"]["build-backend"]
     ):
         raise ValueError("Wrong Plan 1 identity, schema or Python compatibility")
+
+    if manifest.get("evidence_policy") != EXPECTED_EVIDENCE_POLICY:
+        raise ValueError("Evidence policy drift cannot authorize unverified closure")
 
     # An unconstrained install from pyproject is not an exact resolved lock.
     if manifest.get("resolution_state") != "DECLARED_RANGES_ONLY_NOT_REPRODUCIBLE":
@@ -132,7 +151,9 @@ def validate_manifest(manifest: dict[str, object], project: dict[str, object]) -
     if seen != set(EXPECTED_GROUP_AUTHORITIES):
         raise ValueError("Canonical adoption group ownership drift")
     for group in actual:
-        if (group["mode"], group["canonical_owner"]) != EXPECTED_GROUP_AUTHORITIES[group["group"]]:
+        if (group["mode"], group["canonical_owner"], group["capability"]) != (
+            EXPECTED_GROUP_AUTHORITIES[group["group"]]
+        ):
             raise ValueError(f"Canonical adoption decision/owner drift: {group['group']}")
 
     exclusions = manifest.get("rejected_competing_authorities")
@@ -260,6 +281,26 @@ def test_adoption_manifest_cannot_silently_replace_approved_authority(
     group[field] = replacement
     with pytest.raises(ValueError, match="decision/owner drift"):
         validate_manifest(changed, project)
+
+
+
+def test_adoption_guard_rejects_forged_capability_authority() -> None:
+    manifest = read_manifest(MANIFEST.read_text(encoding="utf-8"))
+    project = tomllib.loads(PROJECT.read_text(encoding="utf-8"))
+    altered = copy.deepcopy(manifest)
+    group = next(item for item in altered["groups"] if item["group"] == "agent")
+    group["capability"] = "Unreviewed framework owns runtime policy and durable effects"
+    with pytest.raises(ValueError, match="decision/owner drift"):
+        validate_manifest(altered, project)
+
+
+def test_adoption_guard_rejects_forged_terminal_or_lock_evidence() -> None:
+    manifest = read_manifest(MANIFEST.read_text(encoding="utf-8"))
+    project = tomllib.loads(PROJECT.read_text(encoding="utf-8"))
+    altered = copy.deepcopy(manifest)
+    altered["evidence_policy"] = "All versions locked and Section DONE"
+    with pytest.raises(ValueError, match="Evidence policy drift"):
+        validate_manifest(altered, project)
 
 
 @pytest.mark.parametrize(
