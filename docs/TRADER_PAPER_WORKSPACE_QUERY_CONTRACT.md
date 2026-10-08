@@ -12,7 +12,11 @@ memory store, account ledger or credential access. No real-money authority.
 host-supplied Core authorization callback**, evaluated for the exact pair
 `(workspace_id, run_id)` both before SQLite access and before returning
 data. A browser, language model, or UI command must **never** supply that
-callback or select its trusted scope. The host must resolve the currently
+callback or select its trusted scope. Both scope IDs must be exact plain strings,
+nonblank, already trimmed, printable (no control, line separator or bidi
+formatting), and at most 512 UTF-8 bytes each **before** the callback or
+SQLite query. Invalid trusted-host scope is `ACCESS_DENIED`, never storage
+unavailability or a fabricated empty account. The host must resolve the currently
 authenticated user/workspace/run and consult the existing Core permission
 authority, including revocation. Only singleton boolean `True` grants read.
 

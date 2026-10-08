@@ -79,6 +79,21 @@ def _safe_identity(value: object) -> str:
     return value
 
 
+def _valid_operator_scope(value: object) -> bool:
+    """Require inert, printable, bounded identifiers before Core or SQLite.
+
+    The host may select the scope, but neither the authorization callback nor
+    its audit/log consumers should receive control/bidi or unbounded text.
+    """
+    return (
+        type(value) is str
+        and bool(value)
+        and value.isprintable()
+        and value == value.strip()
+        and len(value.encode("utf-8")) <= 512
+    )
+
+
 class PaperWorkspaceQuery:
     """Check host-owned Core read permission on every request and before return.
 
@@ -107,11 +122,9 @@ class PaperWorkspaceQuery:
 
     def read_account(self, workspace_id: str, run_id: str) -> PaperAccountView:
         # Exact input types prevent behavioral str subclasses running in auth/SQLite.
-        if (
-            type(workspace_id) is not str
-            or type(run_id) is not str
-            or not workspace_id.strip()
-            or not run_id.strip()
+        if not (
+            _valid_operator_scope(workspace_id)
+            and _valid_operator_scope(run_id)
         ):
             raise TradingResearchError("invalid paper workspace scope")
         self._require_authorized(workspace_id, run_id)
@@ -171,7 +184,12 @@ def paper_state_provider(
     def state() -> dict[str, object]:
         try:
             scope = host_scope()
-            if type(scope) is not tuple or len(scope) != 2:
+            if (
+                type(scope) is not tuple
+                or len(scope) != 2
+                or not _valid_operator_scope(scope[0])
+                or not _valid_operator_scope(scope[1])
+            ):
                 raise PermissionError("invalid trusted host scope")
             return query.read_account(scope[0], scope[1]).to_accessible_state()
         except PermissionError:
