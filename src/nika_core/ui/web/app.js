@@ -649,6 +649,10 @@
       (item) => !item || typeof item !== "object" || Array.isArray(item)
         || typeof item.task_id !== "string" || !item.task_id
         || (item.command != null && typeof item.command !== "string")
+        // The desktop task projection is scoped to the canonical local
+        // workspace/agent. Never announce a foreign task from a bad bridge read.
+        || (item.workspace_id != null && item.workspace_id !== "default")
+        || (item.agent_id != null && item.agent_id !== "nika.default")
     ) || (Array.isArray(state.tasks)
       && new Set(state.tasks.map((item) => item.task_id)).size !== state.tasks.length)) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
