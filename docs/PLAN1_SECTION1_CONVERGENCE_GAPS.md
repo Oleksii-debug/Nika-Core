@@ -1,0 +1,61 @@
+# Plan 1 / Section 1 — adoption convergence evidence and remaining gates
+
+Scope: **Nika Core / Plan 1 / Section 1 only**, legacy Section 1.
+Base: `main@a82149694d5efa2fde1a4c3bb46c474b9c20c87e`.
+Convergence parent: PR #1734 @ `ca8ab0b9d27a975fecf36a5452f268d9ce0ff820`.
+Do **not** infer Plan 2–7 Section status from this file.
+
+## Canonical reuse and source authorities
+
+The adoption and historical reuse decisions remain in
+`docs/THIRD_PARTY_ADOPTION.md`, `docs/REUSE_CATALOG_2026-08-18.md`,
+`docs/REUSE_AND_OPEN_SOURCE_MASTER_MAP.md` if present in the relevant
+workspace, and `docs/PLAN1_SECTION1_ADOPTION_AUDIT.md` on PR #1734.
+The machine-readable **declared dependency contract** is
+`docs/PLAN1_DEPENDENCY_AUTHORITY.json`.
+
+| Capability | Nika-owned authority | Existing source/adopted engine boundary |
+|---|---|---|
+| Runtime and orchestration | `AgentRuntimePort`, durable Nika session/effect state | `src/nika_core/runtime/contracts.py`, `langgraph_runtime.py`, `recovery.py`; LangGraph is an adapter, not domain truth |
+| Scheduling | Nika job identity, policy, schedule store | `src/nika_core/scheduler/contracts.py`, `apscheduler_adapter.py`, `store.py` |
+| Models | One `ModelGateway` with policy/routing | `src/nika_core/model_gateway/contracts.py`, `gateway.py`, `providers.py`, `foundry_local.py` |
+| Planning | Deterministic Brain + approval-aware ToolExecutor | `src/nika_core/intelligence/contracts.py`; Unified Planning adapter is replaceable |
+| Coding engines | Product Factory trusted project/review/effect gates | `src/nika_core/product_factory_coding_worker_adapter.py`; no standalone factory kernel |
+| Browser / Windows UIA | Nika semantic interaction/permission boundary | `src/nika_core/interaction/playwright_adapter.py`, desktop bridge; browser/host event types stay at the edge |
+| Media | Nika acquisition, provenance, delivery contracts | `src/nika_core/media/contracts.py`, `acquisition.py`, `transcription.py`; optional yt-dlp and subtitle workers |
+| Documents | Nika source/provenance and workspace result DTOs | pypdf, python-docx, openpyxl, defusedxml in declared base requirements |
+| Windows packaging | Nika artifact identity, release/attestation/rollback policy | `src/nika_core/packaging/windows.py`, `release.py`, `attestation.py`; PyInstaller is tooling |
+| Web/Cloud | Nika application-service, task, identity and policy contracts | Transport adapters may be adopted in Plan 6, never replace Plan 1 core authority |
+
+## Automated drift guard
+
+`tests/test_plan1_dependency_authority.py` compares each base/extra
+requirement string to the manifest and rejects undeclared dependency changes,
+missing/duplicated groups, invalid authority decisions, unsupported package
+maintenance/license claims, altered Python compatibility and false lock status.
+It uses Python standard-library `tomllib` and `json` plus repository pytest.
+
+`tests/test_plan1_architecture.py` on the parent PR guards direct vendor
+imports into six Nika-owned port/contract modules, with negative tests for
+nested/dynamic imports. Those tests are not a substitute for integration or
+runtime trust-boundary tests.
+
+## Deliberate non-claims — currently NOT terminal DONE
+
+1. `pyproject.toml` declares ranges; this checkout has **no committed
+   resolution lock** for complete transitive dependency graphs on supported
+   Python/Windows/Linux profiles. The manifest is **not** an installable
+   deterministic lock. Exact resolved versions/hashes are not verified.
+2. Package-by-package upstream maintenance, adopted exact distribution license
+   and redistributable notices require independent version-specific proof.
+   Candidate/reference-only engines must not be counted as installed.
+3. The PR's exact-head Core CI Ubuntu/Windows, integrity and integration
+   readback must be green and reconciled before terminal closure. A queued
+   check, source readback or green ancestor is not a pass.
+4. Real packaged Windows/NVDA and real Web/Cloud/Node final acceptance belongs
+   to Plan 7; no such evidence is asserted here.
+
+Status: **ACTIONABLE / PARTIAL**, preserving terminal truth. Do not update
+`MULTI_PLAN_CLOSURE_STATE.md` or the assigned Drive plan to DONE until the
+remaining applicable Section 1 evidence passes and the exact integration
+commit has been read back. Section 2 remains next in order, not skipped.
