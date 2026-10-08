@@ -14,11 +14,19 @@ from functools import cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from nika_core.artifacts.schema import (
+    ARTIFACT_REGISTRY_SCHEMA_VERSION,
+    initialize_artifact_registry_schema,
+)
 from nika_core.config import AppConfig
+from nika_core.data.experience_ledger_schema import EXPERIENCE_LEDGER_SCHEMA_VERSION
 from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VERSION
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.media.schema import MEDIA_SCHEMA_VERSION, initialize_media_schema
+from nika_core.model_artifact_schema import MODEL_ARTIFACT_SCHEMA_VERSION
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
+from nika_core.research.knowledge_schema import KNOWLEDGE_SCHEMA_VERSION
 from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
 
 SUPPORTED_CONFIG_SCHEMA_VERSION = 1
@@ -267,11 +275,73 @@ class HealthService:
                         conn,
                         query=(
                             "SELECT version, typeof(version) "
+                            "FROM experience_ledger_schema_migrations "
+                            "ORDER BY version LIMIT ?"
+                        ),
+                        supported_version=EXPERIENCE_LEDGER_SCHEMA_VERSION,
+                        check_id="database.schema.experience-ledger",
+                    )
+                )
+                checks.append(
+                    self._check_migration_history(
+                        conn,
+                        query=(
+                            "SELECT version, typeof(version) "
+                            "FROM model_artifact_schema_migrations "
+                            "ORDER BY version LIMIT ?"
+                        ),
+                        supported_version=MODEL_ARTIFACT_SCHEMA_VERSION,
+                        check_id="database.schema.model-artifact",
+                    )
+                )
+                checks.append(
+                    self._check_migration_history(
+                        conn,
+                        query=(
+                            "SELECT version, typeof(version) "
+                            "FROM knowledge_schema_migrations "
+                            "ORDER BY version LIMIT ?"
+                        ),
+                        supported_version=KNOWLEDGE_SCHEMA_VERSION,
+                        check_id="database.schema.knowledge",
+                    )
+                )
+                checks.append(
+                    self._check_migration_history(
+                        conn,
+                        query=(
+                            "SELECT version, typeof(version) "
                             "FROM product_project_schema_migrations "
                             "ORDER BY version LIMIT ?"
                         ),
                         supported_version=PRODUCT_PROJECT_SCHEMA_VERSION,
                         check_id="database.schema.product-project",
+                    )
+                )
+                checks.append(
+                    self._check_optional_migration_history(
+                        conn,
+                        table_name="artifact_registry_schema_migrations",
+                        query=(
+                            "SELECT version, typeof(version) "
+                            "FROM artifact_registry_schema_migrations "
+                            "ORDER BY version LIMIT ?"
+                        ),
+                        supported_version=ARTIFACT_REGISTRY_SCHEMA_VERSION,
+                        check_id="database.schema.artifact-registry",
+                    )
+                )
+                checks.append(
+                    self._check_optional_migration_history(
+                        conn,
+                        table_name="media_schema_migrations",
+                        query=(
+                            "SELECT version, typeof(version) "
+                            "FROM media_schema_migrations "
+                            "ORDER BY version LIMIT ?"
+                        ),
+                        supported_version=MEDIA_SCHEMA_VERSION,
+                        check_id="database.schema.media",
                     )
                 )
                 checks.append(self._check_schema_shape(conn))
@@ -461,9 +531,73 @@ class HealthService:
             ),
         )
 
+    @staticmethod
+    def _schema_object_types(
+        conn: sqlite3.Connection,
+        *,
+        name: str,
+    ) -> tuple[str, ...]:
+        return tuple(
+            str(row[0])
+            for row in conn.execute(
+                "SELECT type FROM sqlite_master WHERE name = ? ORDER BY type LIMIT 2",
+                (name,),
+            )
+        )
+
+    @classmethod
+    def _check_optional_migration_history(
+        cls,
+        conn: sqlite3.Connection,
+        *,
+        table_name: str,
+        query: str,
+        supported_version: int,
+        check_id: str,
+    ) -> HealthCheck:
+        try:
+            object_types = cls._schema_object_types(conn, name=table_name)
+        except sqlite3.Error:
+            return HealthCheck(
+                check_id=check_id,
+                status=HealthStatus.FAIL,
+                summary="Optional migration authority could not be inspected.",
+            )
+        if not object_types:
+            return HealthCheck(
+                check_id=check_id,
+                status=HealthStatus.PASS,
+                summary="Optional schema is not initialized in this database.",
+            )
+        if object_types != ("table",):
+            return HealthCheck(
+                check_id=check_id,
+                status=HealthStatus.FAIL,
+                summary="Optional migration authority is not a canonical SQLite table.",
+            )
+        return cls._check_migration_history(
+            conn,
+            query=query,
+            supported_version=supported_version,
+            check_id=check_id,
+        )
+
     @classmethod
     def _check_schema_shape(cls, conn: sqlite3.Connection) -> HealthCheck:
-        expected = dict(cls._canonical_schema_signature())
+        artifact_registry_initialized = cls._schema_object_types(
+            conn,
+            name="artifact_registry_schema_migrations",
+        ) == ("table",)
+        media_initialized = cls._schema_object_types(
+            conn,
+            name="media_schema_migrations",
+        ) == ("table",)
+        expected = dict(
+            cls._canonical_schema_signature(
+                include_artifact_registry=artifact_registry_initialized,
+                include_media=media_initialized,
+            )
+        )
         actual = dict(cls._schema_signature(conn))
         valid = actual.keys() == expected.keys()
         if valid:
@@ -491,11 +625,20 @@ class HealthService:
 
     @staticmethod
     @cache
-    def _canonical_schema_signature() -> SchemaSignature:
-        """Derive required shape from the canonical migration authority, never a second schema list."""
+    def _canonical_schema_signature(
+        *,
+        include_artifact_registry: bool = False,
+        include_media: bool = False,
+    ) -> SchemaSignature:
+        """Derive required shape from canonical initializers, never a second schema list."""
         with TemporaryDirectory(prefix="nika-health-schema-") as directory:
             database = Path(directory) / "canonical.db"
-            SQLiteStore(database).initialize()
+            store = SQLiteStore(database)
+            store.initialize()
+            if include_artifact_registry:
+                initialize_artifact_registry_schema(store)
+            if include_media:
+                initialize_media_schema(store)
             conn = sqlite3.connect(database)
             try:
                 return HealthService._schema_signature(conn)

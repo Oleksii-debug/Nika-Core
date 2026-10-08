@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from collections.abc import Mapping
+from math import isfinite
 from typing import Any
 
 from nika_core.builder.repository import AgentDefinitionRepository
@@ -18,6 +20,7 @@ from nika_core.model_gateway.contracts import (
     ModelMessage,
     ModelRequest,
     PrivacyClass,
+    ProviderCapabilities,
     ProviderKind,
 )
 from nika_core.model_gateway.gateway import ModelGateway, model_identity_fingerprint
@@ -27,6 +30,8 @@ from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
+    RuntimeResumeProbe,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 
@@ -52,19 +57,49 @@ class ModelGatewayAgentRuntime:
         privacy: PrivacyClass = PrivacyClass.PRIVATE,
         temperature: float | None = 0.0,
     ) -> None:
+        if type(provider_id) is not str:
+            raise TypeError("provider_id must be exact text")
         if not provider_id.strip():
             raise ValueError("provider_id must not be empty")
         if provider_id != provider_id.strip():
             raise ValueError("provider_id must not contain surrounding whitespace")
-        if not isinstance(provider_kind, ProviderKind):
+        if any(not char.isprintable() for char in provider_id):
+            raise ValueError("provider_id must not contain control characters")
+        if not any(provider_kind is member for member in ProviderKind):
             raise TypeError("provider_kind must be ProviderKind")
+        if intelligence_mode is not None and not any(
+            intelligence_mode is member for member in IntelligenceMode
+        ):
+            raise TypeError("intelligence_mode must be IntelligenceMode")
         if model is not None:
+            if type(model) is not str:
+                raise TypeError("model must be exact text when provided")
             if not model.strip():
                 raise ValueError("model must not be blank when provided")
             if model != model.strip():
                 raise ValueError("model must not contain surrounding whitespace")
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be greater than zero")
+            if any(not char.isprintable() for char in model):
+                raise ValueError("model must not contain control characters")
+        if type(timeout_seconds) not in (int, float):
+            raise TypeError("timeout_seconds must be a finite positive number")
+        try:
+            finite_timeout = isfinite(float(timeout_seconds))
+        except OverflowError:
+            finite_timeout = False
+        if not finite_timeout or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        if not any(privacy is member for member in PrivacyClass):
+            raise TypeError("privacy must be PrivacyClass")
+        if temperature is not None:
+            if type(temperature) not in (int, float):
+                raise TypeError("temperature must be numeric when provided")
+            try:
+                finite_temperature = isfinite(float(temperature))
+            except OverflowError:
+                finite_temperature = False
+            if not finite_temperature or not 0 <= temperature <= 2:
+                raise ValueError("temperature must be finite and between 0 and 2")
+            temperature = float(temperature)
         self._gateway = gateway
         self._definitions = definitions
         self._provider_id = provider_id
@@ -78,7 +113,9 @@ class ModelGatewayAgentRuntime:
         self._timeout_seconds = timeout_seconds
         self._privacy = privacy
         self._temperature = temperature
-        self._active: dict[tuple[str, str], asyncio.Task[Any]] = {}
+        self._active: dict[
+            tuple[str, str], tuple[asyncio.Task[Any], bool, bool]
+        ] = {}
         self._active_lock = asyncio.Lock()
 
     @property
@@ -92,13 +129,80 @@ class ModelGatewayAgentRuntime:
     @property
     def capabilities(self) -> frozenset[RuntimeCapability]:
         capabilities = {
-            RuntimeCapability.CANCELLATION,
             RuntimeCapability.PARALLELISM,
             RuntimeCapability.SUBAGENTS,
         }
+        if self._route_supports_hard_cancellation():
+            capabilities.add(RuntimeCapability.CANCELLATION)
         if self._provider_kind is ProviderKind.LOCAL:
             capabilities.add(RuntimeCapability.LOCAL_MODELS)
         return frozenset(capabilities)
+
+    def _route_supports_hard_cancellation(self) -> bool:
+        """Read hard-cancel truth from the exact canonical ModelGateway route, fail closed."""
+
+        try:
+            # Reuse the gateway's effect-free canonical selector rather than duplicating
+            # provider-registry/default-route semantics in this runtime adapter.
+            provider = self._gateway._select(
+                ModelRequest(
+                    request_id=f"runtime-capability:{self._provider_id}",
+                    messages=(ModelMessage(role="user", content="capability probe"),),
+                    provider_id=self._provider_id,
+                    provider_kind=self._provider_kind,
+                    model=self._model,
+                    privacy=PrivacyClass.PUBLIC,
+                    timeout_seconds=1.0,
+                )
+            )
+            capabilities = provider.capabilities
+        except (AttributeError, ModelGatewayError, TypeError, ValueError):
+            return False
+        return (
+            type(capabilities) is ProviderCapabilities
+            and type(capabilities.provider_id) is str
+            and capabilities.provider_id == self._provider_id
+            and capabilities.kind is self._provider_kind
+            and type(capabilities.supports_hard_cancellation) is bool
+            and capabilities.supports_hard_cancellation
+        )
+
+    def initial_resume_token(self, *, task_id: str, thread_id: str) -> str:
+        """Persist an opaque in-flight marker without claiming durable inference resume."""
+        material = json.dumps(
+            {
+                "schema": "nika-model-gateway-inflight-v1",
+                "runtime_id": self.runtime_id,
+                "task_id": task_id,
+                "thread_id": thread_id,
+                "model_fingerprint": model_identity_fingerprint(self._model),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"model-gateway-inflight-v1:{hashlib.sha256(material).hexdigest()}"
+
+    async def probe_resume(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        resume_token: str,
+    ) -> RuntimeResumeProbe:
+        expected = self.initial_resume_token(task_id=task_id, thread_id=thread_id)
+        if resume_token != expected:
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.INVALID,
+                reason="persisted model inference marker does not match this runtime route",
+            )
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+            reason=(
+                "opaque model inference has no readable durable checkpoint; "
+                "automatic replay is not safe"
+            ),
+        )
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         try:
@@ -114,19 +218,27 @@ class ModelGatewayAgentRuntime:
         key = (request.task_id, request.thread_id)
         async with self._active_lock:
             existing = self._active.get(key)
-            if existing is not None and not existing.done():
+            if existing is not None:
                 return RuntimeResult(
                     outcome=RuntimeOutcome.FAILED,
                     output={"recoverable": True, "provider_id": self._provider_id},
                     error="This agent already has an active model request.",
                     error_code=RuntimeErrorCode.DUPLICATE_ACTIVE,
                 )
+            hard_cancellable = self._route_supports_hard_cancellation()
             task = asyncio.create_task(self._gateway.complete(model_request))
-            self._active[key] = task
+            self._active[key] = (task, hard_cancellable, False)
 
         try:
             response = await task
         except asyncio.CancelledError:
+            async with self._active_lock:
+                active = self._active.get(key)
+                explicit_cancel_requested = (
+                    active is not None and active[0] is task and active[2]
+                )
+            if not explicit_cancel_requested:
+                raise
             return RuntimeResult(
                 outcome=RuntimeOutcome.CANCELLED,
                 output={
@@ -146,7 +258,8 @@ class ModelGatewayAgentRuntime:
             )
         finally:
             async with self._active_lock:
-                if self._active.get(key) is task:
+                active = self._active.get(key)
+                if active is not None and active[0] is task:
                     self._active.pop(key, None)
 
         if response.request_id != model_request.request_id:
@@ -228,17 +341,24 @@ class ModelGatewayAgentRuntime:
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         key = (task_id, thread_id)
         async with self._active_lock:
-            task = self._active.get(key)
-            if task is None or task.done():
+            active = self._active.get(key)
+            if active is None or active[0].done():
                 return False
+            task, hard_cancellable, _ = active
+            if not hard_cancellable:
+                return False
+            self._active[key] = (task, hard_cancellable, True)
             task.cancel()
         try:
-            await task
+            await asyncio.shield(task)
         except asyncio.CancelledError:
-            pass
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+            return task.cancelled()
         except ModelGatewayError:
-            pass
-        return True
+            return False
+        return False
 
     def _build_model_request(self, request: RuntimeRequest) -> ModelRequest:
         agent_id = self._required_text(request.payload, "agent_id")

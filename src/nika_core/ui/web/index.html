@@ -19,7 +19,11 @@
     <button type="button" data-action-id="nav.logs" data-focus-target="logs-heading">Журнал</button>
     <button type="button" data-action-id="nav.workspaces" data-focus-target="workspaces-heading">Робочі простори</button>
     <a href="#team-task-heading">Командне завдання</a>
+    <a href="#recovery-heading">Відновлення</a>
+    <a href="#model-settings-heading">Модель</a>
     <a href="#source-setup-heading">Джерела команди</a>
+    <a href="#speech-heading">Голос Nika</a>
+    <a href="#voice-heading">Голосовий ввід</a>
     <a href="#product-project-heading">ProductProject</a>
     <a href="#keyboard-heading">Клавіатура</a>
     <a href="#autostart-heading">Автозапуск Windows</a>
@@ -37,6 +41,65 @@
         <button type="button" data-action-id="settings.autostart.refresh" data-error-focus-target="autostart-heading">Перечитати автозапуск</button>
       </div>
     </section>
+    <section aria-labelledby="recovery-heading">
+      <h2 id="recovery-heading" tabindex="-1">Відновлення після перезапуску</h2>
+      <p id="recovery-status">Перевірка незавершеної роботи.</p>
+      <dl id="recovery-summary" aria-label="Стан відновлення після перезапуску" hidden>
+        <dt>Безпечне автоматичне продовження</dt>
+        <dd id="recovery-auto-count">0</dd>
+        <dt>Очікує ручного продовження</dt>
+        <dd id="recovery-manual-count">0</dd>
+        <dt>Очікує підтвердження</dt>
+        <dd id="recovery-approval-count">0</dd>
+        <dt>Невизначені зовнішні дії</dt>
+        <dd id="recovery-uncertain-count">0</dd>
+        <dt>Заблоковане відновлення</dt>
+        <dd id="recovery-blocked-count">0</dd>
+        <dt>Невдалі спроби безпечного продовження</dt>
+        <dd id="recovery-failed-count">0</dd>
+      </dl>
+      <p id="recovery-help">Nika автоматично продовжує лише crash-left роботу з канонічно перевіреним checkpoint і без невизначених зовнішніх ефектів. Призупинена, очікуюча підтвердження або невизначена робота не запускається без відповідної authority.</p>
+    </section>
+    <section aria-labelledby="model-settings-heading">
+      <h2 id="model-settings-heading" tabindex="-1">Модель для нових завдань</h2>
+      <p id="model-settings-help">Вибір зберігається до створення нового завдання і не змінює режим уже прийнятого завдання. Детермінований режим працює без LLM. Foundry Local використовує вбудовану локальну модель без мережевої адреси. Ollama використовує лише локальну адресу. Для API вкажіть лише посилання на змінну середовища у форматі env:НАЗВА; сам ключ у це поле не вводьте.</p>
+
+      <label for="model-route-kind">Тип маршруту моделі</label>
+      <select id="model-route-kind" aria-describedby="model-settings-help model-settings-status">
+        <option value="deterministic">Детермінований режим без LLM</option>
+        <option value="foundry_local">Foundry Local</option>
+        <option value="ollama">Локальний Ollama</option>
+        <option value="openai_compatible">Сумісний API</option>
+      </select>
+
+      <label for="model-provider">Ідентифікатор постачальника</label>
+      <input id="model-provider" type="text" spellcheck="false" autocomplete="off" aria-describedby="model-settings-help">
+
+      <label for="model-name">Назва моделі</label>
+      <input id="model-name" type="text" spellcheck="false" autocomplete="off" aria-describedby="model-settings-help">
+
+      <label for="model-base-url">Базова адреса постачальника</label>
+      <input id="model-base-url" type="url" spellcheck="false" autocomplete="off" aria-describedby="model-settings-help">
+
+      <label for="model-credential-ref">Посилання на змінну середовища API</label>
+      <input id="model-credential-ref" type="text" spellcheck="false" autocomplete="off" aria-describedby="model-credential-help model-settings-status">
+      <p id="model-credential-help">Наприклад: env:OPENAI_API_KEY. Не вводьте сюди API-ключ або пароль. Збережене посилання навмисно не показується після перечитування.</p>
+
+      <label>
+        <input id="model-private-data" type="checkbox" aria-describedby="model-private-help">
+        Дозволити приватні дані для вибраного API
+      </label>
+      <p id="model-private-help">Для детермінованого та локальних режимів цей параметр не потребує зміни. Для зовнішнього API вмикайте лише коли політика постачальника це дозволяє.</p>
+
+      <label for="model-timeout">Тайм-аут моделі, секунд</label>
+      <input id="model-timeout" type="number" min="1" max="600" step="1" inputmode="decimal" aria-describedby="model-settings-help">
+
+      <p id="model-settings-status">Перевірка збереженої моделі.</p>
+      <div class="actions">
+        <button type="button" id="model-save" data-action-id="settings.model.configure" data-error-focus-target="model-route-kind">Зберегти модель</button>
+        <button type="button" id="model-reload" data-action-id="settings.model.refresh" data-error-focus-target="model-settings-heading">Перечитати модель</button>
+      </div>
+    </section>
     <section aria-labelledby="source-setup-heading">
       <h2 id="source-setup-heading" tabindex="-1">Джерела команди</h2>
       <p id="source-setup-help">Виберіть папку та два різні файли для порівняння командою. Підтримуються TXT, MD, HTML, CSV, JSON, PDF, DOCX та XLSX, до 16 МіБ кожен. Нові налаштування застосовуються до нових завдань; розпочаті зберігають свої джерела.</p>
@@ -52,11 +115,77 @@
         <button type="button" id="source-reload">Перечитати збережені</button>
       </div>
     </section>
+    <section aria-labelledby="speech-heading">
+      <h2 id="speech-heading" tabindex="-1">Голос Nika</h2>
+      <p id="speech-help">
+        Явно озвучує введений нижче текст локальним системним голосом Windows.
+        Nika не читає результати, пам’ять або приватний вміст автоматично.
+        Це системний голос Windows, а не фінальний власний голос Nika.
+      </p>
+      <label for="speech-text">Текст для озвучення</label>
+      <textarea id="speech-text" rows="4" maxlength="20000"
+                aria-describedby="speech-help speech-status"></textarea>
+      <p id="speech-status">Перевірка локального озвучення.</p>
+      <div class="actions">
+        <button type="button" id="speech-start" data-action-id="speech.start"
+                aria-describedby="speech-help speech-status"
+                data-error-focus-target="speech-heading">Озвучити текст</button>
+        <button type="button" id="speech-cancel" data-action-id="speech.cancel"
+                data-error-focus-target="speech-heading" disabled>Скасувати озвучення</button>
+      </div>
+    </section>
+
+    <section aria-labelledby="voice-heading">
+      <h2 id="voice-heading" tabindex="-1">Голосовий ввід</h2>
+      <p id="voice-help">
+        Запускає один явний локальний запис із мікрофона Windows, перевіряє голосову
+        активність, локально розпізнає мовлення та перевіряє активацію Nika.
+        Розпізнаний текст не створює завдання автоматично: спочатку перенесіть його
+        в поле команди та перевірте перед окремим натисканням «Створити завдання».
+      </p>
+      <div aria-labelledby="voice-model-heading">
+        <h3 id="voice-model-heading">Локальна модель розпізнавання</h3>
+        <p id="voice-model-help">
+          Якщо модель ще не встановлена, вкажіть повний шлях до локальної папки з
+          encoder.onnx, decoder.onnx і tokens.txt. Nika копіює лише ці три файли
+          у власну папку; мережа та автоматичне завантаження не використовуються.
+        </p>
+        <label for="voice-model-source">Папка локальної голосової моделі — повний шлях</label>
+        <input id="voice-model-source" type="text" spellcheck="false" autocomplete="off"
+               aria-describedby="voice-model-help voice-model-status" disabled>
+        <p id="voice-model-status">Перевірка встановлення локальної голосової моделі.</p>
+        <div class="actions">
+          <button type="button" id="voice-model-import" data-action-id="voice.model.import"
+                  aria-describedby="voice-model-help voice-model-status"
+                  data-error-focus-target="voice-model-source" disabled>Імпортувати голосову модель</button>
+          <button type="button" id="voice-model-cancel" data-action-id="voice.model.cancel"
+                  aria-describedby="voice-model-status"
+                  data-error-focus-target="voice-model-heading" disabled>Скасувати імпорт голосової моделі</button>
+        </div>
+      </div>
+      <p id="voice-status">Перевірка локального голосового вводу.</p>
+      <p>Розпізнаний текст: <span id="voice-transcript">Ще немає.</span></p>
+      <div class="actions">
+        <button type="button" id="voice-start" data-action-id="voice.start"
+                aria-describedby="voice-help voice-status"
+                data-error-focus-target="voice-heading" disabled>Почати один голосовий ввід</button>
+        <button type="button" id="voice-cancel" data-action-id="voice.cancel"
+                aria-describedby="voice-help voice-status"
+                data-error-focus-target="voice-heading" disabled>Скасувати голосовий ввід</button>
+        <button type="button" id="voice-use-command"
+                aria-describedby="voice-help voice-status" disabled>Перенести розпізнаний текст у поле команди</button>
+      </div>
+    </section>
+
     <section aria-labelledby="command-heading">
       <h2 id="command-heading" tabindex="-1">Команда</h2>
       <label for="command-input">Що має зробити Nika?</label>
-      <textarea id="command-input" rows="5"></textarea>
-      <p id="execution-mode">Поточний пакет запускає команди через безпечний детермінований режим без LLM.</p>
+      <textarea id="command-input" rows="5" aria-describedby="execution-mode command-intelligence-help task-control-help product-decision-help product-factory-help"></textarea>
+      <p id="execution-mode">Нове завдання незмінно фіксує вибрану модель разом з іншими налаштуваннями. Поточний контрольований сценарій команди зберігає власні детерміновані кроки; інтерфейс не підміняє runtime-стан або маршрут моделі.</p>
+      <p id="command-intelligence-help">Режим інтелекту можна перевірити командою «режим інтелекту» або змінити для нових завдань: «режим інтелекту deterministic», «режим інтелекту foundry &lt;model&gt;», «режим інтелекту ollama &lt;model&gt; &lt;loopback-url&gt;», «режим інтелекту api &lt;provider&gt; &lt;model&gt; &lt;https-url&gt; &lt;env:REF&gt; &lt;public|private&gt;». Уже прийняті завдання не перемикаються.</p>
+      <p id="task-control-help">Для кількох завдань можна вибрати потрібне радіокнопкою у списку «Завдання» й скористатися кнопками керування вибраним завданням. Точні команди з task_id залишаються доступними: «pause task &lt;task_id&gt;», «resume task &lt;task_id&gt;», «stop task &lt;task_id&gt;» або «task status &lt;task_id&gt;». Українські відповідники: «призупини завдання &lt;task_id&gt;», «продовж завдання &lt;task_id&gt;», «зупини завдання &lt;task_id&gt;», «статус завдання &lt;task_id&gt;».</p>
+      <p id="product-decision-help">Якщо ProductProject очікує рішення власника, спочатку введіть «покажи поточне рішення ProductProject» або «show current product decision». Якщо очікують кілька рішень, команда «list pending product decisions» покаже до восьми decision_id на сторінку; наступні сторінки відкриваються командою «list pending product decisions page &lt;номер&gt;», а повне питання конкретного рішення — «show product decision &lt;decision_id&gt;». Щоб відхилити точно вибране рішення, введіть «reject product decision &lt;decision_id&gt;». Щоб схвалити його, введіть «approve product decision &lt;decision_id&gt;»: Nika покаже одноразовий approval request_id. Лише після окремої команди «confirm product decision approval &lt;approval-request-id&gt;» trusted host запише схвалення. Українські відповідники: «відхили рішення ProductProject &lt;decision_id&gt;», «схвали рішення ProductProject &lt;decision_id&gt;» і «підтвердь схвалення рішення ProductProject &lt;approval-request-id&gt;».</p>
+      <p id="product-factory-help">Для поточного ProductProject доступні точні команди Product Factory: «сплануй поточний ProductProject», «покажи поточний план Product Factory», «покажи поточний статус Product Factory» і «запусти поточний Product Factory». Перед запуском завантажте явний JSON-план у розділі ProductProject. Команда статусу лише читає перевірений durable execution state, не запускає воркерів і показує не більш як вісім компонентів за один раз.</p>
       <div class="actions">
         <button type="button" data-action-id="task.create" data-error-focus-target="command-input">Створити завдання</button>
         <button type="button" data-action-id="task.pause">Призупинити</button>
@@ -68,7 +197,17 @@
     <section aria-labelledby="tasks-heading">
       <h2 id="tasks-heading" tabindex="-1">Завдання</h2>
       <p id="tasks-empty">Завдань ще немає.</p>
-      <ol id="tasks-list" aria-label="Список завдань"></ol>
+      <p id="tasks-page-status">Показано актуальний список завдань.</p>
+      <ol id="tasks-list" aria-label="Список завдань і вибір активного завдання"></ol>
+      <div class="actions" aria-label="Керування вибраним завданням">
+        <button id="tasks-selected-pause" type="button" data-action-id="task.pause" data-selected-task-control="true" disabled>Призупинити вибране</button>
+        <button id="tasks-selected-resume" type="button" data-action-id="task.resume" data-selected-task-control="true" disabled>Продовжити вибране</button>
+        <button id="tasks-selected-stop" type="button" data-action-id="agent.stop" data-selected-task-control="true" disabled>Зупинити вибране</button>
+      </div>
+      <div class="actions" aria-label="Сторінки списку завдань">
+        <button id="tasks-page-previous" type="button" data-action-id="task.page.previous" disabled>Попередня сторінка</button>
+        <button id="tasks-page-next" type="button" data-action-id="task.page.next" disabled>Наступна сторінка</button>
+      </div>
     </section>
 
     <section aria-labelledby="team-task-heading">
@@ -109,6 +248,12 @@
           <dd id="team-final-task-id">—</dd>
           <dt>Посилання на команду</dt>
           <dd id="team-final-team-id">—</dd>
+          <dt>Відповідь моделі</dt>
+          <dd id="team-final-model-text">—</dd>
+          <dt>Постачальник моделі</dt>
+          <dd id="team-final-model-provider">—</dd>
+          <dt>Модель</dt>
+          <dd id="team-final-model-name">—</dd>
         </dl>
       </div>
     </section>
@@ -134,6 +279,192 @@
         <dt>Рішення</dt>
         <dd id="product-project-decision-count">—</dd>
       </dl>
+      <div aria-labelledby="product-factory-local-startup-heading">
+        <h3 id="product-factory-local-startup-heading" tabindex="-1">
+          Локальний backend Product Factory
+        </h3>
+        <p id="product-factory-local-startup-help">
+          Тут зберігається лише локальна host-конфігурація: абсолютний шлях
+          робочої папки, дозволені виконувані файли та ресурсні межі.
+          Локальні корені репозиторіїв мають окрему durable-прив’язку ProductProject
+          і не приймаються цим JSON. Не вставляйте паролі, токени, API-ключі або
+          інші секрети. Зміни backend
+          застосовуються лише після перезапуску Nika.
+        </p>
+        <label for="product-factory-local-startup-json">
+          JSON конфігурації локального Product Factory
+        </label>
+        <textarea
+          id="product-factory-local-startup-json"
+          rows="12"
+          maxlength="65536"
+          spellcheck="false"
+          autocomplete="off"
+          aria-describedby="product-factory-local-startup-help product-factory-local-startup-status"
+        ></textarea>
+        <p id="product-factory-local-startup-status">
+          Перевірка збереженої конфігурації локального Product Factory.
+        </p>
+        <div class="actions">
+          <button
+            type="button"
+            id="product-factory-local-startup-save"
+            data-action-id="settings.product_factory_local.configure"
+            data-error-focus-target="product-factory-local-startup-json"
+          >
+            Зберегти локальний Product Factory
+          </button>
+          <button
+            type="button"
+            id="product-factory-local-startup-reload"
+            data-action-id="settings.product_factory_local.refresh"
+            data-error-focus-target="product-factory-local-startup-json"
+          >
+            Перечитати локальний Product Factory
+          </button>
+        </div>
+      </div>
+      <div aria-labelledby="product-factory-execution-plan-heading">
+        <h3 id="product-factory-execution-plan-heading" tabindex="-1">
+          План виконання Product Factory
+        </h3>
+        <p id="product-factory-execution-plan-help">
+          Вкажіть повний шлях до JSON-плану. Nika читає лише прямий звичайний файл,
+          не зберігає шлях і не приймає секрети замість посилань на облікові дані.
+        </p>
+        <label for="product-factory-execution-plan-path">
+          JSON-план виконання Product Factory — повний шлях
+        </label>
+        <input
+          id="product-factory-execution-plan-path"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          aria-describedby="product-factory-execution-plan-help product-factory-execution-plan-status"
+          disabled
+        >
+        <p id="product-factory-execution-plan-status">
+          JSON-план виконання Product Factory ще не завантажено.
+        </p>
+        <div class="actions">
+          <button
+            type="button"
+            id="product-factory-execution-plan-load"
+            data-action-id="product.factory.execution_plan.load"
+            data-error-focus-target="product-factory-execution-plan-path"
+            disabled
+          >
+            Завантажити план виконання
+          </button>
+        </div>
+      </div>
+      <div aria-labelledby="product-factory-local-repository-heading">
+        <h3 id="product-factory-local-repository-heading" tabindex="-1">
+          Локальний репозиторій Product Factory
+        </h3>
+        <p id="product-factory-local-repository-help">
+          Спочатку завантажте JSON-план. Виберіть репозиторій лише з цього плану
+          та явно вкажіть повний шлях до його локального Git-кореня.
+          Прив’язка надає Product Factory локальний доступ до цього репозиторію;
+          зміна або скасування прив’язки під час виконання зупиняє нові ефекти.
+          Шлях не показується у стані та журналі.
+        </p>
+        <label for="product-factory-local-repository-select">
+          Репозиторій з поточного плану
+        </label>
+        <select
+          id="product-factory-local-repository-select"
+          aria-describedby="product-factory-local-repository-help product-factory-local-repository-status"
+          disabled
+        >
+          <option value="">Спочатку завантажте план</option>
+        </select>
+        <label for="product-factory-local-repository-root">
+          Повний шлях до локального Git-кореня
+        </label>
+        <input
+          id="product-factory-local-repository-root"
+          type="text"
+          maxlength="32767"
+          spellcheck="false"
+          autocomplete="off"
+          aria-describedby="product-factory-local-repository-help product-factory-local-repository-status"
+          disabled
+        >
+        <p id="product-factory-local-repository-status">
+          Локальна прив’язка ще недоступна.
+        </p>
+        <div class="actions">
+          <button
+            type="button"
+            id="product-factory-local-repository-bind"
+            data-action-id="product.factory.local_repository.bind"
+            data-error-focus-target="product-factory-local-repository-root"
+            data-focus-target="product-factory-local-repository-select"
+            disabled
+          >
+            Прив’язати локальний репозиторій
+          </button>
+          <button
+            type="button"
+            id="product-factory-local-repository-unbind"
+            data-action-id="product.factory.local_repository.unbind"
+            data-error-focus-target="product-factory-local-repository-select"
+            data-focus-target="product-factory-local-repository-select"
+            disabled
+          >
+            Скасувати локальну прив’язку
+          </button>
+        </div>
+      </div>
+      <div id="product-project-statuses" hidden>
+        <h3 id="product-project-statuses-heading" tabindex="-1">Статус ProductProject</h3>
+        <p id="product-project-statuses-empty">Статусних записів немає.</p>
+        <ul id="product-project-statuses-list" aria-label="Статусні записи ProductProject"></ul>
+        <p id="product-project-statuses-truncated" hidden></p>
+      </div>
+      <div id="product-project-operator" hidden>
+        <h3 id="product-project-operator-heading" tabindex="-1">Оператор Product Factory</h3>
+        <dl aria-label="Поточний операторський стан Product Factory">
+          <dt>Проєкт</dt>
+          <dd id="product-project-operator-project">—</dd>
+          <dt>Поточна робота</dt>
+          <dd id="product-project-operator-work">—</dd>
+          <dt>Власник</dt>
+          <dd id="product-project-operator-owner">—</dd>
+          <dt>Стан</dt>
+          <dd id="product-project-operator-state">—</dd>
+          <dt>Блокер</dt>
+          <dd id="product-project-operator-blocker">—</dd>
+          <dt>Кандидат</dt>
+          <dd id="product-project-operator-candidate">—</dd>
+          <dt>Тести</dt>
+          <dd id="product-project-operator-test">—</dd>
+          <dt>QA</dt>
+          <dd id="product-project-operator-qa">—</dd>
+          <dt>Інтеграція</dt>
+          <dd id="product-project-operator-integration">—</dd>
+          <dt>Наступна дія</dt>
+          <dd id="product-project-operator-next">—</dd>
+        </dl>
+      </div>
+      <div id="product-project-decision" hidden>
+        <h3 id="product-project-decision-heading" tabindex="-1">
+          Потрібне рішення власника
+        </h3>
+        <dl aria-label="Поточне рішення ProductProject">
+          <dt>Ідентифікатор рішення</dt>
+          <dd id="product-project-decision-id">—</dd>
+          <dt>Назва рішення</dt>
+          <dd id="product-project-decision-title">—</dd>
+          <dt>Питання</dt>
+          <dd id="product-project-decision-question">—</dd>
+          <dt>Ризик</dt>
+          <dd id="product-project-decision-risk">—</dd>
+          <dt>Стан рішення</dt>
+          <dd id="product-project-decision-state">—</dd>
+        </dl>
+      </div>
     </section>
 
     <section aria-labelledby="agents-heading">

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import unicodedata
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import isfinite
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -55,6 +59,33 @@ class RuntimeUnsupportedError(RuntimeError):
     pass
 
 
+def _require_exact_nonempty_text(value: object, *, field_name: str) -> None:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be an exact string")
+    if not value.strip():
+        raise ValueError(f"{field_name} must not be empty")
+
+
+def _require_positive_step_count(value: object) -> None:
+    if type(value) is not int:
+        raise TypeError("max_steps must be an exact integer")
+    if value < 1:
+        raise ValueError("max_steps must be positive")
+
+
+def _require_optional_positive_finite_timeout(value: object) -> None:
+    if value is None:
+        return
+    if type(value) not in (int, float):
+        raise TypeError("timeout_seconds must be numeric")
+    try:
+        finite = isfinite(float(value))
+    except OverflowError:
+        finite = False
+    if not finite or value <= 0:
+        raise ValueError("timeout_seconds must be finite and positive")
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeRequest:
     task_id: str
@@ -64,14 +95,10 @@ class RuntimeRequest:
     timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
-        if not self.task_id.strip():
-            raise ValueError("task_id must not be empty")
-        if not self.thread_id.strip():
-            raise ValueError("thread_id must not be empty")
-        if self.max_steps < 1:
-            raise ValueError("max_steps must be positive")
-        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive when provided")
+        _require_exact_nonempty_text(self.task_id, field_name="task_id")
+        _require_exact_nonempty_text(self.thread_id, field_name="thread_id")
+        _require_positive_step_count(self.max_steps)
+        _require_optional_positive_finite_timeout(self.timeout_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,12 +112,22 @@ class RuntimeResumeRequest:
     timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
+        if (
+            type(self.task_id) is not str
+            or type(self.thread_id) is not str
+            or type(self.resume_token) is not str
+        ):
+            raise TypeError("resume identifiers must be exact strings")
         if not self.task_id.strip() or not self.thread_id.strip() or not self.resume_token.strip():
             raise ValueError("resume identifiers must not be empty")
-        if self.max_steps < 1:
-            raise ValueError("max_steps must be positive")
-        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive when provided")
+        if type(self.mode) is not RuntimeResumeMode:
+            raise TypeError("mode must be a RuntimeResumeMode")
+        _require_positive_step_count(self.max_steps)
+        _require_optional_positive_finite_timeout(self.timeout_seconds)
+
+
+_MAX_RESUME_PROBE_REASON_CHARS = 1024
+_MAX_RESUME_CHECKPOINT_ID_CHARS = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,21 +139,49 @@ class RuntimeResumeProbe:
     checkpoint_id: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.status) is not RuntimeResumeProbeStatus:
+            raise TypeError("resume probe status must be an exact RuntimeResumeProbeStatus")
+        if type(self.reason) is not str:
+            raise TypeError("resume probe reason must be an exact string")
         if not self.reason.strip():
             raise ValueError("resume probe reason must not be empty")
+        if len(self.reason) > _MAX_RESUME_PROBE_REASON_CHARS:
+            raise ValueError("resume probe reason is too long")
         if self.checkpoint_id is not None:
-            if not isinstance(self.checkpoint_id, str):
-                raise TypeError("checkpoint_id must be a string when provided")
+            if type(self.checkpoint_id) is not str:
+                raise TypeError("checkpoint_id must be an exact string when provided")
             if not self.checkpoint_id.strip():
                 raise ValueError("checkpoint_id must not be empty")
             if self.checkpoint_id != self.checkpoint_id.strip():
                 raise ValueError("checkpoint_id must not have surrounding whitespace")
-        if self.status == RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
+            if len(self.checkpoint_id) > _MAX_RESUME_CHECKPOINT_ID_CHARS:
+                raise ValueError("checkpoint_id is too long")
+            if any(ord(char) < 32 or ord(char) == 127 for char in self.checkpoint_id):
+                raise ValueError("checkpoint_id must not contain control characters")
+        if self.status is RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
             raise ValueError("ready resume probe requires checkpoint_id")
 
     @property
     def can_resume(self) -> bool:
-        return self.status == RuntimeResumeProbeStatus.READY
+        return self.status is RuntimeResumeProbeStatus.READY
+
+
+def canonical_resume_probe(value: object) -> RuntimeResumeProbe:
+    """Snapshot untrusted adapter probe evidence through Nika's canonical constructor."""
+
+    if type(value) is not RuntimeResumeProbe:
+        raise TypeError("runtime resume probe must be an exact RuntimeResumeProbe")
+    try:
+        status = object.__getattribute__(value, "status")
+        reason = object.__getattribute__(value, "reason")
+        checkpoint_id = object.__getattribute__(value, "checkpoint_id")
+    except AttributeError as exc:
+        raise ValueError("runtime resume probe is incomplete") from exc
+    return RuntimeResumeProbe(
+        status=status,
+        reason=reason,
+        checkpoint_id=checkpoint_id,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,10 +191,11 @@ class RuntimeEvent:
     payload: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if type(self.sequence) is not int:
+            raise TypeError("sequence must be an exact integer")
         if self.sequence < 0:
             raise ValueError("sequence must not be negative")
-        if not self.event_type.strip():
-            raise ValueError("event_type must not be empty")
+        _require_exact_nonempty_text(self.event_type, field_name="event_type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,9 +210,11 @@ class RuntimeResult:
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, RuntimeOutcome):
             raise TypeError("outcome must be a RuntimeOutcome")
+        if isinstance(self.resume_token, str) and type(self.resume_token) is not str:
+            raise TypeError("resume_token must be an exact string when provided")
         if (
             self.outcome in {RuntimeOutcome.WAITING_APPROVAL, RuntimeOutcome.PAUSED}
-            and (not isinstance(self.resume_token, str) or not self.resume_token.strip())
+            and (type(self.resume_token) is not str or not self.resume_token.strip())
         ):
             raise ValueError("resumable outcome requires a usable resume token")
         if self.outcome == RuntimeOutcome.FAILED and not self.error:
@@ -155,6 +223,152 @@ class RuntimeResult:
             raise TypeError("error_code must be a RuntimeErrorCode when provided")
         if self.outcome != RuntimeOutcome.FAILED and self.error_code is not None:
             raise ValueError("error_code is only valid for failed outcomes")
+
+
+
+# Control/audit events are emitted only by Nika, never by an adapter result.
+# Keep this set aligned with current runtime coordinator/recovery/wait authorities.
+_NIKA_OWNED_RUNTIME_AUDIT_EVENTS = frozenset(
+    {
+        "runtime.approval_resumed",
+        "runtime.cancel_accepted",
+        "runtime.cancel_not_active",
+        "runtime.cancel_requested",
+        "runtime.cancel_uncertain",
+        "runtime.connectivity_wait_blocked",
+        "runtime.connectivity_wait_cancelled",
+        "runtime.connectivity_wait_deferred",
+        "runtime.connectivity_wait_ready",
+        "runtime.connectivity_wait_rejected",
+        "runtime.connectivity_wait_rescheduled",
+        "runtime.crash_recovery_started",
+        "runtime.finished",
+        "runtime.finished_after_cancel",
+        "runtime.finished_after_pause",
+        "runtime.pause_confirmed",
+        "runtime.pause_not_active",
+        "runtime.pause_not_applied",
+        "runtime.pause_reaffirmed",
+        "runtime.pause_requested",
+        "runtime.pause_runtime_outcome_uncertain",
+        "runtime.pause_uncertain",
+        "runtime.recovery_auto_resume_failed",
+        "runtime.recovery_auto_resume_requested",
+        "runtime.recovery_checkpoint_blocked",
+        "runtime.recovery_claim_acquired",
+        "runtime.recovery_claim_completed",
+        "runtime.recovery_claim_reclaimed",
+        "runtime.recovery_claim_released_before_effect",
+        "runtime.recovery_effect_started",
+        "runtime.recovery_inventory",
+        "runtime.retry_blocked_cancelled",
+        "runtime.retry_blocked_timeout_budget",
+        "runtime.retry_blocked_unsafe_fresh_replay",
+        "runtime.retry_scheduled",
+        "runtime.retry_started",
+        "runtime.saved_approval_resumed",
+        "runtime.saved_resume_started",
+        "runtime.session_bound",
+        "runtime.started",
+    }
+)
+
+
+def _require_json_string_keys(value: Any, *, field_name: str) -> None:
+    """Reject nested keys that JSON would otherwise silently coerce to strings."""
+
+    if isinstance(value, dict):
+        for key, item in dict.items(value):
+            if type(key) is not str:
+                raise TypeError(f"{field_name} keys must be exact strings")
+            _require_json_string_keys(item, field_name=field_name)
+    elif isinstance(value, list):
+        for item in list.__iter__(value):
+            _require_json_string_keys(item, field_name=field_name)
+    elif isinstance(value, tuple):
+        for item in tuple.__iter__(value):
+            _require_json_string_keys(item, field_name=field_name)
+
+
+def _snapshot_json_mapping(value: Mapping[str, Any], *, field_name: str) -> dict[str, Any]:
+    """Copy adapter output into JSON-safe, detached Nika-owned values."""
+
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping")
+    copied = dict(value)
+    _require_json_string_keys(copied, field_name=field_name)
+    encoded = json.dumps(copied, ensure_ascii=False, allow_nan=False, sort_keys=True)
+    # SQLite and the Windows JSON transport cannot store unpaired surrogates.
+    encoded.encode("utf-8")
+    return json.loads(encoded)
+
+
+def canonical_runtime_result(value: object) -> RuntimeResult:
+    """Snapshot untrusted adapter evidence before it changes Nika's durable state."""
+
+    if type(value) is not RuntimeResult:
+        raise TypeError("runtime adapter must return an exact RuntimeResult")
+    try:
+        outcome = object.__getattribute__(value, "outcome")
+        events = object.__getattribute__(value, "events")
+        output = object.__getattribute__(value, "output")
+        resume_token = object.__getattribute__(value, "resume_token")
+        error = object.__getattribute__(value, "error")
+        error_code = object.__getattribute__(value, "error_code")
+    except AttributeError:
+        raise ValueError("runtime adapter result is incomplete") from None
+
+    if type(events) is not tuple:
+        raise TypeError("runtime result events must be a tuple")
+    if not isinstance(output, Mapping):
+        raise TypeError("runtime result output must be a mapping")
+    if resume_token is not None and type(resume_token) is not str:
+        raise TypeError("runtime result resume token must be an exact string")
+    if error is not None and type(error) is not str:
+        raise TypeError("runtime result error must be an exact string")
+    if error_code is not None and type(error_code) is not RuntimeErrorCode:
+        raise TypeError("runtime result error code must be exact")
+    if resume_token is not None:
+        resume_token.encode("utf-8")
+    if error is not None:
+        error.encode("utf-8")
+    canonical_output = _snapshot_json_mapping(output, field_name="runtime result output")
+
+    canonical_events = []
+    for event in events:
+        if type(event) is not RuntimeEvent:
+            raise TypeError("runtime result contains an invalid event")
+        sequence = object.__getattribute__(event, "sequence")
+        event_type = object.__getattribute__(event, "event_type")
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError("runtime event sequence must be a non-negative integer")
+        if type(event_type) is not str or not event_type.strip():
+            raise ValueError("runtime event type must be an exact nonempty string")
+        event_type.encode("utf-8")
+        if any(
+            unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+            for char in event_type
+        ):
+            raise ValueError("runtime event type contains control or formatting characters")
+        if event_type in _NIKA_OWNED_RUNTIME_AUDIT_EVENTS:
+            raise ValueError("runtime adapter cannot impersonate Nika-owned audit events")
+        event_payload = _snapshot_json_mapping(
+            object.__getattribute__(event, "payload"), field_name="runtime event payload"
+        )
+        if "sequence" in event_payload:
+            raise ValueError("runtime event payload must not override the authoritative sequence")
+        canonical_events.append(
+            RuntimeEvent(sequence=sequence, event_type=event_type, payload=event_payload)
+        )
+
+    return RuntimeResult(
+        outcome=outcome,
+        events=tuple(canonical_events),
+        output=canonical_output,
+        resume_token=resume_token,
+        error=error,
+        error_code=error_code,
+    )
 
 
 @runtime_checkable

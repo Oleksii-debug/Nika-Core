@@ -9,7 +9,12 @@ from typing import Protocol
 
 from .toolsmith.contracts import AcceptanceCommand, normalize_relative_path
 
-INCIDENT_LIFECYCLE_SCHEMA = "nika-pf3-incident-repair-release-v1"
+INCIDENT_LIFECYCLE_SCHEMA_V1 = "nika-pf3-incident-repair-release-v1"
+INCIDENT_LIFECYCLE_SCHEMA = "nika-pf3-incident-repair-release-v2"
+INCIDENT_TRIGGER_FINGERPRINT_SCHEMA = INCIDENT_LIFECYCLE_SCHEMA_V1
+SUPPORTED_INCIDENT_LIFECYCLE_SCHEMAS = frozenset(
+    {INCIDENT_LIFECYCLE_SCHEMA_V1, INCIDENT_LIFECYCLE_SCHEMA}
+)
 
 
 class ProductIncidentError(ValueError):
@@ -105,8 +110,7 @@ class SupplyChainAdvisory:
             self.provenance_ref,
             label="supply-chain advisory identity",
         )
-        if self.fixed_version is not None and not self.fixed_version.strip():
-            raise ProductIncidentError("fixed_version must be non-empty when supplied")
+        _optional_ref(self.fixed_version, "fixed_version")
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +137,12 @@ class IncidentTrigger:
         _sha(self.release_sha, "release_sha")
         _aware(self.observed_at)
         _refs(self.evidence_refs, "incident evidence")
+        if type(self.kind) is not IncidentKind:
+            raise ProductIncidentError("incident kind must be an IncidentKind")
+        if type(self.severity) is not IncidentSeverity:
+            raise ProductIncidentError("incident severity must be an IncidentSeverity")
+        if self.advisory is not None and type(self.advisory) is not SupplyChainAdvisory:
+            raise ProductIncidentError("incident advisory must be a SupplyChainAdvisory")
         if self.kind in {IncidentKind.SECURITY, IncidentKind.DEPENDENCY}:
             if self.advisory is None:
                 raise ProductIncidentError(
@@ -160,7 +170,7 @@ class IncidentTrigger:
                 "provenance_ref": self.advisory.provenance_ref,
             }
         payload = {
-            "schema": INCIDENT_LIFECYCLE_SCHEMA,
+            "schema": INCIDENT_TRIGGER_FINGERPRINT_SCHEMA,
             "project_id": self.project_id,
             "service_id": self.service_id,
             "environment_id": self.environment_id,
@@ -207,21 +217,20 @@ class RepairWorkOrder:
         _refs(self.allowed_paths, "allowed paths")
         for path in self.allowed_paths:
             _relative_path(path)
-        if not self.permission_ceiling or any(
-            not permission.strip() or permission != permission.strip()
-            for permission in self.permission_ceiling
-        ):
+        if type(self.permission_ceiling) is not frozenset or not self.permission_ceiling:
             raise ProductIncidentError(
                 "repair work order requires normalized non-empty permission ceiling"
             )
+        for permission in self.permission_ceiling:
+            _exact_text(permission, "repair work order permission")
+            if permission != permission.strip():
+                raise ProductIncidentError(
+                    "repair work order requires normalized non-empty permission ceiling"
+                )
         _refs(self.evidence_refs, "repair work-order evidence")
-        if self.advisory_id is not None and not self.advisory_id.strip():
-            raise ProductIncidentError("work-order advisory_id must be non-empty when supplied")
-        if self.target_fixed_version is not None and not self.target_fixed_version.strip():
-            raise ProductIncidentError(
-                "work-order target_fixed_version must be non-empty when supplied"
-            )
-        if not self.acceptance_commands:
+        _optional_ref(self.advisory_id, "work-order advisory_id")
+        _optional_ref(self.target_fixed_version, "work-order target_fixed_version")
+        if type(self.acceptance_commands) is not tuple or not self.acceptance_commands:
             raise ProductIncidentError("repair work order requires acceptance commands")
         for command in self.acceptance_commands:
             _acceptance_command(command)
@@ -258,6 +267,8 @@ class RepairCandidateEvidence:
         for evidence_digest in self.regression_evidence_refs:
             _digest(evidence_digest, "regression evidence digest")
         _refs(self.provenance_evidence_refs, "candidate provenance evidence")
+        if type(self.review_accepted) is not bool:
+            raise ProductIncidentError("repair candidate review_accepted must be boolean")
         _aware(self.recorded_at)
 
 
@@ -294,6 +305,8 @@ class ReleaseEvidence:
             raise ProductIncidentError("release requires distinct staging and production intents")
         _refs(self.deployment_evidence_refs, "deployment evidence")
         _aware(self.observed_at)
+        if type(self.disposition) is not ReleaseDisposition:
+            raise ProductIncidentError("release disposition must be a ReleaseDisposition")
 
         if self.disposition is ReleaseDisposition.HEALTHY:
             _refs(self.health_evidence_refs, "healthy release evidence")
@@ -327,8 +340,21 @@ class IncidentRecord:
     release_events: tuple[ReleaseEvidence, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.incident_id.strip():
-            raise ProductIncidentError("incident_id must not be empty")
+        _nonempty(self.incident_id, label="incident_id")
+        if type(self.trigger) is not IncidentTrigger:
+            raise ProductIncidentError("incident trigger must be an IncidentTrigger")
+        if type(self.state) is not IncidentState:
+            raise ProductIncidentError("incident state must be an IncidentState")
+        if self.work_order is not None and type(self.work_order) is not RepairWorkOrder:
+            raise ProductIncidentError("incident work_order must be a RepairWorkOrder")
+        if type(self.candidates) is not tuple or any(
+            type(item) is not RepairCandidateEvidence for item in self.candidates
+        ):
+            raise ProductIncidentError("incident candidates must be RepairCandidateEvidence values")
+        if type(self.release_events) is not tuple or any(
+            type(item) is not ReleaseEvidence for item in self.release_events
+        ):
+            raise ProductIncidentError("incident release_events must be ReleaseEvidence values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,10 +365,22 @@ class IncidentLifecycleSnapshot:
     fingerprint_index: tuple[tuple[str, str], ...]
 
     def __post_init__(self) -> None:
-        if self.schema != INCIDENT_LIFECYCLE_SCHEMA:
+        if (
+            type(self.schema) is not str
+            or self.schema not in SUPPORTED_INCIDENT_LIFECYCLE_SCHEMAS
+        ):
             raise ProductIncidentError("unsupported incident lifecycle snapshot schema")
-        if not self.project_id.strip():
-            raise ProductIncidentError("incident lifecycle snapshot project must not be empty")
+        _nonempty(self.project_id, label="incident lifecycle snapshot project")
+        if type(self.incidents) is not tuple or any(
+            type(item) is not IncidentRecord for item in self.incidents
+        ):
+            raise ProductIncidentError("incident snapshot incidents must be IncidentRecord values")
+        if type(self.fingerprint_index) is not tuple:
+            raise ProductIncidentError("incident fingerprint index must be a tuple")
+        for pair in self.fingerprint_index:
+            if type(pair) is not tuple or len(pair) != 2:
+                raise ProductIncidentError("incident fingerprint mapping must contain two values")
+            _nonempty(pair[0], pair[1], label="incident fingerprint mapping")
 
 
 def _canonical(payload: object) -> bytes:
@@ -355,29 +393,51 @@ def _canonical(payload: object) -> bytes:
 
 
 def _aware(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ProductIncidentError("datetime must be timezone-aware")
-    return value.astimezone(UTC)
+    if type(value) is not datetime:
+        raise ProductIncidentError("datetime must be a timezone-aware datetime")
+    try:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ProductIncidentError("datetime must be timezone-aware")
+        return value.astimezone(UTC)
+    except ProductIncidentError:
+        raise
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ProductIncidentError("datetime must be representable in UTC") from exc
+
+
+def _exact_text(value: object, label: str, *, allow_empty: bool = False) -> str:
+    if type(value) is not str:
+        raise ProductIncidentError(f"{label} must be text")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ProductIncidentError(f"{label} must be valid UTF-8 text") from exc
+    if not allow_empty and not value.strip():
+        raise ProductIncidentError(f"{label} must not be empty")
+    return value
 
 
 def _nonempty(*values: str, label: str) -> None:
-    if any(not value.strip() for value in values):
-        raise ProductIncidentError(f"{label} must not be empty")
+    for value in values:
+        _exact_text(value, label)
 
 
 def _refs(values: tuple[str, ...], label: str) -> None:
-    if not values or any(not value.strip() for value in values):
+    if type(values) is not tuple or not values:
         raise ProductIncidentError(f"{label} must not be empty")
+    for value in values:
+        _exact_text(value, label)
     if len(values) != len(set(values)):
         raise ProductIncidentError(f"{label} must not contain duplicates")
 
 
 def _optional_ref(value: str | None, label: str) -> None:
-    if value is not None and not value.strip():
-        raise ProductIncidentError(f"{label} must be non-empty when supplied")
+    if value is not None:
+        _exact_text(value, label)
 
 
 def _relative_path(value: str) -> None:
+    _exact_text(value, "allowed path")
     if value != value.strip():
         raise ProductIncidentError(
             "allowed path must be normalized project-relative non-.git scope"
@@ -391,8 +451,12 @@ def _relative_path(value: str) -> None:
 
 
 def _acceptance_command(command: tuple[str, ...]) -> None:
-    if not command or any(not part.strip() or part != part.strip() for part in command):
+    if type(command) is not tuple or not command:
         raise ProductIncidentError("repair acceptance command must be normalized and non-empty")
+    for part in command:
+        _exact_text(part, "repair acceptance command")
+        if part != part.strip():
+            raise ProductIncidentError("repair acceptance command must be normalized and non-empty")
     try:
         AcceptanceCommand(command)
     except ValueError as exc:
@@ -402,6 +466,7 @@ def _acceptance_command(command: tuple[str, ...]) -> None:
 
 
 def _sha(value: str, label: str) -> None:
+    _exact_text(value, label)
     if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
         raise ProductIncidentError(f"{label} must be a lowercase 40-character hexadecimal SHA")
 
@@ -413,5 +478,6 @@ def validate_digest(value: str, label: str) -> None:
 
 
 def _digest(value: str, label: str) -> None:
+    _exact_text(value, label)
     if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
         raise ProductIncidentError(f"{label} must be a lowercase 64-character hexadecimal digest")

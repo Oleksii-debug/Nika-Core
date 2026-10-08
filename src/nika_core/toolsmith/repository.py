@@ -153,16 +153,122 @@ class ToolsmithRepository:
             )
         return expected_version + 1
 
-    def record_search_candidate(self, *, task_id: str, candidate: ReuseCandidate) -> None:
-        row = self.get_escalation(task_id=task_id, capability_id=candidate.capability_id)
-        if row is None:
-            raise KeyError((task_id, candidate.capability_id))
-        ceiling = frozenset(json.loads(str(row["permission_ceiling_json"])))
-        if not candidate.permissions.issubset(ceiling):
-            raise PermissionError("candidate permissions exceed original task ceiling")
+    def accept_verification(
+        self,
+        *,
+        task_id: str,
+        capability_id: str,
+        expected_version: int,
+        candidate_digest: str,
+        verifier_evidence: dict[str, object],
+    ) -> int:
+        """Atomically persist independent verification and its exact artifact digest."""
+
+        if not candidate_digest.strip():
+            raise ValueError("verification requires exact candidate digest")
+        if not verifier_evidence:
+            raise ValueError("verification requires independent evidence")
         with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT state, row_version, pinned_digest FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, capability_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError((task_id, capability_id))
+            current = CandidateState(str(row["state"]))
+            version = int(row["row_version"])
+            if version != expected_version:
+                raise StaleTransitionError(
+                    f"expected row version {expected_version}, found {version}"
+                )
+            if current is not CandidateState.VERIFYING:
+                raise InvalidTransitionError("verification acceptance requires VERIFYING state")
+            prior_digest = row["pinned_digest"]
+            if prior_digest is not None and str(prior_digest) != candidate_digest:
+                raise RuntimeError("verification digest conflicts with prior durable identity")
+            cursor = conn.execute(
+                "UPDATE capability_escalations SET state = ?, pinned_digest = ?, "
+                "row_version = row_version + 1, updated_at = ? "
+                "WHERE task_id = ? AND requested_capability = ? AND row_version = ?",
+                (
+                    CandidateState.VERIFIED.value,
+                    candidate_digest,
+                    _now(),
+                    task_id,
+                    capability_id,
+                    expected_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise StaleTransitionError("candidate row changed during verification acceptance")
+            self._audit.append_with_connection(
+                conn,
+                event_type="capability_escalation.transition",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "capability_id": capability_id,
+                    "from": CandidateState.VERIFYING.value,
+                    "to": CandidateState.VERIFIED.value,
+                    "evidence": {
+                        "digest": candidate_digest,
+                        "verifier": verifier_evidence,
+                    },
+                },
+            )
+        return expected_version + 1
+
+    def record_search_candidate(self, *, task_id: str, candidate: ReuseCandidate) -> None:
+        permissions_json = _json(sorted(candidate.permissions))
+        metadata_json = _json(candidate.metadata)
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            escalation = conn.execute(
+                "SELECT permission_ceiling_json FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, candidate.capability_id),
+            ).fetchone()
+            if escalation is None:
+                raise KeyError((task_id, candidate.capability_id))
+            ceiling = frozenset(json.loads(str(escalation["permission_ceiling_json"])))
+            if not candidate.permissions.issubset(ceiling):
+                raise PermissionError("candidate permissions exceed original task ceiling")
+
+            existing = conn.execute(
+                "SELECT digest, permissions_json, metadata_json "
+                "FROM capability_search_candidates "
+                "WHERE task_id = ? AND capability_id = ? AND version = ? AND source = ? "
+                "ORDER BY candidate_id",
+                (
+                    task_id,
+                    candidate.capability_id,
+                    candidate.version,
+                    candidate.source,
+                ),
+            ).fetchall()
+            if existing:
+                exact_identity = (
+                    candidate.digest,
+                    permissions_json,
+                    metadata_json,
+                )
+                if len(existing) != 1 or any(
+                    (
+                        str(row["digest"]),
+                        str(row["permissions_json"]),
+                        str(row["metadata_json"]),
+                    )
+                    != exact_identity
+                    for row in existing
+                ):
+                    raise RuntimeError(
+                        "candidate source/version conflicts with prior durable search identity"
+                    )
+                return
+
             conn.execute(
-                "INSERT OR IGNORE INTO capability_search_candidates("
+                "INSERT INTO capability_search_candidates("
                 "task_id, capability_id, version, source, digest, permissions_json, metadata_json, "
                 "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
@@ -171,40 +277,88 @@ class ToolsmithRepository:
                     candidate.version,
                     candidate.source,
                     candidate.digest,
-                    _json(sorted(candidate.permissions)),
-                    _json(candidate.metadata),
+                    permissions_json,
+                    metadata_json,
                     _now(),
                 ),
             )
 
     def register_exact(self, *, task_id: str, manifest: CapabilityManifestV1) -> None:
+        # Keep the preflight read for fast diagnostics, but never use it as commit authority.
+        # A rollback may win after this read, so publication must revalidate the escalation
+        # under the same SQLite write transaction that creates the active registry row.
         row = self.get_escalation(task_id=task_id, capability_id=manifest.capability_id)
         if row is None:
             raise KeyError((task_id, manifest.capability_id))
         if CandidateState(str(row["state"])) is not CandidateState.REGISTERING:
             raise InvalidTransitionError("capability must be REGISTERING before exact registration")
-        ceiling = frozenset(json.loads(str(row["permission_ceiling_json"])))
-        if not manifest.permissions.issubset(ceiling):
-            raise PermissionError("registered capability permissions exceed original task ceiling")
+
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            authoritative = conn.execute(
+                "SELECT state, permission_ceiling_json, pinned_digest "
+                "FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, manifest.capability_id),
+            ).fetchone()
+            if authoritative is None:
+                raise KeyError((task_id, manifest.capability_id))
+            if CandidateState(str(authoritative["state"])) is not CandidateState.REGISTERING:
+                raise StaleTransitionError("candidate changed before exact registry publication")
+            ceiling = frozenset(json.loads(str(authoritative["permission_ceiling_json"])))
+            if not manifest.permissions.issubset(ceiling):
+                raise PermissionError("registered capability permissions exceed original task ceiling")
+            verified_digest = authoritative["pinned_digest"]
+            if verified_digest is None or str(verified_digest) != manifest.digest:
+                raise StaleTransitionError(
+                    "verified candidate identity changed before exact registry publication"
+                )
+            manifest_json = _json(
+                {**asdict(manifest), "permissions": sorted(manifest.permissions)}
+            )
+            registered_at = _now()
             conflicting = conn.execute(
-                "SELECT digest FROM capability_registry WHERE capability_id = ? AND version = ?",
+                "SELECT digest, manifest_json, active FROM capability_registry "
+                "WHERE capability_id = ? AND version = ?",
                 (manifest.capability_id, manifest.version),
             ).fetchone()
-            if conflicting is not None and str(conflicting["digest"]) != manifest.digest:
-                raise RuntimeError("capability version collision with a different digest")
-            conn.execute(
-                "INSERT OR IGNORE INTO capability_registry("
-                "capability_id, version, digest, manifest_json, registered_at, active) "
-                "VALUES (?, ?, ?, ?, ?, 1)",
-                (
-                    manifest.capability_id,
-                    manifest.version,
-                    manifest.digest,
-                    _json({**asdict(manifest), "permissions": sorted(manifest.permissions)}),
-                    _now(),
-                ),
-            )
+            if conflicting is not None:
+                if str(conflicting["digest"]) != manifest.digest:
+                    raise RuntimeError("capability version collision with a different digest")
+                if str(conflicting["manifest_json"]) != manifest_json:
+                    raise RuntimeError(
+                        "capability version collision with a different manifest identity"
+                    )
+                if int(conflicting["active"]) != 1:
+                    cursor = conn.execute(
+                        "UPDATE capability_registry SET active = 1, registered_at = ? "
+                        "WHERE capability_id = ? AND version = ? AND digest = ? "
+                        "AND manifest_json = ? AND active = 0",
+                        (
+                            registered_at,
+                            manifest.capability_id,
+                            manifest.version,
+                            manifest.digest,
+                            manifest_json,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise StaleTransitionError(
+                            "capability registry identity changed during reactivation"
+                        )
+            else:
+                conn.execute(
+                    "INSERT INTO capability_registry("
+                    "capability_id, version, digest, manifest_json, registered_at, active) "
+                    "VALUES (?, ?, ?, ?, ?, 1)",
+                    (
+                        manifest.capability_id,
+                        manifest.version,
+                        manifest.digest,
+                        manifest_json,
+                        registered_at,
+                    ),
+                )
             conn.execute(
                 "UPDATE capability_escalations SET pinned_version = ?, pinned_digest = ?, "
                 "updated_at = ? WHERE task_id = ? AND requested_capability = ?",
@@ -222,17 +376,39 @@ class ToolsmithRepository:
                 },
             )
 
-    def mark_resume_ready(self, *, task_id: str, capability_id: str) -> None:
+    def mark_resume_ready(self, *, task_id: str, capability_id: str) -> dict[str, str]:
+        # Keep this read for fast diagnostics only. A rollback can win immediately after it,
+        # so it must never authorize durable resume publication.
         row = self.get_escalation(task_id=task_id, capability_id=capability_id)
         if row is None:
             raise KeyError((task_id, capability_id))
         if CandidateState(str(row["state"])) is not CandidateState.REGISTERED:
             raise InvalidTransitionError("original task may resume only after REGISTERED")
-        version = row["pinned_version"]
-        digest = row["pinned_digest"]
-        if not version or not digest:
-            raise RuntimeError("registered escalation is missing exact pinned capability identity")
+
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            authoritative = conn.execute(
+                "SELECT state, pinned_version, pinned_digest FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, capability_id),
+            ).fetchone()
+            if authoritative is None:
+                raise KeyError((task_id, capability_id))
+            if CandidateState(str(authoritative["state"])) is not CandidateState.REGISTERED:
+                raise StaleTransitionError("candidate changed before resume binding publication")
+            version = authoritative["pinned_version"]
+            digest = authoritative["pinned_digest"]
+            if not version or not digest:
+                raise RuntimeError("registered escalation is missing exact pinned capability identity")
+            registry = conn.execute(
+                "SELECT active FROM capability_registry "
+                "WHERE capability_id = ? AND version = ? AND digest = ?",
+                (capability_id, version, digest),
+            ).fetchone()
+            if registry is None or int(registry["active"]) != 1:
+                raise StaleTransitionError(
+                    "registered escalation has no active registry identity"
+                )
             conn.execute(
                 "INSERT INTO capability_resume_bindings("
                 "task_id, capability_id, version, digest, status, updated_at) "
@@ -249,20 +425,60 @@ class ToolsmithRepository:
                 entity_id=task_id,
                 payload={"capability_id": capability_id, "version": version, "digest": digest},
             )
+        return {
+            "task_id": task_id,
+            "capability_id": capability_id,
+            "version": str(version),
+            "digest": str(digest),
+        }
 
     def rollback_registration(self, *, task_id: str, capability_id: str) -> None:
-        row = self.get_escalation(task_id=task_id, capability_id=capability_id)
-        if row is None:
-            raise KeyError((task_id, capability_id))
-        version = row["pinned_version"]
-        digest = row["pinned_digest"]
         with self._store.connection() as conn:
-            if version and digest:
-                conn.execute(
-                    "UPDATE capability_registry SET active = 0 "
-                    "WHERE capability_id = ? AND version = ? AND digest = ?",
-                    (capability_id, version, digest),
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state, pinned_version, pinned_digest FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, capability_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError((task_id, capability_id))
+            if CandidateState(str(row["state"])) is not CandidateState.ROLLED_BACK:
+                raise InvalidTransitionError(
+                    "registration cleanup requires durable ROLLED_BACK state"
                 )
+            version = row["pinned_version"]
+            digest = row["pinned_digest"]
+            registry_deactivated = False
+            if version and digest:
+                surviving = conn.execute(
+                    "SELECT 1 FROM capability_escalations "
+                    "WHERE requested_capability = ? AND pinned_version = ? "
+                    "AND pinned_digest = ? AND state = ? AND task_id <> ? LIMIT 1",
+                    (
+                        capability_id,
+                        version,
+                        digest,
+                        CandidateState.REGISTERED.value,
+                        task_id,
+                    ),
+                ).fetchone()
+                if surviving is None:
+                    conn.execute(
+                        "UPDATE capability_registry SET active = 0 "
+                        "WHERE capability_id = ? AND version = ? AND digest = ?",
+                        (capability_id, version, digest),
+                    )
+                    registry_deactivated = True
+                else:
+                    registry = conn.execute(
+                        "SELECT active FROM capability_registry "
+                        "WHERE capability_id = ? AND version = ? AND digest = ?",
+                        (capability_id, version, digest),
+                    ).fetchone()
+                    if registry is None or int(registry["active"]) != 1:
+                        raise RuntimeError(
+                            "registered capability consumer references an inactive registry identity"
+                        )
             conn.execute(
                 "DELETE FROM capability_resume_bindings WHERE task_id = ? AND capability_id = ?",
                 (task_id, capability_id),
@@ -272,7 +488,12 @@ class ToolsmithRepository:
                 event_type="capability.registration.rolled_back",
                 entity_type="task",
                 entity_id=task_id,
-                payload={"capability_id": capability_id, "version": version, "digest": digest},
+                payload={
+                    "capability_id": capability_id,
+                    "version": version,
+                    "digest": digest,
+                    "registry_deactivated": registry_deactivated,
+                },
             )
 
     def list_incomplete(self) -> tuple[dict[str, object], ...]:

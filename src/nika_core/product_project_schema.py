@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-PRODUCT_PROJECT_SCHEMA_VERSION = 2
+PRODUCT_PROJECT_SCHEMA_VERSION = 8
 
 PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -77,5 +77,123 @@ PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
             "CREATE INDEX IF NOT EXISTS idx_product_decisions_option "
             "ON product_decisions(project_id, option_id, decision_version DESC)"
         ),
+    ),
+    3: (
+        """CREATE TABLE IF NOT EXISTS product_factory_work_ownership (
+            project_id TEXT NOT NULL,
+            work_id TEXT NOT NULL,
+            owner_id TEXT,
+            fence INTEGER NOT NULL CHECK(fence > 0),
+            issued_at TEXT,
+            expires_at TEXT,
+            PRIMARY KEY (project_id, work_id)
+        )""",
+    ),
+    4: (
+        """CREATE TABLE IF NOT EXISTS product_factory_recovery_claims (
+            operation_key TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            work_id TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            fence INTEGER NOT NULL CHECK(fence > 0),
+            FOREIGN KEY(operation_key) REFERENCES idempotency_records(operation_key)
+                ON DELETE CASCADE
+        )""",
+        """CREATE TRIGGER IF NOT EXISTS product_factory_recovery_blocks_completion
+        BEFORE UPDATE OF status ON idempotency_records
+        WHEN NEW.status = 'completed'
+          AND EXISTS (
+              SELECT 1 FROM product_factory_recovery_claims
+              WHERE operation_key = OLD.operation_key
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'active Product Factory recovery claim blocks completion');
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS product_factory_recovery_blocks_release
+        BEFORE DELETE ON idempotency_records
+        WHEN EXISTS (
+            SELECT 1 FROM product_factory_recovery_claims
+            WHERE operation_key = OLD.operation_key
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'active Product Factory recovery claim blocks release');
+        END""",
+    ),
+    5: (
+        """CREATE TABLE IF NOT EXISTS product_project_spec_idempotency (
+            operation_key TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            operation_kind TEXT NOT NULL,
+            expected_row_version INTEGER NOT NULL CHECK(expected_row_version >= 0),
+            previous_spec_version INTEGER NOT NULL CHECK(previous_spec_version > 0),
+            result_spec_version INTEGER NOT NULL CHECK(result_spec_version > 1),
+            result_row_version INTEGER NOT NULL CHECK(result_row_version > 0),
+            input_fingerprint TEXT NOT NULL CHECK(length(input_fingerprint) = 64),
+            spec_sha256 TEXT NOT NULL CHECK(length(spec_sha256) = 64),
+            change_reason TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(project_id, result_spec_version),
+            FOREIGN KEY(project_id) REFERENCES product_projects(project_id)
+        )""",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_product_project_spec_idempotency_result "
+            "ON product_project_spec_idempotency(project_id, result_row_version)"
+        ),
+    ),
+    6: (
+        """CREATE TABLE IF NOT EXISTS product_factory_local_repository_bindings (
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            locator TEXT NOT NULL,
+            root_path TEXT NOT NULL,
+            root_device TEXT NOT NULL,
+            root_inode TEXT NOT NULL,
+            git_metadata_kind TEXT NOT NULL
+                CHECK(git_metadata_kind IN ('directory', 'file')),
+            git_metadata_device TEXT NOT NULL,
+            git_metadata_inode TEXT NOT NULL,
+            gitfile_sha256 TEXT,
+            binding_version INTEGER NOT NULL CHECK(binding_version > 0),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(project_id, repository_id),
+            FOREIGN KEY(project_id) REFERENCES product_projects(project_id)
+        )""",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_pf_local_repository_bindings_project "
+            "ON product_factory_local_repository_bindings(project_id, repository_id)"
+        ),
+    ),
+    7: (
+        """CREATE TABLE IF NOT EXISTS product_factory_local_repository_binding_generations (
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            last_binding_version INTEGER NOT NULL CHECK(last_binding_version > 0),
+            PRIMARY KEY(project_id, repository_id),
+            FOREIGN KEY(project_id) REFERENCES product_projects(project_id) ON DELETE CASCADE
+        )""",
+        """INSERT INTO product_factory_local_repository_binding_generations(
+            project_id, repository_id, last_binding_version
+        )
+        SELECT project_id, repository_id, binding_version
+        FROM product_factory_local_repository_bindings
+        WHERE 1
+        ON CONFLICT(project_id, repository_id) DO UPDATE SET
+            last_binding_version = excluded.last_binding_version
+        WHERE excluded.last_binding_version >
+              product_factory_local_repository_binding_generations.last_binding_version
+        """,
+    ),
+    8: (
+        "ALTER TABLE product_factory_local_repository_bindings "
+        "ADD COLUMN git_target_device TEXT",
+        "ALTER TABLE product_factory_local_repository_bindings "
+        "ADD COLUMN git_target_inode TEXT",
+        "ALTER TABLE product_factory_local_repository_bindings "
+        "ADD COLUMN git_commondir_sha256 TEXT",
+        "ALTER TABLE product_factory_local_repository_bindings "
+        "ADD COLUMN git_common_device TEXT",
+        "ALTER TABLE product_factory_local_repository_bindings "
+        "ADD COLUMN git_common_inode TEXT",
     ),
 }
