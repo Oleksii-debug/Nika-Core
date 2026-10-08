@@ -41,7 +41,7 @@ class _HostileString(str):
         (" \t\n ", ValueError, "must not be empty"),
         ("a" * (64 * 1024 + 1), ValueError, "byte limit"),
         ("é" * (32 * 1024 + 1), ValueError, "byte limit"),
-        ("\\ud800", ValueError, "invalid Unicode"),
+        (chr(0xD800), ValueError, "invalid Unicode"),
     ),
 )
 def test_invalid_request_never_calls_model_gateway(
