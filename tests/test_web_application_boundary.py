@@ -175,7 +175,8 @@ def test_authorized_command_uses_server_principal_and_detached_payload() -> None
     result = boundary.dispatch(principal=principal, command=_command(payload))
     payload["command"] = "changed"
 
-    assert handler.calls[0][0] is principal
+    assert handler.calls[0][0] == principal
+    assert handler.calls[0][0] is not principal  # immutable snapshot, not caller-owned authority
     assert handler.calls[0][1].payload == {"command": "перевір стан"}
     assert result.data["payload"] == {"command": "перевір стан"}
 
@@ -308,3 +309,74 @@ def test_boundary_returns_a_detached_canonical_result() -> None:
     result = boundary.dispatch(principal=_principal(), command=_command())
     data["items"][0]["id"] = 2
     assert result.data == {"items": [{"id": 1}]}
+
+def test_authorizer_cannot_mutate_core_principal_or_command_after_approval() -> None:
+    class MutatingAuthorization:
+        def allows(self, principal: WebPrincipal, command: WebCommand) -> bool:
+            object.__setattr__(principal, "workspace_id", "workspace-attacker")
+            object.__setattr__(principal, "tenant_id", "tenant-attacker")
+            object.__setattr__(command, "action_id", "admin.delete")
+            object.__setattr__(command, "request_id", "request-attacker")
+            object.__setattr__(command, "_payload_json", '{"target":"attacker"}')
+            return True
+
+    handler = _Handler()
+    boundary = WebApplicationBoundary(
+        authorization=MutatingAuthorization(), handler=handler,
+    )
+    original = _principal()
+    result = boundary.dispatch(
+        principal=original, command=_command({"target": "authorized"}),
+    )
+    executed_principal, executed_command = handler.calls[0]
+    assert executed_principal is not original
+    assert executed_principal == original
+    assert executed_principal.tenant_id == "tenant-1"
+    assert executed_principal.workspace_id == "workspace-1"
+    assert executed_command.action_id == "task.create"
+    assert executed_command.request_id == "request-1"
+    assert executed_command.payload == {"target": "authorized"}
+    assert result.data == {"action_id": "task.create", "payload": {"target": "authorized"}}
+
+
+def test_authorization_cannot_mutate_caller_owned_principal_in_flight() -> None:
+    original = _principal()
+
+    class MutatingCallerAuthorization:
+        def allows(self, principal: WebPrincipal, command: WebCommand) -> bool:
+            del principal, command
+            object.__setattr__(original, "workspace_id", "workspace-attacker")
+            return True
+
+    handler = _Handler()
+    boundary = WebApplicationBoundary(
+        authorization=MutatingCallerAuthorization(), handler=handler,
+    )
+    boundary.dispatch(principal=original, command=_command())
+    assert handler.calls[0][0].workspace_id == "workspace-1"
+    assert original.workspace_id == "workspace-attacker"
+
+
+def test_authority_snapshot_revalidates_mutated_server_carrier_before_handler() -> None:
+    principal = _principal()
+    object.__setattr__(principal, "workspace_id", "bad\\nworkspace")
+    handler = _Handler()
+    boundary = WebApplicationBoundary(authorization=_Allow(True), handler=handler)
+    with pytest.raises(ValueError, match="control text"):
+        boundary.dispatch(principal=principal, command=_command())
+    assert handler.calls == []
+
+
+def test_unknown_effect_reports_request_identity_before_handler_mutation() -> None:
+    class MutatingFailingHandler:
+        def handle(self, principal: WebPrincipal, command: WebCommand) -> WebCommandResult:
+            del principal
+            object.__setattr__(command, "request_id", "forged-request")
+            raise RuntimeError("uncertain post-effect failure")
+
+    boundary = WebApplicationBoundary(
+        authorization=_Allow(True), handler=MutatingFailingHandler(),
+    )
+    with pytest.raises(WebCommandOutcomeUnknownError) as caught:
+        boundary.dispatch(principal=_principal(), command=_command())
+    assert caught.value.request_id == "request-1"
