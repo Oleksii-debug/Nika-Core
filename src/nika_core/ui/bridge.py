@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from nika_core.kernel.action_registry import ActionRegistry, Keymap
 from nika_core.ui.bridge_models import UIActionView, UICommand, UIResult
+from nika_core.ui.payload_safety import validate_ui_payload
 
 logger = logging.getLogger(__name__)
 
@@ -129,9 +130,9 @@ class UIActionBridge:
         if self._state_provider is None:
             return {"ok": False, "message": "Desktop state provider is unavailable."}
         try:
-            state = dict(self._state_provider())
-        except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
+            # The state provider is host-owned, but its nested data may include plugin
+            # projections. Return only bounded, detached JSON to the WebView transport.
+            state = validate_ui_payload(dict(self._state_provider()))
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             logger.error(
                 "Desktop state provider failed: exception_type=%s",
