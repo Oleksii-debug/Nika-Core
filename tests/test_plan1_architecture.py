@@ -106,6 +106,23 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         for name in names:
             if name.split(".", 1)[0] in FOREIGN_ENGINE_ROOTS:
                 imports.add(name)
+    # Importer/evaluator references can be stored and invoked later. Block the
+    # acquisition in Core contracts, without losing precise diagnostics for
+    # an immediate direct call such as importlib.import_module("mcp").
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+            continue
+        if node.value.id in builtins_names and node.attr in {"exec", "eval", "compile"}:
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                imports.add("<dynamic-source-execution>")
+        if (
+            (node.value.id in builtins_names and node.attr == "__import__")
+            or (node.value.id in importlib_names and node.attr == "import_module")
+        ):
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                imports.add("<hoisted-dynamic-import>")
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -392,3 +409,35 @@ def test_architecture_guard_keeps_safe_getattr_and_direct_call_results() -> None
         "resolve(host, '__import__')('mcp')\n"
     )
     assert direct_engine_imports(source) == ("mcp",)
+
+
+def test_architecture_guard_rejects_stored_attribute_importers() -> None:
+    source = (
+        "import builtins as host\\n"
+        "import importlib as importer\\n"
+        "one = host.__import__\\n"
+        "two = importer.import_module\\n"
+        "one('litellm')\\n"
+        "two('langgraph')\\n"
+    )
+    assert direct_engine_imports(source) == ("<hoisted-dynamic-import>",)
+
+
+def test_architecture_guard_rejects_stored_attribute_evaluators() -> None:
+    source = (
+        "import builtins as host\\n"
+        "runner = host.exec\\n"
+        "evaluator = host.eval\\n"
+        "compiler = host.compile\\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
+
+
+def test_architecture_guard_keeps_precise_immediate_attribute_calls() -> None:
+    source = (
+        "import builtins as host\\n"
+        "import importlib as importer\\n"
+        "host.__import__('mcp')\\n"
+        "importer.import_module('httpx')\\n"
+    )
+    assert direct_engine_imports(source) == ("httpx", "mcp")
