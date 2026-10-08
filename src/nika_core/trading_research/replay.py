@@ -467,6 +467,16 @@ class ReplayBook:
         return update
 
     def cancel(self, order: RiskApprovedOrder, reason: str = "cancelled by simulation") -> OrderUpdate:
+        # The reason is published as operator/audit text. Refuse behavioral
+        # subclasses, log-forging controls, and oversized text before any
+        # scope or terminal-state mutation; preserve ordinary Unicode prose.
+        if (
+            type(reason) is not str
+            or not reason.strip()
+            or not reason.isprintable()
+            or len(reason.encode("utf-8")) > 512
+        ):
+            raise TradingResearchError("paper cancellation reason must be bounded plain text")
         order = _snapshot_validated_approved_order(order)
         key, approval_scope = self._checked_replay_key(order)
         # A reused approval identity cannot change intent, policy or authority.
