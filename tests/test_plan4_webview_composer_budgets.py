@@ -57,7 +57,7 @@ def _bridge(*, exported: object = '{"format_version":1,"bindings":{}}'):
 
 @pytest.mark.parametrize(
     "bad_export",
-    [BehavioralString("hidden"), 7, "", "x" * 1_048_577, "\\ud800"],
+    [BehavioralString("hidden"), 7, "", "x" * 1_048_577, "\ud800"],
 )
 def test_keymap_export_refuses_unbounded_or_noncanonical_text(bad_export) -> None:
     bridge, calls = _bridge(exported=bad_export)
@@ -69,7 +69,7 @@ def test_keymap_export_refuses_unbounded_or_noncanonical_text(bad_export) -> Non
 
 @pytest.mark.parametrize(
     "bad_import",
-    [BehavioralString("{}"), 7, "", "x" * 1_048_577, "é" * 524_289, "\\ud800"],
+    [BehavioralString("{}"), 7, "", "x" * 1_048_577, "é" * 524_289, "\ud800"],
 )
 def test_keymap_import_refuses_invalid_input_before_parser_or_effects(bad_import) -> None:
     bridge, calls = _bridge()
@@ -84,7 +84,7 @@ def test_keymap_import_refuses_invalid_input_before_parser_or_effects(bad_import
         ("nav.tasks", BehavioralString("Alt+1")),
         ("x" * 121, "Alt+1"),
         ("nav.tasks", "x" * 257),
-        ("nav.tasks", "\\ud800"),
+        ("nav.tasks", "\ud800"),
     ],
 )
 def test_shortcut_mutation_refuses_invalid_or_expensive_carriers(
@@ -102,10 +102,12 @@ def test_keymap_valid_unicode_and_json_paths_remain_operational() -> None:
     assert bridge.export_keymap()["data"] == data
     assert bridge.import_keymap(data)["ok"] is True
     assert bridge.set_binding("nav.tasks", "Ctrl+1")["ok"] is True
+    assert bridge.set_binding("nav.tasks", "")["ok"] is True
     assert bridge.restore_default("nav.tasks")["ok"] is True
     assert calls == [
         ("import", data),
         ("set", "nav.tasks", "Ctrl+1"),
+        ("set", "nav.tasks", ""),
         ("restore", "nav.tasks"),
     ]
 
