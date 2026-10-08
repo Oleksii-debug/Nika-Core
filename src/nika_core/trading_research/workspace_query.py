@@ -10,6 +10,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 from .contracts import TradingResearchError
@@ -73,9 +74,34 @@ def _safe_identity(value: object) -> str:
         type(value) is not str
         or not value
         or not value.isprintable()
-        or any(ord(character) < 32 for character in value)
+        or value != value.strip()
+        or len(value.encode("utf-8")) > 512
     ):
         raise TradingResearchError("paper operator projection contains unsafe identity")
+    return value
+
+
+def _safe_amount(value: object) -> str:
+    """Re-admit inert, finite and bounded text from the durable read adapter.
+
+    A storage decoder normally validates these values. Enforce the projection
+    contract again so a broken/replaced adapter cannot execute str hooks or
+    export non-finite, non-text or unbounded values to a UI client.
+    """
+    if (
+        type(value) is not str
+        or not value
+        or not value.isprintable()
+        or value != value.strip()
+        or len(value.encode("utf-8")) > 128
+    ):
+        raise TradingResearchError("unsafe paper amount projection")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise TradingResearchError("unsafe paper amount projection") from exc
+    if not parsed.is_finite():
+        raise TradingResearchError("unsafe paper amount projection")
     return value
 
 
@@ -135,29 +161,52 @@ class PaperWorkspaceQuery:
                     "NO_PAPER_DATA", None, None, None, None, None, None, None, ()
                 )
             else:
+                required = {
+                    "cash", "equity", "gross_exposure", "net_exposure",
+                    "fees", "realized_pnl", "unrealized_pnl", "positions",
+                }
+                if type(payload) is not dict or set(payload) != required:
+                    raise TradingResearchError("invalid paper account projection")
                 positions = payload["positions"]
-                if type(positions) is not list:
+                if type(positions) is not list or len(positions) > 100_000:
                     raise TradingResearchError("invalid paper position projection")
                 projected: list[PaperPositionView] = []
+                expected_position = {
+                    "venue_id", "instrument_id", "currency",
+                    "quantity", "average_price", "realized_pnl",
+                    "venue_timezone",
+                }
                 for row in positions:
-                    if type(row) is not dict:
+                    if type(row) is not dict or set(row) != expected_position:
                         raise TradingResearchError("invalid paper position projection")
+                    currency = _safe_identity(row["currency"])
+                    if (
+                        len(currency) != 3
+                        or not currency.isascii()
+                        or not currency.isalpha()
+                        or not currency.isupper()
+                    ):
+                        raise TradingResearchError("invalid paper currency projection")
                     projected.append(
                         PaperPositionView(
                             _safe_identity(row["venue_id"]),
                             _safe_identity(row["instrument_id"]),
-                            _safe_identity(row["currency"]),
-                            row["quantity"],
-                            row["average_price"],
-                            row["realized_pnl"],
+                            currency,
+                            _safe_amount(row["quantity"]),
+                            _safe_amount(row["average_price"]),
+                            _safe_amount(row["realized_pnl"]),
                         )
                     )
                 result = PaperAccountView(
                     "PAPER_DATA",
-                    payload["cash"], payload["equity"],
-                    payload["gross_exposure"], payload["net_exposure"],
-                    payload["fees"], payload["realized_pnl"],
-                    payload["unrealized_pnl"], tuple(projected),
+                    _safe_amount(payload["cash"]),
+                    _safe_amount(payload["equity"]),
+                    _safe_amount(payload["gross_exposure"]),
+                    _safe_amount(payload["net_exposure"]),
+                    _safe_amount(payload["fees"]),
+                    _safe_amount(payload["realized_pnl"]),
+                    _safe_amount(payload["unrealized_pnl"]),
+                    tuple(projected),
                 )
         except (RuntimeError, ValueError, KeyError, TypeError, sqlite3.Error):
             # Permission may be revoked *during* a failed SQLite/decode read.
