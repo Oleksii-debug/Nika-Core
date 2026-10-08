@@ -526,6 +526,16 @@ class MultiAgentStore:
     def record_handoff(self, handoff: AgentHandoff) -> None:
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
+            # Fence delayed handoffs against committed cancellation and terminal teams.
+            conn.execute("BEGIN IMMEDIATE")
+            team = conn.execute(
+                "SELECT state FROM multi_agent_teams WHERE team_id = ?",
+                (handoff.team_id,),
+            ).fetchone()
+            if team is None:
+                raise KeyError(f"unknown team: {handoff.team_id}")
+            if team["state"] != TeamState.ACTIVE.value:
+                raise RuntimeError("team is not active")
             self._insert_handoff_with_connection(conn, handoff, now)
 
     def record_result(
@@ -539,6 +549,16 @@ class MultiAgentStore:
     ) -> None:
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
+            # A late runtime callback must not append results after cancellation.
+            conn.execute("BEGIN IMMEDIATE")
+            team = conn.execute(
+                "SELECT state FROM multi_agent_teams WHERE team_id = ?",
+                (team_id,),
+            ).fetchone()
+            if team is None:
+                raise KeyError(f"unknown team: {team_id}")
+            if team["state"] != TeamState.ACTIVE.value:
+                raise RuntimeError("team is not active")
             exists = conn.execute(
                 "SELECT 1 FROM multi_agent_members WHERE team_id = ? AND member_id = ?",
                 (team_id, member_id),
