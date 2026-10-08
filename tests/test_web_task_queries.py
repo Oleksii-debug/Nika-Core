@@ -90,7 +90,13 @@ def test_query_survives_process_style_store_recreation(tmp_path) -> None:
     assert json.loads(result.body)["data"]["task_id"] == task_id
 
 
-@pytest.mark.parametrize("bad_id", ["", " ", " 123", "123 ", "bad\nkey", "x" * 121])
+@pytest.mark.parametrize("bad_id", [
+    "", " ", " 123", "123 ", "bad\nkey", "x" * 121,
+    "t\\u0430sk-123",  # Cyrillic small a, visually close to an ASCII task ID
+    "task-\\u200b123",  # Zero-width separator
+    "task-\\u2067123",  # Bidi isolate
+    "task-\\u00e9123",  # Printable non-ASCII is not a canonical TaskQueue ID
+])
 def test_invalid_query_never_reads_cross_workspace_records(tmp_path, bad_id) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
