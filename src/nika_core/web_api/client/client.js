@@ -49,6 +49,9 @@
     } finally {
       reader.releaseLock();
     }
+    if (lengthHeader !== null && Number(lengthHeader) !== total) {
+      throw new Error("response length mismatch");
+    }
     const bytes = new Uint8Array(total);
     let offset = 0;
     for (const part of parts) {
@@ -69,9 +72,10 @@
     const taskId = field.value;
     // The server is the sole source of tenant/workspace/permission authority.
     // Never send identity, entitlement, local credentials or user-provided tokens.
+    // Core TaskQueue generates ASCII task identities. Reject all Unicode
+    // lookalikes and format characters, not just the common bidi controls.
     if (!taskId || taskId !== taskId.trim() ||
-        taskId.length > 120 ||
-        /\s|[\x00-\x1f\x7f\u200e\u200f\u2028-\u202e\u2066-\u2069]/u.test(taskId)) {
+        taskId.length > 120 || /[^\x21-\x7e]/u.test(taskId)) {
       details.hidden = true;
       report("Перевірте ідентифікатор завдання.");
       return;
@@ -109,6 +113,10 @@
         return;
       }
       const outcome = await readBoundedJson(response);
+      // Some transports can resolve after abort; never publish a late result.
+      if (controller.signal.aborted) {
+        throw new Error("request deadline exceeded");
+      }
       if (!outcome || typeof outcome !== "object" ||
           outcome.request_id !== requestId ||
           outcome.status !== "completed" || outcome.code !== "ok" ||
