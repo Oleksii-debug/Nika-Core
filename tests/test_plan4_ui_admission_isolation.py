@@ -337,3 +337,82 @@ def test_desktop_projection_skips_task_disappearing_during_readback(
         assert response["state"]["tasks"] == tasks
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "forged\\nINFO: accepted".replace("\\n", "\n"),
+        "direction-\u202e",
+        "x" * 2049,
+        "é" * 1025,
+    ],
+)
+def test_bridge_expected_error_status_rejects_control_or_oversized_text(
+    argument: str,
+) -> None:
+    def handler(_payload):
+        raise ValueError(argument)
+
+    bridge = UIActionBridge(
+        SimpleNamespace(get=lambda _action_id: None),
+        SimpleNamespace(),
+        handlers={"task.create": handler},
+    )
+    result = bridge.dispatch({
+        "request_id": "safe-1",
+        "action_id": "task.create",
+        "payload": {},
+    })
+    assert result["status"] == "rejected"
+    assert result["request_id"] == "safe-1"
+    assert result["message"] == "Некоректний запит або стан операції."
+    assert argument not in result["message"]
+
+
+def test_bridge_expected_errors_do_not_stringify_behavioral_arguments() -> None:
+    class HostileArgument:
+        def __str__(self) -> str:
+            raise AssertionError("untrusted exception argument stringify")
+
+    def handler(_payload):
+        raise ValueError(HostileArgument())
+
+    bridge = UIActionBridge(
+        SimpleNamespace(get=lambda _action_id: None),
+        SimpleNamespace(),
+        handlers={"task.create": handler},
+    )
+    result = bridge.dispatch({
+        "request_id": "safe-2",
+        "action_id": "task.create",
+        "payload": {},
+    })
+    assert result["status"] == "rejected"
+    assert result["message"] == "Некоректний запит або стан операції."
+
+
+def test_bridge_keeps_bounded_ukrainian_input_error_and_guards_keymap() -> None:
+    def handler(_payload):
+        raise ValueError("Введіть команду перед створенням завдання.")
+
+    def malicious_set_binding(_action_id, _binding):
+        raise ValueError("secret\nforged line")
+
+    bridge = UIActionBridge(
+        SimpleNamespace(get=lambda _action_id: None),
+        SimpleNamespace(set_binding=malicious_set_binding),
+        handlers={"task.create": handler},
+    )
+    result = bridge.dispatch({
+        "request_id": "safe-3",
+        "action_id": "task.create",
+        "payload": {},
+    })
+    assert result["status"] == "rejected"
+    assert result["message"] == "Введіть команду перед створенням завдання."
+    result_keymap = bridge.set_binding("nav.tasks", "Alt+1")
+    assert result_keymap == {
+        "ok": False,
+        "message": "Некоректний запит або стан операції.",
+    }
