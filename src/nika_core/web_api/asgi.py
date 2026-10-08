@@ -24,6 +24,9 @@ from nika_core.web_api.http_transport import (
 Receive = Callable[[], Awaitable[dict[str, object]]]
 Send = Callable[[dict[str, object]], Awaitable[None]]
 _MAX_RECEIVE_EVENTS = 1024
+_MAX_HEADER_FIELDS = 64
+_MAX_HEADER_BYTES = 16 * 1024
+_HTTP_TOKEN = frozenset(b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
 
 
 _DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
@@ -137,12 +140,24 @@ class ASGICommandApplication:
         headers = scope.get("headers")
         if type(headers) not in {tuple, list}:
             return self._error(400, "invalid_headers")
+        if len(headers) > _MAX_HEADER_FIELDS:
+            return self._error(431, "request_headers_too_large")
         selected: dict[bytes, bytes] = {}
+        header_bytes = 0
         for item in headers:
             if type(item) not in {tuple, list} or len(item) != 2:
                 return self._error(400, "invalid_headers")
             name, value = item
             if type(name) is not bytes or type(value) is not bytes:
+                return self._error(400, "invalid_headers")
+            header_bytes += len(name) + len(value)
+            if header_bytes > _MAX_HEADER_BYTES:
+                return self._error(431, "request_headers_too_large")
+            if (
+                not name
+                or any(char not in _HTTP_TOKEN for char in name)
+                or any(char in value for char in (0, 10, 13))
+            ):
                 return self._error(400, "invalid_headers")
             key = name.lower()
             if key in {b"content-type", b"origin", b"cookie"}:
