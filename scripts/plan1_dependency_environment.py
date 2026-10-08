@@ -90,9 +90,13 @@ def observe_dependencies(
                     if expression:
                         # Metadata is only an unreviewed upstream assertion.
                         record["license_expression"] = expression[:256]
+                    classifiers = getattr(
+                        installed.metadata, "get_all", lambda _: []
+                    )("Classifier") or []
                     record["license_metadata_present"] = bool(
-                        expression or installed.metadata.get("License")
-                        or installed.metadata.get_all("Classifier")
+                        expression
+                        or installed.metadata.get("License")
+                        or any(item.startswith("License ::") for item in classifiers)
                     )
             observed.append(record)
     missing_or_mismatched = [
@@ -122,10 +126,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--groups", nargs="+", default=["base", "agent", "planning", "dev"])
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--strict", action="store_true", help="Fail if selected applicable distributions are absent or outside declared constraints")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail on missing or out-of-range selected applicable distributions",
+    )
     args = parser.parse_args(argv)
     report = observe_dependencies(args.root, tuple(args.groups))
-    args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    args.output.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return int(args.strict and bool(report["missing_or_mismatched"]))
 
 
