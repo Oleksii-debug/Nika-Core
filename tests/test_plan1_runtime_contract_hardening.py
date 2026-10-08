@@ -11,11 +11,11 @@ from nika_core.runtime.contracts import (
     RuntimeEvent,
     RuntimeOutcome,
     RuntimeRequest,
+    RuntimeResult,
     RuntimeResumeMode,
     RuntimeResumeProbe,
     RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
-    RuntimeResult,
 )
 from nika_core.runtime.reference import ReferenceRuntime
 
