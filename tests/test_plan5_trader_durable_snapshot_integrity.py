@@ -108,7 +108,7 @@ def test_unknown_account_field_is_rejected() -> None:
         ("realized_pnl", "Infinity"),
         ("currency", "usd"),
         ("venue_id", ""),
-        ("instrument_id", "A\\nB"),
+        ("instrument_id", "A" + chr(10) + "B"),
     ],
 )
 def test_position_payload_fails_closed(
