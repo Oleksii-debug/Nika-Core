@@ -162,13 +162,16 @@ The message remains human-readable while `error_code` is stable for programmatic
 
 The `max_steps` budget is cumulative across process restarts: the number of validated
 `previously_completed_action_ids` consumes the same step allowance, not a new quota.
-A recovered checkpoint at the exact budget may return terminal success without re-planning
-only if its supplied authoritative state already satisfies the goal; an over-budget
-checkpoint or an unmet goal fails closed before a new tool effect. Existing task-level
-PENDING/UNCERTAIN journal reconciliation still precedes this terminal shortcut.
-When a WorldStateObserver is configured, even an exact-budget satisfied checkpoint is
-observed before it is accepted as terminal: drift blocks success, observation failures
-fail closed, and no additional tool effect or planner invocation is made.
+A recovered checkpoint with a satisfied goal returns terminal success without
+re-planning even when some of its task-wide step budget remains. An over-budget checkpoint
+cannot claim success, and an unmet goal at the step ceiling fails closed before a new
+tool effect. Existing task-level PENDING/UNCERTAIN journal reconciliation still precedes
+this terminal shortcut.
+When a WorldStateObserver is configured, every satisfied checkpoint is re-observed
+before accepting terminal success: observation failures fail closed; drift at the
+step ceiling blocks success; drift with remaining step budget resumes normal validated
+planning from the observed state. No planner or tool effect executes while the observer
+is confirming an already-satisfied checkpoint.
 
 Run, optional task, and deterministic action/replay identities are admitted as exact,
 bounded canonical UTF-8 text before journal/planner/tool handling. Step/re-plan limits
