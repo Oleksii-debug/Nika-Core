@@ -67,6 +67,13 @@ async function main() {
   assert.equal(displayed.length, 2);
   console.log("PASS: malformed state fails closed without late false recovery");
 
+  older = refreshState();
+  pending[6].resolve({ok: true, state: {tasks: "malformed-not-an-empty-list"}});
+  assert.equal(await older, false);
+  assert.equal(outages, 2);
+  assert.equal(displayed.length, 2, "broken tasks must not clear explicit target selection");
+  console.log("PASS: malformed task-list snapshot preserves the last authorized task selection");
+
   const pollFactory = new Function("ctx",
     "const {window, document, refreshState, inFlightActions}=ctx;"
     + "let statePollHandle=null;"
