@@ -187,7 +187,7 @@ def test_uncooperative_receive_cancellation_cannot_hold_response(monkeypatch, la
         # could wait forever for a receiver that ignores cancellation.
         try:
             await asyncio.wait_for(app(scope, hanging_receive, send), timeout=0.5)
-            assert cancelled.is_set()
+            await asyncio.wait_for(cancelled.wait(), timeout=0.2)
             assert messages[0]["status"] == 408
             assert json.loads(messages[1]["body"])["code"] == "request_receive_timeout"
             assert effect.calls == 0
