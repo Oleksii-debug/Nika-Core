@@ -82,6 +82,9 @@ class AgentDefinitionRepository:
             raise ValueError("compiled agent risk/approval evidence is inconsistent")
         now = datetime.now(UTC).isoformat()
         payload = definition.model_dump_json()
+        # Durable drafts must pass the same bounded, unambiguous JSON ingress as
+        # restart/activation; otherwise save succeeds but no readback is possible.
+        AgentDefinition.import_json(payload)
         approvals_json = json.dumps(
             compilation.required_human_approvals,
             ensure_ascii=False,
