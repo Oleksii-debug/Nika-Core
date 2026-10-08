@@ -144,3 +144,15 @@ scope-owned carrier during async receive cannot retarget the Core effect.
 Invalid previously mutated identity is rejected 401 before reading the body.
 The existing WebApplicationBoundary remains the independent authorization
 decision point; no new authentication or tenant-policy authority is introduced.
+
+
+## Read-only SQLite query failure semantics
+
+The shared Core TaskQueue remains the only task-state authority. If its
+read-only inspection encounters sqlite3.Error, WebTaskQueryHandler emits a
+bounded, secret-free `failed/storage_unavailable` result associated with the
+original request_id. A database read failure cannot be described as an
+outcome-unknown write or automatic retry permission. The handler does not
+recreate or mutate failed state; a later valid query after canonical SQLite
+reopen returns the unchanged Core record. Independent real-cloud storage
+availability and worker recovery still require explicit qualification.
