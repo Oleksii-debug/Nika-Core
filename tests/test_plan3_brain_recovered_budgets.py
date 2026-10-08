@@ -81,9 +81,21 @@ def test_recovered_action_leaves_only_one_new_execution_slot() -> None:
     assert planner.calls == 1
 
 
-def test_checkpoint_above_total_budget_is_not_accepted() -> None:
-    result, planner = _resume(max_steps=0 + 1, goal="finished")
+def test_corrupt_checkpoint_exceeding_budget_cannot_claim_success() -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    result = asyncio.run(
+        brain.run(
+            run_id="excess-checkpoint",
+            state=WorldState(facts=frozenset({"prepared", "finished"})),
+            goal=DeterministicGoal(required=frozenset({"finished"})),
+            actions=_ACTIONS,
+            previously_completed_action_ids=("prepare", "finish"),
+            max_steps=1,
+        )
+    )
     assert not result.ok
+    assert result.error_code is DeterministicErrorCode.PLAN_TOO_LONG
     assert planner.calls == 0
 
 
