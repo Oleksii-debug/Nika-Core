@@ -155,17 +155,22 @@ def _require_plain_facts(value: object) -> None:
 
 
 def _require_plain_plan(value: object) -> bool:
-    """A replaceable planner cannot supply behavioral objects for snapshotting."""
-    return (
-        type(value) is DeterministicPlan
-        and type(value.steps) is tuple
-        and all(
-            type(step) is PlanStep
-            and type(step.action_id) is str
-            and (step.tool_id is None or type(step.tool_id) is str)
-            for step in value.steps
-        )
-    )
+    """Bound untrusted planner step identities before snapshot, history or tools."""
+    if type(value) is not DeterministicPlan or type(value.steps) is not tuple:
+        return False
+    for step in value.steps:
+        if type(step) is not PlanStep:
+            return False
+        try:
+            # Reuse the same canonical run/action/tool identity fence; merely
+            # accepting a plain str would admit surrogates, controls and
+            # oversized or non-normalized labels into persisted plan evidence.
+            _require_run_identity(step.action_id, name="plan_action_id")
+            if step.tool_id is not None:
+                _require_run_identity(step.tool_id, name="plan_tool_id")
+        except ValueError:
+            return False
+    return True
 
 
 class DeterministicBrain:
