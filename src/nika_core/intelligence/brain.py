@@ -889,8 +889,13 @@ class DeterministicBrain:
         *,
         timeout_seconds: float,
     ) -> tuple[WorldState | None, _StateObservationFailure | None]:
+        # asyncio.timeout can be suppressed by a replaceable observer that
+        # catches CancelledError. Preserve the absolute deadline as authority:
+        # a late "success" is not fresh state evidence for a tool or recovery.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
         try:
-            async with asyncio.timeout(timeout_seconds):
+            async with asyncio.timeout_at(deadline):
                 observed = await observer.observe()
         except TimeoutError:
             return None, _StateObservationFailure(
@@ -903,6 +908,11 @@ class DeterministicBrain:
             return None, _StateObservationFailure(
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
                 f"world-state observation failed: {type(exc).__name__}",
+            )
+        if loop.time() >= deadline:
+            return None, _StateObservationFailure(
+                DeterministicErrorCode.STATE_OBSERVATION_TIMEOUT,
+                "world-state observation timed out",
             )
         # The observer is replaceable and can retain or corrupt a frozen record.
         # Do not accept subclass behavior, mutable fact carriers, or nontext facts;
