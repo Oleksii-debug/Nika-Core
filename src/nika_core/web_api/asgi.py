@@ -26,7 +26,9 @@ Send = Callable[[dict[str, object]], Awaitable[None]]
 _MAX_RECEIVE_EVENTS = 1024
 _MAX_HEADER_FIELDS = 64
 _MAX_HEADER_BYTES = 16 * 1024
-_HTTP_TOKEN = frozenset(b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+_HTTP_TOKEN = frozenset(
+    b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
 
 _UNIQUE_SECURITY_HEADERS = frozenset({
     b"authorization", b"content-length", b"content-type", b"cookie",
