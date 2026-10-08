@@ -127,6 +127,21 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
+        # A computed attribute name on the importlib/builtins authorities could
+        # select __import__, import_module or an evaluator without a literal
+        # attribute in the AST. Stable Nika ports must not resolve such names.
+        if (
+            isinstance(func, ast.Name)
+            and func.id in getattr_names
+            and len(node.args) in (2, 3)
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in builtins_names | importlib_names
+            and (
+                not isinstance(node.args[1], ast.Constant)
+                or type(node.args[1].value) is not str
+            )
+        ):
+            imports.add("<nonliteral-dynamic-attribute>")
         # A stored importer bypasses the immediate-call import guard:
         # loader = getattr(builtins, "__import__"); loader("vendor")
         # or loader = getattr(importlib, "import_module"). Refuse its
@@ -476,3 +491,22 @@ def test_architecture_guard_preserves_safe_defaulted_getattr() -> None:
         "present(42)\n"
     )
     assert direct_engine_imports(source) == ()
+
+
+def test_architecture_guard_rejects_computed_builtin_loader_name() -> None:
+    source = (
+        "import builtins as host\n"
+        "selected = '__import__'\n"
+        "loader = getattr(host, selected)\n"
+        "loader('langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<nonliteral-dynamic-attribute>",)
+
+
+def test_architecture_guard_rejects_computed_importlib_loader_name() -> None:
+    source = (
+        "import importlib as importer\n"
+        "loader = getattr(importer, 'import_' + 'module')\n"
+        "loader('mcp')\n"
+    )
+    assert direct_engine_imports(source) == ("<nonliteral-dynamic-attribute>",)
