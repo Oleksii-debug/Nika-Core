@@ -195,9 +195,39 @@ class ASGICommandApplication:
                 return self._error(403, "origin_forbidden")
             if origin not in self._allowed_origins:
                 return self._error(403, "origin_forbidden")
+        # Host is browser-controlled input, never evidence of an authenticated
+        # tenant. Pin supplied authorities to the configured trusted origin
+        # inventory, including exact port and IPv6 bracket syntax. Without this
+        # check an allowed Origin and a forged Host could reach the same Core
+        # command handler through host-based middleware or reverse proxies.
+        host_bytes = selected.get(b"host")
+        if host_bytes is not None:
+            try:
+                host = host_bytes.decode("ascii")
+            except UnicodeDecodeError:
+                return self._error(403, "host_forbidden")
+            host_origin = f"https://{host}"
+            if host_origin not in self._allowed_origins:
+                return self._error(403, "host_forbidden")
+            if origin_bytes is not None and origin != host_origin:
+                return self._error(403, "host_forbidden")
+
         state = scope.get("state")
         principal = state.get("nika_principal") if type(state) is dict else None
         if type(principal) is not WebPrincipal:
+            return self._error(401, "authentication_required")
+        # The ASGI receive loop below awaits untrusted network input. Snapshot
+        # and revalidate server-established identity *before* the first await,
+        # so later mutation of the middleware's scope/principal cannot switch
+        # tenant or workspace between admission and Core dispatch.
+        try:
+            trusted_principal = WebPrincipal(
+                tenant_id=principal.tenant_id,
+                user_id=principal.user_id,
+                workspace_id=principal.workspace_id,
+                session_id=principal.session_id,
+            )
+        except ValueError:
             return self._error(401, "authentication_required")
         content_type_bytes = selected.get(b"content-type", b"")
         try:
@@ -229,7 +259,7 @@ class ASGICommandApplication:
                     return self._error(400, "invalid_content_length")
                 try:
                     return self._adapter.handle(
-                        principal=principal,
+                        principal=trusted_principal,
                         method="POST",
                         content_type=content_type,
                         body=b"".join(chunks),

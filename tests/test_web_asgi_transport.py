@@ -348,3 +348,127 @@ def test_matching_content_length_and_fragmented_body_keep_core_boundary() -> Non
     ])
     assert _status(output) == 200
     assert handler.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("host", "origin", "expected_code"),
+    [
+        (b"other.example", b"https://nika.example", "host_forbidden"),
+        (b"nika.example.evil.example", b"https://nika.example", "host_forbidden"),
+        (b"NIKA.example", b"https://nika.example", "host_forbidden"),
+        (b"nika.example:443", b"https://nika.example", "host_forbidden"),
+        (b"user@nika.example", b"https://nika.example", "host_forbidden"),
+        (b"", b"https://nika.example", "host_forbidden"),
+        (b"\xff", b"https://nika.example", "host_forbidden"),
+        (b"other.example", b"", "host_forbidden"),
+    ],
+)
+def test_supplied_host_cannot_redirect_canonical_web_authority(
+    host: bytes, origin: bytes, expected_code: str,
+) -> None:
+    app, handler = _app()
+    headers = [(b"host", host), (b"content-type", b"application/json")]
+    if origin:
+        headers.append((b"origin", origin))
+    output = _call(app, _scope(principal=_principal(), headers=headers))
+    assert _status(output) == 403
+    assert _payload(output)["code"] == expected_code
+    assert handler.calls == 0
+
+
+def test_matching_host_origin_and_explicit_nonbrowser_host_remain_valid() -> None:
+    app, handler = _app()
+    for with_origin in (True, False):
+        headers = [
+            (b"host", b"nika.example"),
+            (b"content-type", b"application/json"),
+        ]
+        if with_origin:
+            headers.append((b"origin", b"https://nika.example"))
+        result = _call(app, _scope(principal=_principal(), headers=headers))
+        assert _status(result) == 200
+    assert handler.calls == 2
+
+
+def test_header_case_duplicate_host_and_injected_host_never_dispatch() -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"Host", b"nika.example"),
+        (b"host", b"nika.example"),
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]))
+    assert _status(output) == 400
+    assert _payload(output)["code"] == "duplicate_security_header"
+    poisoned = _call(app, _scope(principal=_principal(), headers=[
+        (b"host", b"nika.example\r\nX-Authority: poisoned"),
+        (b"content-type", b"application/json"),
+    ]))
+    assert _status(poisoned) == 400
+    assert _payload(poisoned)["code"] == "invalid_headers"
+    assert handler.calls == 0
+
+
+def test_host_rejection_precedes_receive_even_for_unbounded_body() -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"host", b"unauthorized.example"),
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]), events=[])
+    assert _status(output) == 403
+    assert _payload(output)["code"] == "host_forbidden"
+    assert handler.calls == 0
+
+
+@pytest.mark.parametrize("origin", [
+    "https://localhost:8443",
+    "https://127.0.0.1:8443",
+    "https://[::1]:8443",
+])
+def test_configured_ipv4_ipv6_port_hosts_reach_existing_core_boundary(
+    origin: str,
+) -> None:
+    handler = _Handler()
+    boundary = WebApplicationBoundary(authorization=_Allow(), handler=handler)
+    app = ASGICommandApplication(
+        HttpCommandAdapter(boundary), allowed_origins=frozenset({origin}),
+    )
+    host = origin.removeprefix("https://").encode("ascii")
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"host", host),
+        (b"origin", origin.encode("ascii")),
+        (b"content-type", b"application/json"),
+    ]))
+    assert _status(output) == 200
+    assert handler.calls == 1
+
+
+def test_asgi_receive_cannot_swap_server_tenant_or_workspace_in_flight() -> None:
+    app, handler = _app()
+    principal = _principal()
+    scope = _scope(principal=principal)
+    output: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        object.__setattr__(principal, "workspace_id", "other-workspace")
+        object.__setattr__(principal, "tenant_id", "other-tenant")
+        return {"type": "http.request", "body": _body(), "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        output.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    assert _status(tuple(output)) == 200
+    assert _payload(tuple(output))["data"] == {"workspace": "workspace-a"}
+    assert handler.calls == 1
+
+
+def test_mutated_invalid_server_principal_is_rejected_before_network_read() -> None:
+    app, handler = _app()
+    principal = _principal()
+    object.__setattr__(principal, "workspace_id", "bad\nworkspace")
+    result = _call(app, _scope(principal=principal), events=[])
+    assert _status(result) == 401
+    assert _payload(result)["code"] == "authentication_required"
+    assert handler.calls == 0

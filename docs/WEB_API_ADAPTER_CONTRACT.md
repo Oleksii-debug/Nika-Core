@@ -115,3 +115,44 @@ principal identity, and a failing handler that changes its command carrier.
 These are committed regression cases, not an asserted executed pytest pass;
 exact-head CI, authenticated server composition, tenant ownership,
 durable cloud lifecycle and main integration still govern terminal closure.
+
+
+## Host authority admission (Plan 6 §1, component-only)
+
+When an ASGI Host header is supplied, it must match an exact configured HTTPS
+origin authority (case, port and IPv6 spelling included); when Origin is also
+supplied, the two authorities must match. Rejection occurs before principal
+resolution, JSON parsing and all Core effects, including for forged hosts,
+malformed bytes and wrong ports. Explicit non-browser requests without Origin
+remain supported only when their supplied Host belongs to the allowlist and
+the server has separately established WebPrincipal.
+
+This is strict ingress routing, not tenant account membership, an authentication
+service or deployment reverse-proxy verification. The server remains responsible
+for authenticating identities, controlling proxy headers, validating workspace
+ownership and ensuring HTTPS termination. Tests include forged Host/no-effect
+and valid Host paths; automated exact-head pass and upstream/main integration
+are required before any Section 1 closure claim.
+
+
+## ASGI principal read/retry chronology
+
+After trusted server middleware sets the exact WebPrincipal in ASGI scope, the
+ingress adapter immediately snapshots and revalidates its tenant, user,
+workspace and session fields before awaiting body chunks. Any mutation to the
+scope-owned carrier during async receive cannot retarget the Core effect.
+Invalid previously mutated identity is rejected 401 before reading the body.
+The existing WebApplicationBoundary remains the independent authorization
+decision point; no new authentication or tenant-policy authority is introduced.
+
+
+## Read-only SQLite query failure semantics
+
+The shared Core TaskQueue remains the only task-state authority. If its
+read-only inspection encounters sqlite3.Error, WebTaskQueryHandler emits a
+bounded, secret-free `failed/storage_unavailable` result associated with the
+original request_id. A database read failure cannot be described as an
+outcome-unknown write or automatic retry permission. The handler does not
+recreate or mutate failed state; a later valid query after canonical SQLite
+reopen returns the unchanged Core record. Independent real-cloud storage
+availability and worker recovery still require explicit qualification.
