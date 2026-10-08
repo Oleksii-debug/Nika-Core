@@ -180,3 +180,38 @@ def test_plain_durable_fill_and_snapshot_remain_exactly_once_after_restart(tmp_p
     payload = reopened.account_payload("trader", "paper-run")
     assert payload is not None
     assert payload["cash"] == "799"
+
+
+def test_sqlite_uses_detached_records_not_post_admission_mutations(
+    tmp_path, monkeypatch,
+) -> None:
+    import nika_core.trading_research.persistence as persistence
+
+    repo = _repository(tmp_path)
+    fill = _fill()
+    snapshot = _snapshot(fill)
+    original_fill_admission = persistence._require_durable_fill
+    original_snapshot_admission = persistence._require_durable_snapshot
+
+    def mutate_original_fill(value):
+        detached = original_fill_admission(value)
+        object.__setattr__(value, "quantity", Decimal("999"))
+        return detached
+
+    def mutate_original_snapshot(value):
+        detached = original_snapshot_admission(value)
+        object.__setattr__(value, "cash", Decimal("1"))
+        return detached
+
+    monkeypatch.setattr(persistence, "_require_durable_fill", mutate_original_fill)
+    monkeypatch.setattr(persistence, "_require_durable_snapshot", mutate_original_snapshot)
+
+    assert repo.commit_fill_and_account(fill, snapshot) is True
+    with repo._store.connection() as conn:
+        row = conn.execute(
+            "SELECT quantity FROM trading_research_run_fills WHERE "
+            "workspace_id = ? AND run_id = ? AND fill_id = ?",
+            ("trader", "paper-run", "fill-1"),
+        ).fetchone()
+    assert row["quantity"] == "2"
+    assert repo.account_payload("trader", "paper-run")["cash"] == "799"
