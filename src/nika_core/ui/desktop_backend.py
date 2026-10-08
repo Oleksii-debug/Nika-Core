@@ -319,11 +319,17 @@ class DesktopBackend:
         older tasks whenever foreign workspaces had many recent records.
         The existing TaskQueue/SQLite store remains the sole task authority.
         """
+        # Active controls must not disappear behind a burst of completed jobs.
+        # This is only UI priority, not task authority: the same scoped TaskQueue
+        # database and explicit target checks still decide all effects.
+        terminal = tuple(sorted(state.value for state in _TERMINAL_STATES))
+        terminal_slots = ", ".join("?" for _ in terminal)
         with self._queue.store.connection() as conn:
             rows = conn.execute(
                 "SELECT task_id FROM tasks WHERE workspace_id = ? AND agent_id = ? "
-                "ORDER BY updated_at DESC, created_at DESC LIMIT 50",
-                (_DEFAULT_WORKSPACE_ID, _DEFAULT_AGENT_ID),
+                f"ORDER BY CASE WHEN state IN ({terminal_slots}) THEN 1 ELSE 0 END, "
+                "updated_at DESC, created_at DESC LIMIT 50",
+                (_DEFAULT_WORKSPACE_ID, _DEFAULT_AGENT_ID, *terminal),
             ).fetchall()
         records: list[TaskRecord] = []
         for row in rows:
