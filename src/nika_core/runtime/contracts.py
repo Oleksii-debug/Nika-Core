@@ -131,6 +131,16 @@ def _validate_runtime_result_error(value: str) -> None:
         raise ValueError("runtime error contains noncanonical or control text")
 
 
+def _validate_runtime_mapping_keys(value: Mapping[str, Any], label: str) -> None:
+    """Do not let non-string JSON object keys collide after transport conversion."""
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be a mapping")
+    # A Python mapping may contain both 1 and "1"; JSON object projection
+    # would silently merge them. Reject at the canonical port ingress/egress.
+    if any(type(key) is not str for key in value):
+        raise TypeError(f"{label} keys must be plain strings")
+
+
 def _validate_limits(max_steps: int, timeout_seconds: float | None) -> None:
     """Reject malformed budgets before they reach provider/runtime effects."""
     if type(max_steps) is not int:
@@ -164,8 +174,7 @@ class RuntimeRequest:
         _validate_runtime_identity(self.task_id, "task_id")
         _validate_runtime_identity(self.thread_id, "thread_id")
         _validate_limits(self.max_steps, self.timeout_seconds)
-        if not isinstance(self.payload, Mapping):
-            raise TypeError("runtime request payload must be a mapping")
+        _validate_runtime_mapping_keys(self.payload, "runtime request payload")
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,8 +232,7 @@ class RuntimeEvent:
         if self.sequence > MAX_RUNTIME_EVENT_SEQUENCE:
             raise ValueError("event sequence exceeds portable integer limit")
         _validate_runtime_identity(self.event_type, "event_type")
-        if not isinstance(self.payload, Mapping):
-            raise TypeError("runtime event payload must be a mapping")
+        _validate_runtime_mapping_keys(self.payload, "runtime event payload")
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,8 +253,7 @@ class RuntimeResult:
             type(event) is not RuntimeEvent for event in self.events
         ):
             raise TypeError("runtime events must be a tuple of RuntimeEvent")
-        if not isinstance(self.output, Mapping):
-            raise TypeError("runtime output must be a mapping")
+        _validate_runtime_mapping_keys(self.output, "runtime output")
         if self.resume_token is not None:
             _validate_runtime_identity(self.resume_token, "resume_token")
         if (
