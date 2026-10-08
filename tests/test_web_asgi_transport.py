@@ -467,7 +467,7 @@ def test_asgi_receive_cannot_swap_server_tenant_or_workspace_in_flight() -> None
 def test_mutated_invalid_server_principal_is_rejected_before_network_read() -> None:
     app, handler = _app()
     principal = _principal()
-    object.__setattr__(principal, "workspace_id", "bad\\nworkspace")
+    object.__setattr__(principal, "workspace_id", "bad\nworkspace")
     result = _call(app, _scope(principal=principal), events=[])
     assert _status(result) == 401
     assert _payload(result)["code"] == "authentication_required"
