@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import unicodedata
 from dataclasses import dataclass
 
 from nika_core.intelligence.contracts import (
@@ -53,6 +54,25 @@ class _StateObservationFailure:
     message: str
 
 
+def _require_run_identity(value: object, *, name: str) -> None:
+    """Reuse canonical bounded UTF-8 identity admission before durable effects."""
+    if type(value) is not str or not value or len(value) > 512 or value != value.strip():
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+    if unicodedata.normalize("NFC", value) != value:
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in value
+    ):
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text") from exc
+    if len(encoded) > 512:
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+
+
 def _positive_finite_seconds(value: object, *, name: str) -> float:
     """Admit an exact finite deadline budget before starting work."""
     if type(value) not in (int, float):
@@ -98,8 +118,9 @@ class DeterministicBrain:
         planning_timeout_seconds: float = 30.0,
         observation_timeout_seconds: float = 10.0,
     ) -> DeterministicBrainResult:
-        if not run_id.strip():
-            raise ValueError("run_id must not be empty")
+        _require_run_identity(run_id, name="run_id")
+        if task_id is not None:
+            _require_run_identity(task_id, name="task_id")
         if type(max_steps) is not int or max_steps <= 0:
             raise ValueError("max_steps must be a positive integer")
         if type(max_replans) is not int or max_replans < 0:
@@ -117,6 +138,12 @@ class DeterministicBrain:
         # evidence and must never turn into ToolCall.approved=True.
         del approved_action_ids
 
+        # Action IDs are durable completion/effect generation identities.
+        # Admit all of them before planner or journal operations.
+        for action in actions:
+            _require_run_identity(action.action_id, name="action_id")
+        for action_id in previously_completed_action_ids:
+            _require_run_identity(action_id, name="previously_completed_action_id")
         action_map = {action.action_id: action for action in actions}
         if len(action_map) != len(actions):
             raise ValueError("duplicate deterministic action_id")
