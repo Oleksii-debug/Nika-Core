@@ -16,6 +16,10 @@ This boundary exists for privacy, bandwidth/resource control, licensing and repr
 4. Changing `ModelRequest.model` cannot grant download permission.
 5. Provider-wide `allow_download=True` behavior is rejected for Foundry Local. Callers must use the explicit model-management action.
 6. Foundry Local model downloads use the SDK's documented download cancellation event. Cancellation of the Nika coroutine or expiry of the explicit download timeout signals that event.
+Model acquisition deadlines are admitted before any SDK call or lock: exact int/float types only,
+finite and strictly positive, with a maximum of 86,400 seconds (24 hours). NaN, infinities,
+booleans and huge overflowing integers cannot silently disable the download timeout.
+
 7. Foundry model lifecycle work and in-process inference share the same provider slot. A cancelled/timed-out download retains that slot until the native download worker exits, so inference is not started on top of unfinished model acquisition.
 8. Foundry inference may be protected by a Nika-owned `ModelResourcePolicy` using the existing `ResourceObserverPort`: CPU, system-memory percentage and minimum available-memory preflight limits fail closed before native model execution starts.
 9. Large model files remain outside the mandatory base package. Packaging/distribution ownership remains with release engineering; this document defines only the intelligence-side authorization boundary.
