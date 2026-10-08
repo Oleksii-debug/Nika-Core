@@ -348,3 +348,62 @@ def test_matching_content_length_and_fragmented_body_keep_core_boundary() -> Non
     ])
     assert _status(output) == 200
     assert handler.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("host", "origin", "expected_code"),
+    [
+        (b"other.example", b"https://nika.example", "host_forbidden"),
+        (b"nika.example.evil.example", b"https://nika.example", "host_forbidden"),
+        (b"NIKA.example", b"https://nika.example", "host_forbidden"),
+        (b"nika.example:443", b"https://nika.example", "host_forbidden"),
+        (b"user@nika.example", b"https://nika.example", "host_forbidden"),
+        (b"", b"https://nika.example", "host_forbidden"),
+        (b"\\xff", b"https://nika.example", "host_forbidden"),
+        (b"other.example", b"", "host_forbidden"),
+    ],
+)
+def test_supplied_host_cannot_redirect_canonical_web_authority(
+    host: bytes, origin: bytes, expected_code: str,
+) -> None:
+    app, handler = _app()
+    headers = [(b"host", host), (b"content-type", b"application/json")]
+    if origin:
+        headers.append((b"origin", origin))
+    output = _call(app, _scope(principal=_principal(), headers=headers))
+    assert _status(output) == 403
+    assert _payload(output)["code"] == expected_code
+    assert handler.calls == 0
+
+
+def test_matching_host_origin_and_explicit_nonbrowser_host_remain_valid() -> None:
+    app, handler = _app()
+    for with_origin in (True, False):
+        headers = [
+            (b"host", b"nika.example"),
+            (b"content-type", b"application/json"),
+        ]
+        if with_origin:
+            headers.append((b"origin", b"https://nika.example"))
+        result = _call(app, _scope(principal=_principal(), headers=headers))
+        assert _status(result) == 200
+    assert handler.calls == 2
+
+
+def test_header_case_duplicate_host_and_injected_host_never_dispatch() -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"Host", b"nika.example"),
+        (b"host", b"nika.example"),
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]))
+    assert _status(output) == 400
+    assert _payload(output)["code"] == "duplicate_security_header"
+    poisoned = _call(app, _scope(principal=_principal(), headers=[
+        (b"host", b"nika.example\\r\\nX-Authority: poisoned"),
+        (b"content-type", b"application/json"),
+    ]))
+    assert _status(poisoned) == 400
+    assert _payload(poisoned)["code"] == "invalid_headers"
+    assert handler.calls == 0
