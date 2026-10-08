@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
+from urllib.parse import urlsplit
 
 from nika_core.web_api.contracts import WebPrincipal
 from nika_core.web_api.http_transport import (
@@ -21,6 +22,39 @@ from nika_core.web_api.http_transport import (
 Receive = Callable[[], Awaitable[dict[str, object]]]
 Send = Callable[[dict[str, object]], Awaitable[None]]
 _MAX_RECEIVE_EVENTS = 1024
+_MAX_HTTP_HEADERS = 64
+_MAX_HTTP_HEADER_BYTES = 16 * 1024
+_UNIQUE_SECURITY_HEADERS = frozenset({
+    b"authorization", b"content-length", b"content-type", b"cookie",
+    b"host", b"origin", b"transfer-encoding",
+})
+
+
+def _exact_https_origin(value: object) -> bool:
+    """Admit only fully qualified HTTPS origins, never URLs with paths/credentials."""
+    if type(value) is not str or not value.startswith("https://"):
+        return False
+    if any(ord(ch) < 33 or ord(ch) > 126 for ch in value):
+        return False
+    try:
+        parsed = urlsplit(value)
+        # Empty-port syntaxes, userinfo, paths and URI subresources are not origins.
+        port = parsed.port
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or parsed.netloc.endswith(":")
+            or "*" in parsed.netloc
+        ):
+            return False
+        return port is None or 1 <= port <= 65535
+    except ValueError:
+        return False
 
 
 class ASGICommandApplication:
@@ -36,13 +70,7 @@ class ASGICommandApplication:
             raise ValueError("adapter must be the existing HTTP command adapter")
         if type(allowed_origins) is not frozenset or not allowed_origins:
             raise ValueError("configure explicit trusted HTTPS Web origins")
-        if any(
-            type(origin) is not str
-            or not origin.startswith("https://")
-            or origin.endswith("/")
-            or any(ch.isspace() for ch in origin)
-            for origin in allowed_origins
-        ):
+        if any(not _exact_https_origin(origin) for origin in allowed_origins):
             raise ValueError("allowed origins must be exact HTTPS origins")
         self._adapter = adapter
         self._allowed_origins = allowed_origins
@@ -86,15 +114,21 @@ class ASGICommandApplication:
         headers = scope.get("headers")
         if type(headers) not in {tuple, list}:
             return self._error(400, "invalid_headers")
+        if len(headers) > _MAX_HTTP_HEADERS:
+            return self._error(431, "too_many_headers")
         selected: dict[bytes, bytes] = {}
+        header_bytes = 0
         for item in headers:
             if type(item) not in {tuple, list} or len(item) != 2:
                 return self._error(400, "invalid_headers")
             name, value = item
             if type(name) is not bytes or type(value) is not bytes:
                 return self._error(400, "invalid_headers")
+            header_bytes += len(name) + len(value)
+            if header_bytes > _MAX_HTTP_HEADER_BYTES:
+                return self._error(431, "headers_too_large")
             key = name.lower()
-            if key in {b"content-type", b"origin", b"cookie"}:
+            if key in _UNIQUE_SECURITY_HEADERS:
                 if key in selected:
                     return self._error(400, "duplicate_security_header")
                 selected[key] = value
