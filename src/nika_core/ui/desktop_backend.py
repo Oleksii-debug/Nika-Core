@@ -269,10 +269,30 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
+    def _visible_task_records(self) -> tuple[TaskRecord, ...]:
+        """Query authorized desktop tasks before applying the 50-row UI limit.
+
+        Filtering an unscoped recent list after LIMIT would hide legitimate
+        older tasks whenever foreign workspaces had many recent records.
+        The existing TaskQueue/SQLite store remains the sole task authority.
+        """
+        with self._queue.store.connection() as conn:
+            rows = conn.execute(
+                "SELECT task_id FROM tasks WHERE workspace_id = ? AND agent_id = ? "
+                "ORDER BY updated_at DESC, created_at DESC LIMIT 50",
+                (_DEFAULT_WORKSPACE_ID, _DEFAULT_AGENT_ID),
+            ).fetchall()
+        records = (self._queue.get(row["task_id"]) for row in rows)
+        return tuple(
+            record for record in records
+            if record.workspace_id == _DEFAULT_WORKSPACE_ID
+            and record.agent_id == _DEFAULT_AGENT_ID
+        )
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "autostart": self.autostart_settings.snapshot(),
-            "tasks": [self._task_view(record) for record in self._queue.list_recent(limit=50)],
+            "tasks": [self._task_view(record) for record in self._visible_task_records()],
             "agents": [
                 {
                     "agent_id": item.agent_id,

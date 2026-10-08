@@ -141,7 +141,13 @@ class UIActionBridge:
         request_id = raw.get("request_id")
         if type(request_id) is not str:
             return "invalid"
-        if not request_id or len(request_id) > 120:
+        if (
+            not 1 <= len(request_id) <= 120
+            or not all(
+                char.isascii() and (char.isalnum() or char in "-_.:")
+                for char in request_id
+            )
+        ):
             return "invalid"
         return request_id
 
