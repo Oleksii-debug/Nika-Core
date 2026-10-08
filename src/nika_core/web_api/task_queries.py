@@ -40,26 +40,32 @@ class WebTaskQueryHandler:
             record = self._queue.get(task_id)
         except KeyError:
             return self._reject(command.request_id, "not_found")
-        except (sqlite3.Error, ValueError):
-            # Corrupt persisted task JSON/state as well as SQLite read failures
-            # are definite read-only query failures, never uncertain writes.
-            # Do not disclose database content or permit automatic retry.
-            # Preserve the request ID, but do not expose file paths or SQL.
-            return WebCommandResult.create(
-                request_id=command.request_id,
-                status="failed",
-                code="storage_unavailable",
-                message="Task state is temporarily unavailable.",
-            )
+        except (sqlite3.Error, ValueError, TypeError):
+            # Malformed canonical row or SQLite failure is a definite query
+            # failure, not an outcome-unknown write. Never leak persisted data.
+            return self._storage_failure(command.request_id)
         if record.workspace_id != principal.workspace_id:
-            # Do not disclose whether another workspace owns the task.
+            # Never reveal foreign task metadata or its payload health.
             return self._reject(command.request_id, "not_found")
+        if type(record.payload) is not dict:
+            # Canonical TaskRecord payload requires a JSON object. A valid
+            # JSON scalar/list is damaged state, not a healthy task.
+            return self._storage_failure(command.request_id)
         return WebCommandResult.create(
             request_id=command.request_id,
             status="completed",
             code="ok",
             message="Task state is available.",
             data={"task_id":record.task_id, "state":record.state.value},
+        )
+
+    @staticmethod
+    def _storage_failure(request_id: str) -> WebCommandResult:
+        return WebCommandResult.create(
+            request_id=request_id,
+            status="failed",
+            code="storage_unavailable",
+            message="Task state is temporarily unavailable.",
         )
 
     @staticmethod

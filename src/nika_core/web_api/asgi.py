@@ -238,7 +238,13 @@ class ASGICommandApplication:
         chunks: list[bytes] = []
         length = 0
         for _ in range(_MAX_RECEIVE_EVENTS):
-            event = await receive()
+            try:
+                event = await receive()
+            except Exception:  # noqa: BLE001 - fail closed on pre-effect ASGI I/O faults
+                # Receive failed before Core dispatch: no write outcome is unknown.
+                # Do not leak exception text (possibly including request/secret data).
+                # asyncio.CancelledError remains uncaught so host cancellation works.
+                return self._error(500, "request_receive_failed")
             if type(event) is not dict:
                 return self._error(400, "invalid_request_stream")
             kind = event.get("type")

@@ -181,3 +181,76 @@ def test_read_only_failure_does_not_poison_recovery_after_sqlite_reopen(
     assert json.loads(recovered.body)["data"] == {
         "task_id": record.task_id, "state": "CREATED",
     }
+
+
+@pytest.mark.parametrize("corrupt_json", ["[]", "null", "\"not-an-object\"", "7"])
+def test_valid_json_with_wrong_canonical_payload_shape_fails_closed_and_recovers(
+    tmp_path, corrupt_json,
+) -> None:
+    db = tmp_path / "nika.db"
+    store = SQLiteStore(db)
+    store.initialize()
+    queue = TaskQueue(store)
+    record = queue.create(
+        workspace_id="workspace-a",
+        agent_id="agent-a",
+        payload={"private_token": "do-not-serialize-this"},
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (corrupt_json, record.task_id),
+        )
+
+    # Even malformed state is not an existence/health oracle for another
+    # workspace. It must look identical to a genuinely absent task.
+    foreign = _inspect(_adapter(queue), _principal("workspace-b"), record.task_id)
+    missing = _inspect(_adapter(queue), _principal("workspace-b"), "no-such-task")
+    assert foreign.status_code == missing.status_code == 409
+    assert json.loads(foreign.body)["code"] == "not_found"
+    assert foreign.body == missing.body
+
+    response = _inspect(_adapter(queue), _principal(), record.task_id)
+    result = json.loads(response.body)
+    assert response.status_code == 200
+    assert result["status"] == "failed"
+    assert result["code"] == "storage_unavailable"
+    assert result["request_id"] == "query-1"
+    assert result["data"] == {}
+    assert b"do-not-serialize-this" not in response.body
+    assert b"outcome_unknown" not in response.body
+
+    # Correcting the incumbent SQLite record recovers without a Web task store.
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            ("{}", record.task_id),
+        )
+    reopened = SQLiteStore(db)
+    reopened.initialize()
+    recovered = _inspect(_adapter(TaskQueue(reopened)), _principal(), record.task_id)
+    assert recovered.status_code == 200
+    assert json.loads(recovered.body)["data"] == {
+        "task_id": record.task_id, "state": "CREATED",
+    }
+
+
+def test_canonical_task_deserialization_type_error_is_definite_query_failure(
+    tmp_path, monkeypatch,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    queue = TaskQueue(store)
+
+    def damaged_row(_task_id: str):
+        raise TypeError("sensitive internal sqlite row type")
+
+    monkeypatch.setattr(queue, "get", damaged_row)
+    response = _inspect(_adapter(queue), _principal(), "opaque-task")
+    body = json.loads(response.body)
+    assert response.status_code == 200
+    assert body["status"] == "failed"
+    assert body["code"] == "storage_unavailable"
+    assert body["request_id"] == "query-1"
+    assert body["data"] == {}
+    assert b"sensitive internal" not in response.body
