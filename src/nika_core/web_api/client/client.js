@@ -12,7 +12,7 @@
 
   // Bound response allocation before decoding JSON. Browser input and even
   // misconfigured server responses are not an authority for memory budgets.
-  async function readBoundedJson(response) {
+  async function readBoundedJson(response, signal) {
     const contentType = response.headers.get("content-type");
     if (typeof contentType !== "string" ||
         !/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(contentType.trim())) {
@@ -28,11 +28,20 @@
       throw new Error("streaming response unavailable");
     }
     const reader = response.body.getReader();
+    // Some fetch/stream implementations may ignore abort during a pending
+    // reader.read(). Race the read against the same request deadline signal
+    // so keyboard users can recover without an indefinitely busy form.
+    let onAbort;
+    const aborted = new Promise((_, reject) => {
+      onAbort = () => reject(new Error("request deadline exceeded"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
     const parts = [];
     let total = 0;
     try {
       while (true) {
-        const item = await reader.read();
+        const item = await Promise.race([reader.read(), aborted]);
         if (item.done) break;
         if (!(item.value instanceof Uint8Array)) {
           throw new Error("invalid response chunk");
@@ -44,9 +53,17 @@
         parts.push(item.value);
       }
     } catch (error) {
-      await reader.cancel().catch(() => {});
+      // Cancellation is best effort: waiting for a broken reader.cancel()
+      // would reintroduce the same permanent busy-state failure.
+      try {
+        const cancellation = reader.cancel();
+        if (cancellation && typeof cancellation.catch === "function") {
+          cancellation.catch(() => {});
+        }
+      } catch (_ignored) {}
       throw error;
     } finally {
+      signal.removeEventListener("abort", onAbort);
       reader.releaseLock();
     }
     if (lengthHeader !== null && Number(lengthHeader) !== total) {
@@ -112,7 +129,7 @@
         report("Стан недоступний або немає дозволу. Перевірте авторизацію й повторіть вручну.");
         return;
       }
-      const outcome = await readBoundedJson(response);
+      const outcome = await readBoundedJson(response, controller.signal);
       // Some transports can resolve after abort; never publish a late result.
       if (controller.signal.aborted) {
         throw new Error("request deadline exceeded");

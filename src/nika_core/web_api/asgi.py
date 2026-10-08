@@ -283,6 +283,12 @@ class ASGICommandApplication:
                 # Do not leak exception text (possibly including request/secret data).
                 # asyncio.CancelledError remains uncaught so host cancellation works.
                 return self._error(500, "request_receive_failed")
+            # asyncio.wait_for can return *after* its timeout when an ASGI
+            # receive coroutine suppresses cancellation and yields a late
+            # complete body. Recheck the absolute deadline before effects;
+            # a timed-out upload cannot be resurrected by a hostile receiver.
+            if loop.time() >= deadline:
+                return self._error(408, "request_receive_timeout")
             if type(event) is not dict:
                 return self._error(400, "invalid_request_stream")
             kind = event.get("type")

@@ -128,3 +128,32 @@ def test_receive_timeout_exception_does_not_publish_command_outcome():
     assert response[0]["status"] == 408
     assert b"attacker-controlled" not in response[1]["body"]
     assert effect.calls == 0
+
+
+def test_cancel_suppressing_receiver_cannot_resurrect_expired_effect(monkeypatch):
+    """wait_for alone is insufficient: cancelled receive may still return a body."""
+    app, effect, scope, body = _fixture()
+    monkeypatch.setattr(asgi_module, "_MAX_RECEIVE_SECONDS", 0.01)
+
+    async def late_receive():
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            # ASGI host does not control behavior of every receive adapter.
+            # An already-cancelled upload must not reach Core after deadline.
+            await asyncio.sleep(0.02)
+            return {"type": "http.request", "body": body, "more_body": False}
+
+    response = _invoke(app, scope, late_receive)
+    assert response[0]["status"] == 408
+    assert json.loads(response[1]["body"])["code"] == "request_receive_timeout"
+    assert effect.calls == 0
+
+    monkeypatch.setattr(asgi_module, "_MAX_RECEIVE_SECONDS", 15.0)
+
+    async def healthy_receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    response = _invoke(app, scope, healthy_receive)
+    assert response[0]["status"] == 200
+    assert effect.calls == 1

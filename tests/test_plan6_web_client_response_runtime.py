@@ -22,6 +22,7 @@ const assert = require("node:assert/strict");
   let submit;
   let fetchCalls = 0;
   let cancelCalls = 0;
+  let expireStream;
   class Element {
     constructor() {
       this.textContent = "";
@@ -73,12 +74,19 @@ const assert = require("node:assert/strict");
         name === "content-length" ? lengthHeader : null },
       body: { getReader: () => ({
         async read() {
+          if (scenario === "stalled-stream") {
+            expireStream();
+            return new Promise(() => {});
+          }
           if (readCalls++ === 0) {
             return { done: false, value: Uint8Array.from(responseBytes) };
           }
           return { done: true };
         },
-        async cancel() { cancelCalls++; },
+        async cancel() {
+          cancelCalls++;
+          if (scenario === "stalled-stream") return new Promise(() => {});
+        },
         releaseLock() {}
       }) }
     };
@@ -89,6 +97,7 @@ const assert = require("node:assert/strict");
     fetch, Uint8Array, TextDecoder, AbortController,
     setTimeout: callback => {
       if (scenario === "timeout") callback();
+      if (scenario === "stalled-stream") expireStream = callback;
       return 1;
     },
     clearTimeout
@@ -116,13 +125,15 @@ const assert = require("node:assert/strict");
   if (["bidi", "lookalike", "zero-width"].includes(scenario)) {
     assert.match(nodes["app-status"].textContent, /ідентифікатор/u);
   }
-  if (scenario === "timeout") {
+  if (scenario === "timeout" || scenario === "stalled-stream") {
     assert.match(nodes["app-status"].textContent, /перервано/u);
   }
   if (scenario === "length-mismatch") {
     assert.match(nodes["app-status"].textContent, /перервано/u);
   }
-  if (scenario === "oversize") assert.equal(cancelCalls, 1);
+  if (scenario === "oversize" || scenario === "stalled-stream") {
+    assert.equal(cancelCalls, 1);
+  }
   console.log("PASS", scenario);
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
@@ -131,7 +142,8 @@ const assert = require("node:assert/strict");
 @pytest.mark.parametrize(
     "scenario",
     ["ok", "mismatch", "oversize", "declared-oversize", "invalid-utf8", "wrong-mime",
-     "edited", "bidi", "lookalike", "zero-width", "timeout", "length-mismatch"],
+     "edited", "bidi", "lookalike", "zero-width", "timeout", "length-mismatch",
+     "stalled-stream"],
 )
 def test_packaged_web_client_bounds_and_correlates_response(scenario: str) -> None:
     node = shutil.which("node")

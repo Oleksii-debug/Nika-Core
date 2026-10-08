@@ -50,3 +50,22 @@ Section 41 scope, secure deployed composition, exact-head dual-OS tests,
 integration/readback and proper GitHub/Drive closure pass. This child PR
 depends on the Section 1 lineage; do not merge it before the parent is
 qualified and integrated into canonical `main`.
+
+
+## Stalled response-stream recovery — Plan 6 §2
+
+When the 15-second browser request deadline aborts, an untrusted response
+stream may still leave `reader.read()` unresolved. The existing bounded
+JSON reader now races each read against that same abort signal, detaches its
+abort listener after completion, and never awaits a misbehaving
+`reader.cancel()` during cleanup. The form's busy state and disabled submit
+button therefore become recoverable even if stream cancellation is unresolved.
+The safety contract remains same-origin, read-only, manual retry, no browser
+authority, no storage of credentials and output-only `textContent`.
+
+`tests/test_plan6_web_client_response_runtime.py` adds the negative
+`stalled-stream` case with both unresolved reader and unresolved cancellation,
+plus prior happy-path/correlation/response-budget tests. Focused exact-source
+V8 in-process checks exercised success, stalled-stream abort, wrong MIME and
+edited task ID; these are **not** a checked-in Node run, real browser/NVDA
+proof, full dual-OS CI, commercial account layer, or terminal DONE.
