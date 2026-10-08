@@ -133,6 +133,20 @@ class ASGICommandApplication:
                 if key in selected:
                     return self._error(400, "duplicate_security_header")
                 selected[key] = value
+        if b"content-length" in selected and b"transfer-encoding" in selected:
+            return self._error(400, "conflicting_request_framing")
+        declared_length: int | None = None
+        if b"content-length" in selected:
+            declared_bytes = selected[b"content-length"]
+            if (
+                not declared_bytes
+                or len(declared_bytes) > 10
+                or not all(48 <= digit <= 57 for digit in declared_bytes)
+            ):
+                return self._error(400, "invalid_content_length")
+            declared_length = int(declared_bytes)
+            if declared_length > _MAX_HTTP_BODY_BYTES:
+                return self._error(413, "payload_too_large")
         if b"cookie" in selected:
             # Until server-owned CSRF/session semantics exist, cookie auth is not admitted.
             return self._error(403, "cookie_auth_unavailable")
@@ -174,6 +188,8 @@ class ASGICommandApplication:
                 return self._error(413, "payload_too_large")
             chunks.append(chunk)
             if not more:
+                if declared_length is not None and length != declared_length:
+                    return self._error(400, "invalid_content_length")
                 try:
                     return self._adapter.handle(
                         principal=principal,
