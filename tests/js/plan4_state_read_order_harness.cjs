@@ -194,6 +194,41 @@ async function main() {
   assert.equal(displayed[4][0].task_id, "valid-recovered");
   console.log("PASS: validated task projection restores keyboard target after corrupt reads");
 
+
+  const unsafePeerReads = [
+    {agents: [{name: "Bad\nagent", goal: "Goal"}]},
+    {agents: [{name: "Agent", goal: "Goal\u202Ehidden"}]},
+    {agents: [{name: "x".repeat(161), goal: "Goal"}]},
+    {workspaces: [{name: "Workspace", description: "Hidden\u2028line"}]},
+    {workspaces: [{name: "Workspace", description: "x".repeat(1025)}]},
+    {agents: Array.from({length: 257}, (_, i) => ({name: "Agent " + i, goal: "Goal"}))},
+    {workspaces: Array.from({length: 257}, (_, i) => ({name: "Space " + i}))},
+    {tasks: Array.from({length: 257}, (_, i) => ({task_id: "task-" + i}))},
+    {tasks: [{task_id: "safe", command: "unsafe\u2029line"}]},
+  ];
+  for (const [index, override] of unsafePeerReads.entries()) {
+    older = refreshState();
+    pending[21 + index].resolve({ok: true, state: {
+      tasks: [{task_id: "new-valid"}], ...override,
+    }});
+    assert.equal(await older, false);
+    assert.equal(displayed.length, 5,
+      "unsafe peer state must preserve the verified keyboard task selection");
+  }
+  assert.equal(outages, 13 + unsafePeerReads.length);
+  console.log("PASS: invalid peer names, controls and list budgets fail closed");
+
+  older = refreshState();
+  pending[21 + unsafePeerReads.length].resolve({ok: true, state: {
+    tasks: [{task_id: "recovered-after-peers", command: "Legal task"}],
+    agents: [{name: "Агент", goal: "Завдання"}],
+    workspaces: [{name: "Робочий простір", description: "Звичайний опис"}],
+  }});
+  assert.equal(await older, true);
+  assert.equal(displayed.length, 6);
+  assert.equal(displayed[5][0].task_id, "recovered-after-peers");
+  console.log("PASS: safe Ukrainian semantic lists recover after rejected snapshots");
+
   const pollFactory = new Function("ctx",
     "const {window, document, refreshState, inFlightActions}=ctx;"
     + "let statePollHandle=null;"

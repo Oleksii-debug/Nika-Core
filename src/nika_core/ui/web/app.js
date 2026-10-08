@@ -640,23 +640,31 @@
     const agentItems = state.agents ?? [];
     const workspaceItems = state.workspaces ?? [];
     if (!Array.isArray(agentItems) || !Array.isArray(workspaceItems)
+        || agentItems.length > 256 || workspaceItems.length > 256
         || agentItems.some((item) => !item || typeof item !== "object"
           || Array.isArray(item) || typeof item.name !== "string"
-          || typeof item.goal !== "string")
+          || !item.name.trim() || item.name.length > 160
+          || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.name)
+          || typeof item.goal !== "string" || item.goal.length > 1024
+          || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.goal))
         || workspaceItems.some((item) => !item || typeof item !== "object"
           || Array.isArray(item) || typeof item.name !== "string"
-          || (item.description != null && typeof item.description !== "string"))
-        || !Array.isArray(state.tasks) || state.tasks.some(
+          || !item.name.trim() || item.name.length > 160
+          || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.name)
+          || (item.description != null && (typeof item.description !== "string"
+            || item.description.length > 1024
+            || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.description))))
+        || !Array.isArray(state.tasks) || state.tasks.length > 256 || state.tasks.some(
       (item) => !item || typeof item !== "object" || Array.isArray(item)
         || typeof item.task_id !== "string" || !item.task_id.trim()
         || item.task_id.length > 256
-        || /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/.test(item.task_id)
+        || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.task_id)
         || (item.state != null && (typeof item.state !== "string"
           || !item.state.trim() || item.state.length > 128
-          || /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/.test(item.state)))
+          || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.state)))
         || (item.command != null && (typeof item.command !== "string"
           || item.command.length > 8192
-          || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/.test(item.command)))
+          || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.command)))
         // The desktop task projection is scoped to the canonical local
         // workspace/agent. Never announce a foreign task from a bad bridge read.
         || (item.workspace_id != null && item.workspace_id !== "default")
@@ -926,10 +934,10 @@
           || typeof action.label !== "string" || !action.label || action.label.length > 256
           // UI labels/shortcuts must not contain invisible direction overrides
           // or control characters that spoof the NVDA keyboard inventory.
-          || /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/.test(action.label)
+          || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(action.label)
           || (action.binding != null && (typeof action.binding !== "string"
             || action.binding.length > 256
-            || /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/.test(action.binding)))
+            || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(action.binding)))
           || typeof action.may_be_unbound !== "boolean")
         || new Set(nextActions.map((action) => action.action_id)).size !== nextActions.length) {
       actionsReady = false;
