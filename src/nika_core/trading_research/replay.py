@@ -228,6 +228,11 @@ class ReplayBook:
         accepted = self._accepted_orders.get(key)
         if accepted is not None and order != accepted:
             raise TradingResearchError("conflicting approved order replay identity")
+        # Prepare the detached identity before accounting/cancellation effects.
+        # Even an unexpected copy failure cannot leave a partial transition.
+        order_snapshot = accepted if accepted is not None else deepcopy(order)
+        if order != order_snapshot:
+            raise TradingResearchError("unstable approved order replay identity")
         terminal = self._terminal.get(key)
         if terminal is not None:
             return terminal
@@ -256,7 +261,7 @@ class ReplayBook:
             self.ledger.apply_fill(update.fill)
         self._remaining[key] = update.remaining_quantity
         self._last_slice[key] = (time_slice.index, time_slice.at, slice_events, update)
-        self._accepted_orders.setdefault(key, deepcopy(order))
+        self._accepted_orders.setdefault(key, order_snapshot)
         if update.state in {OrderState.FILLED, OrderState.EXPIRED, OrderState.CANCELLED}:
             self._terminal[key] = update
         return update
@@ -267,11 +272,16 @@ class ReplayBook:
         accepted = self._accepted_orders.get(key)
         if accepted is not None and order != accepted:
             raise TradingResearchError("conflicting approved order replay identity")
+        # Prepare the detached identity before accounting/cancellation effects.
+        # Even an unexpected copy failure cannot leave a partial transition.
+        order_snapshot = accepted if accepted is not None else deepcopy(order)
+        if order != order_snapshot:
+            raise TradingResearchError("unstable approved order replay identity")
         terminal = self._terminal.get(key)
         if terminal is not None:
             return terminal
         remaining = self._remaining.get(key, order.intent.quantity)
         update = OrderUpdate(order.approval_id, OrderState.CANCELLED, remaining, reason=reason)
         self._terminal[key] = update
-        self._accepted_orders.setdefault(key, deepcopy(order))
+        self._accepted_orders.setdefault(key, order_snapshot)
         return update
