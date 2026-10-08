@@ -78,6 +78,12 @@ async function run(source) {
   await assert.rejects(ui.refreshKeymap());
   assert.equal(replacements, 1);
   console.log("PASS: control and bidi text cannot spoof the NVDA keymap");
+  inventory.push([good]);
+  assert.equal(await ui.refreshKeymap(), true, "safe inventory must recover");
+  assert.equal(replacements, 2);
+  assert.equal(ui.snapshot().actionsReady, true);
+  assert.equal(displayed[0].children[0].textContent, good.label);
+  console.log("PASS: safe keyboard inventory restores editing after a failed refresh");
 }
 
 if (require.main === module) {
