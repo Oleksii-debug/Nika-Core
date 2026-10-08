@@ -25,4 +25,4 @@ def test_plan4_autostart_acknowledgement_and_uncertain_write_fence() -> None:
         cwd=ROOT, capture_output=True, text=True, timeout=15, check=False,
     )
     assert run.returncode == 0, run.stdout + run.stderr
-    assert run.stdout.count("PASS:") == 7, run.stdout
+    assert run.stdout.count("PASS:") == 8, run.stdout
