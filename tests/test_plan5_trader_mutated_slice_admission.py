@@ -112,3 +112,38 @@ def test_accepted_order_is_detached_from_later_caller_mutation() -> None:
         book.process_existing_order(order, TimeSlice(1, NOW, (_quote(),)))
     assert book.ledger.cash == Decimal("1000")
     assert book._remaining[next(iter(book._remaining))] == Decimal("2")
+
+
+@pytest.mark.parametrize("fraction", [Decimal("0"), Decimal("2"), Decimal("NaN")])
+def test_mutated_execution_policy_cannot_expand_paper_liquidity(fraction: Decimal) -> None:
+    order = _approved()
+    object.__setattr__(order.policy, "max_fill_fraction", fraction)
+    with pytest.raises(TradingResearchError):
+        SimulationExecutionEngine().execute(order, TimeSlice(1, NOW, (_quote(),)))
+    book = ReplayBook(PortfolioLedger(Decimal("1000")))
+    with pytest.raises(TradingResearchError):
+        book.process_existing_order(order, TimeSlice(1, NOW, (_quote(),)))
+    assert book.ledger.cash == Decimal("1000")
+    assert book._last_slice == {}
+
+
+def test_postapproval_forged_quantity_type_cannot_reach_ledger() -> None:
+    order = _approved()
+    object.__setattr__(order.intent, "quantity", 2.0)
+    book = ReplayBook(PortfolioLedger(Decimal("1000")))
+    with pytest.raises(TradingResearchError, match="invalid paper approved order"):
+        book.process_existing_order(order, TimeSlice(1, NOW, (_quote(),)))
+    assert book.ledger.cash == Decimal("1000")
+    assert book._accepted_orders == {}
+
+
+def test_rejected_mutated_order_does_not_poison_valid_retry() -> None:
+    book = ReplayBook(PortfolioLedger(Decimal("1000")))
+    order = _approved()
+    object.__setattr__(order.policy, "slippage_bps", Decimal("-1"))
+    with pytest.raises(TradingResearchError):
+        book.process_existing_order(order, TimeSlice(1, NOW, (_quote(),)))
+    assert book.ledger.cash == Decimal("1000")
+    good = book.process_existing_order(_approved(), TimeSlice(1, NOW, (_quote(),)))
+    assert good.state is OrderState.FILLED
+    assert book.ledger.cash == Decimal("798")
