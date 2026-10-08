@@ -198,6 +198,10 @@ class UIActionBridge:
             ) from None
 
     def set_binding(self, action_id: str, binding: str | None) -> dict[str, Any]:
+        # These methods are directly callable by pywebview. Do not invoke
+        # behavioral str subclasses from a hostile in-process caller.
+        if type(action_id) is not str or (binding is not None and type(binding) is not str):
+            return {"ok": False, "message": "Action and shortcut must be plain text."}
         try:
             self._keymap.set_binding(action_id, binding)
         except (KeyError, TypeError, ValueError) as exc:
@@ -207,6 +211,8 @@ class UIActionBridge:
         return {"ok": True, "message": "Shortcut saved."}
 
     def restore_default(self, action_id: str) -> dict[str, Any]:
+        if type(action_id) is not str:
+            return {"ok": False, "message": "Action ID must be plain text."}
         try:
             self._keymap.restore_default(action_id)
         except (KeyError, TypeError, ValueError) as exc:
@@ -223,7 +229,7 @@ class UIActionBridge:
         return {"ok": True, "data": data, "message": "Shortcut map exported."}
 
     def import_keymap(self, data: str) -> dict[str, Any]:
-        if not isinstance(data, str):
+        if type(data) is not str:
             return {"ok": False, "message": "Shortcut map must be JSON text."}
         try:
             self._keymap.import_json(data)
