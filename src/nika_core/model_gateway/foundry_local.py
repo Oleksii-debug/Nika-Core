@@ -42,6 +42,30 @@ class FoundryModelEvidence:
 
 
 
+def _require_foundry_evidence_text(
+    value: object, *, field: str, limit: int
+) -> str:
+    """Admit exact, bounded public model/evidence identifiers before the SDK."""
+    if type(value) is not str or not value or len(value) > limit:
+        raise ValueError(f"{field} must contain canonical bounded text")
+    if (
+        value != value.strip()
+        or unicodedata.normalize("NFC", value) != value
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+            for character in value
+        )
+    ):
+        raise ValueError(f"{field} must contain canonical bounded text")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must contain canonical bounded text") from exc
+    if len(encoded) > limit:
+        raise ValueError(f"{field} must contain canonical bounded text")
+    return value
+
+
 def _snapshot_download_authorization(
     authorization: ModelDownloadAuthorization,
 ) -> ModelDownloadAuthorization:
@@ -52,43 +76,18 @@ def _snapshot_download_authorization(
     model = authorization.model
     license_reference = authorization.license_reference
     expected_model_id = authorization.expected_model_id
-    if (
-        type(provider_id) is not str
-        or type(model) is not str
-        or type(license_reference) is not str
-        or (expected_model_id is not None and type(expected_model_id) is not str)
-    ):
-        raise ValueError("download authorization must contain canonical plain text")
-    # A reviewed model/license identity is also evidence: bidi/control spoofing,
-    # non-normalized text, invalid UTF-8, and unbounded fields must never reach
-    # the native SDK, diagnostic text or a durable acquisition record.
+    # The same canonical public identifier admission applies to acquisition,
+    # provider configuration, and model inspection; none grant download consent.
     for field, limit in (
         (provider_id, 128),
         (model, 512),
         (license_reference, 4096),
         (expected_model_id, 512),
     ):
-        if field is None:
-            continue
-        if (
-            not field
-            or len(field) > limit
-            or field != field.strip()
-            or unicodedata.normalize("NFC", field) != field
-            or any(
-                unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
-                for character in field
+        if field is not None:
+            _require_foundry_evidence_text(
+                field, field="download authorization", limit=limit
             )
-        ):
-            raise ValueError("download authorization must contain canonical bounded text")
-        try:
-            encoded = field.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise ValueError(
-                "download authorization must contain canonical bounded text"
-            ) from exc
-        if len(encoded) > limit:
-            raise ValueError("download authorization must contain canonical bounded text")
     return ModelDownloadAuthorization(
         provider_id=provider_id,
         model=model,
@@ -128,20 +127,16 @@ class FoundryLocalProvider:
         resource_observer: ResourceObserverPort | None = None,
         manager_factory: Callable[[], Any] | None = None,
     ) -> None:
-        if not default_model.strip():
-            raise ValueError("default_model must not be empty")
-        if default_model != default_model.strip():
-            raise ValueError("default_model must not contain surrounding whitespace")
+        _require_foundry_evidence_text(default_model, field="default_model", limit=512)
         if allow_download:
             raise ValueError(
                 "allow_download on FoundryLocalProvider is no longer supported; "
                 "use download_model() with ModelDownloadAuthorization"
             )
         if expected_model_id is not None:
-            if not expected_model_id.strip():
-                raise ValueError("expected_model_id must not be empty")
-            if expected_model_id != expected_model_id.strip():
-                raise ValueError("expected_model_id must not contain surrounding whitespace")
+            _require_foundry_evidence_text(
+                expected_model_id, field="expected_model_id", limit=512
+            )
         if resource_policy is not None and resource_observer is None:
             raise ValueError("resource_observer is required when resource_policy is configured")
 
@@ -422,11 +417,10 @@ class FoundryLocalProvider:
 
     def inspect_model(self, model_alias: str | None = None) -> FoundryModelEvidence:
         """Return read-only public-SDK metadata for release/hardware evidence."""
-        alias = model_alias or self._default_model
-        if not alias.strip():
-            raise ValueError("model_alias must not be empty")
-        if alias != alias.strip():
-            raise ValueError("model_alias must not contain surrounding whitespace")
+        # An explicit empty/invalid alias must never silently fall back to the
+        # configured model and produce misleading hardware/provenance evidence.
+        alias = self._default_model if model_alias is None else model_alias
+        _require_foundry_evidence_text(alias, field="model_alias", limit=512)
         model = self._get_model(alias)
         if self._expected_model_id is not None:
             self._validate_model_identity(model, self._expected_model_id)
