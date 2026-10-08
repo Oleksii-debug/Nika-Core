@@ -118,12 +118,12 @@ class TradingStateRepository:
                     raise RuntimeError("conflicting durable fill identity")
                 account = _validated_account_row(conn, workspace_id, run_id)
                 assert account is not None
-                _decode_account_payload(str(account["payload"]))
                 if (
                     str(account["last_fill_id"]) == fill.fill_id
                     and str(account["payload"]) != payload
                 ):
                     raise RuntimeError("conflicting durable account state")
+                _decode_account_payload(str(account["payload"]))
                 return False
             conn.execute(
                 "INSERT INTO trading_research_run_fills("
