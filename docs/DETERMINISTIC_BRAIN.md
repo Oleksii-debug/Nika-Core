@@ -38,6 +38,11 @@ starting a planner process. Harder unsatisfiable cases remain the planner's resp
 No Unified Planning problem, fluent, action, plan, result, Aries, gRPC, SQLite or runtime-ledger
 type is exposed by the Nika deterministic planning contracts.
 
+Action catalogs and restored completion checkpoints are each bounded at 10,000 entries,
+and rejected before deepcopy, planning, journal inspection or tool effects. This protects the
+canonical runtime from adversarially oversized replay inputs without introducing another
+runtime authority or changing ToolExecutor permissions.
+
 Untrusted tool arguments are admitted before any planner/journal/tool call or caller-owned
 deep-copy. Nested carriers must be exact inert built-ins; nesting is limited to 32 levels
 and 10,000 counted elements including keys. Per-action UTF-8 text across keys and values

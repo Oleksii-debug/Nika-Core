@@ -232,6 +232,12 @@ class DeterministicBrain:
             raise ValueError("actions must be an immutable tuple")
         if type(previously_completed_action_ids) is not tuple:
             raise ValueError("previously_completed_action_ids must be an immutable tuple")
+        # Refuse unbounded catalogs/checkpoints before scanning or deep-copying
+        # any untrusted action arguments. One run may admit at most 10k IDs.
+        if len(actions) > 10_000:
+            raise ValueError("deterministic action catalog exceeds 10000 entries")
+        if len(previously_completed_action_ids) > 10_000:
+            raise ValueError("deterministic completion checkpoint exceeds 10000 entries")
 
         # Treat caller-owned records as input, not mutable runtime authority. In
         # particular, a frozen DeterministicAction still contains a mutable arguments
