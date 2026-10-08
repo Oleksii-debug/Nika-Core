@@ -45,3 +45,18 @@ head/CI/integration evidence must be checked before claiming terminal DONE.
 
 ## Follow-up identity admission repair
 Durable run/task/thread/resume/checkpoint identities are now validated as real Python strings, NFC-normalized, nonblank, without surrounding whitespace, Unicode control/format/surrogate characters or embedded line separators before they can become runtime or recovery authority. Additional negative regression cases cover type confusion, Unicode bidi/zero-width, and forged multiline identifiers. Existing runtime adapter and persistent recovery paths stay unchanged; exact-head CI and integration readback remain mandatory before DONE.
+
+## Per-invocation resource admission (additional Section 2 hardening)
+The Nika-owned `RuntimeRequest` and `RuntimeResumeRequest` envelopes now
+share explicit upper limits: `1 <= max_steps <= 10_000` and an optional
+`0 < timeout_seconds <= 86_400` (finite seconds). These are per-call guardrails,
+not a cap on the entire durable task/ProductProject lifetime. Over-budget
+initial or recovered invocations fail before adapter dispatch. The limits
+are enforced by the existing `_validate_limits` authority; no second scheduler,
+runtime or policy authority is introduced.
+
+The adversarial tests reject huge integer step budgets and overly long
+time budgets on both initial and resume requests, and exercise both valid
+ceiling and near-ceiling inputs. Tests and source were committed for CI;
+this text does **not** certify exact-head Ubuntu/Windows execution,
+restart integration, downstream clients, or terminal Section 2 closure.
