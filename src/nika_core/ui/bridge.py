@@ -106,7 +106,10 @@ class UIActionBridge:
             ).model_dump()
 
         if isinstance(outcome, UIResult):
-            if not self._safe_accessible_status(outcome.message) or not self._safe_focus_target(outcome.focus_id):
+            if (
+                not self._safe_accessible_status(outcome.message)
+                or not self._safe_focus_target(outcome.focus_id)
+            ):
                 return self._unsafe_handler_status(command.action_id, command.request_id)
             if outcome.request_id != command.request_id:
                 return UIResult(
