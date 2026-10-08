@@ -177,3 +177,70 @@ def test_corrupt_owned_task_remains_bounded_definite_failure(
     assert body["request_id"] == "read-1"
     assert body["data"] == {}
     assert b"outcome_unknown" not in result.body
+
+
+def test_sqlite_fault_after_workspace_transfer_is_opaque_not_owner_error(
+    tmp_path, monkeypatch,
+) -> None:
+    _, store, queue = _queue(tmp_path)
+    task = queue.create(workspace_id="workspace-a", agent_id="agent-a")
+
+    def transfer_then_fail(task_id: str):
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE tasks SET workspace_id = ? WHERE task_id = ?",
+                ("workspace-b", task_id),
+            )
+        raise sqlite3.OperationalError("private-tenant-db-path")
+
+    monkeypatch.setattr(queue, "get", transfer_then_fail)
+    moved = _inspect(queue, "workspace-a", task.task_id)
+    absent = _inspect(queue, "workspace-a", "missing-task")
+    assert moved.status_code == absent.status_code == 409
+    assert moved.body == absent.body
+    assert b"private-tenant-db-path" not in moved.body
+
+
+def test_sqlite_fault_after_task_delete_is_opaque_not_owner_error(
+    tmp_path, monkeypatch,
+) -> None:
+    _, store, queue = _queue(tmp_path)
+    task = queue.create(workspace_id="workspace-a", agent_id="agent-a")
+
+    def delete_then_fail(task_id: str):
+        with store.connection() as conn:
+            conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        raise sqlite3.DatabaseError("deleted-private-task-state")
+
+    monkeypatch.setattr(queue, "get", delete_then_fail)
+    missing = _inspect(queue, "workspace-a", task.task_id)
+    absent = _inspect(queue, "workspace-a", "missing-task")
+    assert missing.status_code == absent.status_code == 409
+    assert missing.body == absent.body
+    assert b"deleted-private-task-state" not in missing.body
+
+
+def test_sqlite_fault_for_still_owned_task_is_bounded_and_recoverable(
+    tmp_path, monkeypatch,
+) -> None:
+    path, _, queue = _queue(tmp_path)
+    task = queue.create(workspace_id="workspace-a", agent_id="agent-a")
+
+    def fail_read(_task_id: str):
+        raise sqlite3.DatabaseError("credential-leak-must-not-escape")
+
+    monkeypatch.setattr(queue, "get", fail_read)
+    failed = _inspect(queue, "workspace-a", task.task_id)
+    result = json.loads(failed.body)
+    assert failed.status_code == 200
+    assert result["status"] == "failed"
+    assert result["code"] == "storage_unavailable"
+    assert result["request_id"] == "read-1"
+    assert result["data"] == {}
+    assert b"credential-leak-must-not-escape" not in failed.body
+    reopened = SQLiteStore(path)
+    reopened.initialize()
+    recovered = _inspect(TaskQueue(reopened), "workspace-a", task.task_id)
+    assert recovered.status_code == 200
+    assert json.loads(recovered.body)["data"]["state"] == "CREATED"
