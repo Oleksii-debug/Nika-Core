@@ -4,8 +4,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from math import isfinite
-from unicodedata import category, is_normalized
 from typing import Any, Protocol, runtime_checkable
+from unicodedata import category, is_normalized
 
 
 class RuntimeCapability(StrEnum):
