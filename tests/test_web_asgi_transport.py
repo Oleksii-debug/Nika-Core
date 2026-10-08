@@ -193,6 +193,57 @@ def test_malformed_stream_fails_without_raw_detail_or_effect() -> None:
 def test_configuration_rejects_non_https_and_wildcard_origins() -> None:
     boundary = WebApplicationBoundary(authorization=_Allow(), handler=_Handler())
     adapter = HttpCommandAdapter(boundary)
-    for origin in ("http://nika.example", "*", "https://nika.example/"):
+    for origin in (
+        "http://nika.example",
+        "*",
+        "https://nika.example/",
+        "https://",
+        "https://nika.example/unsafe",
+        "https://nika.example?query=1",
+        "https://nika.example#fragment",
+        "https://user@nika.example",
+        "https://*.nika.example",
+        "https://nika.example:99999",
+        "https://nika.example:",
+    ):
         with pytest.raises(ValueError, match="origins"):
             ASGICommandApplication(adapter, allowed_origins=frozenset({origin}))
+
+
+@pytest.mark.parametrize(
+    ("headers", "status", "code"),
+    [
+        ([(b"host", b"nika.example"), (b"Host", b"other.example")],
+         400, "duplicate_security_header"),
+        ([(b"authorization", b"Bearer a"), (b"Authorization", b"Bearer b")],
+         400, "duplicate_security_header"),
+        ([(b"content-length", b"1"), (b"Content-Length", b"2")],
+         400, "duplicate_security_header"),
+        ([(b"transfer-encoding", b"chunked"),
+          (b"Transfer-Encoding", b"identity")],
+         400, "duplicate_security_header"),
+        ([(b"x-extra", b"1")] * 65, 431, "too_many_headers"),
+        ([(b"x-extra", b"x" * (16 * 1024))], 431, "headers_too_large"),
+    ],
+)
+def test_hostile_header_inventory_fails_closed(
+    headers: list[tuple[bytes, bytes]], status: int, code: str
+) -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=headers))
+    assert _status(output) == status
+    assert _payload(output)["code"] == code
+    assert handler.calls == 0
+
+
+def test_bounded_normal_headers_and_explicit_https_origin_remain_admitted() -> None:
+    app, handler = _app()
+    headers = [
+        (b"host", b"nika.example"),
+        (b"authorization", b"Bearer verified-by-upstream"),
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]
+    output = _call(app, _scope(principal=_principal(), headers=headers))
+    assert _status(output) == 200
+    assert handler.calls == 1
