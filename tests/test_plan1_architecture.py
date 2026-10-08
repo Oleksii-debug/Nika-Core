@@ -23,6 +23,12 @@ OWNED_BOUNDARIES = (
     "src/nika_core/scheduler/contracts.py",
     "src/nika_core/product_command/contracts.py",
     "src/nika_core/plugins/sdk.py",
+    # Core trust, storage, chronology and action authorities must likewise
+    # never import replaceable runtime/host SDKs directly.
+    "src/nika_core/security/policy.py",
+    "src/nika_core/kernel/audit.py",
+    "src/nika_core/data/schema.py",
+    "src/nika_core/kernel/action_registry.py",
 )
 
 FOREIGN_ENGINE_ROOTS = frozenset(
@@ -53,6 +59,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
     tree = ast.parse(source)
     imports: set[str] = set()
     importlib_names = {"importlib"}
+    builtins_names = {"builtins"}
     dynamic_function_names = {"__import__"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -60,6 +67,8 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
             for alias in node.names:
                 if alias.name == "importlib":
                     importlib_names.add(alias.asname or "importlib")
+                if alias.name == "builtins":
+                    builtins_names.add(alias.asname or "builtins")
         elif isinstance(node, ast.ImportFrom) and node.module:
             names = (node.module,)
             if node.module == "importlib":
@@ -67,6 +76,12 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
                     alias.asname or alias.name
                     for alias in node.names
                     if alias.name == "import_module"
+                )
+            if node.module == "builtins":
+                dynamic_function_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "__import__"
                 )
         else:
             continue
@@ -84,7 +99,31 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
             and isinstance(func.value, ast.Name)
             and func.value.id in importlib_names
         )
-        if not (direct or via_importlib):
+        via_builtins = (
+            isinstance(func, ast.Attribute)
+            and func.attr == "__import__"
+            and isinstance(func.value, ast.Name)
+            and func.value.id in builtins_names
+        )
+        via_getattr = (
+            isinstance(func, ast.Call)
+            and isinstance(func.func, ast.Name)
+            and func.func.id == "getattr"
+            and len(func.args) == 2
+            and isinstance(func.args[0], ast.Name)
+            and isinstance(func.args[1], ast.Constant)
+            and (
+                (
+                    func.args[0].id in importlib_names
+                    and func.args[1].value == "import_module"
+                )
+                or (
+                    func.args[0].id in builtins_names
+                    and func.args[1].value == "__import__"
+                )
+            )
+        )
+        if not (direct or via_importlib or via_builtins or via_getattr):
             continue
         if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(
             node.args[0].value, str
@@ -146,3 +185,37 @@ def test_architecture_guard_does_not_flag_documentation_or_internal_ports() -> N
 def test_architecture_guard_fails_on_invalid_python_instead_of_silently_skipping() -> None:
     with pytest.raises(SyntaxError):
         direct_engine_imports("def broken(:\n")
+
+
+def test_architecture_guard_blocks_builtins_import_alias_escape() -> None:
+    source = (
+        "import builtins as engine_loader\n"
+        "from builtins import __import__ as import_engine\n"
+        "engine_loader.__import__('langgraph.graph')\n"
+        "import_engine('litellm')\n"
+        "import_engine('nika_core.runtime.contracts')\n"
+    )
+    assert direct_engine_imports(source) == ("langgraph.graph", "litellm")
+
+
+def test_architecture_guard_rejects_nonliteral_builtins_import() -> None:
+    source = "from builtins import __import__ as load\nload(unknown_engine)\n"
+    assert direct_engine_imports(source) == ("<nonliteral-dynamic-import>",)
+
+
+def test_architecture_guard_rejects_getattr_dynamic_engine_imports() -> None:
+    source = (
+        "import importlib as loader\n"
+        "import builtins as standard\n"
+        "getattr(loader, 'import_module')('langgraph.graph')\n"
+        "getattr(standard, '__import__')('mcp')\n"
+    )
+    assert direct_engine_imports(source) == ("langgraph.graph", "mcp")
+
+
+def test_architecture_guard_rejects_getattr_nonliteral_provider_name() -> None:
+    source = (
+        "import importlib\n"
+        "getattr(importlib, 'import_module')(user_supplied_module)\n"
+    )
+    assert direct_engine_imports(source) == ("<nonliteral-dynamic-import>",)
