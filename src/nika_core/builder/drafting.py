@@ -61,6 +61,6 @@ class AgentDraftService:
             )
         )
         try:
-            return AgentDefinition.model_validate_json(response.text)
+            return AgentDefinition.import_json(response.text)
         except ValidationError as exc:
             raise ValueError("model returned an invalid AgentDefinition draft") from exc
