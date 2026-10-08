@@ -147,7 +147,10 @@ class PaperWorkspaceQuery:
                     payload["unrealized_pnl"], tuple(projected),
                 )
         except (RuntimeError, ValueError, KeyError, TypeError, sqlite3.Error):
-            # Corrupt durable evidence is neither NOT_CONFIGURED nor empty/healthy.
+            # Permission may be revoked *during* a failed SQLite/decode read.
+            # Recheck before classifying an error as EVIDENCE_UNAVAILABLE:
+            # otherwise a revoked caller learns whether this account is corrupt.
+            self._require_authorized(workspace_id, run_id)
             raise TradingResearchError("paper account evidence unavailable") from None
         # Re-evaluate authorization to catch revocation during the storage read.
         self._require_authorized(workspace_id, run_id)
