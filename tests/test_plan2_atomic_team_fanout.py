@@ -14,6 +14,7 @@ from nika_core.multi_agent import (
     AgentHandoff,
     ChildRequest,
     HandoffKind,
+    MemberState,
     MultiAgentStore,
     TeamQuota,
 )
@@ -148,3 +149,36 @@ def test_concurrent_fanout_waves_never_overbook_quota(tmp_path: Path) -> None:
         results = list(executor.map(wave, ("left", "right")))
     assert sorted(results) == [False, True]
     assert len(_members(store)) == 3
+
+
+@pytest.mark.parametrize(
+    "terminal_state",
+    (MemberState.COMPLETED, MemberState.FAILED, MemberState.CANCELLED),
+)
+def test_terminal_parent_cannot_delegate_after_restart(
+    tmp_path: Path, terminal_state: MemberState,
+) -> None:
+    path = tmp_path / "terminal-parent.db"
+    store = _store(path)
+    store.finish_member_execution(
+        team_id="team-plan2",
+        member_id="root",
+        state=terminal_state,
+        outcome=terminal_state.value,
+        payload={},
+    )
+    # Terminal member state persists even before an overall team-finalization step.
+    restarted = MultiAgentStore(SQLiteStore(path))
+    with pytest.raises(RuntimeError, match="terminal team member cannot delegate"):
+        restarted.spawn_children(
+            team_id="team-plan2",
+            parent_id="root",
+            requests=(_request("late"),),
+            task_handoffs=(_handoff("late"),),
+        )
+    assert _members(MultiAgentStore(SQLiteStore(path))) == ["root"]
+    with SQLiteStore(path).connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM multi_agent_handoffs WHERE team_id = ?",
+            ("team-plan2",),
+        ).fetchone()[0] == 0

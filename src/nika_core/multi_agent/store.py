@@ -204,6 +204,11 @@ class MultiAgentStore:
             if parent_row is None:
                 raise KeyError(f"unknown parent: {parent_id}")
             parent = self._member_from_row(parent_row)
+            # A completed/failed/cancelled parent may not mint fresh child
+            # authority merely because the overall team remains ACTIVE.
+            # Check under the same writer lock as quota and insertion.
+            if parent.state in _TERMINAL_MEMBER_STATES:
+                raise RuntimeError("terminal team member cannot delegate children")
             if parent.depth + 1 > quota.max_depth:
                 raise RuntimeError("spawn depth quota exceeded")
             for thread_id in thread_ids:
