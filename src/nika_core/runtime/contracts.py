@@ -64,7 +64,7 @@ def _validate_runtime_identity(value: str, field_name: str) -> None:
     if not value or value != value.strip():
         raise ValueError(f"{field_name} must be nonempty canonical text")
     if not is_normalized("NFC", value) or any(
-        category(character) in {"Cc", "Cf", "Cs"} or character in "\\u0085\\u2028\\u2029"
+        category(character) in {"Cc", "Cf", "Cs"} or character in "\u0085\u2028\u2029"
         for character in value
     ):
         raise ValueError(f"{field_name} contains noncanonical or control text")
