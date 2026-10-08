@@ -109,3 +109,44 @@ def test_racing_keymap_instances_do_not_commit_duplicate_shortcuts(
     assert after_restart.resolve("nav.tasks") == "Alt+9"
     assert after_restart.resolve("nav.agents") == "Ctrl+2"
     assert len(UIActionBridge(actions, after_restart).list_actions()) == 2
+
+
+@pytest.mark.parametrize(
+    "invalid_json",
+    [
+        "[]",
+        "null",
+        '{"format_version": true, "bindings": {"nav.tasks": "Alt+8"}}',
+        '{"format_version": 1.0, "bindings": {"nav.tasks": "Alt+8"}}',
+        '{"format_version": 1, "format_version": 1, "bindings": {}}',
+        '{"format_version": 1, "bindings": {"nav.tasks": "Alt+8", "nav.tasks": "Alt+9"}}',
+        '{"format_version": 1, "bindings": {"nav.tasks": "Alt+8"}, "bindings": {}}',
+    ],
+)
+def test_malformed_or_ambiguous_import_never_changes_persisted_shortcuts(
+    tmp_path: Path, invalid_json: str
+) -> None:
+    path, actions, keymap = _setup(tmp_path)
+    keymap.set_binding("nav.tasks", "Alt+3")
+    before = keymap.export_json()
+
+    # A duplicate member must never silently choose the last shortcut, and
+    # bool/float versions must not compare equal to integer FORMAT_VERSION.
+    with pytest.raises((ValueError, TypeError)):
+        keymap.import_json(invalid_json)
+
+    assert keymap.export_json() == before
+    reopened = Keymap(SQLiteStore(path), actions)
+    assert reopened.resolve("nav.tasks") == "Alt+3"
+    assert reopened.resolve("nav.agents") == "Ctrl+2"
+    assert len(UIActionBridge(actions, reopened).list_actions()) == 2
+
+
+def test_unambiguous_partial_import_remains_compatible_and_restart_safe(tmp_path: Path) -> None:
+    path, actions, keymap = _setup(tmp_path)
+    keymap.import_json(
+        json.dumps({"format_version": 1, "bindings": {"nav.tasks": "Alt+8"}})
+    )
+    reopened = Keymap(SQLiteStore(path), actions)
+    assert reopened.resolve("nav.tasks") == "Alt+8"
+    assert reopened.resolve("nav.agents") == "Ctrl+2"
