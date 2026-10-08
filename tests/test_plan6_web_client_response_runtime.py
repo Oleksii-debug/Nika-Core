@@ -68,6 +68,11 @@ const assert = require("node:assert/strict");
     assert.equal(init.redirect, "error");
     assert.equal(JSON.parse(init.body).request_id, "fixed-request");
     if (scenario === "edited") nodes["task-id"].value = "other-task";
+    if (scenario === "stalled-fetch") {
+      // Broken fetch ignores abort before exposing headers.
+      expireStream();
+      return new Promise(() => {});
+    }
     return {
       ok: true,
       headers: { get: name => name === "content-type" ? contentType :
@@ -97,7 +102,8 @@ const assert = require("node:assert/strict");
     fetch, Uint8Array, TextDecoder, AbortController,
     setTimeout: callback => {
       if (scenario === "timeout") callback();
-      if (scenario === "stalled-stream") expireStream = callback;
+      if (scenario === "stalled-stream" || scenario === "stalled-fetch")
+        expireStream = callback;
       return 1;
     },
     clearTimeout
@@ -125,7 +131,7 @@ const assert = require("node:assert/strict");
   if (["bidi", "lookalike", "zero-width"].includes(scenario)) {
     assert.match(nodes["app-status"].textContent, /ідентифікатор/u);
   }
-  if (scenario === "timeout" || scenario === "stalled-stream") {
+  if (["timeout", "stalled-stream", "stalled-fetch"].includes(scenario)) {
     assert.match(nodes["app-status"].textContent, /перервано/u);
   }
   if (scenario === "length-mismatch") {
@@ -143,7 +149,7 @@ const assert = require("node:assert/strict");
     "scenario",
     ["ok", "mismatch", "oversize", "declared-oversize", "invalid-utf8", "wrong-mime",
      "edited", "bidi", "lookalike", "zero-width", "timeout", "length-mismatch",
-     "stalled-stream"],
+     "stalled-stream", "stalled-fetch"],
 )
 def test_packaged_web_client_bounds_and_correlates_response(scenario: str) -> None:
     node = shutil.which("node")
