@@ -155,3 +155,65 @@ def test_unresolved_effect_overrides_exact_budget_terminal_success() -> None:
     assert not result.ok
     assert result.error_code is DeterministicErrorCode.SIDE_EFFECT_RECONCILIATION_REQUIRED
     assert planner.calls == 0
+
+
+@pytest.mark.parametrize(
+    "identifier",
+    [" spaced", "bidi\\u202e".replace("\\u202e", "\u202e"),
+     "e\\u0301".replace("\\u0301", "\u0301"), "x" * 513, "\ud800"],
+)
+def test_adversarial_run_identity_cannot_start_planner(identifier: str) -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    with pytest.raises(ValueError, match="canonical bounded UTF-8"):
+        asyncio.run(
+            brain.run(
+                run_id=identifier,
+                state=WorldState(),
+                goal=DeterministicGoal(required=frozenset({"finished"})),
+                actions=_ACTIONS,
+            )
+        )
+    assert planner.calls == 0
+
+
+def test_no_journal_task_id_is_still_canonical() -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    with pytest.raises(ValueError, match="task_id"):
+        asyncio.run(
+            brain.run(
+                run_id="valid-run",
+                task_id="bad\\u202e".replace("\\u202e", "\u202e"),
+                state=WorldState(),
+                goal=DeterministicGoal(required=frozenset({"finished"})),
+                actions=_ACTIONS,
+            )
+        )
+    assert planner.calls == 0
+
+
+def test_action_and_checkpoint_ids_are_rejected_before_planner() -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    rogue_action = DeterministicAction(action_id="rogue\\u202e".replace("\\u202e", "\u202e"))
+    with pytest.raises(ValueError, match="action_id"):
+        asyncio.run(
+            brain.run(
+                run_id="valid-run",
+                state=WorldState(),
+                goal=DeterministicGoal(required=frozenset({"finished"})),
+                actions=(rogue_action,),
+            )
+        )
+    with pytest.raises(ValueError, match="previously_completed_action_id"):
+        asyncio.run(
+            brain.run(
+                run_id="valid-run",
+                state=WorldState(),
+                goal=DeterministicGoal(required=frozenset({"finished"})),
+                actions=_ACTIONS,
+                previously_completed_action_ids=("rogue\\u202e".replace("\\u202e", "\u202e"),),
+            )
+        )
+    assert planner.calls == 0
