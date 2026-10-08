@@ -91,29 +91,53 @@ def _positive_finite_seconds(value: object, *, name: str) -> float:
 
 
 
-def _require_plain_json_arguments(value: object, *, depth: int = 0, budget: list[int]) -> None:
-    """Reject behavioral objects before a caller-controlled deepcopy is attempted."""
+def _require_plain_json_arguments(
+    value: object, *, depth: int = 0, budget: list[int], size_budget: list[int]
+) -> None:
+    """Reject behavioral, malformed and oversized input before caller-owned deepcopy."""
     budget[0] -= 1
     if budget[0] < 0 or depth > 32:
         raise ValueError("deterministic run inputs cannot be detached safely")
     kind = type(value)
-    if value is None or kind in (str, bool, int):
+    if value is None or kind is bool:
+        return
+    if kind is str:
+        try:
+            size_budget[0] -= len(value.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                "deterministic run inputs cannot be detached safely"
+            ) from exc
+        if size_budget[0] < 0:
+            raise ValueError("deterministic run inputs cannot be detached safely")
+        return
+    if kind is int:
+        # Huge integers can exhaust JSON fingerprinting/encoding even with a
+        # small element count. Bound each primitive before invoking the journal.
+        if value.bit_length() > 4096:
+            raise ValueError("deterministic run inputs cannot be detached safely")
         return
     if kind is float and math.isfinite(value):
         return
     if kind in (list, tuple):
         for item in value:
-            _require_plain_json_arguments(item, depth=depth + 1, budget=budget)
+            _require_plain_json_arguments(
+                item, depth=depth + 1, budget=budget, size_budget=size_budget
+            )
         return
     if kind is dict:
         for key, item in value.items():
             if type(key) is not str:
                 break
-            _require_plain_json_arguments(item, depth=depth + 1, budget=budget)
+            _require_plain_json_arguments(
+                key, depth=depth + 1, budget=budget, size_budget=size_budget
+            )
+            _require_plain_json_arguments(
+                item, depth=depth + 1, budget=budget, size_budget=size_budget
+            )
         else:
             return
     raise ValueError("deterministic run inputs cannot be detached safely")
-
 
 
 def _require_plain_facts(value: object) -> None:
@@ -222,7 +246,9 @@ class DeterministicBrain:
                     _require_plain_facts(facts)
                 if action.requires & action.forbids or action.adds & action.removes:
                     raise ValueError("contradictory deterministic action")
-                _require_plain_json_arguments(action.arguments, budget=[10000])
+                _require_plain_json_arguments(
+                    action.arguments, budget=[10000], size_budget=[256 * 1024]
+                )
             state, goal, actions = deepcopy((state, goal, actions))
         except Exception as exc:
             raise ValueError("deterministic run inputs cannot be detached safely") from exc
