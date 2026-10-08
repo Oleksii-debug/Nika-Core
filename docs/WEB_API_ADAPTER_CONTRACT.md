@@ -244,3 +244,31 @@ canonical data correction and restart-style readback. This component repair
 does **not** satisfy outstanding server authentication, tenant/entitlements,
 durable cloud execution, exact-head CI/main integration or Section 1 terminal
 DONE by itself.
+
+## Foreign-task payload admission before canonical JSON decoding (Plan 6 §1)
+
+The read-only Web projection now checks only the existing Core SQLiteStore
+`tasks.workspace_id` using the supplied task ID **after** the independent
+WebAuthorizationPort decision and **before** `TaskQueue.get` deserializes
+persisted payload JSON. Missing and foreign records both return the same opaque
+`not_found`, without parsing large/deep/damaged foreign task payloads.
+This avoids attacker-triggerable parse cost for data outside the caller's
+workspace. A legitimate owner continues through the canonical TaskQueue;
+there is no Web database, duplicate permission service or alternative runtime.
+
+This preliminary read is not a lock or tenant authentication. If the row is
+transferred while the canonical read is in flight, the resulting TaskRecord is
+still checked against the principal. If parsing fails during the transfer,
+the existing metadata-only fallback checks current workspace identity again
+before exposing a bounded storage error. SQLite faults remain definite
+`storage_unavailable` without exception details. The canonical Core store
+can be reopened and successfully queried without any Web recovery state.
+
+Focused evidence: `tests/test_plan6_task_preflight_isolation.py` covers
+foreign/missing no-decode parity, owned canonical read and reopened SQLite,
+secret-free storage failures and clean recovery, a healthy cross-workspace
+transfer race, an invalid JSON transfer race and an owned deeply nested
+payload failure. Tests are authored and require exact-head CI execution.
+This component does **not** establish server-account authentication,
+commercial entitlements, durable cloud workers, multi-tenant production,
+Windows package proof, or terminal Section 1/2 DONE.
