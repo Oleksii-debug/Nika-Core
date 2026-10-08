@@ -8,17 +8,17 @@ set a *trusted* ASGI scheme; forwarded browser headers are not consulted.
 """
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from ipaddress import IPv6Address
-import re
 from typing import Any
 from urllib.parse import urlsplit
 
 from nika_core.web_api.contracts import WebPrincipal
 from nika_core.web_api.http_transport import (
+    _MAX_HTTP_BODY_BYTES,
     HttpCommandAdapter,
     HttpCommandResponse,
-    _MAX_HTTP_BODY_BYTES,
 )
 
 Receive = Callable[[], Awaitable[dict[str, object]]]
@@ -264,7 +264,7 @@ class ASGICommandApplication:
                         content_type=content_type,
                         body=b"".join(chunks),
                     )
-                except Exception:
+                except Exception:  # noqa: BLE001 - untrusted ASGI failures must be sanitized
                     # Framework/transport faults never disclose raw errors or credentials.
                     return self._error(500, "internal_error")
         return self._error(413, "request_stream_too_long")
