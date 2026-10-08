@@ -59,6 +59,7 @@ class RuntimeUnsupportedError(RuntimeError):
 
 MAX_RUNTIME_ID_UTF8_BYTES = 512
 MAX_RUNTIME_PROBE_REASON_UTF8_BYTES = 2048
+MAX_RUNTIME_RESULT_ERROR_UTF8_BYTES = 4096
 
 
 def _validate_runtime_identity(value: str, field_name: str) -> None:
@@ -102,6 +103,28 @@ def _validate_probe_reason(value: str) -> None:
         for character in value
     ):
         raise ValueError("resume probe reason contains noncanonical or control text")
+
+
+def _validate_runtime_result_error(value: str) -> None:
+    """Keep provider diagnostics inert, bounded and readable across durable readback."""
+    if type(value) is not str:
+        raise TypeError("runtime error must be a plain string")
+    if len(value) > MAX_RUNTIME_RESULT_ERROR_UTF8_BYTES:
+        raise ValueError("runtime error exceeds diagnostic size limit")
+    try:
+        byte_count = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError("runtime error contains invalid Unicode") from None
+    if byte_count > MAX_RUNTIME_RESULT_ERROR_UTF8_BYTES:
+        raise ValueError("runtime error exceeds diagnostic size limit")
+    # Existing multiline/tab diagnostics remain valid, but no terminal escapes,
+    # bidi overrides, carriage-return overwrites or surrogate code points.
+    if not is_normalized("NFC", value) or any(
+        (category(char) in {"Cf", "Cs", "Cc"} and char not in "\n\t")
+        or char in "\u0085\u2028\u2029"
+        for char in value
+    ):
+        raise ValueError("runtime error contains noncanonical or control text")
 
 
 def _validate_limits(max_steps: int, timeout_seconds: float | None) -> None:
@@ -209,8 +232,8 @@ class RuntimeResult:
             and self.resume_token is None
         ):
             raise ValueError("resumable outcome requires a usable resume token")
-        if self.error is not None and type(self.error) is not str:
-            raise TypeError("runtime error must be a plain string")
+        if self.error is not None:
+            _validate_runtime_result_error(self.error)
         if self.outcome == RuntimeOutcome.FAILED and (
             self.error is None or not self.error.strip()
         ):
