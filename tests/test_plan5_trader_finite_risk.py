@@ -131,3 +131,29 @@ def test_valid_paper_risk_approval_still_succeeds():
     approved = approve()
     assert approved.authority.workspace_id == "paper-workspace"
     assert approved.intent.quantity == Decimal(1)
+
+
+@pytest.mark.parametrize("field", (
+    "slippage_bps", "fee_bps", "fixed_fee", "max_fill_fraction",
+))
+@pytest.mark.parametrize("invalid", (Decimal("Infinity"), Decimal("NaN")))
+def test_policy_numeric_bypass_is_rejected_before_approval(field, invalid):
+    policy = replace(ExecutionPolicy("malformed"), **{field: invalid})
+    with pytest.raises(TradingResearchError):
+        approve(policy=policy)
+
+
+def test_strategy_cannot_approve_infinite_order_quantity():
+    intent = OrderIntent(
+        "unbounded", INSTRUMENT, Side.BUY, OrderType.MARKET,
+        Decimal("Infinity"), NOW, 0,
+    )
+    with pytest.raises(TradingResearchError):
+        approve(intent=intent)
+
+
+def test_nonfinite_position_in_forged_snapshot_fails_closed():
+    from nika_core.trading_research.accounting import Position
+    position = Position(INSTRUMENT, quantity=Decimal("Infinity"))
+    with pytest.raises(TradingResearchError):
+        approve(snap=replace(snapshot(), positions=(position,)))
