@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -211,6 +212,7 @@ class ReplayBook:
     _remaining: dict[ReplayOrderKey, Decimal]
     _terminal: dict[ReplayOrderKey, OrderUpdate]
     _last_slice: dict[ReplayOrderKey, tuple[int, datetime, tuple[bytes, ...], OrderUpdate]]
+    _accepted_orders: dict[ReplayOrderKey, RiskApprovedOrder]
 
     def __init__(self, ledger: PortfolioLedger) -> None:
         self.ledger = ledger
@@ -218,9 +220,14 @@ class ReplayBook:
         self._remaining = {}
         self._terminal = {}
         self._last_slice = {}
+        self._accepted_orders = {}
 
     def process_existing_order(self, order: RiskApprovedOrder, time_slice: TimeSlice) -> OrderUpdate:
         key = _replay_order_key(order)
+        # A reused approval identity cannot change intent, policy or authority.
+        accepted = self._accepted_orders.get(key)
+        if accepted is not None and order != accepted:
+            raise TradingResearchError("conflicting approved order replay identity")
         terminal = self._terminal.get(key)
         if terminal is not None:
             return terminal
@@ -235,6 +242,8 @@ class ReplayBook:
             previous_index, previous_at, previous_events, previous_update = previous
             if time_slice.index < previous_index:
                 raise TradingResearchError("order replay slice cannot move backwards")
+            if time_slice.index > previous_index and time_slice.at < previous_at:
+                raise TradingResearchError("order replay time cannot move backwards")
             if time_slice.index == previous_index:
                 if time_slice.at != previous_at or slice_events != previous_events:
                     raise TradingResearchError("conflicting same-slice order replay")
@@ -247,16 +256,22 @@ class ReplayBook:
             self.ledger.apply_fill(update.fill)
         self._remaining[key] = update.remaining_quantity
         self._last_slice[key] = (time_slice.index, time_slice.at, slice_events, update)
+        self._accepted_orders.setdefault(key, deepcopy(order))
         if update.state in {OrderState.FILLED, OrderState.EXPIRED, OrderState.CANCELLED}:
             self._terminal[key] = update
         return update
 
     def cancel(self, order: RiskApprovedOrder, reason: str = "cancelled by simulation") -> OrderUpdate:
         key = _replay_order_key(order)
+        # A reused approval identity cannot change intent, policy or authority.
+        accepted = self._accepted_orders.get(key)
+        if accepted is not None and order != accepted:
+            raise TradingResearchError("conflicting approved order replay identity")
         terminal = self._terminal.get(key)
         if terminal is not None:
             return terminal
         remaining = self._remaining.get(key, order.intent.quantity)
         update = OrderUpdate(order.approval_id, OrderState.CANCELLED, remaining, reason=reason)
         self._terminal[key] = update
+        self._accepted_orders.setdefault(key, deepcopy(order))
         return update
