@@ -210,3 +210,39 @@ def test_unqualified_resume_detects_old_paused_target_behind_recent_history(tmp_
         assert queue.get(paused.task_id).state == TaskState.COMPLETED
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize("bad_command", [None, False, 7, ["run"], {"command": "run"}])
+def test_durable_resume_rejects_nontext_saved_command_without_effects(
+    tmp_path: Path, bad_command: object
+) -> None:
+    backend, queue = _build(tmp_path)
+    record = queue.create(
+        workspace_id="default", agent_id="nika.default",
+        payload={"command": bad_command},
+    )
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.PAUSED)
+    try:
+        with pytest.raises(ValueError, match="коректної текстової команди"):
+            backend.resume_task({"task_id": record.task_id})
+        assert queue.get(record.task_id).state == TaskState.PAUSED
+        assert backend._active_futures == {}
+        assert backend._runtime_loop is None
+        assert backend._task_view(queue.get(record.task_id))["command"] == ""
+    finally:
+        backend.close()
+
+
+def test_task_view_does_not_coerce_behavioral_nontext_payload() -> None:
+    from nika_core.kernel.task_queue import TaskRecord
+
+    class Dangerous:
+        def __str__(self) -> str:
+            raise AssertionError("must not call untrusted __str__")
+
+    record = TaskRecord(
+        task_id="task-example", workspace_id="default", agent_id="nika.default",
+        state=TaskState.PAUSED, payload={"command": Dangerous()},
+    )
+    assert DesktopBackend._task_view(record)["command"] == ""
