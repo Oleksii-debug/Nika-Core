@@ -82,3 +82,19 @@ fragmented requests plus no-effect rejection.
 
 These controls do not establish server authentication, tenant ownership,
 durable cloud work, commercial entitlements or Section 1 terminal closure.
+
+## Read-only shared Core task readback
+
+The Web `task.inspect` projection delegates directly to the incumbent
+`TaskQueue.get` and returns only durable task ID and canonical state. It does
+not expose the stored payload, agent configuration, secrets or unrelated
+workspace records. A missing record and a record in another workspace have
+the same response. After SQLiteStore re-open, the same scoped query uses the
+existing persisted task state, not a new Web snapshot or scheduler.
+
+Authentication, server-owned tenant/workspace entitlement and API mounting
+remain requirements of the composition root. `WebTaskQueryHandler` must be
+passed behind a server-authorized `WebApplicationBoundary`; workspace equality
+alone is not an account/tenant ownership proof. This read-only integration
+does not grant task creation, cloud worker dispatch, provider credentials or
+any production-ready Web/Cloud claim.
