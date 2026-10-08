@@ -46,7 +46,15 @@ async function main() {
   const context = {
     globalThis: {pywebview: {api: {dispatch: (request) => {
       requests.push(request);
-      return bridge(request);
+      // The real Python bridge always echoes the admitted request identity.
+      // Existing harness mocks omit it; supply that envelope unless a test
+      // explicitly returns a wrong or missing identity.
+      return Promise.resolve(bridge(request)).then((result) => (
+        result && typeof result === "object"
+          && !Object.prototype.hasOwnProperty.call(result, "request_id")
+          ? {...result, request_id: request.request_id}
+          : result
+      ));
     }}}},
     announce: (message, assertive) => messages.push([message, assertive]),
     appendLog: (message) => logs.push(message),
@@ -219,6 +227,39 @@ async function main() {
   }, null, keymapInput);
   assert.equal(postFailureMutationCalled, false);
   console.log("PASS: confirmed keymap write with failed reread disables hotkeys and retains lock");
+
+  // A mismatched durable acknowledgement may belong to an older or unrelated
+  // task submission. Never trust its apparent success or permit a retry.
+  ui = factory(context);
+  stateRead = async () => true;
+  const beforeMismatchedAck = requests.length;
+  bridge = async () => ({
+    request_id: "stale-other-request", status: "completed", message: "FORGED_SUCCESS",
+  });
+  await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, beforeMismatchedAck + 1);
+  assert(messages.at(-1)[0].includes("Повтор заблоковано до перезапуску"));
+  assert(!logs.includes("FORGED_SUCCESS"));
+  await ui.dispatch("task.pause", trigger);
+  assert.equal(requests.length, beforeMismatchedAck + 1);
+  console.log("PASS: stale durable effect ACK cannot unlock a second command");
+
+  // A handler can commit a durable task and then fail before its reply.
+  // A failed transport envelope is not evidence that rerunning is safe.
+  ui = factory(context);
+  stateRead = async () => true;
+  const beforeBackendFailure = requests.length;
+  bridge = async () => ({
+    status: "failed", message: "Внутрішня помилка обробки",
+  });
+  await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, beforeBackendFailure + 1);
+  assert(messages.some(([message]) => message.includes("Невідомо, чи дія частково виконана")));
+  await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, beforeBackendFailure + 1,
+    "failed durable operation must not immediately submit a duplicate");
+  assert(messages.at(-1)[0].includes("Попередню команду"));
+  console.log("PASS: backend failure cannot authorize duplicate durable effect");
 
   const logFunctionsStart = source.indexOf("  function announce(message, assertive = false) {");
   const logFunctionsEnd = source.indexOf("  function requestId() {", logFunctionsStart);

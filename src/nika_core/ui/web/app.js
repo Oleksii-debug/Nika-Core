@@ -679,10 +679,13 @@
         payload.revision = sourceRevision;
         for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
       }
+      // Bind the acknowledgement to this exact user-issued request. A stale
+      // or misrouted success cannot confirm an unrelated durable task effect.
+      const issuedRequestId = requestId();
       let result;
       try {
         result = await globalThis.pywebview.api.dispatch({
-          request_id: requestId(), action_id: actionId, payload,
+          request_id: issuedRequestId, action_id: actionId, payload,
         });
       } catch {
         // The durable effect may have committed before the bridge disconnected. Never retry blindly.
@@ -691,13 +694,18 @@
         );
         return;
       }
-      if (!result || !["accepted", "completed", "failed", "rejected"].includes(result.status)) {
+      if (!result || result.request_id !== issuedRequestId
+          || !["accepted", "completed", "failed", "rejected"].includes(result.status)) {
         await reconcileUncertain(
           "Міст повернув непідтверджений результат. Стан буде перечитано перед можливим повтором.",
         );
         return;
       }
       const failed = ["failed", "rejected"].includes(result.status);
+      // A backend "failed" response may follow a committed durable effect.
+      // Unlike an input rejection, it is not proof that retry is harmless.
+      const uncertainBackendFailure = durableMutation && result.status === "failed";
+      if (uncertainBackendFailure) keepLocked = true;
       const message = typeof result.message === "string" && result.message
         ? result.message
         : (failed
@@ -715,6 +723,12 @@
         reportStateUnavailable();
       }
       document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (uncertainBackendFailure) {
+        const caution = "Невідомо, чи дія частково виконана до помилки. "
+          + "Перевірте список завдань; повтор заблоковано до перезапуску вікна.";
+        announce(caution, true);
+        appendLog(caution);
+      }
       if (!stateReady) {
         if (!failed && durableMutation) keepLocked = true;
         announce(
