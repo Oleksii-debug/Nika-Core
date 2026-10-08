@@ -103,6 +103,7 @@ def group_visible_time_waves(
 
     counts: dict[datetime, int] = {}
     instruments: dict[datetime, set[InstrumentIdentity]] = {}
+    ends: dict[datetime, datetime] = {}
     for event in view:
         event_at, identity = _admit_event(event, at)
         minute = (event_at.hour * 60 + event_at.minute) // window_minutes * window_minutes
@@ -112,13 +113,14 @@ def group_visible_time_waves(
             end = start + timedelta(minutes=window_minutes)
         except OverflowError as exc:
             raise TradingResearchError("time-wave date exceeds supported range") from exc
+        ends[start] = end
         counts[start] = counts.get(start, 0) + 1
         instruments.setdefault(start, set()).add(identity)
 
     return tuple(
         TimeWave(
             start_at=start,
-            end_at=start + timedelta(minutes=window_minutes),
+            end_at=ends[start],
             event_count=counts[start],
             instruments=tuple(sorted(instruments[start])),
         )
