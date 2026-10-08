@@ -254,7 +254,10 @@ class UIActionBridge:
         # These methods are directly callable by pywebview. Bound all input
         # before invoking the stateful Keymap resolver or persistence layer.
         if not self._bounded_keymap_text(action_id, max_bytes=120) or (
-            binding is not None and not self._bounded_keymap_text(binding, max_bytes=256)
+            binding is not None
+            and not (type(binding) is str and (
+                not binding or self._bounded_keymap_text(binding, max_bytes=256)
+            ))
         ):
             return {"ok": False, "message": "Action or shortcut text is invalid or too long."}
         try:
