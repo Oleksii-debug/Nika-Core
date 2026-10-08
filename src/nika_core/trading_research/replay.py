@@ -56,6 +56,10 @@ class TimeSlice:
     events: tuple[MarketEvent, ...]
 
     def __post_init__(self) -> None:
+        # Admit inert, exact carriers before touching potentially behavioral
+        # event containers, nested prices, or timezone callbacks. This also
+        # protects callers constructing slices outside the execution engine.
+        _require_inert_paper_carriers(self)
         if type(self.index) is not int or self.index < 0:
             raise TradingResearchError("slice index must be a non-negative integer")
         at = require_aware_utc(self.at, "at")
