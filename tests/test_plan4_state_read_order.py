@@ -25,4 +25,4 @@ def test_plan4_accessible_state_reconciliation_order() -> None:
         cwd=ROOT, capture_output=True, text=True, timeout=15, check=False,
     )
     assert run.returncode == 0, run.stdout + run.stderr
-    assert run.stdout.count("PASS:") == 11, run.stdout
+    assert run.stdout.count("PASS:") == 12, run.stdout
