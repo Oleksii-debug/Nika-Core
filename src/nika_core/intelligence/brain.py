@@ -303,6 +303,21 @@ class DeterministicBrain:
                 actions=available_actions,
                 planning_deadline=planning_deadline,
             )
+            # A planner may retain its result and mutate frozen PlanStep objects
+            # after returning. Own an independent plan snapshot before validation,
+            # history, observer awaits, and ToolExecutor dispatch.
+            try:
+                plan = deepcopy(plan)
+            except Exception:
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                    message="planner returned an unsafe deterministic plan carrier",
+                )
             # The planner is a replaceable/untrusted adapter. Validate its carrier
             # before indexing a step or publishing it as durable plan evidence.
             # Malformed steps must never reach ToolExecutor or a journal reservation.
@@ -701,12 +716,19 @@ class DeterministicBrain:
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
                 f"world-state observation failed: {type(exc).__name__}",
             )
-        if not isinstance(observed, WorldState):
+        # The observer is replaceable and can retain or corrupt a frozen record.
+        # Do not accept subclass behavior, mutable fact carriers, or nontext facts;
+        # detach the authoritative observation before any subsequent await.
+        if (
+            type(observed) is not WorldState
+            or type(observed.facts) is not frozenset
+            or any(type(fact) is not str or not fact.strip() for fact in observed.facts)
+        ):
             return None, _StateObservationFailure(
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
-                "world-state observer returned an invalid state type",
+                "world-state observer returned an invalid state",
             )
-        return observed, None
+        return WorldState(facts=frozenset(observed.facts)), None
 
     async def _plan(
         self,
