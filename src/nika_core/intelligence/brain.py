@@ -23,6 +23,11 @@ from nika_core.intelligence.contracts import (
 from nika_core.tools import ToolCall, ToolExecutor, ToolRisk, ToolSpec
 
 
+# Bound repeated planner snapshots independently of the per-plan step limit.
+# State drift can force thousands of valid but unexecuted replans.
+_MAX_PLANNING_HISTORY_STEPS = 100_000
+
+
 @dataclass(frozen=True, slots=True)
 class DeterministicBrainResult:
     plan: DeterministicPlan
@@ -261,16 +266,31 @@ class DeterministicBrain:
             _require_plain_facts(goal.forbidden)
             if goal.required & goal.forbidden:
                 raise ValueError("contradictory deterministic goal")
+            # A catalog with 10k actions must not multiply the per-action
+            # limits into unbounded admission/deepcopy/planner work.
+            # Keep both the established per-action budgets and bounded
+            # aggregate node/UTF-8-byte budgets across the complete run.
+            catalog_nodes = [100_000]
+            catalog_utf8_bytes = [4 * 1024 * 1024]
+            catalog_fact_slots = 0
             for action in actions:
                 _require_run_identity(action.action_id, name="action_id")
                 if action.tool_id is not None:
                     _require_run_identity(action.tool_id, name="tool_id")
                 for facts in (action.requires, action.forbids, action.adds, action.removes):
                     _require_plain_facts(facts)
+                    catalog_fact_slots += len(facts)
+                    if catalog_fact_slots > 100_000:
+                        raise ValueError("deterministic action fact catalog exceeds 100000 entries")
                 if action.requires & action.forbids or action.adds & action.removes:
                     raise ValueError("contradictory deterministic action")
                 _require_plain_json_arguments(
                     action.arguments, budget=[10000], size_budget=[256 * 1024]
+                )
+                _require_plain_json_arguments(
+                    action.arguments,
+                    budget=catalog_nodes,
+                    size_budget=catalog_utf8_bytes,
                 )
             state, goal, actions = deepcopy((state, goal, actions))
         except Exception as exc:
@@ -302,6 +322,7 @@ class DeterministicBrain:
         completed = list(previously_completed_action_ids)
         completed_set = set(previously_completed_action_ids)
         history: list[DeterministicPlan] = []
+        admitted_plan_steps = 0
         replans = 0
         # A recovered action already consumed this task's total execution budget.
         executed_steps = len(previously_completed_action_ids)
@@ -449,6 +470,20 @@ class DeterministicBrain:
                     code=DeterministicErrorCode.INVALID_PLAN,
                     message="planner returned a malformed deterministic plan",
                 )
+            # A changing observer can force thousands of individually valid
+            # plans without consuming the executed-step limit. Bound cumulative
+            # snapshot/history work before deepcopy and before tool dispatch.
+            if len(plan.steps) > _MAX_PLANNING_HISTORY_STEPS - admitted_plan_steps:
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.PLANNER_RESOURCE_LIMIT,
+                    message="deterministic planning history resource limit exceeded",
+                )
+            admitted_plan_steps += len(plan.steps)
             # A planner may retain its result and mutate frozen PlanStep objects
             # after returning. Own an independent plan snapshot before validation,
             # history, observer awaits, and ToolExecutor dispatch.
