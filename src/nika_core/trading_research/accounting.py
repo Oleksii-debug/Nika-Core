@@ -39,9 +39,10 @@ class PortfolioLedger:
     _applied_fills: dict[str, tuple[object, ...]] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
+        _finite_decimal(self.starting_cash, "starting_cash")
         if self.starting_cash < 0:
             raise TradingResearchError("starting_cash cannot be negative")
-        self._cash = Decimal(self.starting_cash)
+        self._cash = self.starting_cash
 
     @property
     def cash(self) -> Decimal:
@@ -55,10 +56,14 @@ class PortfolioLedger:
         return self._positions.get(instrument_identity(instrument), Position(instrument))
 
     def apply_fill(self, fill: SimulatedFill) -> None:
+        if type(fill) is not SimulatedFill or type(fill.side) is not Side:
+            raise TradingResearchError("portfolio ledger requires a simulated fill")
+        for name in ("quantity", "price", "fee"):
+            _finite_decimal(getattr(fill, name), f"fill {name}")
+        # Fail before any ledger mutation, even for forged frozen fill carriers.
+        fill.__post_init__()
         scope = (fill.authority.workspace_id, fill.authority.run_id)
-        if self._scope is None:
-            self._scope = scope
-        elif self._scope != scope:
+        if self._scope is not None and self._scope != scope:
             raise TradingResearchError("portfolio ledger cannot mix workspace/run scope")
         evidence = _fill_evidence(fill)
         existing = self._applied_fills.get(fill.fill_id)
@@ -69,12 +74,18 @@ class PortfolioLedger:
         current = self.position(fill.instrument)
         signed_fill = fill.quantity * Decimal(fill.side.sign)
         gross = fill.quantity * fill.price
-        self._cash += (-gross if fill.side is Side.BUY else gross) - fill.fee
-        self._fees += fill.fee
-        self._positions[instrument_identity(fill.instrument)] = _apply_position_fill(
-            current, signed_fill, fill.price
-        )
+        next_cash = self._cash + (
+            -gross if fill.side is Side.BUY else gross
+        ) - fill.fee
+        next_fees = self._fees + fill.fee
+        next_position = _apply_position_fill(current, signed_fill, fill.price)
+        key = instrument_identity(fill.instrument)
+        # All fallible validation/calculation precedes these state mutations.
+        self._cash = next_cash
+        self._fees = next_fees
+        self._positions[key] = next_position
         self._applied_fills[fill.fill_id] = evidence
+        self._scope = scope
 
     def snapshot(self, marks: Mapping[InstrumentIdentity, Decimal]) -> AccountSnapshot:
         positions = tuple(
@@ -90,9 +101,9 @@ class PortfolioLedger:
                 continue
             identity = instrument_identity(item.instrument)
             mark = marks.get(identity)
-            if mark is None or mark <= 0:
+            if type(mark) is not Decimal or not mark.is_finite() or mark <= 0:
                 raise TradingResearchError(
-                    f"positive mark required for open position identity {identity!r}"
+                    f"finite positive mark required for open position identity {identity!r}"
                 )
             value = item.quantity * mark
             market_value += value
@@ -114,6 +125,11 @@ class PortfolioLedger:
         return fill_id in self._applied_fills
 
 
+
+def _finite_decimal(value: object, name: str) -> Decimal:
+    if type(value) is not Decimal or not value.is_finite():
+        raise TradingResearchError(f"{name} must be a finite Decimal")
+    return value
 
 
 def _fill_evidence(fill: SimulatedFill) -> tuple[object, ...]:
