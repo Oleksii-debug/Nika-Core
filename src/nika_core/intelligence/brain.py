@@ -138,6 +138,14 @@ class DeterministicBrain:
         # evidence and must never turn into ToolCall.approved=True.
         del approved_action_ids
 
+        # Recovery checkpoints and the action catalog are immutable sequences. A
+        # consumable iterator could pass the first identity scan and then appear
+        # empty when calculating the remaining step budget, replaying completed work.
+        if type(actions) is not tuple:
+            raise ValueError("actions must be an immutable tuple")
+        if type(previously_completed_action_ids) is not tuple:
+            raise ValueError("previously_completed_action_ids must be an immutable tuple")
+
         # Action IDs are durable completion/effect generation identities.
         # Admit all of them before planner or journal operations.
         for action in actions:
