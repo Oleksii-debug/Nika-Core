@@ -128,6 +128,57 @@ def _assert_cancelled(store: MultiAgentStore) -> None:
     assert all(member.state is MemberState.CANCELLED for member in store.members("team-cancel"))
 
 
+def test_active_team_preserves_existing_member_state_transition(tmp_path: Path) -> None:
+    _, store = _make_store(tmp_path)
+    store.set_member_state(
+        team_id="team-cancel",
+        member_id="child",
+        state=MemberState.PAUSED,
+        resume_token="valid-pre-cancel-cursor",
+    )
+    child = store.member("team-cancel", "child")
+    assert child.state is MemberState.PAUSED
+    assert child.resume_token == "valid-pre-cancel-cursor"
+
+
+@pytest.mark.parametrize("uncertain_effect", (False, True))
+@pytest.mark.parametrize(
+    "late_state",
+    (MemberState.RUNNING, MemberState.PAUSED, MemberState.WAITING_APPROVAL),
+)
+def test_late_member_callback_cannot_resurrect_cancelled_team_after_restart(
+    tmp_path: Path,
+    uncertain_effect: bool,
+    late_state: MemberState,
+) -> None:
+    path, store = _make_store(tmp_path)
+    runtime = _EffectThenErrorRuntime() if uncertain_effect else _RecordingRuntime()
+    if uncertain_effect:
+        with pytest.raises(CancellationReconciliationRequired):
+            asyncio.run(_supervisor(store, runtime).cancel_team("team-cancel"))
+    else:
+        asyncio.run(_supervisor(store, runtime).cancel_team("team-cancel"))
+    _assert_cancelled(store)
+
+    # Models delayed PAUSED/RUNNING/approval responses racing the durable cancel
+    # journal, including an external cancel whose result is still uncertain.
+    with pytest.raises(RuntimeError, match="team is not active"):
+        store.set_member_state(
+            team_id="team-cancel",
+            member_id="child",
+            state=late_state,
+            resume_token="stale-runtime-cursor",
+        )
+    _assert_cancelled(store)
+    restarted = MultiAgentStore(SQLiteStore(path))
+    _assert_cancelled(restarted)
+    operation = TeamCancellationJournal(restarted).get("team-cancel")
+    assert operation is not None
+    assert operation.state.value == (
+        "reconcile_required" if uncertain_effect else "completed"
+    )
+
+
 def test_direct_store_cancellation_cannot_bypass_durable_runtime_cleanup(tmp_path: Path) -> None:
     _, store = _make_store(tmp_path)
 
