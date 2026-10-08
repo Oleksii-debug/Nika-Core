@@ -98,6 +98,43 @@ def test_framework_neutral_runtime_still_accepts_valid_execution_and_resume_enve
     assert resume.timeout_seconds == 3.5
 
 
+
+class UntrustedInteger(int):
+    """An int subclass must not be accepted as a durable numeric authority."""
+
+
+def test_integer_subclasses_cannot_supply_runtime_budget_or_event_order() -> None:
+    with pytest.raises(TypeError, match="max_steps"):
+        RuntimeRequest("task", "thread", max_steps=UntrustedInteger(1))
+    with pytest.raises(TypeError, match="max_steps"):
+        RuntimeResumeRequest("task", "thread", "cursor", max_steps=UntrustedInteger(1))
+    with pytest.raises(TypeError, match="sequence"):
+        RuntimeEvent(UntrustedInteger(0), "runtime.event")
+
+
+@pytest.mark.parametrize("outcome", [RuntimeOutcome.PAUSED, RuntimeOutcome.WAITING_APPROVAL])
+@pytest.mark.parametrize(
+    "token",
+    [" cursor", "cursor ", "cursor\\nnext", "cursor\\u202evictim", "e\\u0301", ""],
+)
+def test_runtime_result_rejects_resume_tokens_that_recovery_would_refuse(
+    outcome: RuntimeOutcome, token: str
+) -> None:
+    with pytest.raises(ValueError, match="resume_token"):
+        RuntimeResult(outcome=outcome, resume_token=token)
+
+
+def test_runtime_result_allows_a_recovery_compatible_canonical_resume_token() -> None:
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.PAUSED,
+        resume_token="checkpoint:2026-10-08",
+    )
+    assert result.resume_token == "checkpoint:2026-10-08"
+    assert RuntimeResumeRequest("task", "thread", result.resume_token).resume_token == (
+        result.resume_token
+    )
+
+
 def test_failed_runtime_result_keeps_explicit_error_authority() -> None:
     with pytest.raises(ValueError, match="failed outcome"):
         RuntimeResult(outcome=RuntimeOutcome.FAILED)
