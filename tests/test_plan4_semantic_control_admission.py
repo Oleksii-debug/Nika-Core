@@ -165,3 +165,8 @@ def test_direct_controls_reject_behavioral_and_extra_selectors_without_effects(
         assert TaskQueue(queue.store).get(task.task_id).state == TaskState.CANCELLED
     finally:
         backend.close()
+
+    # Reopening SQLite must not resurrect a completed local cancellation.
+    reopened = SQLiteStore(tmp_path / "control.sqlite")
+    reopened.initialize()
+    assert TaskQueue(reopened).get(task.task_id).state == TaskState.CANCELLED
