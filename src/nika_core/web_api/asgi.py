@@ -48,8 +48,9 @@ def _exact_https_origin(value: object) -> bool:
             or parsed.path
             or parsed.query
             or parsed.fragment
+            or value != f"https://{parsed.netloc}"
             or parsed.netloc.endswith(":")
-            or "*" in parsed.netloc
+            or any(mark in parsed.netloc for mark in ("*", "%", "\\"))
         ):
             return False
         return port is None or 1 <= port <= 65535
