@@ -107,6 +107,7 @@
   });
   let actions = [];
   let actionsReady = false;
+  let keymapReadGeneration = 0;
   // One outstanding durable task command per UI session: a second click must not mint a new request ID.
   const taskMutationActions = new Set(["task.create", "task.pause", "task.resume", "agent.stop"]);
   const inFlightActions = new Set();
@@ -647,8 +648,15 @@
           || (item.description != null && typeof item.description !== "string"))
         || !Array.isArray(state.tasks) || state.tasks.some(
       (item) => !item || typeof item !== "object" || Array.isArray(item)
-        || typeof item.task_id !== "string" || !item.task_id
-        || (item.command != null && typeof item.command !== "string")
+        || typeof item.task_id !== "string" || !item.task_id.trim()
+        || item.task_id.length > 256
+        || /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/.test(item.task_id)
+        || (item.state != null && (typeof item.state !== "string"
+          || !item.state.trim() || item.state.length > 128
+          || /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/.test(item.state)))
+        || (item.command != null && (typeof item.command !== "string"
+          || item.command.length > 8192
+          || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/.test(item.command)))
         // The desktop task projection is scoped to the canonical local
         // workspace/agent. Never announce a foreign task from a bad bridge read.
         || (item.workspace_id != null && item.workspace_id !== "default")
@@ -893,13 +901,23 @@
   }
 
   async function refreshKeymap() {
+    const readGeneration = ++keymapReadGeneration;
     if (!globalThis.pywebview?.api?.list_actions) {
       actionsReady = false;
       return false;
     }
     // Validate and stage the complete registry projection before touching the
     // active keyboard editor. A malformed refresh must not partially erase it.
-    const nextActions = await globalThis.pywebview.api.list_actions();
+    let nextActions;
+    try {
+      nextActions = await globalThis.pywebview.api.list_actions();
+    } catch (error) {
+      if (readGeneration !== keymapReadGeneration) return null;
+      actionsReady = false;
+      throw error;
+    }
+    // A stale read must never replace newer verified keyboard controls.
+    if (readGeneration !== keymapReadGeneration) return null;
     if (!Array.isArray(nextActions) || nextActions.length > 512
         || nextActions.some((action) => !action || typeof action !== "object"
           || Array.isArray(action)
