@@ -192,7 +192,10 @@ class DesktopBackend:
                 "Призупинене завдання не має збереженої runtime-сесії; "
                 "повторний старт відхилено, щоб не дублювати побічні ефекти."
             )
-        command = str(record.payload.get("command", "")).strip()
+        raw_command = record.payload.get("command")
+        if type(raw_command) is not str:
+            raise ValueError("Збережене завдання не містить коректної текстової команди.")
+        command = raw_command.strip()
         if not command:
             raise ValueError("Збережене завдання не містить команди для безпечного запуску.")
         self._queue.transition(record.task_id, TaskState.READY)
@@ -485,12 +488,10 @@ class DesktopBackend:
         if payload is not None and "task_id" in payload:
             selected = self._selected_task(payload)
             return selected if selected is not None and selected.state not in _TERMINAL_STATES else None
-        records = [
-            record
-            for record in self._queue.list_recent(limit=50)
-            if record.state not in _TERMINAL_STATES
-        ]
-        return self._require_unambiguous(records, action=action)
+        return self._unqualified_task(
+            states=tuple(state for state in TaskState if state not in _TERMINAL_STATES),
+            action=action,
+        )
 
     def _only_with_state(
         self, state: TaskState, *, action: str, payload: Mapping[str, Any] | None = None
@@ -498,26 +499,48 @@ class DesktopBackend:
         if payload is not None and "task_id" in payload:
             selected = self._selected_task(payload)
             return selected if selected is not None and selected.state == state else None
-        records = [
-            record for record in self._queue.list_recent(limit=50) if record.state == state
-        ]
-        return self._require_unambiguous(records, action=action)
+        return self._unqualified_task(states=(state,), action=action)
 
-    @staticmethod
-    def _require_unambiguous(
-        records: list[TaskRecord],
-        *,
-        action: str,
+    def _unqualified_task(
+        self, *, states: tuple[TaskState, ...], action: str
     ) -> TaskRecord | None:
-        if len(records) > 1:
+        """Fail closed on all durable matches, not only the latest 50 UI rows.
+
+        The task table is the existing TaskQueue authority. No other agent or
+        workspace may be controlled by the default desktop action.
+        """
+        if not states:
+            return None
+        allowed = tuple(state.value for state in states)
+        placeholders = ", ".join("?" for _ in allowed)
+        with self._queue.store.connection() as conn:
+            rows = conn.execute(
+                "SELECT task_id FROM tasks "
+                "WHERE workspace_id = ? AND agent_id = ? "
+                f"AND state IN ({placeholders}) "
+                "ORDER BY updated_at DESC, created_at DESC LIMIT 2",
+                (_DEFAULT_WORKSPACE_ID, _DEFAULT_AGENT_ID, *allowed),
+            ).fetchall()
+        if len(rows) > 1:
             raise ValueError(
                 f"Є кілька завдань, доступних для {action}; потрібен явний вибір завдання."
             )
-        return records[0] if records else None
+        if not rows:
+            return None
+        record = self._queue.get(rows[0]["task_id"])
+        if (
+            record.workspace_id != _DEFAULT_WORKSPACE_ID
+            or record.agent_id != _DEFAULT_AGENT_ID
+            or record.state.value not in allowed
+        ):
+            raise ValueError("Стан завдання змінився; оновіть список і повторіть дію.")
+        return record
 
     @staticmethod
     def _task_view(record: TaskRecord) -> dict[str, Any]:
-        command = str(record.payload.get("command", "")).strip()
+        raw_command = record.payload.get("command")
+        # Never invoke behavioral __str__ objects when composing a screen-reader view.
+        command = raw_command.strip() if type(raw_command) is str else ""
         return {
             "task_id": record.task_id,
             "workspace_id": record.workspace_id,
