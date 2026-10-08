@@ -241,12 +241,13 @@ def test_canonical_task_deserialization_type_error_is_definite_query_failure(
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     queue = TaskQueue(store)
+    record = queue.create(workspace_id="workspace-a", agent_id="agent-a")
 
     def damaged_row(_task_id: str):
         raise TypeError("sensitive internal sqlite row type")
 
     monkeypatch.setattr(queue, "get", damaged_row)
-    response = _inspect(_adapter(queue), _principal(), "opaque-task")
+    response = _inspect(_adapter(queue), _principal(), record.task_id)
     body = json.loads(response.body)
     assert response.status_code == 200
     assert body["status"] == "failed"
@@ -254,3 +255,55 @@ def test_canonical_task_deserialization_type_error_is_definite_query_failure(
     assert body["request_id"] == "query-1"
     assert body["data"] == {}
     assert b"sensitive internal" not in response.body
+
+
+@pytest.mark.parametrize(
+    "corrupt_json",
+    ['{"private_token":', '{"private_token": "secret",', '{"nested": ['],
+)
+def test_corrupt_foreign_payload_is_opaque_as_missing_and_recovers(
+    tmp_path, corrupt_json,
+) -> None:
+    path = tmp_path / "nika.db"
+    store = SQLiteStore(path)
+    store.initialize()
+    queue = TaskQueue(store)
+    task = queue.create(
+        workspace_id="workspace-a",
+        agent_id="agent-a",
+        payload={"private_token": "keep-private"},
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (corrupt_json, task.task_id),
+        )
+
+    # JSONDecodeError happens during canonical TaskQueue.get, before the Web
+    # projection sees TaskRecord.workspace_id. The foreign workspace cannot
+    # learn that an otherwise opaque task exists or has damaged storage.
+    foreign = _inspect(_adapter(queue), _principal("workspace-b"), task.task_id)
+    missing = _inspect(_adapter(queue), _principal("workspace-b"), "missing-task")
+    assert foreign.status_code == missing.status_code == 409
+    assert foreign.body == missing.body
+    assert json.loads(foreign.body)["code"] == "not_found"
+    assert b"private_token" not in foreign.body
+    assert b"secret" not in foreign.body
+
+    owning = _inspect(_adapter(queue), _principal(), task.task_id)
+    assert owning.status_code == 200
+    assert json.loads(owning.body)["code"] == "storage_unavailable"
+    assert b"outcome_unknown" not in owning.body
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            ("{}", task.task_id),
+        )
+    reopened = SQLiteStore(path)
+    reopened.initialize()
+    recovered = _inspect(_adapter(TaskQueue(reopened)), _principal(), task.task_id)
+    assert recovered.status_code == 200
+    assert json.loads(recovered.body)["data"] == {
+        "task_id": task.task_id, "state": "CREATED",
+    }
