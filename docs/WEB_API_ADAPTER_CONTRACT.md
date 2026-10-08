@@ -350,3 +350,20 @@ New positive/negative tests are authored in
 `tests/test_web_asgi_transport.py`; exact-head Ubuntu/Windows execution and
 integration into canonical `main` must still be verified. No tenant authorization
 or terminal Plan 6 section-closure credit follows from these ingress checks.
+
+
+## Request-wide receive deadline after cancellation suppression — Plan 6 §1
+
+A late ASGI `receive()` completion is not admissible merely because
+`asyncio.wait_for` returned a result. Cancellation may be caught by a
+third-party receive adapter, which can then return a complete request body
+*after* the absolute deadline. The same monotonic deadline is now checked
+immediately after each receive completion and before any command dispatch,
+including the final chunk. A late complete request yields sanitized 408 and
+zero Core handler invocations. A fresh healthy request can still be processed.
+
+Regression coverage: `tests/test_plan6_asgi_receive_deadline.py` adds a
+cancel-suppressing delayed receiver and subsequent successful read. This is
+a repository-level §1 component hardening checkpoint, not authenticated cloud
+composition, production performance qualification, executed pytest evidence,
+or terminal DONE.
