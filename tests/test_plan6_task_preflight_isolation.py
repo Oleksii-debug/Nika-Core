@@ -244,3 +244,81 @@ def test_sqlite_fault_for_still_owned_task_is_bounded_and_recoverable(
     recovered = _inspect(TaskQueue(reopened), "workspace-a", task.task_id)
     assert recovered.status_code == 200
     assert json.loads(recovered.body)["data"]["state"] == "CREATED"
+
+
+def test_task_transfer_after_successful_core_read_is_still_opaque(
+    tmp_path, monkeypatch,
+) -> None:
+    """A parsed snapshot cannot authorize a task that moved before projection."""
+    _, store, queue = _queue(tmp_path)
+    task = queue.create(workspace_id="workspace-a", agent_id="agent-a")
+    original_get = queue.get
+
+    def read_then_transfer(task_id: str):
+        snapshot = original_get(task_id)
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE tasks SET workspace_id = ? WHERE task_id = ?",
+                ("workspace-b", task_id),
+            )
+        return snapshot
+
+    monkeypatch.setattr(queue, "get", read_then_transfer)
+    transferred = _inspect(queue, "workspace-a", task.task_id)
+    absent = _inspect(queue, "workspace-a", "absent-task")
+    assert transferred.status_code == absent.status_code == 409
+    assert transferred.body == absent.body
+
+
+def test_task_delete_after_successful_core_read_is_still_opaque(
+    tmp_path, monkeypatch,
+) -> None:
+    """A deleted task cannot leak its former state from a parsed snapshot."""
+    _, store, queue = _queue(tmp_path)
+    task = queue.create(workspace_id="workspace-a", agent_id="agent-a")
+    original_get = queue.get
+
+    def read_then_delete(task_id: str):
+        snapshot = original_get(task_id)
+        with store.connection() as conn:
+            conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
+            conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        return snapshot
+
+    monkeypatch.setattr(queue, "get", read_then_delete)
+    deleted = _inspect(queue, "workspace-a", task.task_id)
+    absent = _inspect(queue, "workspace-a", "absent-task")
+    assert deleted.status_code == absent.status_code == 409
+    assert deleted.body == absent.body
+
+
+def test_post_read_membership_sqlite_failure_is_definite_and_secret_free(
+    tmp_path, monkeypatch,
+) -> None:
+    """Final metadata fault does not publish the already-decoded task state."""
+    path, store, queue = _queue(tmp_path)
+    task = queue.create(workspace_id="workspace-a", agent_id="agent-a")
+    original_connection = store.connection
+    calls = 0
+
+    def fail_only_post_read():
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise sqlite3.OperationalError("secret-final-membership-db-path")
+        return original_connection()
+
+    monkeypatch.setattr(store, "connection", fail_only_post_read)
+    failed = _inspect(queue, "workspace-a", task.task_id)
+    decoded = json.loads(failed.body)
+    assert calls == 3
+    assert failed.status_code == 200
+    assert decoded["status"] == "failed"
+    assert decoded["code"] == "storage_unavailable"
+    assert decoded["data"] == {}
+    assert b"secret-final-membership-db-path" not in failed.body
+    reopened = SQLiteStore(path)
+    reopened.initialize()
+    recovered = _inspect(TaskQueue(reopened), "workspace-a", task.task_id)
+    assert recovered.status_code == 200
+    assert json.loads(recovered.body)["data"]["state"] == "CREATED"
