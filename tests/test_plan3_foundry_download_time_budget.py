@@ -118,3 +118,43 @@ def test_authorization_is_detached_across_lock_await(monkeypatch: pytest.MonkeyP
     assert evidence.alias == "safe-model"
     assert not provider._model_management_lock.locked()
     assert not provider._inference_lock.locked()
+
+
+@pytest.mark.parametrize(
+    "field,spoofed",
+    [
+        ("model", "model\nother"),
+        ("model", "e\u0301"),
+        ("provider_id", "foundry-\u202elocal"),
+        ("license_reference", "LICENSE\u2066spoof"),
+        ("license_reference", "L" * 4097),
+        ("model", "x" * 513),
+        ("expected_model_id", "\ud800"),
+    ],
+)
+def test_download_acquisition_text_spoofing_fails_before_sdk_and_locks(
+    field: str, spoofed: str,
+) -> None:
+    manager_calls = 0
+
+    def forbidden_manager() -> object:
+        nonlocal manager_calls
+        manager_calls += 1
+        raise AssertionError("untrusted acquisition evidence reached SDK")
+
+    provider = FoundryLocalProvider(
+        default_model="safe-model", manager_factory=forbidden_manager,
+    )
+    permit = ModelDownloadAuthorization(
+        provider_id="foundry-local",
+        model="safe-model",
+        license_reference="REVIEWED-LICENSE",
+        expected_model_id="variant-v1",
+    )
+    object.__setattr__(permit, field, spoofed)
+
+    with pytest.raises(ValueError, match="download authorization"):
+        asyncio.run(provider.download_model(permit))
+    assert manager_calls == 0
+    assert not provider._model_management_lock.locked()
+    assert not provider._inference_lock.locked()
