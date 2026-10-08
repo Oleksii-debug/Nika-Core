@@ -121,6 +121,38 @@ def test_cycle_and_excessive_nesting_fail_closed_without_planner() -> None:
         assert tools.calls == []
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"text": "x" * (256 * 1024)},
+        {"unicode": "Ї" * (128 * 1024)},
+        {"text": "\\ud800"},
+        {"\\ud800": "value"},
+        {"huge_integer": 2 ** 4097},
+        {"nested": [{"text": "a" * (256 * 1024)}]},
+    ],
+)
+def test_oversized_or_unencodable_arguments_never_reach_planner_or_tools(
+    payload: object,
+) -> None:
+    planner, tools = SingleStepPlanner(), RecordingTools()
+    with pytest.raises(ValueError, match="cannot be detached safely"):
+        run_action(arguments=payload, planner=planner, tools=tools)
+    assert planner.calls == 0
+    assert tools.calls == []
+
+
+def test_exact_nested_utf8_size_budget_preserves_valid_read_only_execution() -> None:
+    # Count dict key bytes as well as values; remain on the 256 KiB ceiling.
+    payload = {"text": "x" * (256 * 1024 - len("text"))}
+    planner, tools = SingleStepPlanner(), RecordingTools()
+    result = run_action(arguments=payload, planner=planner, tools=tools)
+    assert result.ok  # type: ignore[attr-defined]
+    assert len(tools.calls) == 1
+    assert tools.calls[0].arguments == payload
+    assert tools.calls[0].approved is False
+
+
 def test_plain_nested_arguments_preserve_normal_execution() -> None:
     arguments = {"nested": {"numbers": [1, 2], "flags": (True, None)}, "weight": 1.25}
     planner, tools = SingleStepPlanner(), RecordingTools()
