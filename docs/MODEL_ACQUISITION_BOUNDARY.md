@@ -16,6 +16,13 @@ This boundary exists for privacy, bandwidth/resource control, licensing and repr
 4. Changing `ModelRequest.model` cannot grant download permission.
 5. Provider-wide `allow_download=True` behavior is rejected for Foundry Local. Callers must use the explicit model-management action.
 6. Foundry Local model downloads use the SDK's documented download cancellation event. Cancellation of the Nika coroutine or expiry of the explicit download timeout signals that event.
+Explicit download authorization is also re-admitted as an exact canonical record and
+snapshotted before the first await: caller mutation of a frozen carrier cannot
+redirect a waiting acquisition to a different model/variant or license reference.
+Malformed, subclassed or empty authorization fields fail before native SDK access.
+This is still the existing ModelDownloadAuthorization policy boundary, not an
+alternative source of permissions.
+
 Model acquisition deadlines are admitted before any SDK call or lock: exact int/float types only,
 finite and strictly positive, with a maximum of 86,400 seconds (24 hours). NaN, infinities,
 booleans and huge overflowing integers cannot silently disable the download timeout.
