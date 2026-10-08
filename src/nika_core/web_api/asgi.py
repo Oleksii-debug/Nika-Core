@@ -195,6 +195,23 @@ class ASGICommandApplication:
                 return self._error(403, "origin_forbidden")
             if origin not in self._allowed_origins:
                 return self._error(403, "origin_forbidden")
+        # Host is browser-controlled input, never evidence of an authenticated
+        # tenant. Pin supplied authorities to the configured trusted origin
+        # inventory, including exact port and IPv6 bracket syntax. Without this
+        # check an allowed Origin and a forged Host could reach the same Core
+        # command handler through host-based middleware or reverse proxies.
+        host_bytes = selected.get(b"host")
+        if host_bytes is not None:
+            try:
+                host = host_bytes.decode("ascii")
+            except UnicodeDecodeError:
+                return self._error(403, "host_forbidden")
+            host_origin = f"https://{host}"
+            if host_origin not in self._allowed_origins:
+                return self._error(403, "host_forbidden")
+            if origin_bytes is not None and origin != host_origin:
+                return self._error(403, "host_forbidden")
+
         state = scope.get("state")
         principal = state.get("nika_principal") if type(state) is dict else None
         if type(principal) is not WebPrincipal:
