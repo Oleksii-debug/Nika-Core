@@ -79,7 +79,13 @@ class WebApplicationBoundary:
             action_id=admitted.action_id,
             _payload_json=admitted._payload_json,
         )
-        allowed = self._authorization.allows(review_principal, review_command)
+        try:
+            allowed = self._authorization.allows(review_principal, review_command)
+        except Exception as exc:
+            # Authorization runs before Core effects. An adapter failure is a
+            # definite server failure, not an uncertain command outcome; it
+            # must not smuggle a forged reconciliation request ID to HTTP.
+            raise RuntimeError("Web authorization port failed") from exc
         if type(allowed) is not bool:
             raise RuntimeError("Web authorization port must return an exact bool")
         if not allowed:
@@ -103,7 +109,10 @@ class WebApplicationBoundary:
                 message=result.message,
                 data=result.data,
             )
-        except WebCommandOutcomeUnknownError:
-            raise
+        except WebCommandOutcomeUnknownError as exc:
+            # A handler is not a correlation authority: it may have failed
+            # after an effect, but cannot replace the admitted request ID.
+            # Preserve the original exception only as the internal cause.
+            raise WebCommandOutcomeUnknownError(request_id) from exc
         except Exception as exc:
             raise WebCommandOutcomeUnknownError(request_id) from exc
