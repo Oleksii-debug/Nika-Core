@@ -282,20 +282,20 @@ def test_architecture_guard_rejects_compilation_with_unknown_source() -> None:
 
 def test_architecture_guard_rejects_getattr_wrapped_builtin_execution() -> None:
     source = (
-        "import builtins as host\\n"
-        "from builtins import getattr as resolve\\n"
-        "resolve(host, 'exec')('import langgraph')\\n"
-        "getattr(host, 'eval')('1 + 1')\\n"
-        "resolve(host, 'compile')(source, '<core>', 'exec')\\n"
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "resolve(host, 'exec')('import langgraph')\n"
+        "getattr(host, 'eval')('1 + 1')\n"
+        "resolve(host, 'compile')(source, '<core>', 'exec')\n"
     )
     assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
 
 
 def test_architecture_guard_rejects_aliased_getattr_dynamic_import() -> None:
     source = (
-        "import builtins as host\\n"
-        "from builtins import getattr as resolve\\n"
-        "resolve(host, '__import__')('mcp')\\n"
-        "resolve(host, 'repr')('safe')\\n"
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "resolve(host, '__import__')('mcp')\n"
+        "resolve(host, 'repr')('safe')\n"
     )
     assert direct_engine_imports(source) == ("mcp",)
