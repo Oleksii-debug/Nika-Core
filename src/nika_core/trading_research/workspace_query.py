@@ -152,3 +152,40 @@ class PaperWorkspaceQuery:
         # Re-evaluate authorization to catch revocation during the storage read.
         self._require_authorized(workspace_id, run_id)
         return result
+
+
+def paper_state_provider(
+    query: PaperWorkspaceQuery,
+    *,
+    host_scope: Callable[[], tuple[str, str]],
+) -> Callable[[], dict[str, object]]:
+    """Adapt authorized paper evidence to the existing UIActionBridge StateProvider.
+
+    The scope and Core permission callback come from the trusted host, never
+    from UICommand payload, model output, browser storage, or a workspace label.
+    Failures are explicit text states; they never fabricate an empty portfolio.
+    """
+    def state() -> dict[str, object]:
+        try:
+            scope = host_scope()
+            if type(scope) is not tuple or len(scope) != 2:
+                raise PermissionError("invalid trusted host scope")
+            return query.read_account(scope[0], scope[1]).to_accessible_state()
+        except PermissionError:
+            return {
+                "mode": "PAPER_ONLY", "state": "ACCESS_DENIED",
+                "message": "Paper workspace access is not authorized.",
+            }
+        except (TradingResearchError, RuntimeError, sqlite3.Error):
+            return {
+                "mode": "PAPER_ONLY", "state": "EVIDENCE_UNAVAILABLE",
+                "message": "Paper workspace evidence is unavailable; no balance is shown.",
+            }
+        except Exception:
+            # A broken host identity/provider is not a trading-empty response.
+            return {
+                "mode": "PAPER_ONLY", "state": "ACCESS_DENIED",
+                "message": "Paper workspace access is not authorized.",
+            }
+
+    return state
