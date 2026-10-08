@@ -51,6 +51,7 @@ from .orders import (
     order_authority_sha256,
 )
 from .persistence import TradingStateRepository
+from .workspace_query import PaperAccountView, PaperPositionView, PaperWorkspaceQuery
 from .replay import OrderUpdate, ReplayBook, ReplayPhase, SimulationExecutionEngine, TimeSlice
 from .risk import PendingRiskOrder, RiskEngine, RiskLimits, RiskRejected, RiskState
 from .strategy import DecisionContext, OrderStrategy, Strategy, StrategyDecision
@@ -82,6 +83,9 @@ __all__ = [
     "OrderUpdate",
     "OutcomeSettlement",
     "Partition",
+    "PaperAccountView",
+    "PaperPositionView",
+    "PaperWorkspaceQuery",
     "PendingRiskOrder",
     "PortfolioLedger",
     "Position",
