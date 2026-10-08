@@ -201,6 +201,11 @@ class ASGICommandApplication:
         # check an allowed Origin and a forged Host could reach the same Core
         # command handler through host-based middleware or reverse proxies.
         host_bytes = selected.get(b"host")
+        # HTTP/1.1+ requires an authority. ASGI servers supply http_version;
+        # do not let an omitted Host bypass the configured origin inventory.
+        # Retain HTTP/1.0 compatibility where Host is optional.
+        if scope.get("http_version") in ("1.1", "2", "3") and host_bytes is None:
+            return self._error(403, "host_required")
         if host_bytes is not None:
             try:
                 host = host_bytes.decode("ascii")
