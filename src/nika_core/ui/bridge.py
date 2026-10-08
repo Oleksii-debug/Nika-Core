@@ -239,11 +239,24 @@ class UIActionBridge:
                 "Не вдалося завантажити список дій через внутрішню помилку."
             ) from None
 
+    @staticmethod
+    def _bounded_keymap_text(value: object, *, max_bytes: int = 1_048_576) -> bool:
+        # Inspect exact built-in strings only; encoding catches invalid Unicode
+        # without invoking behavioral subclasses at the WebView boundary.
+        if type(value) is not str or not value:
+            return False
+        try:
+            return len(value.encode("utf-8")) <= max_bytes
+        except UnicodeEncodeError:
+            return False
+
     def set_binding(self, action_id: str, binding: str | None) -> dict[str, Any]:
-        # These methods are directly callable by pywebview. Do not invoke
-        # behavioral str subclasses from a hostile in-process caller.
-        if type(action_id) is not str or (binding is not None and type(binding) is not str):
-            return {"ok": False, "message": "Action and shortcut must be plain text."}
+        # These methods are directly callable by pywebview. Bound all input
+        # before invoking the stateful Keymap resolver or persistence layer.
+        if not self._bounded_keymap_text(action_id, max_bytes=120) or (
+            binding is not None and not self._bounded_keymap_text(binding, max_bytes=256)
+        ):
+            return {"ok": False, "message": "Action or shortcut text is invalid or too long."}
         try:
             self._keymap.set_binding(action_id, binding)
         except (KeyError, TypeError, ValueError) as exc:
@@ -253,8 +266,8 @@ class UIActionBridge:
         return {"ok": True, "message": "Shortcut saved."}
 
     def restore_default(self, action_id: str) -> dict[str, Any]:
-        if type(action_id) is not str:
-            return {"ok": False, "message": "Action ID must be plain text."}
+        if not self._bounded_keymap_text(action_id, max_bytes=120):
+            return {"ok": False, "message": "Action ID must be bounded plain text."}
         try:
             self._keymap.restore_default(action_id)
         except (KeyError, TypeError, ValueError) as exc:
@@ -268,11 +281,21 @@ class UIActionBridge:
             data = self._keymap.export_json()
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             return self._unexpected_keymap_failure("export_keymap", exc)
+        if not self._bounded_keymap_text(data):
+            return {
+                "ok": False,
+                "message": "Не вдалося експортувати комбінації клавіш: некоректний розмір або текст.",
+            }
         return {"ok": True, "data": data, "message": "Shortcut map exported."}
 
     def import_keymap(self, data: str) -> dict[str, Any]:
-        if type(data) is not str:
-            return {"ok": False, "message": "Shortcut map must be JSON text."}
+        # json.loads in the canonical Keymap must never receive an unbounded
+        # WebView string; failed admission must have zero persisted effects.
+        if not self._bounded_keymap_text(data):
+            return {
+                "ok": False,
+                "message": "Файл комбінацій клавіш має некоректний розмір або текст.",
+            }
         try:
             self._keymap.import_json(data)
         except (KeyError, TypeError, ValueError) as exc:
