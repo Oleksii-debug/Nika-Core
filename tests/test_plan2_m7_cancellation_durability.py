@@ -141,6 +141,60 @@ def test_active_team_preserves_existing_member_state_transition(tmp_path: Path) 
     assert child.resume_token == "valid-pre-cancel-cursor"
 
 
+@pytest.mark.parametrize(
+    "forged_state",
+    (
+        MemberState.SPAWNED,
+        MemberState.COMPLETED,
+        MemberState.FAILED,
+        MemberState.CANCELLED,
+    ),
+)
+def test_direct_member_state_update_cannot_bypass_result_or_cancel_journal(
+    tmp_path: Path, forged_state: MemberState,
+) -> None:
+    path, store = _make_store(tmp_path)
+    before = store.member("team-cancel", "child")
+    with pytest.raises(ValueError, match="in-flight state"):
+        store.set_member_state(
+            team_id="team-cancel",
+            member_id="child",
+            state=forged_state,
+            resume_token="forged-cursor",
+        )
+    restarted = MultiAgentStore(SQLiteStore(path))
+    assert restarted.member("team-cancel", "child") == before
+    assert restarted.team_state("team-cancel") is TeamState.ACTIVE
+
+
+def test_late_inflight_callback_cannot_resurrect_completed_member(
+    tmp_path: Path,
+) -> None:
+    path, store = _make_store(tmp_path)
+    store.prepare_member_execution(
+        team_id="team-cancel",
+        member_id="child",
+        resume_token="durable-pre-result-cursor",
+    )
+    store.finish_member_execution(
+        team_id="team-cancel",
+        member_id="child",
+        state=MemberState.COMPLETED,
+        outcome="completed",
+        payload={"ok": True},
+    )
+    with pytest.raises(RuntimeError, match="terminal member state"):
+        store.set_member_state(
+            team_id="team-cancel",
+            member_id="child",
+            state=MemberState.RUNNING,
+            resume_token="stale-callback-cursor",
+        )
+    restarted = MultiAgentStore(SQLiteStore(path))
+    assert restarted.member("team-cancel", "child").state is MemberState.COMPLETED
+    assert restarted.member_result("team-cancel", "child").payload == {"ok": True}
+
+
 @pytest.mark.parametrize("uncertain_effect", (False, True))
 @pytest.mark.parametrize(
     "late_state",
