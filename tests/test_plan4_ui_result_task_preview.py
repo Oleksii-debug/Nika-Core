@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
@@ -109,3 +111,36 @@ def test_task_preview_rejects_behavioral_command_carrier_without_str() -> None:
 
     assert DesktopBackend._task_view(_record(Poisoned()))["command"] == ""
     assert DesktopBackend._task_view(_record("Зробити звіт"))["command"] == "Зробити звіт"
+
+
+def test_accessible_preview_after_sqlite_reopen_keeps_full_command(tmp_path) -> None:
+    path = tmp_path / "preview.sqlite"
+    store = SQLiteStore(path)
+    store.initialize()
+    original = "Тривала команда " + ("N" * 2400)
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": original},
+    )
+
+    reopened = SQLiteStore(path)
+    reopened.initialize()
+    restored = TaskQueue(reopened).get(task.task_id)
+    assert restored.payload["command"] == original
+    preview = DesktopBackend._task_view(restored)["command"]
+    assert preview == original[:160] + "…"
+    assert len(preview) == 161
+
+
+def test_invalid_frozen_status_does_not_poison_subsequent_clean_readback() -> None:
+    result = UIResult(request_id="handler", status="completed", message="Чистий результат")
+    object.__setattr__(result, "status", None)
+    assert _dispatch(result)["status"] == "failed"
+    healthy = UIResult(request_id="handler", status="completed", message="Чистий результат")
+    assert _dispatch(healthy) == {
+        "request_id": "screenreader-1",
+        "status": "completed",
+        "message": "Чистий результат",
+        "focus_id": None,
+    }
