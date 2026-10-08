@@ -55,6 +55,7 @@ from .paper_actions import (
     paper_inspect_definition,
     paper_inspect_handler,
 )
+from .paper_core_permission import standing_paper_read_authorizer
 from .persistence import TradingStateRepository
 from .workspace_query import (
     PaperAccountView,
@@ -133,6 +134,7 @@ __all__ = [
     "order_authority_sha256",
     "paper_inspect_definition",
     "paper_inspect_handler",
+    "standing_paper_read_authorizer",
     "paper_state_provider",
     "trailing_mean",
 ]
