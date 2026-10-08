@@ -99,10 +99,14 @@ class Keymap:
             raise ValueError(f"action {action_id} may not be unbound")
         if cleaned is not None:
             _binding_key(cleaned)
-        conflict = self.conflict(action_id, cleaned)
-        if conflict is not None:
-            raise ValueError(f"shortcut conflict with {conflict}")
         with self._store.connection() as conn:
+            # Check-and-write must share one SQLite writer transaction. Without
+            # this gate two WebView/Keymap callers can both observe a free
+            # shortcut and persist conflicting bindings.
+            conn.execute("BEGIN IMMEDIATE")
+            conflict = self.conflict(action_id, cleaned)
+            if conflict is not None:
+                raise ValueError(f"shortcut conflict with {conflict}")
             conn.execute(
                 "INSERT INTO keymap_overrides(action_id, binding, updated_at) VALUES (?, ?, ?) "
                 "ON CONFLICT(action_id) DO UPDATE SET binding=excluded.binding, updated_at=excluded.updated_at",
@@ -110,8 +114,16 @@ class Keymap:
             )
 
     def restore_default(self, action_id: str) -> None:
-        self._actions.get(action_id)
+        action = self._actions.get(action_id)
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Restoring a default can conflict with a second action that took
+            # that shortcut while this action was unbound. Do not silently
+            # create two keyboard commands for the same key combination.
+            if action.default_binding is not None:
+                conflict = self.conflict(action_id, action.default_binding)
+                if conflict is not None:
+                    raise ValueError(f"shortcut conflict with {conflict}")
             conn.execute("DELETE FROM keymap_overrides WHERE action_id = ?", (action_id,))
 
     def conflict(self, action_id: str, binding: str | None) -> str | None:
@@ -135,11 +147,24 @@ class Keymap:
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
     def import_json(self, data: str) -> None:
-        raw = json.loads(data)
-        if raw.get("format_version") != self.FORMAT_VERSION:
+        # Duplicate JSON members are ambiguous on import: json.loads normally
+        # keeps only the final value, concealing a conflicting shortcut entry.
+        # Reject before inspecting actions or entering the SQLite write transaction.
+        def unique_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            values: dict[str, object] = {}
+            for key, value in pairs:
+                if key in values:
+                    raise ValueError("duplicate keymap JSON member")
+                values[key] = value
+            return values
+
+        raw = json.loads(data, object_pairs_hook=unique_members)
+        if type(raw) is not dict:
+            raise ValueError("keymap must be a JSON object")
+        if type(raw.get("format_version")) is not int or raw["format_version"] != self.FORMAT_VERSION:
             raise ValueError("unsupported keymap format version")
         bindings = raw.get("bindings")
-        if not isinstance(bindings, dict):
+        if type(bindings) is not dict:
             raise TypeError("keymap bindings must be an object")
         proposed: dict[str, str | None] = {}
         for action_id, binding in bindings.items():
@@ -152,17 +177,20 @@ class Keymap:
             if cleaned is not None:
                 _binding_key(cleaned)
             proposed[action_id] = cleaned
-        seen: dict[tuple[str, str], str] = {}
-        for action in self._actions.all():
-            binding = proposed.get(action.action_id, self.resolve(action.action_id))
-            if binding is None:
-                continue
-            key = (action.scope, _binding_key(binding))
-            other = seen.get(key)
-            if other is not None:
-                raise ValueError(f"shortcut conflict between {other} and {action.action_id}")
-            seen[key] = action.action_id
         with self._store.connection() as conn:
+            # Include the complete existing keymap when checking a partial
+            # import, and hold the writer lock until all updates commit.
+            conn.execute("BEGIN IMMEDIATE")
+            seen: dict[tuple[str, str], str] = {}
+            for action in self._actions.all():
+                binding = proposed.get(action.action_id, self.resolve(action.action_id))
+                if binding is None:
+                    continue
+                key = (action.scope, _binding_key(binding))
+                other = seen.get(key)
+                if other is not None:
+                    raise ValueError(f"shortcut conflict between {other} and {action.action_id}")
+                seen[key] = action.action_id
             now = datetime.now(UTC).isoformat()
             for action_id, binding in proposed.items():
                 conn.execute(
