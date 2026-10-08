@@ -250,3 +250,35 @@ def test_config_rejection_prevents_untrusted_host_from_admission() -> None:
     ))
     assert _status(output) == 403
     assert handler.calls == 0
+
+
+@pytest.mark.parametrize("headers, expected", [
+    ([(b"X-Test", b"x")] * 65, 431),
+    ([(b"x-large", b"x" * (16 * 1024 + 1))], 431),
+    ([(b"bad\\nname", b"hello")], 400),
+    ([(b"x-safe", b"bad\\x00value")], 400),
+    ([(b"x-safe", b"bad\\r\\nset-cookie: forged")], 400),
+    ([(b"", b"empty")], 400),
+])
+def test_oversized_or_malformed_headers_fail_before_effect(
+    headers: list[tuple[bytes, bytes]], expected: int
+) -> None:
+    app, handler = _app()
+    headers += [
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]
+    output = _call(app, _scope(principal=_principal(), headers=headers))
+    assert _status(output) == expected
+    assert handler.calls == 0
+
+
+def test_canonical_headers_accept_additional_bounded_field() -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+        (b"x-trace-id", b"opaque-123"),
+    ]))
+    assert _status(output) == 200
+    assert handler.calls == 1
