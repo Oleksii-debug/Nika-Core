@@ -25,9 +25,14 @@ def _expected_risk_evidence(definition: AgentDefinition) -> tuple[int, tuple[str
 def _validate_persisted_risk_evidence(
     definition: AgentDefinition, *, highest_risk: object, approvals_json: object
 ) -> tuple[str, ...]:
+    # SQLite can contain truncated or hostile legacy/corrupt evidence. Bound
+    # the parser before reading, and normalize excessive JSON nesting to a
+    # controlled fail-closed admission failure rather than a recursion crash.
+    if type(approvals_json) is not str or len(approvals_json) > 1_048_576:
+        raise ValueError("persisted agent risk/approval evidence is invalid")
     try:
         approvals = json.loads(approvals_json)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError("persisted agent risk/approval evidence is invalid") from exc
     expected_risk, expected_approvals = _expected_risk_evidence(definition)
     if (

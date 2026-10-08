@@ -97,3 +97,48 @@ def test_overbroad_approval_is_rejected_even_on_committed_lost_ack_replay(tmp_pa
             (definition.agent_id, definition.version),
         ).fetchone()["activated_at"]
     assert after == original
+
+@pytest.mark.parametrize("damage", ("oversized", "deeply_nested"))
+def test_damaged_approval_evidence_fails_closed_after_sqlite_restart(
+    tmp_path, damage: str,
+) -> None:
+    """A corrupt durable row cannot authorize activation or crash JSON admission."""
+    path = tmp_path / "damaged-approval.db"
+    store = SQLiteStore(path)
+    store.initialize()
+    definition = _definition(high_impact=True)
+    repository = AgentDefinitionRepository(store)
+    repository.save_draft(
+        AgentCompiler(
+            tools=(ToolSpec("release.publish", "Publish", ToolRisk.HIGH_IMPACT),),
+            model_profiles={"local"},
+        ).compile(definition)
+    )
+    corrupted = (
+        '["release.publish"]' + " " * 1_048_577
+        if damage == "oversized"
+        else "[" * 1200 + '"release.publish"' + "]" * 1200
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE agent_definitions SET required_approvals_json = ? "
+            "WHERE agent_id = ? AND version = ?",
+            (corrupted, definition.agent_id, definition.version),
+        )
+
+    restarted = AgentDefinitionRepository(SQLiteStore(path))
+    with pytest.raises(ValueError, match="persisted agent risk/approval evidence is invalid"):
+        restarted.get(definition.agent_id, definition.version)
+    with pytest.raises(ValueError, match="persisted agent risk/approval evidence is invalid"):
+        restarted.activate(
+            definition, approved_tool_ids=frozenset({"release.publish"})
+        )
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT status, activated_at, required_approvals_json "
+            "FROM agent_definitions WHERE agent_id = ? AND version = ?",
+            (definition.agent_id, definition.version),
+        ).fetchone()
+    assert row["status"] == "draft"
+    assert row["activated_at"] is None
+    assert row["required_approvals_json"] == corrupted
