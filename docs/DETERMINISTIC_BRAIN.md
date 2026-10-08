@@ -160,6 +160,18 @@ The message remains human-readable while `error_code` is stable for programmatic
 
 ## Restart evidence
 
+The `max_steps` budget is cumulative across process restarts: the number of validated
+`previously_completed_action_ids` consumes the same step allowance, not a new quota.
+A recovered checkpoint at the exact budget may return terminal success without re-planning
+only if its supplied authoritative state already satisfies the goal; an over-budget
+checkpoint or an unmet goal fails closed before a new tool effect. Existing task-level
+PENDING/UNCERTAIN journal reconciliation still precedes this terminal shortcut.
+
+Run, optional task, and deterministic action/replay identities are admitted as exact,
+bounded canonical UTF-8 text before journal/planner/tool handling. Step/re-plan limits
+must be exact integer budgets, and planning/observation time budgets must be finite
+positive numbers; booleans, NaN, infinities and huge values are invalid.
+
 For read-only/purely deterministic work, a caller persists the returned `final_state` plus ordered
 `completed_actions` in its normal durable task/checkpoint state. On restart those values are
 passed back as the initial state and `previously_completed_action_ids`. The brain excludes those
