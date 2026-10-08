@@ -183,12 +183,12 @@ class ASGICommandApplication:
             return self._error(400, "conflicting_request_framing")
         # ASGI delivers decoded request bodies. Admit at most one canonical
         # HTTP/1.1 chunked transfer coding; ambiguous/unsupported codings and
-        # HTTP/1.0, HTTP/2 and HTTP/3 transfer-encoding headers fail closed.
+        # absent-version/HTTP/1.0/HTTP/2/HTTP/3 transfer coding fails closed.
         # Never reinterpret the body or add a second HTTP framing parser.
         transfer_encoding = selected.get(b"transfer-encoding")
         if transfer_encoding is not None and (
             transfer_encoding != b"chunked"
-            or http_version in ("1.0", "2", "3")
+            or http_version != "1.1"
         ):
             return self._error(400, "invalid_transfer_encoding")
         declared_length: int | None = None
