@@ -72,8 +72,8 @@ def _validate_runtime_identity(value: str, field_name: str) -> None:
 
 def _validate_limits(max_steps: int, timeout_seconds: float | None) -> None:
     """Reject malformed budgets before they reach provider/runtime effects."""
-    if isinstance(max_steps, bool) or not isinstance(max_steps, int):
-        raise TypeError("max_steps must be an integer, not bool or float")
+    if type(max_steps) is not int:
+        raise TypeError("max_steps must be a plain integer, not bool or float")
     if max_steps < 1:
         raise ValueError("max_steps must be positive")
     if timeout_seconds is not None:
@@ -150,8 +150,8 @@ class RuntimeEvent:
     payload: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
-            raise TypeError("event sequence must be an integer")
+        if type(self.sequence) is not int:
+            raise TypeError("event sequence must be a plain integer")
         if self.sequence < 0:
             raise ValueError("sequence must not be negative")
         if not isinstance(self.event_type, str) or not self.event_type.strip():
@@ -170,9 +170,11 @@ class RuntimeResult:
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, RuntimeOutcome):
             raise TypeError("outcome must be a RuntimeOutcome")
+        if self.resume_token is not None:
+            _validate_runtime_identity(self.resume_token, "resume_token")
         if (
             self.outcome in {RuntimeOutcome.WAITING_APPROVAL, RuntimeOutcome.PAUSED}
-            and (not isinstance(self.resume_token, str) or not self.resume_token.strip())
+            and self.resume_token is None
         ):
             raise ValueError("resumable outcome requires a usable resume token")
         if self.outcome == RuntimeOutcome.FAILED and not self.error:
