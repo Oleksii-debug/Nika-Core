@@ -593,9 +593,14 @@ class MultiAgentSupervisor:
             task_id=self._task_id(team_id, member_id),
             thread_id=thread_id,
         )
-        if not token:
+        # A runtime-owned object may implement arbitrary __bool__/__str__ hooks.
+        # Admit an inert cursor exactly as promised by the runtime port before
+        # this value becomes durable recovery authority in SQLite.
+        if type(token) is not str:
+            raise TypeError("durable runtime must return a plain resume token")
+        if not token.strip():
             raise RuntimeError("durable runtime returned an empty initial resume token")
-        return str(token)
+        return token
 
     def _validate_child_requests(self, requests: tuple[ChildRequest, ...]) -> None:
         seen_member_ids: set[str] = set()
