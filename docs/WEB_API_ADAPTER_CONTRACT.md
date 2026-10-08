@@ -33,6 +33,13 @@ enable public ingress without that middleware and a real authorization port.
 ## Failure, security and performance
 - Fail closed before effects for HTTP downgrades, unknown routes, unsafe Origins,
   cookies, missing server principal, duplicate sensitive headers and bad streams.
+- Validate configured Origins as fully serialized HTTPS origins, not URLs with
+  credentials, path, query, wildcard, escaped hostname or invalid port.
+- Enforce at most 64 HTTP headers and 16 KiB of aggregate header name/value
+  bytes; reject duplicates of Host, Authorization, Content-Length,
+  Content-Type, Cookie, Origin and Transfer-Encoding regardless of casing.
+- Reject contradictory Content-Length/Transfer-Encoding framing and
+  invalid, oversized or inconsistent Content-Length before dispatch.
 - Enforce the existing 256 KiB bounded JSON body and 1,024 receive-event limit;
   no unlimited request buffering or optional untrusted schema coercion.
 - Pass approved envelopes to the existing detached Web command boundary.
