@@ -106,6 +106,8 @@ class UIActionBridge:
             ).model_dump()
 
         if isinstance(outcome, UIResult):
+            if not self._safe_accessible_status(outcome.message) or not self._safe_focus_target(outcome.focus_id):
+                return self._unsafe_handler_status(command.action_id, command.request_id)
             if outcome.request_id != command.request_id:
                 return UIResult(
                     request_id=command.request_id,
@@ -129,10 +131,46 @@ class UIActionBridge:
                 status="failed",
                 message="Не вдалося виконати дію через внутрішню помилку.",
             ).model_dump()
+        if not self._safe_accessible_status(message):
+            return self._unsafe_handler_status(command.action_id, command.request_id)
         return UIResult(
             request_id=command.request_id,
             status="completed",
             message=message,
+        ).model_dump()
+
+    @staticmethod
+    def _safe_accessible_status(message: object) -> bool:
+        """Keep returned action text bounded and single-line for NVDA/status logs."""
+        if type(message) is not str:
+            return False
+        try:
+            if len(message.encode("utf-8")) > 2048:
+                return False
+        except UnicodeEncodeError:
+            return False
+        return not any(category(char) in {"Cc", "Cf", "Cs"} for char in message)
+
+    @staticmethod
+    def _safe_focus_target(focus_id: object) -> bool:
+        if focus_id is None:
+            return True
+        return (
+            type(focus_id) is str
+            and 1 <= len(focus_id) <= 120
+            and all(
+                char.isascii() and (char.isalnum() or char in "-_.:")
+                for char in focus_id
+            )
+        )
+
+    @staticmethod
+    def _unsafe_handler_status(action_id: str, request_id: str) -> dict[str, Any]:
+        logger.error("UI action returned unsafe status: action_id=%s", action_id)
+        return UIResult(
+            request_id=request_id,
+            status="failed",
+            message="Не вдалося виконати дію через некоректний текст стану.",
         ).model_dump()
 
     @staticmethod
