@@ -208,3 +208,22 @@ No new Web-owned state, retries or side-effect authority are introduced. The
 source of truth is still TaskQueue. Invalid payloads that fail inside
 TaskQueue.get before workspace membership is read still require deeper
 end-to-end tenancy/privacy qualification; this patch is not terminal closure.
+
+
+## Corrupt cross-workspace payloads fail closed (Plan 6 §1)
+
+The canonical `TaskQueue.get` parses its SQLite payload before returning a
+`TaskRecord`. If JSON decoding raises `ValueError` or a damaged carrier raises
+`TypeError`, `WebTaskQueryHandler` checks *only* the task's workspace column
+through the existing `TaskQueue.store` canonical SQLite connection. An absent
+task or a row outside the authenticated WebPrincipal workspace receives the
+same bounded `not_found` result. Only a damaged task in the requesting
+workspace receives `failed/storage_unavailable`. A failed metadata read also
+fails closed and never reflects storage content.
+
+The handler neither repairs corrupted payloads nor invents Web-owned task
+state, mutation retries or authorization. The server-side authorization port
+must independently enforce real tenant membership and entitlements. The
+regression covers syntactically corrupt foreign JSON, body parity with missing
+tasks, legitimate local failure, correction and canonical SQLite reopen. No
+claim of hosted multi-tenant qualification or terminal DONE follows.
