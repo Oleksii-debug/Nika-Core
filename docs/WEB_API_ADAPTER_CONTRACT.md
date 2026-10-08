@@ -227,3 +227,20 @@ must independently enforce real tenant membership and entitlements. The
 regression covers syntactically corrupt foreign JSON, body parity with missing
 tasks, legitimate local failure, correction and canonical SQLite reopen. No
 claim of hosted multi-tenant qualification or terminal DONE follows.
+
+## Deeply recursive corrupt canonical payloads (Plan 6 §1)
+
+A stored TaskQueue payload that raises `RecursionError` during canonical
+`TaskQueue.get` JSON decoding is a **definite read failure**. It is handled
+through the existing workspace-ownership metadata fallback: a foreign row
+looks identical to a missing row, while the owning workspace receives bounded
+`failed/storage_unavailable`. Neither user data nor parser details are
+reflected, no Web-owned store/retry authority is introduced, and corrected
+SQLite data remains readable after store re-open.
+
+`tests/test_plan6_deep_corrupt_task_recovery.py` exercises deep nested JSON,
+foreign/missing response parity, owner error classification, no secrets,
+canonical data correction and restart-style readback. This component repair
+does **not** satisfy outstanding server authentication, tenant/entitlements,
+durable cloud execution, exact-head CI/main integration or Section 1 terminal
+DONE by itself.
