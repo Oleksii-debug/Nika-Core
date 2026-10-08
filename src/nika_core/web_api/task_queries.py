@@ -44,9 +44,9 @@ class WebTaskQueryHandler:
             # A failed canonical read is a definite query failure, not a
             # possibly applied command. Never echo storage exception details.
             return self._storage_failure(command.request_id)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             # TaskQueue.get() deserializes the payload *before* its caller can
-            # establish the workspace. If the persisted payload is corrupt,
+            # establish the workspace. If the persisted payload is corrupt or too deeply nested,
             # a foreign task must still be indistinguishable from a missing
             # task. Inspect only the canonical store's workspace column; do
             # not parse or expose the corrupt payload or create Web state.
