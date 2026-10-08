@@ -32,6 +32,12 @@ The machine-readable **declared dependency contract** is
 requirement string to the manifest and rejects undeclared dependency changes,
 missing/duplicated groups, invalid authority decisions, unsupported package
 maintenance/license claims, altered Python compatibility and false lock status.
+The build-system's `setuptools.build_meta` backend and the declared
+`setuptools>=75` / `wheel` build requirements are now inventoried separately
+from runtime dependencies. The guard rejects forged build-only activation,
+backend substitution, omitted build requirements, and pyproject build-input
+drift. This is a constraint-boundary check, **not** a reproducible wheel build,
+resolved build-environment lock, install proof, or dependency license clearance.
 It uses Python standard-library `tomllib` and `json` plus repository pytest.
 
 `tests/test_plan1_architecture.py` on the parent PR guards direct vendor
