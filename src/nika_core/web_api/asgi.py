@@ -172,6 +172,18 @@ class ASGICommandApplication:
                 selected[key] = value
         if b"content-length" in selected and b"transfer-encoding" in selected:
             return self._error(400, "conflicting_request_framing")
+        # The HTTP Host is not a tenant, identity, or routing authority. Require
+        # its exact public HTTPS authority to be explicitly allowed before Core.
+        # Do not trust X-Forwarded-Host or infer a host from the Origin header.
+        host_bytes = selected.get(b"host")
+        if host_bytes is None:
+            return self._error(400, "host_required")
+        try:
+            host = host_bytes.decode("ascii")
+        except UnicodeDecodeError:
+            return self._error(403, "host_forbidden")
+        if f"https://{host}" not in self._allowed_origins:
+            return self._error(403, "host_forbidden")
         declared_length: int | None = None
         if b"content-length" in selected:
             encoded = selected[b"content-length"]
