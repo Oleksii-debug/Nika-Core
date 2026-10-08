@@ -167,11 +167,11 @@ def test_foreign_task_and_absent_id_are_indistinguishable(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     "bad_id",
     [
-        "forged\\nINFO: accepted",
-        "unsafe\\x00tail",
-        "direction-\\u202e",
+        "forged\nINFO: accepted",
+        "unsafe\x00tail",
+        "direction-\u202e",
         "contains whitespace",
-        "nonascii-\\u00e9",
+        "nonascii-\u00e9",
         "x" * 121,
     ],
 )
