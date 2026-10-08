@@ -115,7 +115,7 @@ def test_integer_subclasses_cannot_supply_runtime_budget_or_event_order() -> Non
 @pytest.mark.parametrize("outcome", [RuntimeOutcome.PAUSED, RuntimeOutcome.WAITING_APPROVAL])
 @pytest.mark.parametrize(
     "token",
-    [" cursor", "cursor ", "cursor\\nnext", "cursor\\u202evictim", "e\\u0301", ""],
+    [" cursor", "cursor ", "cursor\nnext", "cursor\u202evictim", "e\u0301", ""],
 )
 def test_runtime_result_rejects_resume_tokens_that_recovery_would_refuse(
     outcome: RuntimeOutcome, token: str
