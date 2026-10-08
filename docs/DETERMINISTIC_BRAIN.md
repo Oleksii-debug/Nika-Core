@@ -87,6 +87,10 @@ cannot alter the Brain's authoritative validation state, goal, or dispatched too
 arguments. Unsnapshotable run inputs fail before planner, effect journal or tools.
 The copies create no new storage, approval source, or runtime authority.
 
+An exact planner result with more steps than the remaining execution budget is
+rejected as `PLAN_TOO_LONG` before scanning or deep-copying the steps. This prevents an
+oversized untrusted plan from consuming snapshot memory before the bounded-plan gate.
+
 The planner's returned plan is also detached before plan validation, evidence/history,
 observer awaits, and tool dispatch. Retaining a frozen-but-forcibly-mutable PlanStep
 cannot rewrite the action chosen after the planner returns. Uncopyable or malformed
