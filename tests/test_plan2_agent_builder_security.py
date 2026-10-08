@@ -359,3 +359,32 @@ def test_concurrent_activation_preserves_single_durable_active_version(tmp_path)
     active = restarted.active(first.agent_id)
     assert active is not None and active.status == "active"
     assert active.definition.version in (1, 2)
+
+def test_compiled_draft_cannot_outgrow_its_durable_restart_reader(tmp_path) -> None:
+    from nika_core.builder.repository import AgentDefinitionRepository
+    from nika_core.data.sqlite import SQLiteStore
+
+    path = tmp_path / "nika.db"
+    SQLiteStore(path).initialize()
+    repository = AgentDefinitionRepository(SQLiteStore(path))
+    compiler = _compiler(ToolSpec("web.read", "Read", ToolRisk.READ_ONLY))
+    scopes = tuple(f"scope-{index:05d}-" + "x" * 140 for index in range(7500))
+    oversized = _definition().model_copy(
+        update={
+            "tool_grants": (
+                ToolGrant(tool_id="web.read", max_risk=0, scopes=scopes),
+            ),
+        }
+    )
+    compilation = compiler.compile(oversized)
+    assert len(compilation.definition.model_dump_json().encode("utf-8")) > 1024 * 1024
+
+    with pytest.raises(ValueError, match="size limit"):
+        repository.save_draft(compilation)
+
+    assert repository.get(oversized.agent_id, oversized.version) is None
+    assert repository.next_version(oversized.agent_id) == 1
+    repository.save_draft(compiler.compile(_definition()))
+    restarted = AgentDefinitionRepository(SQLiteStore(path))
+    stored = restarted.get(oversized.agent_id, oversized.version)
+    assert stored is not None and stored.definition == _definition()
