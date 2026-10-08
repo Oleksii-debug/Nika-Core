@@ -81,6 +81,27 @@ async function main() {
   assert.equal(displayed.length, 2, "null task entry must not clobber target DOM");
   console.log("PASS: malformed individual task projection fails closed without DOM mutation");
 
+
+  older = refreshState();
+  pending[8].resolve({ok: true, state: {
+    tasks: [{task_id: "newer"}], agents: [{name: "bad agent"}],
+  }});
+  assert.equal(await older, false);
+  assert.equal(outages, 4);
+  assert.equal(displayed.length, 2,
+    "malformed agent collection must not replace the keyboard task target");
+  console.log("PASS: invalid agent projection cannot partly update task controls");
+
+  older = refreshState();
+  pending[9].resolve({ok: true, state: {
+    tasks: [{task_id: "newer"}], workspaces: [{name: "space", description: {unsafe: true}}],
+  }});
+  assert.equal(await older, false);
+  assert.equal(outages, 5);
+  assert.equal(displayed.length, 2,
+    "malformed workspace collection must not replace the keyboard task target");
+  console.log("PASS: invalid workspace projection cannot partly update task controls");
+
   const pollFactory = new Function("ctx",
     "const {window, document, refreshState, inFlightActions}=ctx;"
     + "let statePollHandle=null;"
