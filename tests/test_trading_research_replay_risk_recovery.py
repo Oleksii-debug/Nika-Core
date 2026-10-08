@@ -351,3 +351,25 @@ def test_later_fill_accepts_valid_previous_account_and_survives_restart(tmp_path
     assert payload is not None
     assert payload["cash"] == "598"
     assert payload["fees"] == "2"
+
+def test_replay_keeps_remaining_order_after_accounting_rejection() -> None:
+    class RejectingLedger(PortfolioLedger):
+        def apply_fill(self, fill: SimulatedFill) -> None:
+            raise TradingResearchError("injected account failure")
+
+    order = _approved()
+    book = ReplayBook(RejectingLedger(Decimal(1000)))
+    time_slice = TimeSlice(1, NOW, (_quote(NOW),))
+    with pytest.raises(TradingResearchError, match="injected account failure"):
+        book.process_existing_order(order, time_slice)
+
+    # Simulate repair/restart of the failed accounting adapter: the same order
+    # and full remaining quantity must still be replayable exactly once.
+    book.ledger = PortfolioLedger(Decimal(1000))
+    update = book.process_existing_order(order, time_slice)
+    assert update.state is OrderState.FILLED
+    assert update.fill is not None
+    assert update.fill.quantity == Decimal(5)
+    assert book.ledger.cash == Decimal(495)
+    assert book.process_existing_order(order, time_slice) is update
+    assert book.ledger.cash == Decimal(495)
