@@ -636,7 +636,11 @@
     const state = response.state;
     // A broken task-list projection is not an empty list: preserve the explicit
     // keyboard target rather than silently selecting a different durable task.
-    if (!Array.isArray(state.tasks)) {
+    if (!Array.isArray(state.tasks) || state.tasks.some(
+      (item) => !item || typeof item !== "object" || Array.isArray(item)
+        || typeof item.task_id !== "string" || !item.task_id
+        || (item.command != null && typeof item.command !== "string")
+    )) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       reportStateUnavailable();
       return false;
