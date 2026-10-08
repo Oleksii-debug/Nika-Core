@@ -36,7 +36,7 @@ def test_result_rejects_nonmapping_output_before_readback(invalid: object) -> No
         RuntimeResult(outcome=RuntimeOutcome.COMPLETED, output=invalid)
 
 
-@pytest.mark.parametrize("invalid", [None, [], [RuntimeEvent(0, "done")], (), "events", 42])
+@pytest.mark.parametrize("invalid", [None, [], [RuntimeEvent(0, "done")], "events", 42])
 def test_result_rejects_non_tuple_event_container(invalid: object) -> None:
     with pytest.raises(TypeError, match="tuple of RuntimeEvent"):
         RuntimeResult(outcome=RuntimeOutcome.COMPLETED, events=invalid)
@@ -46,6 +46,12 @@ def test_result_rejects_non_tuple_event_container(invalid: object) -> None:
 def test_result_rejects_non_event_members(invalid: object) -> None:
     with pytest.raises(TypeError, match="tuple of RuntimeEvent"):
         RuntimeResult(outcome=RuntimeOutcome.COMPLETED, events=(invalid,))
+
+
+def test_empty_tuple_is_the_valid_default_event_container() -> None:
+    result = RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+    assert result.events == ()
+    assert result.output == {}
 
 
 def test_valid_tuple_and_readonly_mapping_remain_compatible() -> None:
