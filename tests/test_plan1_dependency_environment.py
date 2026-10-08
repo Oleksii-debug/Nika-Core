@@ -30,7 +30,13 @@ def fixture_root(tmp_path: Path) -> Path:
                 "project": "nika-core",
                 "resolution_state": "DECLARED_RANGES_ONLY_NOT_REPRODUCIBLE",
                 "groups": [
-                    {"group": "base", "requirements": ["example-lib>=2,<3", "windows-lib>=1; python_version < '2.0'"]},
+                    {
+                        "group": "base",
+                        "requirements": [
+                            "example-lib>=2,<3",
+                            "windows-lib>=1; python_version < '2.0'",
+                        ],
+                    },
                     {"group": "dev", "requirements": ["pytest>=8,<9"]},
                     {"group": "build-system", "requirements": ["setuptools>=75"]},
                 ],
