@@ -65,7 +65,13 @@ def _validate_runtime_identity(value: str, field_name: str) -> None:
     if type(value) is not str:
         raise TypeError(f"{field_name} must be a string")
     # Bound code points before any O(n) Unicode normalization or encoding work.
-    if len(value) > MAX_RUNTIME_ID_UTF8_BYTES or len(value.encode("utf-8")) > MAX_RUNTIME_ID_UTF8_BYTES:
+    if len(value) > MAX_RUNTIME_ID_UTF8_BYTES:
+        raise ValueError(f"{field_name} exceeds the durable identity size limit")
+    try:
+        byte_count = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError(f"{field_name} contains invalid Unicode") from None
+    if byte_count > MAX_RUNTIME_ID_UTF8_BYTES:
         raise ValueError(f"{field_name} exceeds the durable identity size limit")
     if not value or value != value.strip():
         raise ValueError(f"{field_name} must be nonempty canonical text")
