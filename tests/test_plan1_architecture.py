@@ -56,6 +56,13 @@ FOREIGN_ENGINE_ROOTS = frozenset(
 def direct_engine_imports(source: str) -> tuple[str, ...]:
     """Return direct provider/host imports; malformed source fails rather than passing."""
     tree = ast.parse(source)
+    # Only an immediately invoked getattr is covered by the dynamic-call check.
+    # A fetched importer can otherwise be stored and called later unnoticed.
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
     imports: set[str] = set()
     importlib_names = {"importlib"}
     builtins_names = {"builtins"}
@@ -103,6 +110,31 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
+        # A stored importer bypasses the immediate-call import guard:
+        # loader = getattr(builtins, "__import__"); loader("vendor")
+        # or loader = getattr(importlib, "import_module"). Refuse its
+        # acquisition in stable Core authorities, but retain precise
+        # vendor-name reporting for immediately invoked wrappers.
+        if (
+            isinstance(func, ast.Name)
+            and func.id in getattr_names
+            and len(node.args) == 2
+            and isinstance(node.args[0], ast.Name)
+            and isinstance(node.args[1], ast.Constant)
+            and (
+                (
+                    node.args[0].id in builtins_names
+                    and node.args[1].value == "__import__"
+                )
+                or (
+                    node.args[0].id in importlib_names
+                    and node.args[1].value == "import_module"
+                )
+            )
+        ):
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                imports.add("<hoisted-dynamic-import>")
         # Refuse acquisition of dangerous builtin source evaluators, including
         # when the retrieved callable is stored and invoked in a later statement.
         if (
@@ -331,3 +363,32 @@ def test_architecture_guard_allows_hoisted_safe_builtin_getattr() -> None:
         "runner('safe')\n"
     )
     assert direct_engine_imports(source) == ()
+
+def test_architecture_guard_rejects_stored_builtin_importer() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "loader = resolve(host, '__import__')\n"
+        "loader('litellm')\n"
+    )
+    assert direct_engine_imports(source) == ("<hoisted-dynamic-import>",)
+
+
+def test_architecture_guard_rejects_stored_importlib_loader() -> None:
+    source = (
+        "import importlib as importer\n"
+        "loader = getattr(importer, 'import_module')\n"
+        "loader('langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<hoisted-dynamic-import>",)
+
+
+def test_architecture_guard_keeps_safe_getattr_and_direct_call_results() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "safe = resolve(host, 'repr')\n"
+        "safe(1)\n"
+        "resolve(host, '__import__')('mcp')\n"
+    )
+    assert direct_engine_imports(source) == ("mcp",)
