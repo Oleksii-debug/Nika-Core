@@ -244,6 +244,23 @@ async function main() {
   assert.equal(requests.length, beforeMismatchedAck + 1);
   console.log("PASS: stale durable effect ACK cannot unlock a second command");
 
+  // A handler can commit a durable task and then fail before its reply.
+  // A failed transport envelope is not evidence that rerunning is safe.
+  ui = factory(context);
+  stateRead = async () => true;
+  const beforeBackendFailure = requests.length;
+  bridge = async () => ({
+    status: "failed", message: "Внутрішня помилка обробки",
+  });
+  await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, beforeBackendFailure + 1);
+  assert(messages.some(([message]) => message.includes("Невідомо, чи дія частково виконана")));
+  await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, beforeBackendFailure + 1,
+    "failed durable operation must not immediately submit a duplicate");
+  assert(messages.at(-1)[0].includes("Попередню команду"));
+  console.log("PASS: backend failure cannot authorize duplicate durable effect");
+
   const logFunctionsStart = source.indexOf("  function announce(message, assertive = false) {");
   const logFunctionsEnd = source.indexOf("  function requestId() {", logFunctionsStart);
   const reportStart = source.indexOf("  function reportStateUnavailable() {");
