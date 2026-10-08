@@ -112,6 +112,18 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         for name in names:
             if name.split(".", 1)[0] in FOREIGN_ENGINE_ROOTS:
                 imports.add(name)
+    def is_tracked_getattr(func: ast.expr) -> bool:
+        """Recognize builtins.getattr as well as its direct/aliased function."""
+        return (
+            (isinstance(func, ast.Name) and func.id in getattr_names)
+            or (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id in builtins_names
+                and func.attr == "getattr"
+            )
+        )
+
     # Importer/evaluator references can be stored and invoked later. Block the
     # acquisition in Core contracts, without losing precise diagnostics for
     # an immediate direct call such as importlib.import_module("mcp").
@@ -157,8 +169,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         ):
             imports.add("<dynamic-authority-namespace>")
         if (
-            isinstance(func, ast.Name)
-            and func.id in getattr_names
+            is_tracked_getattr(func)
             and len(node.args) in (2, 3)
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id in builtins_names | importlib_names
@@ -170,8 +181,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         # select __import__, import_module or an evaluator without a literal
         # attribute in the AST. Stable Nika ports must not resolve such names.
         if (
-            isinstance(func, ast.Name)
-            and func.id in getattr_names
+            is_tracked_getattr(func)
             and len(node.args) in (2, 3)
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id in builtins_names | importlib_names
@@ -187,8 +197,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         # acquisition in stable Core authorities, but retain precise
         # vendor-name reporting for immediately invoked wrappers.
         if (
-            isinstance(func, ast.Name)
-            and func.id in getattr_names
+            is_tracked_getattr(func)
             and len(node.args) in (2, 3)
             and isinstance(node.args[0], ast.Name)
             and isinstance(node.args[1], ast.Constant)
@@ -209,8 +218,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         # Refuse acquisition of dangerous builtin source evaluators, including
         # when the retrieved callable is stored and invoked in a later statement.
         if (
-            isinstance(func, ast.Name)
-            and func.id in getattr_names
+            is_tracked_getattr(func)
             and len(node.args) >= 2
             and isinstance(node.args[0], ast.Name)
             and node.args[0].id in builtins_names
@@ -249,8 +257,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         # the builtin is accessed indirectly rather than as builtins.exec.
         via_builtin_source_getattr = (
             isinstance(func, ast.Call)
-            and isinstance(func.func, ast.Name)
-            and func.func.id in getattr_names
+            and is_tracked_getattr(func.func)
             and len(func.args) in (2, 3)
             and isinstance(func.args[0], ast.Name)
             and func.args[0].id in builtins_names
@@ -262,8 +269,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
             continue
         via_getattr = (
             isinstance(func, ast.Call)
-            and isinstance(func.func, ast.Name)
-            and func.func.id in getattr_names
+            and is_tracked_getattr(func.func)
             and len(func.args) in (2, 3)
             and isinstance(func.args[0], ast.Name)
             and isinstance(func.args[1], ast.Constant)
@@ -588,5 +594,50 @@ def test_architecture_guard_keeps_safe_unrelated_namespace_reads() -> None:
         "fields = vars(value)\n"
         "package_name = getattr(importer, '__name__')\n"
         "formatter = getattr(host, 'repr')\n"
+    )
+    assert direct_engine_imports(source) == ()
+
+
+def test_architecture_guard_rejects_builtins_getattr_immediate_import_and_eval() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "host.getattr(importer, 'import_module')('mcp')\n"
+        "host.getattr(host, '__import__')('litellm')\n"
+        "host.getattr(host, 'eval')('1 + 1')\n"
+    )
+    assert direct_engine_imports(source) == (
+        "<dynamic-source-execution>", "litellm", "mcp"
+    )
+
+
+def test_architecture_guard_rejects_builtins_getattr_stored_importers() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "loader = host.getattr(importer, 'import_module')\n"
+        "loader('langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<hoisted-dynamic-import>",)
+
+
+def test_architecture_guard_rejects_builtins_getattr_namespace_and_computed_name() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "namespace = host.getattr(importer, '__dict__')\n"
+        "dynamic = host.getattr(host, unknown_name)\n"
+    )
+    assert direct_engine_imports(source) == (
+        "<dynamic-authority-namespace>", "<nonliteral-dynamic-attribute>"
+    )
+
+
+def test_architecture_guard_allows_safe_builtins_getattr_on_inert_objects() -> None:
+    source = (
+        "import builtins as host\n"
+        "class Local: pass\n"
+        "safe = host.getattr(host, 'repr')\n"
+        "value = host.getattr(Local(), '__class__')\n"
     )
     assert direct_engine_imports(source) == ()
