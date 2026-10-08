@@ -267,3 +267,7 @@ block all deterministic continuation for that task until reconciliation.
 
 No second persistence engine is introduced; authoritative state remains in Nika's existing
 runtime/task SQLite and idempotency/recovery layers.
+
+## Plan 3 Section 1 — aggregate catalog resource admission
+
+Every run admits no more than 10,000 actions and 10,000 recovered action identities, and validates action arguments **before** planner, journal or ToolExecutor access. The existing *per-action* caps (10,000 plain JSON-like nodes, 256 KiB total UTF-8 argument strings, depth 32) remain in force. A separate, shared *whole-catalog* cap now limits all action argument trees to 100,000 plain nodes and 4 MiB of UTF-8 argument strings in aggregate. Neither limit authorizes tools, approvals or new effects; oversized inputs fail closed as ValueError without a planner or durable-effect call. Focused adversarial tests exercise many individually valid oversized actions and a valid smaller two-action catalog. These are repository-controllable contracts, not a claim of physical Windows/NVDA testing.
