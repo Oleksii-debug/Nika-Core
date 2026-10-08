@@ -58,6 +58,7 @@ class RuntimeUnsupportedError(RuntimeError):
 
 
 MAX_RUNTIME_ID_UTF8_BYTES = 512
+MAX_RUNTIME_PROBE_REASON_UTF8_BYTES = 2048
 
 
 def _validate_runtime_identity(value: str, field_name: str) -> None:
@@ -80,6 +81,27 @@ def _validate_runtime_identity(value: str, field_name: str) -> None:
         for character in value
     ):
         raise ValueError(f"{field_name} contains noncanonical or control text")
+
+
+def _validate_probe_reason(value: str) -> None:
+    """Bound and canonicalize diagnostic text before restart/audit presentation."""
+    if type(value) is not str:
+        raise TypeError("resume probe reason must be a plain string")
+    if len(value) > MAX_RUNTIME_PROBE_REASON_UTF8_BYTES:
+        raise ValueError("resume probe reason exceeds diagnostic size limit")
+    try:
+        encoded_size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError("resume probe reason contains invalid Unicode") from None
+    if encoded_size > MAX_RUNTIME_PROBE_REASON_UTF8_BYTES:
+        raise ValueError("resume probe reason exceeds diagnostic size limit")
+    if not value or value != value.strip():
+        raise ValueError("resume probe reason must be nonempty canonical text")
+    if not is_normalized("NFC", value) or any(
+        category(character) in {"Cc", "Cf", "Cs"} or character in "\u0085\u2028\u2029"
+        for character in value
+    ):
+        raise ValueError("resume probe reason contains noncanonical or control text")
 
 
 def _validate_limits(max_steps: int, timeout_seconds: float | None) -> None:
@@ -143,8 +165,7 @@ class RuntimeResumeProbe:
     def __post_init__(self) -> None:
         if not isinstance(self.status, RuntimeResumeProbeStatus):
             raise TypeError("resume probe status must be a RuntimeResumeProbeStatus")
-        if not isinstance(self.reason, str) or not self.reason.strip():
-            raise ValueError("resume probe reason must be nonempty text")
+        _validate_probe_reason(self.reason)
         if self.checkpoint_id is not None:
             _validate_runtime_identity(self.checkpoint_id, "checkpoint_id")
         if self.status == RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
