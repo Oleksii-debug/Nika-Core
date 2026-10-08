@@ -341,6 +341,14 @@ class DeterministicBrain:
                 raise AssertionError("durable deterministic task identity is unavailable")
             try:
                 unresolved = journal.unresolved_operation_keys(task_id=task_id)
+                # A corrupt or replaceable journal adapter must not smuggle
+                # malformed recovery evidence into result/history output or
+                # cause a type-dependent crash before the reconciliation gate.
+                # The canonical runtime journal returns an immutable tuple.
+                if type(unresolved) is not tuple or len(unresolved) > 10_000:
+                    raise ValueError("invalid unresolved effect evidence carrier")
+                for operation_key in unresolved:
+                    _require_run_identity(operation_key, name="operation_key")
             except Exception as exc:  # noqa: BLE001 - fail closed before planning or effects.
                 return self._failure(
                     plan=DeterministicPlan(steps=()),
