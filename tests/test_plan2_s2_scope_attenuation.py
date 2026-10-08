@@ -51,7 +51,9 @@ def test_rejected_unrestricted_child_creates_no_durable_member_after_restart(
         root_agent_version=1,
         root_thread_id="thread-root",
         root_grants=(ToolGrant(tool_id="web.read", scopes=("repo:read",)),),
-        quota=TeamQuota(max_depth=2, max_children_per_parent=2, max_total_agents=3),
+        quota=TeamQuota(
+            max_depth=2, max_children_per_parent=2, max_total_agents=3, max_parallel=2
+        ),
     )
     with pytest.raises(PermissionError, match="broader scope"):
         store.spawn_child(
