@@ -61,6 +61,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
     importlib_names = {"importlib"}
     builtins_names = {"builtins"}
     dynamic_function_names = {"__import__"}
+    dynamic_source_names = {"exec", "eval", "compile"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names = (alias.name for alias in node.names)
@@ -83,6 +84,11 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
                     for alias in node.names
                     if alias.name == "__import__"
                 )
+                dynamic_source_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name in {"exec", "eval", "compile"}
+                )
         else:
             continue
         for name in names:
@@ -92,6 +98,19 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
+        # Core ports have no reason to evaluate dynamically supplied Python code.
+        # Otherwise a vendor import can be hidden inside a string and evade the
+        # import AST walk. This is a drift fence, not a Python sandbox.
+        if (
+            isinstance(func, ast.Name)
+            and func.id in dynamic_source_names
+        ) or (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id in builtins_names
+            and func.attr in {"exec", "eval", "compile"}
+        ):
+            imports.add("<dynamic-source-execution>")
         direct = isinstance(func, ast.Name) and func.id in dynamic_function_names
         via_importlib = (
             isinstance(func, ast.Attribute)
@@ -219,3 +238,19 @@ def test_architecture_guard_rejects_getattr_nonliteral_provider_name() -> None:
         "getattr(importlib, 'import_module')(user_supplied_module)\n"
     )
     assert direct_engine_imports(source) == ("<nonliteral-dynamic-import>",)
+
+
+def test_architecture_guard_rejects_dynamic_python_code_escape() -> None:
+    source = (
+        "import builtins as host\\n"
+        "from builtins import exec as run_source\\n"
+        "exec('import langgraph')\\n"
+        "host.eval('1 + 1')\\n"
+        "run_source(untrusted_code)\\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
+
+
+def test_architecture_guard_rejects_compilation_with_unknown_source() -> None:
+    source = "from builtins import compile as compile_code\\ncompile_code(source, '<port>', 'exec')\\n"
+    assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
