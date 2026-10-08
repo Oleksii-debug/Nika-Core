@@ -417,3 +417,49 @@ def test_explicit_cancel_refusal_requires_probe_before_retry(tmp_path: Path) -> 
     )
     assert [request.member_id for request in probe.requests] == ["root"]
     assert safe_runtime.cancel_effects == ["team:team-cancel:root", "team:team-cancel:child"]
+
+
+def test_cancelled_team_fences_legacy_member_writer_after_restart(tmp_path: Path) -> None:
+    path, store = _make_store(tmp_path)
+    runtime = _RecordingRuntime()
+    asyncio.run(_supervisor(store, runtime).cancel_team("team-cancel"))
+    restarted = MultiAgentStore(SQLiteStore(path))
+
+    for member_id in ("root", "child"):
+        with pytest.raises(RuntimeError, match="team is not active"):
+            restarted.set_member_state(
+                team_id="team-cancel",
+                member_id=member_id,
+                state=MemberState.RUNNING,
+                resume_token="stale-runtime-resume",
+            )
+
+    _assert_cancelled(restarted)
+    assert all(member.resume_token is None for member in restarted.members("team-cancel"))
+    assert runtime.cancel_effects == ["team:team-cancel:root", "team:team-cancel:child"]
+
+
+def test_cancel_commit_fences_racing_member_writer_before_external_effect(
+    tmp_path: Path,
+) -> None:
+    _, store = _make_store(tmp_path)
+
+    async def run_race() -> None:
+        runtime = _BlockingRuntime()
+        cancellation = asyncio.create_task(
+            _supervisor(store, runtime).cancel_team("team-cancel")
+        )
+        await runtime.entered.wait()
+        assert store.team_state("team-cancel") is TeamState.CANCELLED
+        with pytest.raises(RuntimeError, match="team is not active"):
+            store.set_member_state(
+                team_id="team-cancel",
+                member_id="child",
+                state=MemberState.RUNNING,
+                resume_token="late-write",
+            )
+        runtime.release.set()
+        await cancellation
+
+    asyncio.run(run_race())
+    _assert_cancelled(store)
