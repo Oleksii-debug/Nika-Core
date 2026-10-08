@@ -59,7 +59,19 @@ action/tool identifiers. An invalid planner payload is discarded before entering
 or `ToolExecutor`, with a typed `INVALID_PLAN` failure and no effect reservation. A provider
 cannot smuggle arbitrary objects or list-backed steps into the approved execution plan.
 
-Before either snapshot, deterministic action arguments must use plain JSON-like built-in carriers\n(dict with text keys, list/tuple, text, boolean, integer, finite float, or null).\nCustom object/dict/list subclasses, non-finite numbers, cycles, more than 32 levels of\nnesting or more than 10,000 nested elements per action are rejected before invoking\nany caller-defined `__deepcopy__`, planner, journal reservation, or tool handler.\nThis is an admission fence, not a second tool-schema or permission authority.\n\nPlanner inputs are detached twice: the Brain snapshots caller-provided state, goal
+Before either snapshot, deterministic action arguments must use plain JSON-like built-in
+carriers (dict with text keys, list/tuple, text, boolean, integer, finite float, or null).
+Custom object/dict/list subclasses, non-finite numbers, cycles, more than 32 levels of
+nesting or more than 10,000 nested elements per action are rejected before invoking
+any caller-defined `__deepcopy__`, planner, journal reservation, or tool handler.
+Mutable frozen-record internals are also re-admitted before snapshot: state/goal/action
+facts must be exact immutable frozensets of nonempty text, action/tool identities must
+be canonical text, and contradictory mutated preconditions/effects are rejected.
+A malformed planner result is inspected as exact built-in plan/step records *before*
+deepcopy and again afterward. No planner-defined copy method is invoked for a
+rejected carrier. This is an admission fence, not a second tool-schema or permission authority.
+
+Planner inputs are detached twice: the Brain snapshots caller-provided state, goal
 and action records at run admission, and each replaceable planner invocation receives
 its own detached copy. Frozen dataclasses can still contain mutable nested arguments
 or be forcibly assigned by a hostile adapter; planner/caller mutations therefore
