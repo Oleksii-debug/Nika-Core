@@ -36,6 +36,32 @@ _TERMINAL_MEMBER_STATES = frozenset(
 )
 
 
+
+def _reject_duplicate_quota_key(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate persisted team quota key")
+        result[key] = value
+    return result
+
+
+def _load_team_quota(raw: object) -> TeamQuota:
+    """Fail closed before decoding an untrusted durable quota after restart."""
+    if type(raw) is not str or len(raw) > 4096:
+        raise ValueError("persisted team quota is invalid")
+    try:
+        decoded = json.loads(raw, object_pairs_hook=_reject_duplicate_quota_key)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError("persisted team quota is invalid") from exc
+    expected = {
+        "max_depth", "max_children_per_parent", "max_total_agents", "max_parallel"
+    }
+    if type(decoded) is not dict or set(decoded) != expected:
+        raise ValueError("persisted team quota is invalid")
+    return TeamQuota(**decoded)
+
+
 class MultiAgentStore:
     """Durable Nika-owned team identity, lineage and evidence store."""
 
@@ -114,7 +140,7 @@ class MultiAgentStore:
             ).fetchone()
         if row is None:
             raise KeyError(f"unknown team: {team_id}")
-        return TeamQuota(**json.loads(row["quota_json"]))
+        return _load_team_quota(row["quota_json"])
 
     def member(self, team_id: str, member_id: str) -> TeamMember:
         with self._store.connection() as conn:
@@ -199,7 +225,7 @@ class MultiAgentStore:
                 raise KeyError(f"unknown team: {team_id}")
             if team["state"] != TeamState.ACTIVE.value:
                 raise RuntimeError("team is not active")
-            quota = TeamQuota(**json.loads(team["quota_json"]))
+            quota = _load_team_quota(team["quota_json"])
             parent_row = self._member_row(conn, team_id=team_id, member_id=parent_id)
             if parent_row is None:
                 raise KeyError(f"unknown parent: {parent_id}")
