@@ -359,7 +359,7 @@ def test_matching_content_length_and_fragmented_body_keep_core_boundary() -> Non
         (b"nika.example:443", b"https://nika.example", "host_forbidden"),
         (b"user@nika.example", b"https://nika.example", "host_forbidden"),
         (b"", b"https://nika.example", "host_forbidden"),
-        (b"\\xff", b"https://nika.example", "host_forbidden"),
+        (b"\xff", b"https://nika.example", "host_forbidden"),
         (b"other.example", b"", "host_forbidden"),
     ],
 )
@@ -401,7 +401,7 @@ def test_header_case_duplicate_host_and_injected_host_never_dispatch() -> None:
     assert _status(output) == 400
     assert _payload(output)["code"] == "duplicate_security_header"
     poisoned = _call(app, _scope(principal=_principal(), headers=[
-        (b"host", b"nika.example\\r\\nX-Authority: poisoned"),
+        (b"host", b"nika.example\r\nX-Authority: poisoned"),
         (b"content-type", b"application/json"),
     ]))
     assert _status(poisoned) == 400
