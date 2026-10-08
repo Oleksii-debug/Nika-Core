@@ -91,6 +91,26 @@ def test_catalog_budget_rejects_aggregate_resource_exhaustion_before_effects(
     assert journal.reads == 0
 
 
+
+def test_aggregate_fact_slots_are_bounded_before_journal_or_planner() -> None:
+    # Per-action fact sets are valid, but 11 times 10k slots is not a
+    # bounded whole-catalog planning input, even when entries are shared.
+    shared = frozenset(f"fact-{index}" for index in range(10_000))
+    actions = tuple(
+        DeterministicAction(
+            action_id=f"step-{index}",
+            requires=shared,
+            adds=frozenset({f"result-{index}"}),
+        )
+        for index in range(11)
+    )
+    result, planner, journal = run_catalog(actions, with_journal=True)
+    with pytest.raises(ValueError, match="cannot be detached safely"):
+        asyncio.run(result)
+    assert planner.calls == 0
+    assert journal.reads == 0
+
+
 def test_small_multi_action_catalog_still_executes() -> None:
     actions = (
         DeterministicAction(
