@@ -951,7 +951,9 @@
   });
 
   document.addEventListener("click", (event) => {
-    const trigger = event.target.closest?.("[data-action-id]");
+    // Only semantic command buttons dispatch actions. Keymap editor inputs
+    // also carry action IDs for editing, but must never execute an action.
+    const trigger = event.target.closest?.("button[data-action-id]");
     if (!trigger) return;
     void dispatch(trigger.dataset.actionId, trigger);
   });
