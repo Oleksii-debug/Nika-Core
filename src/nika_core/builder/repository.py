@@ -170,7 +170,7 @@ class AgentDefinitionRepository:
             # Verification, approval admission and the active-version swap are atomic.
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT definition_json, required_approvals_json, highest_risk, status "
+                "SELECT definition_json, required_approvals_json, highest_risk, status, activated_at "
                 "FROM agent_definitions "
                 "WHERE agent_id = ? AND version = ?",
                 (definition.agent_id, definition.version),
@@ -190,6 +190,10 @@ class AgentDefinitionRepository:
             # resending its one-time approval: do not reauthorize or repeat the effect.
             # The persisted document and risk evidence are checked above first.
             if row["status"] == "active":
+                # An active marker without its durable activation receipt is not
+                # proof of a committed, approved transition after restart.
+                if not isinstance(row["activated_at"], str) or not row["activated_at"].strip():
+                    raise ValueError("active agent definition lacks activation evidence")
                 return
             missing = sorted(set(required) - set(approved_tool_ids))
             if missing:
@@ -263,6 +267,10 @@ class AgentDefinitionRepository:
             highest_risk=row["highest_risk"],
             approvals_json=row["required_approvals_json"],
         )
+        if row["status"] == "active" and (
+            not isinstance(row["activated_at"], str) or not row["activated_at"].strip()
+        ):
+            raise ValueError("active agent definition lacks activation evidence")
         return StoredAgentDefinition(
             definition=payload,
             status=str(row["status"]),
