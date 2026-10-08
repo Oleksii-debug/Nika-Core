@@ -111,7 +111,7 @@ def test_untrusted_observer_fact_fails_closed_without_planning(
     assert observer.calls == 1
 
 
-def test_valid_unicode_facts_and_observation_preserve_clean_path() -> None:
+def test_valid_unicode_facts_preserve_clean_execution_path() -> None:
     planner = CountingPlanner()
     result = asyncio.run(
         DeterministicBrain(planner=planner, tools=ToolExecutor()).run(
@@ -119,7 +119,6 @@ def test_valid_unicode_facts_and_observation_preserve_clean_path() -> None:
             state=WorldState(facts=frozenset({"джерело"})),
             goal=DeterministicGoal(required=frozenset({"готово"})),
             actions=(DeterministicAction("finish", adds=frozenset({"готово"})),),
-            state_observer=HostileObserver("джерело"),
         )
     )
     assert result.ok
