@@ -261,6 +261,12 @@ class DeterministicBrain:
             _require_plain_facts(goal.forbidden)
             if goal.required & goal.forbidden:
                 raise ValueError("contradictory deterministic goal")
+            # A catalog with 10k actions must not multiply the per-action
+            # limits into unbounded admission/deepcopy/planner work.
+            # Keep both the established per-action budgets and bounded
+            # aggregate node/UTF-8-byte budgets across the complete run.
+            catalog_nodes = [100_000]
+            catalog_utf8_bytes = [4 * 1024 * 1024]
             for action in actions:
                 _require_run_identity(action.action_id, name="action_id")
                 if action.tool_id is not None:
@@ -271,6 +277,11 @@ class DeterministicBrain:
                     raise ValueError("contradictory deterministic action")
                 _require_plain_json_arguments(
                     action.arguments, budget=[10000], size_budget=[256 * 1024]
+                )
+                _require_plain_json_arguments(
+                    action.arguments,
+                    budget=catalog_nodes,
+                    size_budget=catalog_utf8_bytes,
                 )
             state, goal, actions = deepcopy((state, goal, actions))
         except Exception as exc:
