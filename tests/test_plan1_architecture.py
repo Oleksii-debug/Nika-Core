@@ -242,15 +242,15 @@ def test_architecture_guard_rejects_getattr_nonliteral_provider_name() -> None:
 
 def test_architecture_guard_rejects_dynamic_python_code_escape() -> None:
     source = (
-        "import builtins as host\\n"
-        "from builtins import exec as run_source\\n"
-        "exec('import langgraph')\\n"
-        "host.eval('1 + 1')\\n"
-        "run_source(untrusted_code)\\n"
+        "import builtins as host\n"
+        "from builtins import exec as run_source\n"
+        "exec('import langgraph')\n"
+        "host.eval('1 + 1')\n"
+        "run_source(untrusted_code)\n"
     )
     assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
 
 
 def test_architecture_guard_rejects_compilation_with_unknown_source() -> None:
-    source = "from builtins import compile as compile_code\\ncompile_code(source, '<port>', 'exec')\\n"
+    source = "from builtins import compile as compile_code\ncompile_code(source, '<port>', 'exec')\n"
     assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
