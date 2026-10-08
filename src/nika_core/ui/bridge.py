@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from unicodedata import category
 from typing import Any
+from unicodedata import category
 
 from pydantic import ValidationError
 
