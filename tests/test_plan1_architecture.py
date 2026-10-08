@@ -119,18 +119,18 @@ def test_architecture_guard_rejects_aliased_and_nested_vendor_imports() -> None:
 
 def test_architecture_guard_rejects_direct_and_aliased_dynamic_engine_imports() -> None:
     source = (
-        "import importlib as importer\\n"
-        "from importlib import import_module as load\\n"
-        "__import__('langgraph.graph')\\n"
-        "importer.import_module('mcp')\\n"
-        "load('httpx')\\n"
-        "load('nika_core.runtime.contracts')\\n"
+        "import importlib as importer\n"
+        "from importlib import import_module as load\n"
+        "__import__('langgraph.graph')\n"
+        "importer.import_module('mcp')\n"
+        "load('httpx')\n"
+        "load('nika_core.runtime.contracts')\n"
     )
     assert direct_engine_imports(source) == ("httpx", "langgraph.graph", "mcp")
 
 
 def test_architecture_guard_fails_closed_on_nonliteral_dynamic_import() -> None:
-    source = "from importlib import import_module as load\\nload(provider_name)\\n"
+    source = "from importlib import import_module as load\nload(provider_name)\n"
     assert direct_engine_imports(source) == ("<nonliteral-dynamic-import>",)
 
 
