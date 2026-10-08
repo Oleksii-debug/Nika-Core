@@ -82,3 +82,13 @@ fragmented requests plus no-effect rejection.
 
 These controls do not establish server authentication, tenant ownership,
 durable cloud work, commercial entitlements or Section 1 terminal closure.
+
+## Exact Host admission (nonterminal security repair)
+
+Every command request must contain exactly one Host header, with an ASCII
+authority matching an explicitly configured canonical HTTPS allowed Origin.
+Missing, spoofed, noncanonical or inconsistent Host values fail closed before
+authorization and Core effects; X-Forwarded-Host is never trusted as a fallback.
+The trusted reverse proxy must preserve the public Host. This check neither
+authenticates the caller nor authorizes a workspace; server-side session,
+tenant, entitlement and durable runtime composition remain separate gates.
