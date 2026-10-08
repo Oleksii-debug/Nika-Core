@@ -568,3 +568,19 @@ def test_http10_without_transfer_coding_keeps_legacy_optional_host() -> None:
     output = _call(app, scope)
     assert _status(output) == 200
     assert handler.calls == 1
+
+
+
+def test_missing_http_version_cannot_admit_chunked_framing() -> None:
+    """Missing ASGI protocol authority must not imply HTTP/1.1 framing."""
+    app, handler = _app()
+    scope = _scope(principal=_principal(), headers=[
+        (b"host", b"nika.example"),
+        (b"content-type", b"application/json"),
+        (b"transfer-encoding", b"chunked"),
+    ])
+    assert "http_version" not in scope
+    output = _call(app, scope, events=[])
+    assert _status(output) == 400
+    assert _payload(output)["code"] == "invalid_transfer_encoding"
+    assert handler.calls == 0
