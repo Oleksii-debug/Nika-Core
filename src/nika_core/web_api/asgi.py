@@ -91,6 +91,20 @@ def _is_canonical_https_origin(value: object) -> bool:
     return value == f"https://{authority}"
 
 
+
+def _observe_abandoned_receive(future: asyncio.Future[Any]) -> None:
+    """Drain a late receive failure; it can never dispatch the command.
+
+    The ASGI host owns network receive cleanup. We only cancel our temporary
+    awaitable and consume its eventual exception without logging request data.
+    """
+    if not future.cancelled():
+        try:
+            future.exception()
+        except Exception:
+            pass
+
+
 class ASGICommandApplication:
     """Small, framework-neutral Web ingress; canonical Core remains the executor."""
 
@@ -273,7 +287,18 @@ class ASGICommandApplication:
             if remaining <= 0:
                 return self._error(408, "request_receive_timeout")
             try:
-                event = await asyncio.wait_for(receive(), timeout=remaining)
+                # Shield the underlying receive so timeout/cancellation cannot
+                # wait indefinitely for a non-cooperative ASGI receiver to
+                # acknowledge cancellation. The late result is discarded.
+                receive_future = asyncio.ensure_future(receive())
+                try:
+                    event = await asyncio.wait_for(
+                        asyncio.shield(receive_future), timeout=remaining
+                    )
+                finally:
+                    if not receive_future.done():
+                        receive_future.cancel()
+                    receive_future.add_done_callback(_observe_abandoned_receive)
             except TimeoutError:
                 # No Core command has been dispatched. Do not retry or leak
                 # any fragment, session value, or exception text.
