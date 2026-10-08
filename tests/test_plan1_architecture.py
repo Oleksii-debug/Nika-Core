@@ -413,31 +413,31 @@ def test_architecture_guard_keeps_safe_getattr_and_direct_call_results() -> None
 
 def test_architecture_guard_rejects_stored_attribute_importers() -> None:
     source = (
-        "import builtins as host\\n"
-        "import importlib as importer\\n"
-        "one = host.__import__\\n"
-        "two = importer.import_module\\n"
-        "one('litellm')\\n"
-        "two('langgraph')\\n"
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "one = host.__import__\n"
+        "two = importer.import_module\n"
+        "one('litellm')\n"
+        "two('langgraph')\n"
     )
     assert direct_engine_imports(source) == ("<hoisted-dynamic-import>",)
 
 
 def test_architecture_guard_rejects_stored_attribute_evaluators() -> None:
     source = (
-        "import builtins as host\\n"
-        "runner = host.exec\\n"
-        "evaluator = host.eval\\n"
-        "compiler = host.compile\\n"
+        "import builtins as host\n"
+        "runner = host.exec\n"
+        "evaluator = host.eval\n"
+        "compiler = host.compile\n"
     )
     assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
 
 
 def test_architecture_guard_keeps_precise_immediate_attribute_calls() -> None:
     source = (
-        "import builtins as host\\n"
-        "import importlib as importer\\n"
-        "host.__import__('mcp')\\n"
-        "importer.import_module('httpx')\\n"
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "host.__import__('mcp')\n"
+        "importer.import_module('httpx')\n"
     )
     assert direct_engine_imports(source) == ("httpx", "mcp")
