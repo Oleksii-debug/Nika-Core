@@ -75,8 +75,10 @@ class AgentDefinitionRepository:
         )
         highest, approvals = _expected_risk_evidence(definition)
         if (
-            not isinstance(compilation.highest_risk, RiskTier)
+            type(compilation.highest_risk) is not RiskTier
             or compilation.highest_risk.value != highest
+            or type(compilation.required_human_approvals) is not tuple
+            or any(type(tool_id) is not str for tool_id in compilation.required_human_approvals)
             or compilation.required_human_approvals != approvals
         ):
             raise ValueError("compiled agent risk/approval evidence is inconsistent")
