@@ -331,7 +331,10 @@ class MultiAgentSupervisor:
                     task_id=planned.task_id,
                     thread_id=planned.thread_id,
                 )
-                if applied is False:
+                # The runtime port promises an explicit bool. None, integers and
+                # arbitrary truthy objects are not evidence that a remote effect
+                # completed; preserve the uncertain dispatch for inspection.
+                if applied is not True:
                     raise RuntimeError("runtime cancellation not confirmed")
             except asyncio.CancelledError:
                 self._mark_cancel_uncertain(planned, "CancelledError")
