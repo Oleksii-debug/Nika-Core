@@ -442,3 +442,33 @@ def test_configured_ipv4_ipv6_port_hosts_reach_existing_core_boundary(
     ]))
     assert _status(output) == 200
     assert handler.calls == 1
+
+
+def test_asgi_receive_cannot_swap_server_tenant_or_workspace_in_flight() -> None:
+    app, handler = _app()
+    principal = _principal()
+    scope = _scope(principal=principal)
+    output: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        object.__setattr__(principal, "workspace_id", "other-workspace")
+        object.__setattr__(principal, "tenant_id", "other-tenant")
+        return {"type": "http.request", "body": _body(), "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        output.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    assert _status(tuple(output)) == 200
+    assert _payload(tuple(output))["data"] == {"workspace": "workspace-a"}
+    assert handler.calls == 1
+
+
+def test_mutated_invalid_server_principal_is_rejected_before_network_read() -> None:
+    app, handler = _app()
+    principal = _principal()
+    object.__setattr__(principal, "workspace_id", "bad\\nworkspace")
+    result = _call(app, _scope(principal=principal), events=[])
+    assert _status(result) == 401
+    assert _payload(result)["code"] == "authentication_required"
+    assert handler.calls == 0
