@@ -13,7 +13,7 @@ assert(dispatchStart >= 0 && dispatchEnd > dispatchStart);
 
 const factory = new Function("context", `
   const {
-    globalThis, announce, appendLog, requestId, commandInput, sourceInputs, refreshState,
+    globalThis, announce, appendLog, requestId, commandInput, sourceInputs, taskTarget, refreshState,
     reportStateUnavailable, document, focusElementById, dispatchAutostart, refreshKeymap,
   } = context;
   let sourceRevision = 5;
@@ -52,6 +52,7 @@ async function main() {
     appendLog: (message) => logs.push(message),
     requestId: () => `req-${++nextId}`,
     commandInput: {value: "  Створити завдання  "},
+    taskTarget: {value: ""},
     sourceInputs: {root: {value: "C:\\\\Українська папка"}, source_a: {value: "а.txt"}, source_b: {value: "б.txt"}},
     refreshState: async () => {stateReads += 1; return stateRead();},
     refreshKeymap: async () => {keymapReads += 1; return keymapReady;},
@@ -79,9 +80,13 @@ async function main() {
   console.log("PASS: duplicate and cross-command single-flight");
 
   bridge = async () => ({status: "completed", message: "Призупинено."});
+  context.taskTarget.value = "task-visual-selection";
   await ui.dispatch("task.pause", trigger);
   assert.equal(requests.length, 2);
   assert.equal(requests[1].request_id, "req-2");
+  assert.equal(requests[1].payload.task_id, "task-visual-selection");
+  context.taskTarget.value = "";
+  console.log("PASS: keyboard-selected durable task ID reaches canonical bridge");
   console.log("PASS: command unlocks after acknowledged completion");
 
   bridge = async () => ({status: "accepted", message: "Завдання прийнято.", focus_id: "tasks-heading"});
