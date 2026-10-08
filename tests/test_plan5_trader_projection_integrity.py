@@ -87,7 +87,7 @@ def test_legitimate_paper_projection_is_text_first_and_authorized_twice() -> Non
         "-Infinity",
         " 1",
         "1 ",
-        "1\\n2",
+        "1\n2",
         "not-a-decimal",
         "9" * 129,
     ],
@@ -111,7 +111,7 @@ def test_bad_account_amounts_are_denied_to_ui_as_unavailable(field: str, bad: ob
 @pytest.mark.parametrize(
     "bad", [
         object(), Decimal(1), HostileText("1"), "NaN",
-        "Infinity", " 1", "1\\n2", "x" * 129,
+        "Infinity", " 1", "1\n2", "x" * 129,
     ],
 )
 @pytest.mark.parametrize("field", ["quantity", "average_price", "realized_pnl"])
@@ -128,7 +128,7 @@ def test_bad_position_amounts_never_leave_canonical_projection(
 
 @pytest.mark.parametrize(
     "identity", [
-        " SIM", "SIM ", "SIM\\nforged", "SIM\\u202eforged",
+        " SIM", "SIM ", "SIM\nforged", "SIM\u202eforged",
         "X" * 513, HostileText("SIM"), 7,
     ],
 )
@@ -140,7 +140,7 @@ def test_unbounded_behavioral_or_spoofed_operator_identity_never_renders(identit
     assert checks == 2
 
 
-@pytest.mark.parametrize("currency", ["usd", "US", "USDX", "ЇЇЇ", "U\\u202eD"])
+@pytest.mark.parametrize("currency", ["usd", "US", "USDX", "ЇЇЇ", "U\u202eD"])
 def test_currency_must_be_unambiguous_ascii_code(currency: str) -> None:
     payload = clean_account()
     payload["positions"][0]["currency"] = currency
