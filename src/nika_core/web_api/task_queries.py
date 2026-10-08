@@ -40,9 +40,26 @@ class WebTaskQueryHandler:
             record = self._queue.get(task_id)
         except KeyError:
             return self._reject(command.request_id, "not_found")
-        except (sqlite3.Error, ValueError, TypeError):
-            # Malformed canonical row or SQLite failure is a definite query
-            # failure, not an outcome-unknown write. Never leak persisted data.
+        except sqlite3.Error:
+            # A failed canonical read is a definite query failure, not a
+            # possibly applied command. Never echo storage exception details.
+            return self._storage_failure(command.request_id)
+        except (ValueError, TypeError):
+            # TaskQueue.get() deserializes the payload *before* its caller can
+            # establish the workspace. If the persisted payload is corrupt,
+            # a foreign task must still be indistinguishable from a missing
+            # task. Inspect only the canonical store's workspace column; do
+            # not parse or expose the corrupt payload or create Web state.
+            try:
+                with self._queue.store.connection() as conn:
+                    owner = conn.execute(
+                        "SELECT workspace_id FROM tasks WHERE task_id = ?",
+                        (task_id,),
+                    ).fetchone()
+            except sqlite3.Error:
+                return self._storage_failure(command.request_id)
+            if owner is None or owner["workspace_id"] != principal.workspace_id:
+                return self._reject(command.request_id, "not_found")
             return self._storage_failure(command.request_id)
         if record.workspace_id != principal.workspace_id:
             # Never reveal foreign task metadata or its payload health.
