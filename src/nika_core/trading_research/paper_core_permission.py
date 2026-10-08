@@ -17,18 +17,21 @@ from nika_core.security.standing_permission import (
 )
 from nika_core.tools import ToolRisk
 
-from .paper_actions import PAPER_ACCOUNT_INSPECT
+from .paper_actions import PAPER_ACCOUNT_INSPECT, PAPER_POSITIONS_INSPECT
 
 
 def standing_paper_read_authorizer(
     permissions: StandingPermissionStore,
     *,
     trusted_binding: Callable[[], StandingPermissionBinding],
+    action_id: str = PAPER_ACCOUNT_INSPECT,
 ) -> Callable[[str, str], bool]:
     """Compose PaperWorkspaceQuery with Core's durable, revocable READ_ONLY grant.
 
     The binding must come from authenticated host context on *each* call. Its
     target is the exact workspace_id and its resource_id is the exact run_id.
+    The action must be bound by the host: inspecting detailed PAPER positions
+    cannot borrow the narrower account-summary grant.
     Core also matches subject, user/project/task context, action class, risk,
     expiry, parent grants, and revocation. Absent/invalid authority fails
     closed; nothing here creates a standing permission.
@@ -37,6 +40,10 @@ def standing_paper_read_authorizer(
         raise TypeError("canonical standing permission store is required")
     if not callable(trusted_binding):
         raise TypeError("trusted host binding resolver is required")
+    if type(action_id) is not str or action_id not in (
+        PAPER_ACCOUNT_INSPECT, PAPER_POSITIONS_INSPECT
+    ):
+        raise ValueError("unsupported PAPER read action")
 
     def authorize(workspace_id: str, run_id: str) -> bool:
         if type(workspace_id) is not str or type(run_id) is not str:
@@ -65,8 +72,8 @@ def standing_paper_read_authorizer(
                 subject_id=binding.subject_id,
                 context=context,
                 intent=ActionIntent(
-                    action_id=PAPER_ACCOUNT_INSPECT,
-                    tool_id=PAPER_ACCOUNT_INSPECT,
+                    action_id=action_id,
+                    tool_id=action_id,
                     target=workspace_id,
                     risk=ToolRisk.READ_ONLY,
                 ),
