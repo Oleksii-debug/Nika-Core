@@ -92,7 +92,8 @@ def test_shortcut_mutation_refuses_invalid_or_expensive_carriers(
 ) -> None:
     bridge, calls = _bridge()
     assert bridge.set_binding(action_id, binding)["ok"] is False
-    assert bridge.restore_default(action_id)["ok"] is (type(action_id) is str and len(action_id) <= 120)
+    is_valid_action = type(action_id) is str and len(action_id) <= 120
+    assert bridge.restore_default(action_id)["ok"] is is_valid_action
     assert not any(call[0] == "set" for call in calls)
 
 
