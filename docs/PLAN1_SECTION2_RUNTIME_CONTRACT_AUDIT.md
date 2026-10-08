@@ -26,7 +26,11 @@ command authority.
 3. Recovery approval and checkpoint authority require actual Nika-owned
    `RuntimeResumeMode` / `RuntimeResumeProbeStatus` enum instances. A
    string equal to `"ready"` must never claim a verified checkpoint.
-4. Event ordering requires real nonnegative integer sequence numbers.
+4. Event ordering requires plain nonnegative integer sequence numbers; user-defined
+   integer subclasses are not authoritative.
+5. Resumable `RuntimeResult` tokens use the same canonical identity validation as
+   `RuntimeResumeRequest`, so an advertised PAUSED/WAITING_APPROVAL cursor cannot
+   contain multiline/bidi/decomposed or edge-whitespace text that restart rejects.
 
 ## Negative/recovery/integration evidence
 `tests/test_plan1_runtime_contract_hardening.py` covers the invalid
