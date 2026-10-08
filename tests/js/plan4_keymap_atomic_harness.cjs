@@ -22,7 +22,7 @@ async function run(source) {
   const factory = new Function("ctx",
     "const {globalThis,document,keymapBody,keymapAccessibleActionLabel,"
     + "keymapControlId,mutateKeymap}=ctx;"
-    + "let actions=[{action_id:'previous'}], actionsReady=true;"
+    + "let actions=[{action_id:'previous'}], actionsReady=true, keymapReadGeneration=0;"
     + source.slice(start, end)
     + "return {refreshKeymap, snapshot:()=>({actions,actionsReady})};"
   );
@@ -84,6 +84,32 @@ async function run(source) {
   assert.equal(ui.snapshot().actionsReady, true);
   assert.equal(displayed[0].children[0].textContent, good.label);
   console.log("PASS: safe keyboard inventory restores editing after a failed refresh");
+
+  // A delayed older bridge read must not roll back a newer accessible keymap.
+  let resolveOlder;
+  inventory.push(new Promise((resolve) => { resolveOlder = resolve; }));
+  inventory.push([{...good, label: "Нова команда"}]);
+  const older = ui.refreshKeymap();
+  const newer = ui.refreshKeymap();
+  assert.equal(await newer, true);
+  resolveOlder([{...good, label: "Стара команда"}]);
+  assert.equal(await older, null);
+  assert.equal(replacements, 3);
+  assert.equal(ui.snapshot().actions[0].label, "Нова команда");
+  assert.equal(displayed[0].children[0].textContent, "Нова команда");
+  console.log("PASS: stale success cannot roll back the newer semantic keymap");
+
+  let rejectOlder;
+  inventory.push(new Promise((_, reject) => { rejectOlder = reject; }));
+  inventory.push([good]);
+  const failedOld = ui.refreshKeymap();
+  const recovered = ui.refreshKeymap();
+  assert.equal(await recovered, true);
+  rejectOlder(new Error("stale bridge internals"));
+  assert.equal(await failedOld, null);
+  assert.equal(ui.snapshot().actionsReady, true);
+  assert.equal(ui.snapshot().actions[0].label, good.label);
+  console.log("PASS: stale failure cannot invalidate a newer verified keymap");
 }
 
 if (require.main === module) {
