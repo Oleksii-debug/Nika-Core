@@ -9,7 +9,14 @@ from functools import lru_cache
 from importlib.resources import files
 from typing import Any
 
-from nika_core.web_api.asgi import ASGICommandApplication, Receive, Send
+from nika_core.web_api.asgi import (
+    ASGICommandApplication,
+    Receive,
+    Send,
+    _HTTP_TOKEN,
+    _MAX_HEADER_BYTES,
+    _MAX_HEADER_FIELDS,
+)
 
 _ASSETS = {
     "/app/": ("index.html", b"text/html; charset=utf-8"),
@@ -73,14 +80,26 @@ class AccessibleWebClientApplication:
         await send({"type": "http.response.body", "body": body, "more_body": False})
 
     def _trusted_static_host(self, headers: object) -> bool:
-        if type(headers) not in {list, tuple} or len(headers) > 64:
+        # Share the canonical ASGI header admission budgets and token syntax:
+        # a public static route must not become a weaker reverse-proxy parser.
+        if type(headers) not in {list, tuple} or len(headers) > _MAX_HEADER_FIELDS:
             return False
         hosts: list[bytes] = []
+        total_bytes = 0
         for pair in headers:
             if type(pair) not in {list, tuple} or len(pair) != 2:
                 return False
             name, value = pair
             if type(name) is not bytes or type(value) is not bytes:
+                return False
+            total_bytes += len(name) + len(value)
+            if total_bytes > _MAX_HEADER_BYTES:
+                return False
+            if (
+                not name
+                or any(char not in _HTTP_TOKEN for char in name)
+                or any(char in value for char in (0, 10, 13))
+            ):
                 return False
             if name.lower() == b"host":
                 hosts.append(value)
