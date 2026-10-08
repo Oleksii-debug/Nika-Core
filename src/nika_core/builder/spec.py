@@ -87,6 +87,11 @@ class AgentDefinition(BaseModel):
     def strip_reference(cls, value: str | None) -> str | None:
         if value is None:
             return None
+        # Reference identifiers select registered model, schedule, and budget
+        # authority. Do not silently trim Unicode separators, bidirectional
+        # controls or decomposed forms into a different registered identity.
+        if not value.isprintable() or unicodedata.normalize("NFC", value) != value:
+            raise ValueError("reference contains ambiguous Unicode")
         normalized = value.strip()
         if not normalized:
             raise ValueError("reference must not be blank")
