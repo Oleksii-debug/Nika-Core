@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from unicodedata import normalize
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -20,6 +21,10 @@ def _machine_text(value: object, *, field_name: str, max_bytes: int = 160) -> st
         raise ValueError(f"{field_name} must be an exact string")
     if not value or value != value.strip():
         raise ValueError(f"{field_name} must be non-empty without surrounding whitespace")
+    # Machine tokens are correlation/registry keys, not display text. Keep
+    # canonically equivalent Unicode spellings from acquiring distinct keys.
+    if normalize("NFC", value) != value:
+        raise ValueError(f"{field_name} must use NFC-normalized text")
     if len(value) > _MAX_TEXT_CHARS:
         raise ValueError(f"{field_name} is too long")
     try:

@@ -195,3 +195,31 @@ def test_public_static_shell_preserves_valid_bounded_extra_header() -> None:
     assert start["status"] == 200
     assert b"Nika Core" in body["body"]
     assert handler.calls == 0
+
+
+@pytest.mark.parametrize("duplicated_name", [
+    b"authorization", b"origin", b"content-type", b"content-length",
+    b"transfer-encoding", b"cookie",
+])
+def test_static_shell_rejects_ambiguous_duplicate_security_headers(duplicated_name) -> None:
+    app, handler = _app()
+    start, body = _request(app, headers=[
+        (b"host", b"nika.example"),
+        (duplicated_name, b"first"),
+        (duplicated_name.upper(), b"second"),
+    ])
+    assert start["status"] == 403
+    assert body["body"] == b""
+    assert handler.calls == 0
+
+
+def test_static_shell_preserves_distinct_bounded_headers() -> None:
+    app, handler = _app()
+    start, body = _request(app, headers=[
+        (b"host", b"nika.example"),
+        (b"origin", b"https://nika.example"),
+        (b"accept", b"text/html"),
+    ])
+    assert start["status"] == 200
+    assert b"Nika Core" in body["body"]
+    assert handler.calls == 0
