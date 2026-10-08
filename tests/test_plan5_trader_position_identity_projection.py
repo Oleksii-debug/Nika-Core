@@ -111,8 +111,11 @@ def test_venue_timezone_is_part_of_canonical_position_identity() -> None:
     assert [row["venue_timezone"] for row in state["positions"]] == [
         "UTC", "Europe/Bratislava",
     ]
-    assert len({(row["venue"], row["venue_timezone"], row["instrument"], row["currency"])
-                for row in state["positions"]}) == 2
+    identities = {
+        (row["venue"], row["venue_timezone"], row["instrument"], row["currency"])
+        for row in state["positions"]
+    }
+    assert len(identities) == 2
 
 
 def test_single_position_projection_still_works_without_new_authority() -> None:
