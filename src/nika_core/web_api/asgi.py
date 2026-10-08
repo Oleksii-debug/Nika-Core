@@ -26,8 +26,14 @@ Send = Callable[[dict[str, object]], Awaitable[None]]
 _MAX_RECEIVE_EVENTS = 1024
 _MAX_HEADER_FIELDS = 64
 _MAX_HEADER_BYTES = 16 * 1024
-_HTTP_TOKEN = frozenset(b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+_HTTP_TOKEN = frozenset(
+    b"!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+)
 
+_UNIQUE_SECURITY_HEADERS = frozenset({
+    b"authorization", b"content-length", b"content-type", b"cookie",
+    b"host", b"origin", b"transfer-encoding",
+})
 
 _DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 
@@ -160,10 +166,36 @@ class ASGICommandApplication:
             ):
                 return self._error(400, "invalid_headers")
             key = name.lower()
-            if key in {b"content-type", b"origin", b"cookie"}:
+            if key in _UNIQUE_SECURITY_HEADERS:
                 if key in selected:
                     return self._error(400, "duplicate_security_header")
                 selected[key] = value
+        if b"content-length" in selected and b"transfer-encoding" in selected:
+            return self._error(400, "conflicting_request_framing")
+        # The HTTP Host is not a tenant, identity, or routing authority. Require
+        # its exact public HTTPS authority to be explicitly allowed before Core.
+        # Do not trust X-Forwarded-Host or infer a host from the Origin header.
+        host_bytes = selected.get(b"host")
+        if host_bytes is None:
+            return self._error(400, "host_required")
+        try:
+            host = host_bytes.decode("ascii")
+        except UnicodeDecodeError:
+            return self._error(403, "host_forbidden")
+        if f"https://{host}" not in self._allowed_origins:
+            return self._error(403, "host_forbidden")
+        declared_length: int | None = None
+        if b"content-length" in selected:
+            encoded = selected[b"content-length"]
+            if (
+                not encoded
+                or len(encoded) > 10
+                or not all(48 <= digit <= 57 for digit in encoded)
+            ):
+                return self._error(400, "invalid_content_length")
+            declared_length = int(encoded)
+            if declared_length > _MAX_HTTP_BODY_BYTES:
+                return self._error(413, "payload_too_large")
         if b"cookie" in selected:
             # Until server-owned CSRF/session semantics exist, cookie auth is not admitted.
             return self._error(403, "cookie_auth_unavailable")
@@ -205,6 +237,8 @@ class ASGICommandApplication:
                 return self._error(413, "payload_too_large")
             chunks.append(chunk)
             if not more:
+                if declared_length is not None and length != declared_length:
+                    return self._error(400, "invalid_content_length")
                 try:
                     return self._adapter.handle(
                         principal=principal,

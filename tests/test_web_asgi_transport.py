@@ -57,6 +57,22 @@ def _app() -> tuple[ASGICommandApplication, _Handler]:
     ), handler
 
 
+def _headers_for_scope(
+    headers: list[tuple[bytes, bytes]] | None,
+    origin: bytes,
+) -> list[tuple[bytes, bytes]]:
+    if headers is None:
+        return [
+            (b"host", origin.removeprefix(b"https://")),
+            (b"origin", origin),
+            (b"content-type", b"application/json"),
+        ]
+    items = list(headers)
+    if not any(type(name) is bytes and name.lower() == b"host" for name, _ in items):
+        items.insert(0, (b"host", b"nika.example"))
+    return items
+
+
 def _scope(
     *,
     principal: WebPrincipal | None = None,
@@ -70,10 +86,7 @@ def _scope(
         "path": "/v1/commands",
         "query_string": b"",
         "method": "POST",
-        "headers": headers if headers is not None else [
-            (b"origin", origin),
-            (b"content-type", b"application/json"),
-        ],
+        "headers": _headers_for_scope(headers, origin),
         "state": {"nika_principal": principal} if principal else {},
     }
 
@@ -282,3 +295,117 @@ def test_canonical_headers_accept_additional_bounded_field() -> None:
     ]))
     assert _status(output) == 200
     assert handler.calls == 1
+
+
+@pytest.mark.parametrize("name", [
+    b"host", b"authorization", b"content-length", b"transfer-encoding",
+])
+def test_duplicate_server_authority_or_framing_header_rejected_before_effect(
+    name: bytes,
+) -> None:
+    app, handler = _app()
+    headers = [
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+        (name, b"a"),
+        (name.upper(), b"b"),
+    ]
+    output = _call(app, _scope(principal=_principal(), headers=headers))
+    assert _status(output) == 400
+    assert _payload(output)["code"] == "duplicate_security_header"
+    assert handler.calls == 0
+
+
+@pytest.mark.parametrize("framing, expected_status, expected_code", [
+    ([(b"content-length", b"-1")], 400, "invalid_content_length"),
+    ([(b"content-length", b"1.0")], 400, "invalid_content_length"),
+    ([(b"content-length", b"1 2")], 400, "invalid_content_length"),
+    ([(b"content-length", b"99999999999999999999")],
+     400, "invalid_content_length"),
+    ([(b"content-length", b"262145")], 413, "payload_too_large"),
+    ([(b"content-length", b"1"), (b"transfer-encoding", b"chunked")],
+     400, "conflicting_request_framing"),
+])
+def test_framing_attack_cannot_dispatch_core_effect(
+    framing: list[tuple[bytes, bytes]], expected_status: int, expected_code: str,
+) -> None:
+    app, handler = _app()
+    headers = [(b"content-type", b"application/json"), *framing]
+    output = _call(app, _scope(principal=_principal(), headers=headers))
+    assert _status(output) == expected_status
+    assert _payload(output)["code"] == expected_code
+    assert handler.calls == 0
+
+
+def test_declared_content_length_mismatch_has_no_effect() -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"content-type", b"application/json"),
+        (b"content-length", b"1"),
+    ]))
+    assert _status(output) == 400
+    assert _payload(output)["code"] == "invalid_content_length"
+    assert handler.calls == 0
+
+
+def test_matching_content_length_and_fragmented_body_keep_core_boundary() -> None:
+    app, handler = _app()
+    body = _body()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(body)).encode("ascii")),
+    ]), events=[
+        {"type": "http.request", "body": body[:9], "more_body": True},
+        {"type": "http.request", "body": body[9:], "more_body": False},
+    ])
+    assert _status(output) == 200
+    assert handler.calls == 1
+
+
+@pytest.mark.parametrize("bad_host", [
+    b"nika.example.evil",
+    b"NIKA.example",
+    b"nika.example:443",
+    b"nika.example@attacker.example",
+    b"nika.example/path",
+    b"nika.example\\evil",
+    b"nika.example\\xff",
+])
+def test_host_authority_spoof_rejected_before_core_effect(bad_host: bytes) -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"host", bad_host),
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]))
+    assert _status(output) == 403
+    assert _payload(output)["code"] == "host_forbidden"
+    assert handler.calls == 0
+
+
+def test_missing_host_is_rejected_without_core_effect() -> None:
+    app, handler = _app()
+    scope = _scope(principal=_principal())
+    scope["headers"] = [
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]
+    output = _call(app, scope)
+    assert _status(output) == 400
+    assert _payload(output)["code"] == "host_required"
+    assert handler.calls == 0
+
+
+def test_host_is_not_derived_from_untrusted_forwarded_host() -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"host", b"attacker.example"),
+        (b"x-forwarded-host", b"nika.example"),
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]))
+    assert _status(output) == 403
+    assert handler.calls == 0
+
+
