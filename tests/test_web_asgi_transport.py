@@ -407,3 +407,38 @@ def test_header_case_duplicate_host_and_injected_host_never_dispatch() -> None:
     assert _status(poisoned) == 400
     assert _payload(poisoned)["code"] == "invalid_headers"
     assert handler.calls == 0
+
+
+def test_host_rejection_precedes_receive_even_for_unbounded_body() -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"host", b"unauthorized.example"),
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]), events=[])
+    assert _status(output) == 403
+    assert _payload(output)["code"] == "host_forbidden"
+    assert handler.calls == 0
+
+
+@pytest.mark.parametrize("origin", [
+    "https://localhost:8443",
+    "https://127.0.0.1:8443",
+    "https://[::1]:8443",
+])
+def test_configured_ipv4_ipv6_port_hosts_reach_existing_core_boundary(
+    origin: str,
+) -> None:
+    handler = _Handler()
+    boundary = WebApplicationBoundary(authorization=_Allow(), handler=handler)
+    app = ASGICommandApplication(
+        HttpCommandAdapter(boundary), allowed_origins=frozenset({origin}),
+    )
+    host = origin.removeprefix("https://").encode("ascii")
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"host", host),
+        (b"origin", origin.encode("ascii")),
+        (b"content-type", b"application/json"),
+    ]))
+    assert _status(output) == 200
+    assert handler.calls == 1
