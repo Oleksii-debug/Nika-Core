@@ -8,9 +8,8 @@ Do **not** infer Plan 2–7 Section status from this file.
 ## Canonical reuse and source authorities
 
 The adoption and historical reuse decisions remain in
-`docs/THIRD_PARTY_ADOPTION.md`, `docs/REUSE_CATALOG_2026-08-18.md`,
-`docs/REUSE_AND_OPEN_SOURCE_MASTER_MAP.md` if present in the relevant
-workspace, and `docs/PLAN1_SECTION1_ADOPTION_AUDIT.md` on PR #1734.
+`docs/THIRD_PARTY_ADOPTION.md`, `docs/REUSE_CATALOG_2026-08-18.md`
+and `docs/PLAN1_SECTION1_ADOPTION_AUDIT.md` on PR #1734.
 The machine-readable **declared dependency contract** is
 `docs/PLAN1_DEPENDENCY_AUTHORITY.json`.
 
