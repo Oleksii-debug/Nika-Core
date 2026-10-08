@@ -38,6 +38,25 @@ starting a planner process. Harder unsatisfiable cases remain the planner's resp
 No Unified Planning problem, fluent, action, plan, result, Aries, gRPC, SQLite or runtime-ledger
 type is exposed by the Nika deterministic planning contracts.
 
+Action catalogs and restored completion checkpoints are each bounded at 10,000 entries,
+and rejected before deepcopy, planning, journal inspection or tool effects.
+Caller execution budgets use the same 10,000 ceiling for maximum steps and replans;
+model-free planning and observation timeout inputs are limited to 86,400 seconds.
+Oversized finite numbers are rejected before planner or durable journal inspection.
+These upper bounds prevent caller-controlled huge integers and deadlines from
+bypassing practical resource limits, without changing an already admitted run.
+ This protects the
+canonical runtime from adversarially oversized replay inputs without introducing another
+runtime authority or changing ToolExecutor permissions.
+
+Untrusted tool arguments are admitted before any planner/journal/tool call or caller-owned
+deep-copy. Nested carriers must be exact inert built-ins; nesting is limited to 32 levels
+and 10,000 counted elements including keys. Per-action UTF-8 text across keys and values
+must not exceed 256 KiB; malformed UTF-8 (including lone surrogates) is rejected.
+Individual integers are restricted to 4,096 bits to keep later fingerprint/JSON work
+bounded. These size gates grant no permissions and do not replace ToolExecutor's
+tool-schema and approval checks.
+
 ## Execution contract
 
 A deterministic run receives:
@@ -52,6 +71,60 @@ A deterministic run receives:
 - optionally, ordered `previously_completed_action_ids` recovered from a durable checkpoint;
 - for durable non-read-only tool execution, a `DeterministicEffectJournal` plus the stable
   `task_id` owned by the runtime/task lifecycle.
+
+The selected replaceable planner is not an execution authority: its returned plan must be an
+actual `DeterministicPlan` with immutable tuple steps and exact `PlanStep` carriers with text
+action/tool identifiers. An invalid planner payload is discarded before entering plan history
+or `ToolExecutor`, with a typed `INVALID_PLAN` failure and no effect reservation. A provider
+cannot smuggle arbitrary objects or list-backed steps into the approved execution plan.
+
+Before either snapshot, deterministic action arguments must use plain JSON-like built-in
+carriers (dict with text keys, list/tuple, text, boolean, integer, finite float, or null).
+Custom object/dict/list subclasses, non-finite numbers, cycles, more than 32 levels of
+nesting or more than 10,000 nested elements per action are rejected before invoking
+any caller-defined `__deepcopy__`, planner, journal reservation, or tool handler.
+Mutable frozen-record internals are also re-admitted before snapshot: state/goal/action
+facts must be exact immutable frozensets of at most 10,000 canonical UTF-8 identifiers
+(each at most 512 bytes, NFC, without controls/bidi formatting or edge whitespace);
+action/tool identities must be canonical text, and contradictory mutated
+preconditions/effects are rejected. The same fail-closed fact fence applies to
+replaceable world-state observer output before the observed state becomes evidence.
+Malformed observer facts return STATE_OBSERVATION_FAILED without planner/tool effects.
+A malformed planner result is inspected as exact built-in plan/step records *before*
+deepcopy and again afterward. No planner-defined copy method is invoked for a
+rejected carrier. This is an admission fence, not a second tool-schema or permission authority.
+
+Planner inputs are detached twice: the Brain snapshots caller-provided state, goal
+and action records at run admission, and each replaceable planner invocation receives
+its own detached copy. Frozen dataclasses can still contain mutable nested arguments
+or be forcibly assigned by a hostile adapter; planner/caller mutations therefore
+cannot alter the Brain's authoritative validation state, goal, or dispatched tool
+arguments. Unsnapshotable run inputs fail before planner, effect journal or tools.
+The copies create no new storage, approval source, or runtime authority.
+
+An exact planner result with more steps than the remaining execution budget is
+rejected as `PLAN_TOO_LONG` before scanning or deep-copying the steps. This prevents an
+oversized untrusted plan from consuming snapshot memory before the bounded-plan gate.
+Every planner-supplied step action/tool ID must also pass the canonical bounded,
+normalized UTF-8 identity check before a snapshot or history write: plain strings
+alone are insufficient (controls, bidirectional formatting, invalid surrogates,
+non-NFC text and overlong IDs are rejected with `INVALID_PLAN`). This is not
+planner permission to register or invoke a new tool.
+
+The planner's returned plan is also detached before plan validation, evidence/history,
+observer awaits, and tool dispatch. Retaining a frozen-but-forcibly-mutable PlanStep
+cannot rewrite the action chosen after the planner returns. Uncopyable or malformed
+plan carriers fail with INVALID_PLAN before tool effects. Observer results must be
+exact WorldState records with immutable frozenset[str] facts; the Brain constructs
+an owned result rather than trusting an object the adapter may mutate afterward.
+Malformed observation records fail with STATE_OBSERVATION_FAILED. None of these
+adapters can grant authority to a model, planner, tool, or alternative runtime.
+
+Unexpected exceptions from replaceable planner adapters are normalized to a typed
+`PLANNER_FAILURE` without surfacing provider-specific exception text. Intentional
+`DeterministicPlanningError` outcomes retain their original error code, and cancellation
+still propagates to the caller. No planner exception can itself authorize a tool call.
+
 
 Before the first tool action in each returned plan, Nika simulates the entire plan against the
 current state. Unknown action IDs, planner/tool identity mismatch, repeated completed actions,
@@ -160,6 +233,27 @@ The message remains human-readable while `error_code` is stable for programmatic
 
 ## Restart evidence
 
+The `max_steps` budget is cumulative across process restarts: the number of validated
+`previously_completed_action_ids` consumes the same step allowance, not a new quota.
+A recovered checkpoint with a satisfied goal returns terminal success without
+re-planning even when some of its task-wide step budget remains. An over-budget checkpoint
+cannot claim success, and an unmet goal at the step ceiling fails closed before a new
+tool effect. Existing task-level PENDING/UNCERTAIN journal reconciliation still precedes
+this terminal shortcut.
+When a WorldStateObserver is configured, every satisfied checkpoint is re-observed
+before accepting terminal success: observation failures fail closed; drift at the
+step ceiling blocks success; drift with remaining step budget resumes normal validated
+planning from the observed state. No planner or tool effect executes while the observer
+is confirming an already-satisfied checkpoint.
+
+Run, optional task, and deterministic action/replay identities are admitted as exact,
+bounded canonical UTF-8 text before journal/planner/tool handling.
+The action catalog and recovered completed-action checkpoint must be immutable tuples.
+Consumable iterators and mutable sequences are rejected before inspection; they cannot
+evade cumulative step accounting by changing or exhausting during admission. Step/re-plan limits
+must be exact integer budgets, and planning/observation time budgets must be finite
+positive numbers; booleans, NaN, infinities and huge values are invalid.
+
 For read-only/purely deterministic work, a caller persists the returned `final_state` plus ordered
 `completed_actions` in its normal durable task/checkpoint state. On restart those values are
 passed back as the initial state and `previously_completed_action_ids`. The brain excludes those
@@ -173,3 +267,7 @@ block all deterministic continuation for that task until reconciliation.
 
 No second persistence engine is introduced; authoritative state remains in Nika's existing
 runtime/task SQLite and idempotency/recovery layers.
+
+## Plan 3 Section 1 — aggregate catalog resource admission
+
+Every run admits no more than 10,000 actions and 10,000 recovered action identities, and validates action arguments **before** planner, journal or ToolExecutor access. The existing *per-action* caps (10,000 plain JSON-like nodes, 256 KiB total UTF-8 argument strings, depth 32) remain in force. A separate, shared *whole-catalog* cap now limits all action argument trees to 100,000 plain nodes and 4 MiB of UTF-8 argument strings in aggregate. Action preconditions/effects additionally admit at most 100,000 fact memberships across the action catalog, while retaining the individual 10,000-fact-set ceiling. None of these limits authorizes tools, approvals or new effects; oversized inputs fail closed as ValueError without a planner or durable-effect call. Focused adversarial tests exercise many individually valid oversized actions and a valid smaller two-action catalog. These are repository-controllable contracts, not a claim of physical Windows/NVDA testing.
