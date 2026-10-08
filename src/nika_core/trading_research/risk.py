@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from .accounting import AccountSnapshot
+from .accounting import AccountSnapshot, Position
 from .contracts import TradingResearchError, require_aware_utc
 from .identity import InstrumentIdentity, instrument_identity, instrument_identity_sha256
 from .orders import (
@@ -31,6 +31,15 @@ def _finite_decimal(value: object, name: str) -> Decimal:
     return value
 
 
+def _validate_policy(policy: ExecutionPolicy) -> None:
+    if type(policy) is not ExecutionPolicy:
+        raise TradingResearchError("risk execution policy must be ExecutionPolicy")
+    for name in ("slippage_bps", "fee_bps", "fixed_fee", "max_fill_fraction"):
+        _finite_decimal(getattr(policy, name), f"execution policy {name}")
+    # Immutable carriers can be forged through object.__setattr__; recheck at use.
+    policy.__post_init__()
+
+
 def _validate_snapshot(snapshot: AccountSnapshot) -> None:
     if type(snapshot) is not AccountSnapshot:
         raise TradingResearchError("risk snapshot must be AccountSnapshot")
@@ -39,7 +48,22 @@ def _validate_snapshot(snapshot: AccountSnapshot) -> None:
         "gross_exposure", "net_exposure",
     ):
         _finite_decimal(getattr(snapshot, name), f"snapshot {name}")
+    if type(snapshot.positions) is not tuple:
+        raise TradingResearchError("risk snapshot positions must be a tuple")
+    if snapshot.fees < 0:
+        raise TradingResearchError("risk snapshot fees cannot be negative")
+    if snapshot.gross_exposure < 0 or (
+        snapshot.gross_exposure < abs(snapshot.net_exposure)
+    ):
+        raise TradingResearchError("risk snapshot gross/net exposure is inconsistent")
+    seen: set[InstrumentIdentity] = set()
     for position in snapshot.positions:
+        if type(position) is not Position:
+            raise TradingResearchError("risk snapshot positions must be Position")
+        identity = instrument_identity(position.instrument)
+        if identity in seen:
+            raise TradingResearchError("risk snapshot has duplicate instrument identity")
+        seen.add(identity)
         for name in ("quantity", "average_price", "realized_pnl"):
             _finite_decimal(getattr(position, name), f"position {name}")
 
@@ -156,8 +180,7 @@ class RiskEngine:
             raise TradingResearchError("approve requires host OrderAuthority")
         _finite_decimal(mark_price, "mark_price")
         _finite_decimal(pending_signed_quantity, "pending_signed_quantity")
-        for field in ("slippage_bps", "fee_bps", "fixed_fee", "max_fill_fraction"):
-            _finite_decimal(getattr(policy, field), f"execution policy {field}")
+        _validate_policy(policy)
         if mark_price <= 0:
             raise TradingResearchError("mark_price must be positive")
         if pending_orders and pending_signed_quantity != 0:
@@ -174,7 +197,10 @@ class RiskEngine:
         for pending in pending_orders:
             if type(pending) is not PendingRiskOrder:
                 raise TradingResearchError("pending orders must be PendingRiskOrder")
+            if type(pending.order) is not RiskApprovedOrder:
+                raise TradingResearchError("pending order must be RiskApprovedOrder")
             pending.__post_init__()
+            _validate_policy(pending.order.policy)
             if pending.order.approval_id in seen_pending_approvals:
                 raise TradingResearchError("duplicate pending approval_id")
             seen_pending_approvals.add(pending.order.approval_id)
