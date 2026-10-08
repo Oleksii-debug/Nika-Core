@@ -23,6 +23,11 @@ from nika_core.intelligence.contracts import (
 from nika_core.tools import ToolCall, ToolExecutor, ToolRisk, ToolSpec
 
 
+# Bound repeated planner snapshots independently of the per-plan step limit.
+# State drift can force thousands of valid but unexecuted replans.
+_MAX_PLANNING_HISTORY_STEPS = 100_000
+
+
 @dataclass(frozen=True, slots=True)
 class DeterministicBrainResult:
     plan: DeterministicPlan
@@ -317,6 +322,7 @@ class DeterministicBrain:
         completed = list(previously_completed_action_ids)
         completed_set = set(previously_completed_action_ids)
         history: list[DeterministicPlan] = []
+        admitted_plan_steps = 0
         replans = 0
         # A recovered action already consumed this task's total execution budget.
         executed_steps = len(previously_completed_action_ids)
@@ -464,6 +470,20 @@ class DeterministicBrain:
                     code=DeterministicErrorCode.INVALID_PLAN,
                     message="planner returned a malformed deterministic plan",
                 )
+            # A changing observer can force thousands of individually valid
+            # plans without consuming the executed-step limit. Bound cumulative
+            # snapshot/history work before deepcopy and before tool dispatch.
+            if len(plan.steps) > _MAX_PLANNING_HISTORY_STEPS - admitted_plan_steps:
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.PLANNER_RESOURCE_LIMIT,
+                    message="deterministic planning history resource limit exceeded",
+                )
+            admitted_plan_steps += len(plan.steps)
             # A planner may retain its result and mutate frozen PlanStep objects
             # after returning. Own an independent plan snapshot before validation,
             # history, observer awaits, and ToolExecutor dispatch.
