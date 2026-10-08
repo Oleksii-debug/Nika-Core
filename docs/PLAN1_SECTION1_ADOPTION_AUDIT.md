@@ -29,9 +29,11 @@ another persistence, scheduler, ModelGateway or AgentRuntime authority.
 
 `tests/test_plan1_architecture.py` tests that six designated stable contract
 modules do not acquire *direct* imports of orchestration/model/HTTP/MCP/Windows/Web
-engines. It includes negative tests for aliased and nested imports, false-positive
-documentation and a malformed-source fail-closed case. This is a structural guard;
-it cannot prove absence of dynamic imports or prove packaged/NVDA acceptance.
+engines. It includes negative tests for aliased/nested imports, common direct and aliased
+`importlib`/`__import__` dynamic imports, nonliteral dynamic module names, documentation
+false positives and malformed-source fail-closed behavior. This is a source-level
+guard, not an exhaustive proof against arbitrary code execution, import machinery
+rewrites, packaged operation or physical Windows/NVDA acceptance.
 
 Existing `tests/test_m1_foundation.py` already checks schema migration from v1,
 future-schema rejection, agent/workspace persistence, audit round-trip and shortcut

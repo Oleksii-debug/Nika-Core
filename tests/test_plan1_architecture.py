@@ -1,6 +1,6 @@
 """Plan 1 / Section 1: keep Nika-owned contracts independent of replaceable engines.
 
-This is an intentionally narrow, source-level drift gate. It does not assert
+This guards direct and common dynamic imports; it does not assert
 that plugins/providers are safe to execute or that a packaged UI is accessible.
 """
 
@@ -52,16 +52,48 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
     """Return direct provider/host imports; malformed source fails rather than passing."""
     tree = ast.parse(source)
     imports: set[str] = set()
+    importlib_names = {"importlib"}
+    dynamic_function_names = {"__import__"}
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             names = (alias.name for alias in node.names)
+            for alias in node.names:
+                if alias.name == "importlib":
+                    importlib_names.add(alias.asname or "importlib")
         elif isinstance(node, ast.ImportFrom) and node.module:
             names = (node.module,)
+            if node.module == "importlib":
+                dynamic_function_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "import_module"
+                )
         else:
             continue
         for name in names:
             if name.split(".", 1)[0] in FOREIGN_ENGINE_ROOTS:
                 imports.add(name)
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        direct = isinstance(func, ast.Name) and func.id in dynamic_function_names
+        via_importlib = (
+            isinstance(func, ast.Attribute)
+            and func.attr == "import_module"
+            and isinstance(func.value, ast.Name)
+            and func.value.id in importlib_names
+        )
+        if not (direct or via_importlib):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(
+            node.args[0].value, str
+        ):
+            imports.add("<nonliteral-dynamic-import>")
+            continue
+        module = node.args[0].value
+        if module.split(".", 1)[0] in FOREIGN_ENGINE_ROOTS:
+            imports.add(module)
     return tuple(sorted(imports))
 
 
@@ -83,6 +115,23 @@ def test_architecture_guard_rejects_aliased_and_nested_vendor_imports() -> None:
         "langgraph.graph",
         "webview",
     )
+
+
+def test_architecture_guard_rejects_direct_and_aliased_dynamic_engine_imports() -> None:
+    source = (
+        "import importlib as importer\n"
+        "from importlib import import_module as load\n"
+        "__import__('langgraph.graph')\n"
+        "importer.import_module('mcp')\n"
+        "load('httpx')\n"
+        "load('nika_core.runtime.contracts')\n"
+    )
+    assert direct_engine_imports(source) == ("httpx", "langgraph.graph", "mcp")
+
+
+def test_architecture_guard_fails_closed_on_nonliteral_dynamic_import() -> None:
+    source = "from importlib import import_module as load\nload(provider_name)\n"
+    assert direct_engine_imports(source) == ("<nonliteral-dynamic-import>",)
 
 
 def test_architecture_guard_does_not_flag_documentation_or_internal_ports() -> None:
