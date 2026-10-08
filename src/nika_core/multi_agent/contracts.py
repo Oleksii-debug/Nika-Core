@@ -240,7 +240,12 @@ def attenuate_grants(
             raise PermissionError(f"child requested ungranted tool: {requested.tool_id}")
         if requested.max_risk > parent.max_risk:
             raise PermissionError(f"child requested higher risk for tool: {requested.tool_id}")
-        if not set(requested.scopes).issubset(parent.scopes):
+        # An empty scope tuple denotes the unscoped (unrestricted) grant.
+        # A constrained parent cannot delegate an unrestricted child;
+        # an unrestricted parent may delegate a narrower scoped grant.
+        if parent.scopes and (
+            not requested.scopes or not set(requested.scopes).issubset(parent.scopes)
+        ):
             raise PermissionError(f"child requested broader scope for tool: {requested.tool_id}")
         result.append(requested)
     return tuple(result)
