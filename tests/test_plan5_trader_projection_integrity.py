@@ -73,7 +73,8 @@ def test_legitimate_paper_projection_is_text_first_and_authorized_twice() -> Non
     assert state["equity"] == "100"
     assert state["cash"] == "98"
     assert state["positions"] == [{
-        "venue": "SIM", "instrument": "TEST", "currency": "USD",
+        "venue": "SIM", "venue_timezone": "UTC",
+        "instrument": "TEST", "currency": "USD",
         "quantity": "1", "average_price": "2", "realized_pnl": "0",
     }]
 
