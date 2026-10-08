@@ -649,7 +649,20 @@
       (item) => !item || typeof item !== "object" || Array.isArray(item)
         || typeof item.task_id !== "string" || !item.task_id
         || (item.command != null && typeof item.command !== "string")
-    )) {
+    ) || (Array.isArray(state.tasks)
+      && new Set(state.tasks.map((item) => item.task_id)).size !== state.tasks.length)) {
+      if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
+      reportStateUnavailable();
+      return false;
+    }
+    // Do not publish a new task-control target if a sibling project/team
+    // projection is corrupt. The entire read is one operator-visible snapshot.
+    const projectView = state.product_project ?? null;
+    const teamView = state.v01_team_task ?? null;
+    const unavailableTeam = teamView && typeof teamView === "object"
+      && !Array.isArray(teamView) && teamView.available === false;
+    if ((projectView != null && !validProductProject(projectView))
+        || (teamView != null && !unavailableTeam && !validTeamTaskProjection(teamView))) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       reportStateUnavailable();
       return false;
@@ -661,8 +674,8 @@
     renderTaskTargets(taskItems);
     renderItems(agentsList, agentsEmpty, agentItems, (item) => `${item.name} — ${item.goal}`);
     renderItems(workspacesList, workspacesEmpty, workspaceItems, (item) => `${item.name} — ${item.description || "Без опису"}`);
-    const productReady = renderProductProject(state.product_project ?? null);
-    const teamRender = renderTeamTask(state.v01_team_task ?? null);
+    const productReady = renderProductProject(projectView);
+    const teamRender = renderTeamTask(teamView);
     if (!teamRender.ok) {
       announce(teamTaskUnavailableMessage, true);
       return false;
@@ -889,8 +902,12 @@
           || typeof action.action_id !== "string"
           || !/^[A-Za-z0-9_.:-]{1,120}$/.test(action.action_id)
           || typeof action.label !== "string" || !action.label || action.label.length > 256
+          // UI labels/shortcuts must not contain invisible direction overrides
+          // or control characters that spoof the NVDA keyboard inventory.
+          || /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/.test(action.label)
           || (action.binding != null && (typeof action.binding !== "string"
-            || action.binding.length > 256))
+            || action.binding.length > 256
+            || /[\u0000-\u001F\u007F-\u009F\u202A-\u202E\u2066-\u2069]/.test(action.binding)))
           || typeof action.may_be_unbound !== "boolean")
         || new Set(nextActions.map((action) => action.action_id)).size !== nextActions.length) {
       actionsReady = false;
