@@ -132,3 +132,53 @@ def test_integer_quota_preserves_normal_team_admission_after_restart(tmp_path: P
     )
     assert len(children) == 1
     assert [item.member_id for item in restarted.members("typed-team")] == ["root", "child"]
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    (
+        '{"max_depth":2,"max_children_per_parent":2,"max_total_agents":3,'
+        '"max_parallel":2,"max_parallel":999999}',
+        '{"max_depth":2,"max_children_per_parent":2,"max_total_agents":3,'
+        '"max_parallel":2}' + " " * 4097,
+        "[" * 1100 + "1" + "]" * 1100,
+        '{"max_depth":2,"max_children_per_parent":2,"max_total_agents":3}',
+    ),
+)
+def test_corrupt_quota_json_cannot_authorize_spawn_after_restart(
+    tmp_path: Path, corrupt: str,
+) -> None:
+    path = tmp_path / "corrupt-quota.db"
+    store = SQLiteStore(path)
+    store.initialize()
+    teams = MultiAgentStore(store)
+    teams.create_team(
+        team_id="bounded-team",
+        root_member_id="root",
+        root_agent_id="supervisor",
+        root_agent_version=1,
+        root_thread_id="thread-root",
+        root_grants=(),
+        quota=TeamQuota(max_depth=2, max_children_per_parent=2,
+                        max_total_agents=3, max_parallel=2),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE multi_agent_teams SET quota_json = ? WHERE team_id = ?",
+            (corrupt, "bounded-team"),
+        )
+    restarted = MultiAgentStore(SQLiteStore(path))
+    with pytest.raises(ValueError, match="persisted team quota is invalid"):
+        restarted.quota("bounded-team")
+    with pytest.raises(ValueError, match="persisted team quota is invalid"):
+        restarted.spawn_children(
+            team_id="bounded-team",
+            parent_id="root",
+            requests=(ChildRequest(
+                member_id="child",
+                agent_id="worker",
+                agent_version=1,
+                thread_id="thread-child",
+            ),),
+        )
+    assert [m.member_id for m in restarted.members("bounded-team")] == ["root"]
