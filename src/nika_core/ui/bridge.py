@@ -243,7 +243,9 @@ class UIActionBridge:
     def _bounded_keymap_text(value: object, *, max_bytes: int = 1_048_576) -> bool:
         # Inspect exact built-in strings only; encoding catches invalid Unicode
         # without invoking behavioral subclasses at the WebView boundary.
-        if type(value) is not str or not value:
+        # Unicode's UTF-8 encoding never uses fewer bytes than code points.
+        # Refuse huge inputs before allocating a second (encoded) copy.
+        if type(value) is not str or not value or len(value) > max_bytes:
             return False
         try:
             return len(value.encode("utf-8")) <= max_bytes
