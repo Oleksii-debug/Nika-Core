@@ -167,3 +167,31 @@ def test_rejects_unrelated_asgi_protocol() -> None:
     app, _ = _app()
     with pytest.raises(RuntimeError, match="HTTP"):
         _request(app, type="websocket")
+
+
+@pytest.mark.parametrize("headers", [
+    [(b"host", b"nika.example"), (b"x-ignored", b"bad\\r\\nX-Policy: owner")],
+    [(b"host", b"nika.example"), (b"x-ignored", b"bad\\x00value")],
+    [(b"host", b"nika.example"), (b"invalid name", b"value")],
+    [(b"host", b"nika.example"), (b"invalid\\x7fname", b"value")],
+    [(b"host", b"nika.example"), (b"", b"value")],
+    [(b"host", b"nika.example"), (b"x-padding", b"x" * (16 * 1024))],
+    [(b"host", b"nika.example")] + [(b"x-test", b"ok")] * 64,
+])
+def test_public_static_shell_rejects_ambiguous_or_oversized_headers(headers) -> None:
+    app, handler = _app()
+    start, body = _request(app, headers=headers)
+    assert start["status"] == 403
+    assert body["body"] == b""
+    assert handler.calls == 0
+
+
+def test_public_static_shell_preserves_valid_bounded_extra_header() -> None:
+    app, handler = _app()
+    start, body = _request(app, headers=[
+        (b"Host", b"nika.example"),
+        (b"x-request-trace", b"synthetic-test"),
+    ])
+    assert start["status"] == 200
+    assert b"Nika Core" in body["body"]
+    assert handler.calls == 0
