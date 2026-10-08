@@ -13,7 +13,8 @@ assert(readStart > 0 && readEnd > readStart && pollStart > 0 && pollEnd > pollSt
 const readFactory = new Function("ctx",
   "const {globalThis, renderAutostart, reportStateUnavailable, renderSourceSetup, "
   + "renderItems, tasksList, tasksEmpty, renderTaskTargets, agentsList, agentsEmpty, "
-  + "workspacesList, workspacesEmpty, renderProductProject, renderTeamTask, announce}=ctx;"
+  + "workspacesList, workspacesEmpty, renderProductProject, renderTeamTask, announce,"
+  + "validProductProject,validTeamTaskProjection}=ctx;"
   + "let stateReadGeneration=0, autostartGeneration=0, stateUnavailableReported=false;"
   + source.slice(readStart, readEnd) + "return refreshState;"
 );
@@ -35,6 +36,10 @@ async function main() {
     agentsList: {}, agentsEmpty: {}, workspacesList: {}, workspacesEmpty: {},
     renderProductProject: () => true,
     renderTeamTask: () => ({ok: true, changed: false}),
+    // These small doubles isolate the ordered UI commit from the already
+    // separately-tested canonical project/team structural validators.
+    validProductProject: (item) => typeof item.title === "string" && item.title.length > 0,
+    validTeamTaskProjection: (item) => item.available === true && item.task?.task_id === "valid",
     announce: () => {},
   });
 
@@ -101,6 +106,71 @@ async function main() {
   assert.equal(displayed.length, 2,
     "malformed workspace collection must not replace the keyboard task target");
   console.log("PASS: invalid workspace projection cannot partly update task controls");
+
+  older = refreshState();
+  pending[10].resolve({ok: true, state: {
+    tasks: [{task_id: "duplicate"}, {task_id: "duplicate"}],
+  }});
+  assert.equal(await older, false);
+  assert.equal(outages, 6);
+  assert.equal(displayed.length, 2, "duplicate IDs must not change the explicit target");
+  console.log("PASS: duplicate task identities cannot create ambiguous keyboard targets");
+
+  older = refreshState();
+  pending[11].resolve({ok: true, state: {
+    tasks: [{task_id: "newer"}], product_project: {bad: "projection"},
+  }});
+  assert.equal(await older, false);
+  assert.equal(outages, 7);
+  assert.equal(displayed.length, 2, "bad product state must not partly publish tasks");
+  console.log("PASS: malformed project sibling fails before task control DOM changes");
+
+  older = refreshState();
+  pending[12].resolve({ok: true, state: {
+    tasks: [{task_id: "newer"}], v01_team_task: {available: true, bad: true},
+  }});
+  assert.equal(await older, false);
+  assert.equal(outages, 8);
+  assert.equal(displayed.length, 2, "bad team state must not partly publish tasks");
+  console.log("PASS: malformed team sibling fails before task control DOM changes");
+
+  older = refreshState();
+  pending[13].resolve({ok: true, state: {
+    tasks: [{task_id: "safe-after-corruption"}], product_project: null, v01_team_task: null,
+  }});
+  assert.equal(await older, true);
+  assert.equal(outages, 8);
+  assert.equal(displayed.length, 3);
+  assert.equal(displayed[2][0].task_id, "safe-after-corruption");
+  console.log("PASS: clean snapshot recovers semantic task state after rejected siblings");
+
+  older = refreshState();
+  pending[14].resolve({ok: true, state: {
+    tasks: [{task_id: "foreign", workspace_id: "another-workspace", agent_id: "nika.default"}],
+  }});
+  assert.equal(await older, false);
+  assert.equal(outages, 9);
+  assert.equal(displayed.length, 3);
+  console.log("PASS: foreign-workspace task is not announced through desktop state");
+
+  older = refreshState();
+  pending[15].resolve({ok: true, state: {
+    tasks: [{task_id: "foreign-agent", workspace_id: "default", agent_id: "other-agent"}],
+  }});
+  assert.equal(await older, false);
+  assert.equal(outages, 10);
+  assert.equal(displayed.length, 3);
+  console.log("PASS: foreign-agent task is not announced through desktop state");
+
+  older = refreshState();
+  pending[16].resolve({ok: true, state: {
+    tasks: [{task_id: "authorized", workspace_id: "default", agent_id: "nika.default"}],
+  }});
+  assert.equal(await older, true);
+  assert.equal(outages, 10);
+  assert.equal(displayed.length, 4);
+  assert.equal(displayed[3][0].task_id, "authorized");
+  console.log("PASS: authorized local task resumes after foreign task rejection");
 
   const pollFactory = new Function("ctx",
     "const {window, document, refreshState, inFlightActions}=ctx;"
