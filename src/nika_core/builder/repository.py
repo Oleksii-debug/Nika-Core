@@ -199,6 +199,15 @@ class AgentDefinitionRepository:
                 highest_risk=row["highest_risk"],
                 approvals_json=row["required_approvals_json"],
             )
+            # Approval tokens are scoped to this exact immutable definition.
+            # Extra IDs must not become durable audit evidence of approvals for
+            # capabilities the reviewed definition never requested. This also
+            # applies to lost-ACK retries, without requiring the original token.
+            unexpected = sorted(approved_tool_ids.difference(required))
+            if unexpected:
+                raise PermissionError(
+                    "unrequested high-impact tool approvals: " + ", ".join(unexpected)
+                )
             # A verified active record is the durable result of an earlier authorized
             # activation. A lost acknowledgement may cause a caller to retry without
             # resending its one-time approval: do not reauthorize or repeat the effect.
