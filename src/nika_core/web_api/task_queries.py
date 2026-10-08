@@ -57,13 +57,13 @@ class WebTaskQueryHandler:
         except KeyError:
             # Deleted between scoped preflight and canonical read.
             return self._reject(command.request_id, "not_found")
-        except sqlite3.Error:
-            # A failed canonical read is definite, never an unknown write.
-            return self._storage_failure(command.request_id)
-        except (ValueError, TypeError, RecursionError):
-            # A concurrent workspace transfer may have happened after preflight.
-            # Recheck only the canonical workspace metadata before revealing a
-            # storage failure; foreign and missing rows are always opaque.
+        except (sqlite3.Error, ValueError, TypeError, RecursionError):
+            # A canonical read may fail *after* the preflight row moved to
+            # another workspace or was deleted. The error class is not
+            # evidence of continued ownership. Recheck only canonical
+            # workspace metadata before returning a storage failure, so a
+            # transferred or deleted record remains indistinguishable from
+            # an absent record. This read-only handler performs no retry.
             try:
                 with self._queue.store.connection() as conn:
                     current = conn.execute(
