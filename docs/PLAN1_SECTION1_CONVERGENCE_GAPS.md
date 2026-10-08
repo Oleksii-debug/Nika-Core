@@ -40,9 +40,12 @@ drift. This is a constraint-boundary check, **not** a reproducible wheel build,
 resolved build-environment lock, install proof, or dependency license clearance.
 It uses Python standard-library `tomllib` and `json` plus repository pytest.
 
-`tests/test_plan1_architecture.py` on the parent PR guards direct vendor
-imports into six Nika-owned port/contract modules, with negative tests for
-nested/dynamic imports. Those tests are not a substitute for integration or
+`tests/test_plan1_architecture.py` guards direct vendor imports into ten
+Nika-owned ports and authoritative core modules: the original six
+runtime/intelligence/model/scheduler/product/plugin contracts plus security
+policy, audit, SQLite schema and Action Registry. The latter four have been
+read back from current `main` and have no existing direct foreign-engine
+imports. Negative tests cover nested/dynamic imports. Those tests are not a substitute for integration or
 runtime trust-boundary tests.
 
 ## Added Section 1 drift/adversarial admission evidence (2026-10-08)
@@ -65,6 +68,15 @@ runtime trust-boundary tests.
   readback was completed. Authored negative tests are not a CI PASS.
 - These changes neither add new dependencies nor a second orchestration,
   model, scheduler, policy or persistence authority.
+
+
+- Section-1 architecture regression coverage was extended on the existing
+  convergence branch in commit `dac87f0a9f2d7389682879e22beb9cdeb4b1e7e1`:
+  `tests/test_plan1_architecture.py` now exercises **ten** canonical authorities,
+  including permission policy, audit, database schema and semantic Action Registry.
+  Exact file blob: `44f098894e583435b8e77baf084e07251a76db56`.
+  This records static negative-drift coverage only; it is **not a test pass** or a
+  terminal closure claim, and does not expand the Section into another plan.
 
 ## Deliberate non-claims — currently NOT terminal DONE
 
