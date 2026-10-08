@@ -74,3 +74,30 @@ def test_state_snapshot_preserves_shutdown_signal() -> None:
 
     with pytest.raises(KeyboardInterrupt):
         _bridge(interrupted).get_state()
+
+
+def test_state_provider_rejects_pair_iterable_without_invoking_user_iteration() -> None:
+    class PairLike:
+        def __init__(self) -> None:
+            self.invocations = 0
+
+        def __iter__(self):
+            self.invocations += 1
+            yield ("tasks", [])
+
+    pair_like = PairLike()
+    response = _bridge(lambda: pair_like).get_state()
+    assert response == {
+        "ok": False,
+        "message": "Не вдалося отримати стан програми через внутрішню помилку.",
+    }
+    assert pair_like.invocations == 0
+    assert "state" not in response
+
+
+def test_state_provider_rejects_non_plain_mapping_before_serialization() -> None:
+    from types import MappingProxyType
+
+    response = _bridge(lambda: MappingProxyType({"tasks": []})).get_state()
+    assert response["ok"] is False
+    assert "state" not in response
