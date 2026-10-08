@@ -147,7 +147,16 @@ class DesktopBackend:
             payload=task_payload,
         )
         self._queue.transition(record.task_id, TaskState.READY)
-        self._schedule_start(record.task_id, command)
+        try:
+            self._schedule_start(record.task_id, command)
+        except Exception:
+            # A synchronous loop/submission failure must not leave an orphan
+            # READY task that the user might unknowingly submit a second time.
+            # A concurrent RUNNING transition is never rolled back here.
+            if self._queue.get(record.task_id).state == TaskState.READY:
+                self._queue.transition(record.task_id, TaskState.CANCELLED)
+            self._record_background_failure(record.task_id, "desktop.runtime_schedule_failed")
+            raise
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
@@ -221,7 +230,15 @@ class DesktopBackend:
         if not command:
             raise ValueError("Збережене завдання не містить команди для безпечного запуску.")
         self._queue.transition(record.task_id, TaskState.READY)
-        self._schedule_start(record.task_id, command)
+        try:
+            self._schedule_start(record.task_id, command)
+        except Exception:
+            # The resumed task has never reached RUNNING. Preserve PAUSED so
+            # an operator may retry safely after the host becomes available.
+            if self._queue.get(record.task_id).state == TaskState.READY:
+                self._queue.transition(record.task_id, TaskState.PAUSED)
+            self._record_background_failure(record.task_id, "desktop.runtime_resume_schedule_failed")
+            raise
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
