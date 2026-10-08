@@ -167,3 +167,9 @@ failing. The HTTP 409 response references only the original admitted request;
 it never authorizes a blind retry. Regression tests cover both direct Web
 boundary and HTTP projections. This is not a cloud recovery or terminal DONE
 claim; the canonical task/runtime journal remains the reconciliation authority.
+
+Authorization faults occur before canonical Core command effects and therefore
+map to a sanitized pre-effect HTTP 500, not 409/outcome_unknown, even when a
+broken authorization adapter itself raises WebCommandOutcomeUnknownError with
+a forged correlation identity. Tests require zero handler calls and no internal
+exception or forged request identity in the HTTP response.
