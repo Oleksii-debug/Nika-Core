@@ -126,8 +126,8 @@ def test_cycle_and_excessive_nesting_fail_closed_without_planner() -> None:
     [
         {"text": "x" * (256 * 1024)},
         {"unicode": "Ї" * (128 * 1024)},
-        {"text": "\\ud800"},
-        {"\\ud800": "value"},
+        {"text": "\ud800"},
+        {"\ud800": "value"},
         {"huge_integer": 2 ** 4097},
         {"nested": [{"text": "a" * (256 * 1024)}]},
     ],
