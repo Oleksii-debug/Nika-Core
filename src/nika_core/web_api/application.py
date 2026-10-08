@@ -52,12 +52,34 @@ class WebApplicationBoundary:
     def dispatch(self, *, principal: WebPrincipal, command: object) -> WebCommandResult:
         if type(principal) is not WebPrincipal:
             raise ValueError("principal must be the exact server authority carrier")
+        # Freeze trusted request authority before invoking replaceable authorization
+        # adapters. Frozen dataclasses can still be changed with object.__setattr__.
+        authority_principal = WebPrincipal(
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
+            workspace_id=principal.workspace_id,
+            session_id=principal.session_id,
+        )
         try:
             admitted = WebCommand.from_untrusted(command)
         except ValueError as exc:
             raise WebCommandAdmissionError() from exc
+        request_id = admitted.request_id
 
-        allowed = self._authorization.allows(principal, admitted)
+        # The authorization port receives disposable carriers. It cannot rewrite
+        # the exact principal or detached command subsequently passed to Core.
+        review_principal = WebPrincipal(
+            tenant_id=authority_principal.tenant_id,
+            user_id=authority_principal.user_id,
+            workspace_id=authority_principal.workspace_id,
+            session_id=authority_principal.session_id,
+        )
+        review_command = WebCommand(
+            request_id=admitted.request_id,
+            action_id=admitted.action_id,
+            _payload_json=admitted._payload_json,
+        )
+        allowed = self._authorization.allows(review_principal, review_command)
         if type(allowed) is not bool:
             raise RuntimeError("Web authorization port must return an exact bool")
         if not allowed:
@@ -69,10 +91,10 @@ class WebApplicationBoundary:
             )
 
         try:
-            result = self._handler.handle(principal, admitted)
+            result = self._handler.handle(authority_principal, admitted)
             if type(result) is not WebCommandResult:
                 raise RuntimeError("Web command handler returned an invalid result carrier")
-            if result.request_id != admitted.request_id:
+            if result.request_id != request_id:
                 raise RuntimeError("Web command handler changed the request identity")
             return WebCommandResult.create(
                 request_id=result.request_id,
@@ -84,4 +106,4 @@ class WebApplicationBoundary:
         except WebCommandOutcomeUnknownError:
             raise
         except Exception as exc:
-            raise WebCommandOutcomeUnknownError(admitted.request_id) from exc
+            raise WebCommandOutcomeUnknownError(request_id) from exc

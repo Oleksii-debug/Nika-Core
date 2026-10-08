@@ -98,3 +98,20 @@ passed behind a server-authorized `WebApplicationBoundary`; workspace equality
 alone is not an account/tenant ownership proof. This read-only integration
 does not grant task creation, cloud worker dispatch, provider credentials or
 any production-ready Web/Cloud claim.
+
+## Permission-decision carrier isolation (Plan 6 §1, component-only)
+
+The trusted server principal and admitted command are copied before the
+replaceable WebAuthorizationPort is called. The authorization adapter receives
+separate disposable dataclass carriers. Even if an adapter improperly mutates
+a frozen principal or command through `object.__setattr__`, the Core handler
+receives the previously admitted tenant/user/workspace/session and command.
+The caller-owned principal is revalidated, and outcome-unknown reconciliation
+uses the request ID captured before the handler call.
+
+Regression tests cover authorization-carrier mutation, mutation of the
+caller-owned principal during authorization, invalid post-construction
+principal identity, and a failing handler that changes its command carrier.
+These are committed regression cases, not an asserted executed pytest pass;
+exact-head CI, authenticated server composition, tenant ownership,
+durable cloud lifecycle and main integration still govern terminal closure.
