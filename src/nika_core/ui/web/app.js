@@ -21,6 +21,8 @@
   let autostartPending = false;
   let autostartGeneration = 0;
   const tasksList = document.getElementById("tasks-list");
+  const taskTarget = document.getElementById("task-target");
+  let taskTargetSignature = null;
   const agentsList = document.getElementById("agents-list");
   const workspacesList = document.getElementById("workspaces-list");
   const tasksEmpty = document.getElementById("tasks-empty");
@@ -180,6 +182,35 @@
       row.textContent = formatter(item);
       list.appendChild(row);
     }
+  }
+
+  function renderTaskTargets(items) {
+    if (!taskTarget) return;
+    const targets = Array.isArray(items) ? items.filter(
+      (item) => item && typeof item.task_id === "string"
+        && item.task_id.length > 0
+        && item.workspace_id === "default"
+        && item.agent_id === "nika.default"
+    ).map((item) => ({
+      id: item.task_id,
+      label: `${typeof item.command === "string" ? item.command.slice(0, 120) : "Без назви"} — ${typeof item.state === "string" ? item.state : "невідомий стан"} — ${item.task_id}`,
+    })) : [];
+    const signature = JSON.stringify(targets);
+    if (taskTargetSignature === signature) return;
+    const previousId = taskTarget.value;
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Без явного вибору — тільки одне відповідне завдання";
+    const options = [placeholder];
+    for (const item of targets) {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = item.label;
+      options.push(option);
+    }
+    taskTarget.replaceChildren(...options);
+    if (targets.some((item) => item.id === previousId)) taskTarget.value = previousId;
+    taskTargetSignature = signature;
   }
 
   function validProductProject(project) {
@@ -569,7 +600,9 @@
     const state = response.state || {};
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     renderSourceSetup(state.v01_sources ?? null);
-    renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}`);
+    const taskItems = Array.isArray(state.tasks) ? state.tasks : [];
+    renderItems(tasksList, tasksEmpty, taskItems, (item) => `${item.command || "Без назви"} — ${item.state}`);
+    renderTaskTargets(taskItems);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
     renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
     const productReady = renderProductProject(state.product_project ?? null);
@@ -633,6 +666,9 @@
     try {
       const payload = {};
       if (actionId === "task.create") payload.command = commandInput.value.trim();
+      if (["task.pause", "task.resume", "agent.stop"].includes(actionId) && taskTarget?.value) {
+        payload.task_id = taskTarget.value;
+      }
       if (actionId === "team.sources.configure") {
         payload.revision = sourceRevision;
         for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
