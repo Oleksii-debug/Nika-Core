@@ -231,3 +231,60 @@ def test_durable_draft_rejects_forged_compilation_evidence(
     with pytest.raises(PermissionError, match="explicit human approval"):
         repository.activate(definition)
     assert repository.active(definition.agent_id) is None
+
+
+@pytest.mark.parametrize(
+    ("column", "replacement"),
+    (
+        ("highest_risk", 0),
+        ("required_approvals_json", "[]"),
+        ("required_approvals_json", '["wrong.tool"]'),
+        ("required_approvals_json", '{"forged":true}'),
+    ),
+)
+def test_sqlite_restart_rejects_tampered_risk_evidence_before_activation(
+    tmp_path, column: str, replacement: object,
+) -> None:
+    from nika_core.builder.repository import AgentDefinitionRepository
+    from nika_core.data.sqlite import SQLiteStore
+
+    path = tmp_path / "nika.db"
+    sqlite = SQLiteStore(path)
+    sqlite.initialize()
+    repository = AgentDefinitionRepository(sqlite)
+    definition = _definition().model_copy(
+        update={"tool_grants": (ToolGrant(tool_id="release.publish", max_risk=4),)}
+    )
+    compiler = _compiler(ToolSpec("release.publish", "Publish", ToolRisk.HIGH_IMPACT))
+    repository.save_draft(compiler.compile(definition))
+    with sqlite.connection() as conn:
+        row = conn.execute(
+            f"SELECT {column} FROM agent_definitions WHERE agent_id = ?",
+            (definition.agent_id,),
+        ).fetchone()
+        assert row is not None
+        original = row[column]
+        conn.execute(
+            f"UPDATE agent_definitions SET {column} = ? WHERE agent_id = ?",
+            (replacement, definition.agent_id),
+        )
+
+    restarted = AgentDefinitionRepository(SQLiteStore(path))
+    with pytest.raises(ValueError, match="persisted agent risk/approval"):
+        restarted.activate(
+            definition, approved_tool_ids=frozenset({"release.publish"})
+        )
+    with pytest.raises(ValueError, match="persisted agent risk/approval"):
+        restarted.get(definition.agent_id, definition.version)
+    with sqlite.connection() as conn:
+        row = conn.execute(
+            "SELECT status FROM agent_definitions WHERE agent_id = ?",
+            (definition.agent_id,),
+        ).fetchone()
+        assert row["status"] == "draft"
+        conn.execute(
+            f"UPDATE agent_definitions SET {column} = ? WHERE agent_id = ?",
+            (original, definition.agent_id),
+        )
+    restarted.activate(definition, approved_tool_ids=frozenset({"release.publish"}))
+    assert restarted.require_active(definition.agent_id, definition.version).status == "active"
