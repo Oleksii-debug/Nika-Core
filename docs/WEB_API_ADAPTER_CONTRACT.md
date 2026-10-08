@@ -191,3 +191,20 @@ before and after body fragmentation, multiple exception classes, zero effects,
 secret-free responses, a subsequent healthy request and cancellation propagation.
 These are source-level candidate tests until exact-head CI finishes; they are
 **not** cloud-hosted performance, durability or terminal-Section evidence.
+
+
+## Corrupt canonical task-row projection (Plan 6 §1, recovery fixture)
+
+Web task inspection is read-only: a canonical TaskQueue deserialization TypeError
+must be reported as `failed/storage_unavailable`, never an uncertain write.
+JSON that parses to a scalar, list or null violates the existing TaskRecord
+payload-object contract and must not be advertised as a valid state. Once the
+record is loaded, foreign-workspace checks run *before* inspecting payload
+shape, so a foreign malformed task and an absent task have the same response.
+
+The new negative tests mutate only test SQLite rows, verify bounded redaction,
+cross-workspace non-disclosure, and re-open corrected canonical SQLite data.
+No new Web-owned state, retries or side-effect authority are introduced. The
+source of truth is still TaskQueue. Invalid payloads that fail inside
+TaskQueue.get before workspace membership is read still require deeper
+end-to-end tenancy/privacy qualification; this patch is not terminal closure.
