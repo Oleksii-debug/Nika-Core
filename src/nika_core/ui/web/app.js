@@ -634,9 +634,18 @@
       return false;
     }
     const state = response.state;
-    // A broken task-list projection is not an empty list: preserve the explicit
-    // keyboard target rather than silently selecting a different durable task.
-    if (!Array.isArray(state.tasks) || state.tasks.some(
+    // Stage all list projections before mutating task targeting or live regions.
+    // Malformed agent/workspace data must not partly commit a task readback.
+    const agentItems = state.agents ?? [];
+    const workspaceItems = state.workspaces ?? [];
+    if (!Array.isArray(agentItems) || !Array.isArray(workspaceItems)
+        || agentItems.some((item) => !item || typeof item !== "object"
+          || Array.isArray(item) || typeof item.name !== "string"
+          || typeof item.goal !== "string")
+        || workspaceItems.some((item) => !item || typeof item !== "object"
+          || Array.isArray(item) || typeof item.name !== "string"
+          || (item.description != null && typeof item.description !== "string"))
+        || !Array.isArray(state.tasks) || state.tasks.some(
       (item) => !item || typeof item !== "object" || Array.isArray(item)
         || typeof item.task_id !== "string" || !item.task_id
         || (item.command != null && typeof item.command !== "string")
@@ -650,8 +659,8 @@
     const taskItems = state.tasks;
     renderItems(tasksList, tasksEmpty, taskItems, (item) => `${item.command || "Без назви"} — ${item.state}`);
     renderTaskTargets(taskItems);
-    renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
-    renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
+    renderItems(agentsList, agentsEmpty, agentItems, (item) => `${item.name} — ${item.goal}`);
+    renderItems(workspacesList, workspacesEmpty, workspaceItems, (item) => `${item.name} — ${item.description || "Без опису"}`);
     const productReady = renderProductProject(state.product_project ?? null);
     const teamRender = renderTeamTask(state.v01_team_task ?? null);
     if (!teamRender.ok) {
@@ -871,9 +880,24 @@
       actionsReady = false;
       return false;
     }
-    actions = await globalThis.pywebview.api.list_actions();
-    keymapBody.replaceChildren();
-    for (const action of actions) {
+    // Validate and stage the complete registry projection before touching the
+    // active keyboard editor. A malformed refresh must not partially erase it.
+    const nextActions = await globalThis.pywebview.api.list_actions();
+    if (!Array.isArray(nextActions) || nextActions.length > 512
+        || nextActions.some((action) => !action || typeof action !== "object"
+          || Array.isArray(action)
+          || typeof action.action_id !== "string"
+          || !/^[A-Za-z0-9_.:-]{1,120}$/.test(action.action_id)
+          || typeof action.label !== "string" || !action.label || action.label.length > 256
+          || (action.binding != null && (typeof action.binding !== "string"
+            || action.binding.length > 256))
+          || typeof action.may_be_unbound !== "boolean")
+        || new Set(nextActions.map((action) => action.action_id)).size !== nextActions.length) {
+      actionsReady = false;
+      throw new Error("Invalid action inventory");
+    }
+    const nextRows = [];
+    for (const action of nextActions) {
       const accessibleActionLabel = keymapAccessibleActionLabel(action);
       const row = document.createElement("tr");
       const labelCell = document.createElement("th");
@@ -924,8 +948,10 @@
       });
       controlCell.append(save, document.createTextNode(" "), restore);
       row.append(labelCell, bindingCell, controlCell);
-      keymapBody.appendChild(row);
+      nextRows.push(row);
     }
+    keymapBody.replaceChildren(...nextRows);
+    actions = nextActions;
     actionsReady = true;
     return true;
   }
