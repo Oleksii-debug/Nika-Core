@@ -255,3 +255,85 @@ def test_desktop_task_projection_excludes_foreign_scope_even_after_restart(
         ]
     finally:
         restarted.close()
+
+
+def test_keymap_webview_boundary_rejects_behavioral_strings_without_calls() -> None:
+    calls: list[tuple[object, ...]] = []
+
+    class BehavioralText(str):
+        def __hash__(self) -> int:
+            raise AssertionError("behavioral action ID hash")
+
+        def __str__(self) -> str:
+            raise AssertionError("behavioral keymap input stringification")
+
+    keymap = SimpleNamespace(
+        set_binding=lambda *args: calls.append(("set", *args)),
+        restore_default=lambda *args: calls.append(("restore", *args)),
+        import_json=lambda *args: calls.append(("import", *args)),
+    )
+    bridge = UIActionBridge(SimpleNamespace(), keymap)
+    hostile = BehavioralText("nav.tasks")
+    assert bridge.set_binding(hostile, "Alt+1")["ok"] is False
+    assert bridge.set_binding("nav.tasks", hostile)["ok"] is False
+    assert bridge.restore_default(hostile)["ok"] is False
+    assert bridge.import_keymap(BehavioralText("{}"))["ok"] is False
+    assert calls == []
+
+    assert bridge.set_binding("nav.tasks", "Alt+1")["ok"] is True
+    assert bridge.restore_default("nav.tasks")["ok"] is True
+    assert bridge.import_keymap("{}")["ok"] is True
+    assert calls == [
+        ("set", "nav.tasks", "Alt+1"),
+        ("restore", "nav.tasks"),
+        ("import", "{}"),
+    ]
+
+
+def test_task_acceptance_does_not_announce_private_command(tmp_path: Path) -> None:
+    backend, queue = _backend(tmp_path)
+    sensitive = "token-canary-private-do-not-announce"
+    try:
+        result = backend.create_task({"command": sensitive})
+        assert result.status == "accepted"
+        assert sensitive not in result.message
+        assert result.message == "Завдання прийнято до виконання."
+        # The authorized task authority still keeps the original command.
+        assert queue.list_recent()[0].payload["command"] == sensitive
+    finally:
+        backend.close()
+
+
+def test_desktop_projection_skips_task_disappearing_during_readback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend, queue = _backend(tmp_path)
+    vanished = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "vanished"},
+    )
+    available = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "available"},
+    )
+    actual_get = queue.get
+
+    def get_with_concurrent_removal(task_id: str):
+        if task_id == vanished.task_id:
+            raise KeyError(task_id)
+        return actual_get(task_id)
+
+    monkeypatch.setattr(queue, "get", get_with_concurrent_removal)
+    try:
+        tasks = backend.snapshot()["tasks"]
+        assert [task["task_id"] for task in tasks] == [available.task_id]
+        bridge = UIActionBridge(
+            SimpleNamespace(), SimpleNamespace(), state_provider=backend.snapshot
+        )
+        response = bridge.get_state()
+        assert response["ok"] is True
+        assert response["state"]["tasks"] == tasks
+    finally:
+        backend.close()
