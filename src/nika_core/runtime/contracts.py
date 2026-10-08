@@ -58,6 +58,8 @@ class RuntimeUnsupportedError(RuntimeError):
 
 
 MAX_RUNTIME_STEPS = 10_000
+# Maximum exactly representable JSON integer in JavaScript and safe within SQLite int64.
+MAX_RUNTIME_EVENT_SEQUENCE = (1 << 53) - 1
 MAX_RUNTIME_TIMEOUT_SECONDS = 86_400
 MAX_RUNTIME_ID_UTF8_BYTES = 512
 MAX_RUNTIME_PROBE_REASON_UTF8_BYTES = 2048
@@ -218,6 +220,8 @@ class RuntimeEvent:
             raise TypeError("event sequence must be a plain integer")
         if self.sequence < 0:
             raise ValueError("sequence must not be negative")
+        if self.sequence > MAX_RUNTIME_EVENT_SEQUENCE:
+            raise ValueError("event sequence exceeds portable integer limit")
         _validate_runtime_identity(self.event_type, "event_type")
         if not isinstance(self.payload, Mapping):
             raise TypeError("runtime event payload must be a mapping")
