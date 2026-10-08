@@ -44,14 +44,13 @@ class WebTaskQueryHandler:
             # Malformed canonical row or SQLite failure is a definite query
             # failure, not an outcome-unknown write. Never leak persisted data.
             return self._storage_failure(command.request_id)
-        if type(record.payload) is not dict:
-            # SQLite JSON can decode successfully into a scalar/list even when
-            # the canonical TaskRecord payload contract requires a JSON object.
-            # Do not advertise corrupted durable state as a healthy task.
-            return self._storage_failure(command.request_id)
         if record.workspace_id != principal.workspace_id:
-            # Do not disclose whether another workspace owns the task.
+            # Never reveal foreign task metadata or its payload health.
             return self._reject(command.request_id, "not_found")
+        if type(record.payload) is not dict:
+            # Canonical TaskRecord payload requires a JSON object. A valid
+            # JSON scalar/list is damaged state, not a healthy task.
+            return self._storage_failure(command.request_id)
         return WebCommandResult.create(
             request_id=command.request_id,
             status="completed",
