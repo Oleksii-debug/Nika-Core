@@ -252,5 +252,8 @@ def test_architecture_guard_rejects_dynamic_python_code_escape() -> None:
 
 
 def test_architecture_guard_rejects_compilation_with_unknown_source() -> None:
-    source = "from builtins import compile as compile_code\ncompile_code(source, '<port>', 'exec')\n"
+    source = (
+        "from builtins import compile as compile_code\n"
+        "compile_code(source, '<port>', 'exec')\n"
+    )
     assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
