@@ -54,6 +54,17 @@ class UIActionBridge:
                 status="rejected",
                 message=f"Unknown action: {command.action_id}",
             ).model_dump()
+        except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
+            logger.error(
+                "UI action lookup failed: action_id=%s exception_type=%s",
+                command.action_id,
+                type(exc).__name__,
+            )
+            return UIResult(
+                request_id=command.request_id,
+                status="failed",
+                message="Не вдалося виконати дію через внутрішню помилку.",
+            ).model_dump()
 
         handler = self._handlers.get(command.action_id)
         if handler is None:

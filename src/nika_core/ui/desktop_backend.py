@@ -355,13 +355,18 @@ class DesktopBackend:
         existing = self._cancel_futures.get(task_id)
         if existing is not None and not existing.done():
             raise ValueError("Запит на зупинку цього завдання вже виконується.")
-        future = self._host().submit(
-            self._coordinator.cancel(
-                self._runtime,
-                task_id=task_id,
-                thread_id=thread_id,
-            )
+        coroutine = self._coordinator.cancel(
+            self._runtime,
+            task_id=task_id,
+            thread_id=thread_id,
         )
+        try:
+            future = self._host().submit(coroutine)
+        except BaseException:
+            # Do not leak an unawaited cancellation or record phantom ownership
+            # if loop startup/submission failed. Shutdown signals still propagate.
+            coroutine.close()
+            raise
         self._cancel_futures[task_id] = future
         return future
 
