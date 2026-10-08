@@ -7,6 +7,7 @@ from types import MappingProxyType
 from zoneinfo import ZoneInfo
 from decimal import Decimal
 from enum import IntEnum
+from gc import get_referents
 
 from .accounting import PortfolioLedger
 from .contracts import (
@@ -108,8 +109,13 @@ def _require_inert_paper_carriers(root: object) -> None:
         if kind is tuple:
             pending.extend(value)
         elif kind in (dict, MappingProxyType):
-            # Only canonical immutable odds snapshots use mapping proxies.
-            # Reject subclasses that can override iteration or lookups.
+            # A mappingproxy may wrap an arbitrary behavior-bearing Mapping.
+            # On CPython, inspect the referent without calling its methods;
+            # fail closed if the implementation cannot prove an exact dict.
+            if kind is MappingProxyType:
+                referents = get_referents(value)
+                if len(referents) != 1 or type(referents[0]) is not dict:
+                    raise TradingResearchError("behavioral paper odds mapping is forbidden")
             for key, item in value.items():
                 if type(key) is not str or type(item) is not Decimal:
                     raise TradingResearchError("invalid paper odds selection carrier")
