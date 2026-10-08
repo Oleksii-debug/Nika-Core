@@ -157,3 +157,46 @@ def test_cancel_suppressing_receiver_cannot_resurrect_expired_effect(monkeypatch
     response = _invoke(app, scope, healthy_receive)
     assert response[0]["status"] == 200
     assert effect.calls == 1
+
+
+@pytest.mark.parametrize("late_result", [False, True])
+def test_uncooperative_receive_cancellation_cannot_hold_response(monkeypatch, late_result):
+    """A receiver that refuses to finish cancellation must not stall the host."""
+    app, effect, scope, body = _fixture()
+    monkeypatch.setattr(asgi_module, "_MAX_RECEIVE_SECONDS", 0.01)
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def hanging_receive():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release.wait()
+            if late_result:
+                return {"type": "http.request", "body": body, "more_body": False}
+            raise
+
+    async def run_case():
+        messages = []
+
+        async def send(message):
+            messages.append(message)
+
+        # An outer host deadline catches the old wait_for behavior, which
+        # could wait forever for a receiver that ignores cancellation.
+        try:
+            await asyncio.wait_for(app(scope, hanging_receive, send), timeout=0.5)
+            await asyncio.wait_for(cancelled.wait(), timeout=0.2)
+            assert messages[0]["status"] == 408
+            assert json.loads(messages[1]["body"])["code"] == "request_receive_timeout"
+            assert effect.calls == 0
+        finally:
+            # Allow the intentionally noncooperative task to finish before
+            # asyncio.run() shutdown; the late body is never dispatched.
+            release.set()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+    asyncio.run(run_case())
+    assert effect.calls == 0

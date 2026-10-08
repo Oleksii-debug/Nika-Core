@@ -10,6 +10,23 @@
   let pending = false;
   const MAX_RESPONSE_BYTES = 80 * 1024;
 
+  // A transport may ignore AbortController even before returning response
+  // headers. Race the initial fetch, not only later stream reads, with the
+  // existing deadline; late responses never reach the DOM or trigger retries.
+  async function fetchBeforeDeadline(options, signal) {
+    let onAbort;
+    const aborted = new Promise((_, reject) => {
+      onAbort = () => reject(new Error("request deadline exceeded"));
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+    try {
+      return await Promise.race([fetch("/v1/commands", options), aborted]);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
   // Bound response allocation before decoding JSON. Browser input and even
   // misconfigured server responses are not an authority for memory budgets.
   async function readBoundedJson(response, signal) {
@@ -111,7 +128,7 @@
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
       const requestId = crypto.randomUUID();
-      const response = await fetch("/v1/commands", {
+      const response = await fetchBeforeDeadline({
         method: "POST",
         mode: "same-origin",
         credentials: "omit",
@@ -124,7 +141,7 @@
           payload: { task_id: taskId }
         }),
         signal: controller.signal
-      });
+      }, controller.signal);
       if (!response.ok) {
         report("Стан недоступний або немає дозволу. Перевірте авторизацію й повторіть вручну.");
         return;
