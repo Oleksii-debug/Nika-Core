@@ -131,14 +131,37 @@ def _validate_runtime_result_error(value: str) -> None:
         raise ValueError("runtime error contains noncanonical or control text")
 
 
+MAX_RUNTIME_MAPPING_WALK_NODES = 20_000
+
+
 def _validate_runtime_mapping_keys(value: Mapping[str, Any], label: str) -> None:
-    """Do not let non-string JSON object keys collide after transport conversion."""
+    """Reject lossy JSON map keys even when nested in transport envelopes."""
     if not isinstance(value, Mapping):
         raise TypeError(f"{label} must be a mapping")
-    # A Python mapping may contain both 1 and "1"; JSON object projection
-    # would silently merge them. Reject at the canonical port ingress/egress.
-    if any(type(key) is not str for key in value):
-        raise TypeError(f"{label} keys must be plain strings")
+    # Lists/tuples are supported nested carriers; do not invoke arbitrary object
+    # serializers here. Track identity to avoid infinite loops on cyclic inputs.
+    pending: list[Any] = [value]
+    visited: set[int] = set()
+    nodes = 0
+    while pending:
+        current = pending.pop()
+        nodes += 1
+        if nodes > MAX_RUNTIME_MAPPING_WALK_NODES:
+            raise ValueError(f"{label} exceeds nested container inspection limit")
+        if not isinstance(current, (Mapping, list, tuple)):
+            continue
+        identity = id(current)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        if len(current) > MAX_RUNTIME_MAPPING_WALK_NODES:
+            raise ValueError(f"{label} exceeds nested container inspection limit")
+        if isinstance(current, Mapping):
+            if any(type(key) is not str for key in current):
+                raise TypeError(f"{label} keys must be plain strings")
+            pending.extend(current.values())
+        else:
+            pending.extend(current)
 
 
 def _validate_limits(max_steps: int, timeout_seconds: float | None) -> None:
