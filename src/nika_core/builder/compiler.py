@@ -57,6 +57,10 @@ class AgentCompiler:
         self._resource_budget_refs = frozenset(resource_budget_refs)
 
     def compile(self, definition: AgentDefinition) -> CompilationResult:
+        # Pydantic's model_copy(update=...) and frozen-object mutation bypass validators.
+        # Re-admit the full document before reviewing any tool or budget authority.
+        # model_validate(existing_instance) alone would not revalidate by default.
+        definition = AgentDefinition.model_validate(definition.model_dump(mode="python"))
         if definition.model_profile not in self._model_profiles:
             raise ValueError(f"unknown model profile: {definition.model_profile}")
         if definition.schedule_id is not None and definition.schedule_id not in self._schedule_ids:
