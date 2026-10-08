@@ -24,36 +24,82 @@ VALID_ACTIVATION = frozenset({"required", "optional", "test-only", "build-only"}
 # Changing an engine's canonical owner or REUSE/ADAPT mode requires an explicit
 # reviewed code change, not a manifest-only edit that passes the drift guard.
 EXPECTED_GROUP_AUTHORITIES = {
-    "base": ("REUSE", "Nika-owned application DTOs, persistence, file/HTTP adapters",
-        "Platform/data/document parsing"),
-    "agent": ("ADAPT", "AgentRuntimePort, SchedulerPort and ModelGateway",
-        "Replaceable orchestration, model and scheduling engines"),
-    "embedded-ai": ("ADAPT", "ModelGateway provider adapter",
-        "Local model inference"),
-    "planning": ("ADAPT", "Deterministic Brain contracts and ToolExecutor",
-        "Model-free planning engine"),
-    "gui": ("ADAPT", "Desktop UI action bridge",
-        "Windows shell"),
-    "browser": ("ADAPT", "Semantic browser interaction port",
-        "Browser DOM automation"),
-    "windows-interaction": ("ADAPT", "Semantic UIA interaction port",
-        "Windows object-model automation"),
-    "learning": ("ADAPT", "Experiments/promotion authority",
-        "Measured learning capability"),
-    "media": ("ADAPT", "Media acquisition/transcription boundaries",
-        "Optional media engines"),
-    "credentials": ("REUSE", "Credential/Identity Broker reference boundary",
-        "Protected OS credential access"),
-    "deployment": ("ADAPT", "Authorized deployment/staging adapter",
-        "Remote deployment worker"),
-    "dev": ("REUSE", "Repository CI and source-verification harness",
-        "Automated development verification"),
-    "qa": ("REUSE", "Release/QA provenance gate",
-        "Security and packaging verification"),
-    "build-system": ("REUSE", "Nika package build backend and source distribution",
-        "Build-system dependency and packaging authority"),
+    "base": (
+        "REUSE",
+        "Nika-owned application DTOs, persistence, file/HTTP adapters",
+        "Platform/data/document parsing",
+    ),
+    "agent": (
+        "ADAPT",
+        "AgentRuntimePort, SchedulerPort and ModelGateway",
+        "Replaceable orchestration, model and scheduling engines",
+    ),
+    "embedded-ai": (
+        "ADAPT",
+        "ModelGateway provider adapter",
+        "Local model inference",
+    ),
+    "planning": (
+        "ADAPT",
+        "Deterministic Brain contracts and ToolExecutor",
+        "Model-free planning engine",
+    ),
+    "gui": (
+        "ADAPT",
+        "Desktop UI action bridge",
+        "Windows shell",
+    ),
+    "browser": (
+        "ADAPT",
+        "Semantic browser interaction port",
+        "Browser DOM automation",
+    ),
+    "windows-interaction": (
+        "ADAPT",
+        "Semantic UIA interaction port",
+        "Windows object-model automation",
+    ),
+    "learning": (
+        "ADAPT",
+        "Experiments/promotion authority",
+        "Measured learning capability",
+    ),
+    "media": (
+        "ADAPT",
+        "Media acquisition/transcription boundaries",
+        "Optional media engines",
+    ),
+    "credentials": (
+        "REUSE",
+        "Credential/Identity Broker reference boundary",
+        "Protected OS credential access",
+    ),
+    "deployment": (
+        "ADAPT",
+        "Authorized deployment/staging adapter",
+        "Remote deployment worker",
+    ),
+    "dev": (
+        "REUSE",
+        "Repository CI and source-verification harness",
+        "Automated development verification",
+    ),
+    "qa": (
+        "REUSE",
+        "Release/QA provenance gate",
+        "Security and packaging verification",
+    ),
+    "build-system": (
+        "REUSE",
+        "Nika package build backend and source distribution",
+        "Build-system dependency and packaging authority",
+    ),
 }
-EXPECTED_EVIDENCE_POLICY = "This file inventories requested dependency constraints and authority boundaries; it is not a lockfile, resolved version assertion, upstream maintenance audit, license certification, installation proof or Section DONE."
+EXPECTED_EVIDENCE_POLICY = (
+    "This file inventories requested dependency constraints and authority boundaries; "
+    "it is not a lockfile, resolved version assertion, upstream maintenance audit, "
+    "license certification, installation proof or Section DONE."
+)
 
 EXPECTED_REJECTED_AUTHORITIES = {
     "Microsoft Agent Framework": "SECONDARY_ONLY",
@@ -86,6 +132,8 @@ def validate_manifest(manifest: dict[str, object], project: dict[str, object]) -
     if (
         type(manifest.get("schema_version")) is not int
         or manifest["schema_version"] != 1
+        or type(manifest.get("plan")) is not int
+        or type(manifest.get("section")) is not int
         or (manifest.get("plan"), manifest.get("section")) != (1, 1)
         or manifest.get("project") != metadata["name"]
         or manifest.get("source_path") != "pyproject.toml"
@@ -282,6 +330,16 @@ def test_adoption_manifest_cannot_silently_replace_approved_authority(
     with pytest.raises(ValueError, match="decision/owner drift"):
         validate_manifest(changed, project)
 
+
+
+@pytest.mark.parametrize("field", ["plan", "section"])
+def test_adoption_guard_rejects_boolean_plan_identity(field: str) -> None:
+    manifest = read_manifest(MANIFEST.read_text(encoding="utf-8"))
+    project = tomllib.loads(PROJECT.read_text(encoding="utf-8"))
+    forged = copy.deepcopy(manifest)
+    forged[field] = True
+    with pytest.raises(ValueError, match="identity"):
+        validate_manifest(forged, project)
 
 
 def test_adoption_guard_rejects_forged_capability_authority() -> None:
