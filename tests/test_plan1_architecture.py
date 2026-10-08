@@ -103,6 +103,18 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
+        # Refuse acquisition of dangerous builtin source evaluators, including
+        # when the retrieved callable is stored and invoked in a later statement.
+        if (
+            isinstance(func, ast.Name)
+            and func.id in getattr_names
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in builtins_names
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in {"exec", "eval", "compile"}
+        ):
+            imports.add("<dynamic-source-execution>")
         # Core ports have no reason to evaluate dynamically supplied Python code.
         # Otherwise a vendor import can be hidden inside a string and evade the
         # import AST walk. This is a drift fence, not a Python sandbox.
@@ -299,3 +311,22 @@ def test_architecture_guard_rejects_aliased_getattr_dynamic_import() -> None:
         "resolve(host, 'repr')('safe')\n"
     )
     assert direct_engine_imports(source) == ("mcp",)
+
+def test_architecture_guard_rejects_hoisted_builtin_source_loader() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "runner = resolve(host, 'exec')\n"
+        "runner('import langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
+
+
+def test_architecture_guard_allows_hoisted_safe_builtin_getattr() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "runner = resolve(host, 'repr')\n"
+        "runner('safe')\n"
+    )
+    assert direct_engine_imports(source) == ()
