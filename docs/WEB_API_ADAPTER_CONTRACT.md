@@ -133,3 +133,14 @@ for authenticating identities, controlling proxy headers, validating workspace
 ownership and ensuring HTTPS termination. Tests include forged Host/no-effect
 and valid Host paths; automated exact-head pass and upstream/main integration
 are required before any Section 1 closure claim.
+
+
+## ASGI principal read/retry chronology
+
+After trusted server middleware sets the exact WebPrincipal in ASGI scope, the
+ingress adapter immediately snapshots and revalidates its tenant, user,
+workspace and session fields before awaiting body chunks. Any mutation to the
+scope-owned carrier during async receive cannot retarget the Core effect.
+Invalid previously mutated identity is rejected 401 before reading the body.
+The existing WebApplicationBoundary remains the independent authorization
+decision point; no new authentication or tenant-policy authority is introduced.
