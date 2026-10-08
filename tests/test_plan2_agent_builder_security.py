@@ -103,3 +103,28 @@ class _UnsafeGateway:
 def test_model_draft_cannot_launder_duplicate_permission_keys() -> None:
     with pytest.raises(ValueError, match="duplicate JSON object key"):
         asyncio.run(AgentDraftService(_UnsafeGateway()).draft("Create safe agent"))
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("version", True),
+        ("max_steps", 1.0),
+        ("max_steps", "10"),
+        ("enabled", "true"),
+    ),
+)
+def test_compiler_readmits_unvalidated_copy_before_authorizing(
+    field: str, value: object,
+) -> None:
+    # model_copy(update=...) deliberately skips Pydantic validation.
+    document = _definition().model_copy(update={field: value})
+    with pytest.raises(ValidationError):
+        _compiler(ToolSpec("web.read", "Read", ToolRisk.READ_ONLY)).compile(document)
+
+
+def test_compiler_rejects_mutated_nested_grant_before_authorizing() -> None:
+    grant = ToolGrant(tool_id="web.read", max_risk=0)
+    object.__setattr__(grant, "max_risk", 0.0)
+    document = _definition().model_copy(update={"tool_grants": (grant,)})
+    with pytest.raises(ValidationError):
+        _compiler(ToolSpec("web.read", "Read", ToolRisk.READ_ONLY)).compile(document)
