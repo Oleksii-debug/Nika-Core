@@ -312,3 +312,41 @@ def test_valid_planner_identity_still_completes_through_canonical_tools() -> Non
     assert result.completed_actions == ("finish",)
     assert len(tools.calls) == 1
     assert tools.calls[0].approved is False
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "",
+        " leading",
+        "trailing ",
+        "line\nbreak",
+        "bidi\u202ereordered",
+        "e\u0301",
+        "x" * 513,
+        "\ud800",
+    ],
+)
+def test_nested_argument_field_name_cannot_spoof_evidence_or_tool_schema(
+    field_name: str,
+) -> None:
+    planner, tools = SingleStepPlanner(), RecordingTools()
+    with pytest.raises(ValueError, match="cannot be detached safely"):
+        run_action(
+            arguments={"outer": {field_name: "ordinary value"}},
+            planner=planner,
+            tools=tools,
+        )
+    assert planner.calls == 0
+    assert tools.calls == []
+
+
+def test_normal_nested_field_names_keep_plain_unicode_values() -> None:
+    arguments = {"outer": {"user_text": "line\nbidi \u202e is text, not a field name"}}
+    planner, tools = SingleStepPlanner(), RecordingTools()
+    result = run_action(arguments=arguments, planner=planner, tools=tools)
+    assert result.ok  # type: ignore[attr-defined]
+    assert planner.calls == 1
+    assert len(tools.calls) == 1
+    assert tools.calls[0].arguments == arguments
+    assert tools.calls[0].approved is False

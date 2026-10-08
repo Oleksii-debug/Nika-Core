@@ -141,6 +141,14 @@ def _require_plain_json_arguments(
         for key, item in value.items():
             if type(key) is not str:
                 break
+            # Argument names are audit/schema identifiers, not free-form text.
+            # Reject bidi/control/normalization spoofing before evidence or tools.
+            try:
+                _require_run_identity(key, name="argument_key")
+            except ValueError as exc:
+                raise ValueError(
+                    "deterministic run inputs cannot be detached safely"
+                ) from exc
             _require_plain_json_arguments(
                 key, depth=depth + 1, budget=budget, size_budget=size_budget
             )
