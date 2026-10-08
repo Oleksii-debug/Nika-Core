@@ -185,13 +185,17 @@ class AgentDefinitionRepository:
                 highest_risk=row["highest_risk"],
                 approvals_json=row["required_approvals_json"],
             )
+            # A verified active record is the durable result of an earlier authorized
+            # activation. A lost acknowledgement may cause a caller to retry without
+            # resending its one-time approval: do not reauthorize or repeat the effect.
+            # The persisted document and risk evidence are checked above first.
+            if row["status"] == "active":
+                return
             missing = sorted(set(required) - set(approved_tool_ids))
             if missing:
                 raise PermissionError(
                     "explicit human approval required for high-impact tools: " + ", ".join(missing)
                 )
-            if row["status"] == "active":
-                return
             if row["status"] != "draft":
                 raise ValueError(f"cannot activate definition in status {row['status']}")
             conn.execute(
