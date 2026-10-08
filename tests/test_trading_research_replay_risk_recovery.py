@@ -437,3 +437,58 @@ def test_pending_slice_cannot_be_repriced_at_same_sequence() -> None:
     with pytest.raises(TradingResearchError, match="conflicting same-slice"):
         book.process_existing_order(order, TimeSlice(1, NOW, (_quote(NOW),)))
     assert book.ledger.cash == Decimal(1000)
+
+
+def test_replay_rejects_same_approval_with_changed_intent_or_policy() -> None:
+    order = _approved()
+    book = ReplayBook(PortfolioLedger(Decimal(1000)))
+    first = book.process_existing_order(order, TimeSlice(1, NOW, ()))
+    assert first.state is OrderState.ACTIVE
+
+    changed_intent = OrderIntent(
+        order.intent.intent_id, INSTRUMENT, Side.BUY, OrderType.MARKET,
+        Decimal(4), NOW, 0,
+    )
+    changed_order = RiskApprovedOrder(
+        order.approval_id, changed_intent, order.authority,
+        order.approved_at, order.approved_slice, order.policy,
+    )
+    with pytest.raises(TradingResearchError, match="conflicting approved order"):
+        book.process_existing_order(
+            changed_order, TimeSlice(2, NOW + timedelta(seconds=1), ())
+        )
+    with pytest.raises(TradingResearchError, match="conflicting approved order"):
+        book.cancel(changed_order)
+    assert book.ledger.cash == Decimal(1000)
+
+    changed_policy_order = RiskApprovedOrder(
+        order.approval_id, order.intent, order.authority,
+        order.approved_at, order.approved_slice, ExecutionPolicy("different"),
+    )
+    with pytest.raises(TradingResearchError, match="conflicting approved order"):
+        book.process_existing_order(
+            changed_policy_order, TimeSlice(2, NOW + timedelta(seconds=1), ())
+        )
+    later = NOW + timedelta(seconds=1)
+    unchanged = book.process_existing_order(
+        order, TimeSlice(2, later, (_quote(later),))
+    )
+    assert unchanged.state is OrderState.FILLED
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal(5)
+
+
+def test_replay_rejects_later_index_with_regressing_utc_time() -> None:
+    order = _approved()
+    book = ReplayBook(PortfolioLedger(Decimal(1000)))
+    first = book.process_existing_order(order, TimeSlice(1, NOW, ()))
+    assert first.state is OrderState.ACTIVE
+    earlier = NOW - timedelta(seconds=1)
+    with pytest.raises(TradingResearchError, match="time cannot move backwards"):
+        book.process_existing_order(order, TimeSlice(2, earlier, (_quote(earlier),)))
+    assert book.ledger.cash == Decimal(1000)
+    later = NOW + timedelta(seconds=1)
+    final = book.process_existing_order(
+        order, TimeSlice(2, later, (_quote(later),))
+    )
+    assert final.state is OrderState.FILLED
+    assert book.ledger.cash == Decimal(495)
