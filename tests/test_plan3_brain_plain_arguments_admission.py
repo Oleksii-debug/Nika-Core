@@ -7,6 +7,7 @@ import pytest
 from nika_core.intelligence.brain import DeterministicBrain
 from nika_core.intelligence.contracts import (
     DeterministicAction,
+    DeterministicErrorCode,
     DeterministicGoal,
     DeterministicPlan,
     PlanStep,
@@ -130,3 +131,76 @@ def test_plain_nested_arguments_preserve_normal_execution() -> None:
     assert len(tools.calls) == 1
     assert tools.calls[0].arguments == arguments
     assert tools.calls[0].approved is False
+
+
+@pytest.mark.parametrize("poisoned_field", ["state", "goal", "action_facts", "tool_id"])
+def test_behaving_frozen_record_fields_rejected_before_deepcopy(
+    poisoned_field: str,
+) -> None:
+    class HostileFact:
+        deepcopy_calls = 0
+
+        def __deepcopy__(self, memo: object) -> object:
+            del memo
+            self.deepcopy_calls += 1
+            return self
+
+    class HostileToolId(str):
+        deepcopy_calls = 0
+
+        def __deepcopy__(self, memo: object) -> object:
+            del memo
+            self.deepcopy_calls += 1
+            return self
+
+    state = WorldState()
+    goal = DeterministicGoal(required=frozenset({"done"}))
+    action = DeterministicAction(
+        action_id="finish", adds=frozenset({"done"}), tool_id="read.demo",
+    )
+    attack = HostileFact() if poisoned_field != "tool_id" else HostileToolId("read.demo")
+    if poisoned_field == "state":
+        object.__setattr__(state, "facts", frozenset({attack}))
+    elif poisoned_field == "goal":
+        object.__setattr__(goal, "required", frozenset({attack}))
+    elif poisoned_field == "action_facts":
+        object.__setattr__(action, "requires", frozenset({attack}))
+    else:
+        object.__setattr__(action, "tool_id", attack)
+
+    planner, tools = SingleStepPlanner(), RecordingTools()
+    with pytest.raises(ValueError, match="canonical|cannot be detached safely"):
+        asyncio.run(
+            DeterministicBrain(planner=planner, tools=tools).run(
+                run_id="untrusted-record", state=state, goal=goal, actions=(action,),
+            )
+        )
+    assert attack.deepcopy_calls == 0
+    assert planner.calls == 0
+    assert tools.calls == []
+
+
+def test_planner_must_not_invoke_behavioral_step_deepcopy() -> None:
+    class BehavioralStepId(str):
+        deepcopy_calls = 0
+
+        def __deepcopy__(self, memo: object) -> object:
+            del memo
+            self.deepcopy_calls += 1
+            raise AssertionError("planner carrier deepcopy executed")
+
+    poisoned_id = BehavioralStepId("finish")
+
+    class BehavioralStepPlanner(SingleStepPlanner):
+        def plan(self, *, state: object, goal: object, actions: object) -> DeterministicPlan:
+            self.calls += 1
+            return DeterministicPlan(
+                steps=(PlanStep(action_id=poisoned_id, tool_id="read.demo"),)
+            )
+
+    planner, tools = BehavioralStepPlanner(), RecordingTools()
+    result = run_action(arguments={"safe": True}, planner=planner, tools=tools)
+    assert result.error_code is DeterministicErrorCode.INVALID_PLAN
+    assert poisoned_id.deepcopy_calls == 0
+    assert planner.calls == 1
+    assert tools.calls == []
