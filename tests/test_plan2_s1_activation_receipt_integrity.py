@@ -11,7 +11,18 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.tools import ToolRisk, ToolSpec
 
 
-@pytest.mark.parametrize("corrupt_receipt", [None, ""])
+@pytest.mark.parametrize(
+    "corrupt_receipt",
+    [
+        None,
+        "",
+        "not-a-timestamp",
+        "2026-10-08",
+        "2026-10-08T12:00:00",
+        "2026-10-08T12:00:00+02:00",
+        "2026-10-08T12:00:00Z",
+    ],
+)
 def test_active_without_activation_receipt_fails_closed_after_restart(
     tmp_path, corrupt_receipt: str | None
 ) -> None:
@@ -56,7 +67,7 @@ def test_active_without_activation_receipt_fails_closed_after_restart(
         lambda: restarted.require_active(definition.agent_id, definition.version),
         lambda: restarted.activate(definition),
     ):
-        with pytest.raises(ValueError, match="lacks activation evidence"):
+        with pytest.raises(ValueError, match="lacks valid activation evidence"):
             read()
 
     with store.connection() as conn:
