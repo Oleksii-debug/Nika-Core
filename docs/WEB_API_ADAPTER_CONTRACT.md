@@ -173,3 +173,21 @@ map to a sanitized pre-effect HTTP 500, not 409/outcome_unknown, even when a
 broken authorization adapter itself raises WebCommandOutcomeUnknownError with
 a forged correlation identity. Tests require zero handler calls and no internal
 exception or forged request identity in the HTTP response.
+
+
+## Pre-dispatch ASGI receive fault and recovery (Plan 6 §1)
+
+The optional HTTP adapter treats an unexpected ASGI receive failure as a
+**definite pre-effect transport failure**. It returns a bounded HTTP 500
+`request_receive_failed` response and never projects raw exception text,
+request fragments or local file paths. A partial body is discarded, with no
+call to the canonical Core handler. A later fully valid request may be
+admitted normally; no local Web-side retry is scheduled. ASGI cancellation
+(`asyncio.CancelledError`) is not suppressed, preserving host cancellation
+semantics and preventing success from being reported for a cancelled request.
+
+Regression: `tests/test_plan6_asgi_receive_fault_recovery.py` covers failures
+before and after body fragmentation, multiple exception classes, zero effects,
+secret-free responses, a subsequent healthy request and cancellation propagation.
+These are source-level candidate tests until exact-head CI finishes; they are
+**not** cloud-hosted performance, durability or terminal-Section evidence.
