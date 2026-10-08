@@ -367,3 +367,52 @@ def test_terminal_recovery_observer_can_confirm_checkpoint_without_planner() -> 
     assert result.completed_actions == ("prepare",)
     assert observer.calls == 1
     assert planner.calls == 0
+
+def test_consumable_recovery_iterator_cannot_reset_completed_step_budget() -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    checkpoint = (item for item in ("prepare",))
+    with pytest.raises(ValueError, match="previously_completed_action_ids"):
+        asyncio.run(
+            brain.run(
+                run_id="generator-checkpoint",
+                state=WorldState(facts=frozenset({"prepared"})),
+                goal=DeterministicGoal(required=frozenset({"finished"})),
+                actions=_ACTIONS,
+                previously_completed_action_ids=checkpoint,  # type: ignore[arg-type]
+                max_steps=1,
+            )
+        )
+    assert planner.calls == 0
+
+
+def test_mutable_recovery_sequence_is_not_trusted_as_checkpoint_authority() -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    with pytest.raises(ValueError, match="previously_completed_action_ids"):
+        asyncio.run(
+            brain.run(
+                run_id="mutable-checkpoint",
+                state=WorldState(facts=frozenset({"prepared"})),
+                goal=DeterministicGoal(required=frozenset({"finished"})),
+                actions=_ACTIONS,
+                previously_completed_action_ids=["prepare"],  # type: ignore[arg-type]
+                max_steps=1,
+            )
+        )
+    assert planner.calls == 0
+
+
+def test_consumable_action_catalog_is_rejected_before_planning() -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    with pytest.raises(ValueError, match="actions must be an immutable tuple"):
+        asyncio.run(
+            brain.run(
+                run_id="generator-actions",
+                state=WorldState(),
+                goal=DeterministicGoal(required=frozenset({"finished"})),
+                actions=(action for action in _ACTIONS),  # type: ignore[arg-type]
+            )
+        )
+    assert planner.calls == 0
