@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, fields
+from datetime import datetime, timezone, timedelta
+from types import MappingProxyType
+from zoneinfo import ZoneInfo
 from decimal import Decimal
 from enum import IntEnum
 
@@ -64,6 +66,60 @@ class TimeSlice:
 
 
 
+ 
+def _require_inert_paper_carriers(root: object) -> None:
+    """Reject behavioral nested inputs before deepcopy or market-data iteration.
+
+    These records are already typed by canonical domain constructors, but a
+    frozen dataclass may have its fields replaced with object.__setattr__ after
+    construction. Do not run attacker-controlled __deepcopy__, numeric methods
+    or custom mapping methods while re-admitting a paper order/slice.
+    """
+    records = (
+        TimeSlice, Venue, Instrument, EventTime, Bar, Tick, Quote,
+        OddsSnapshot, OutcomeSettlement, OrderIntent, OrderAuthority,
+        ExecutionPolicy, RiskApprovedOrder,
+    )
+    pending = [root]
+    seen: set[int] = set()
+    while pending:
+        value = pending.pop()
+        kind = type(value)
+        if kind in (str, int, bool, Side, OrderType, type(None)):
+            continue
+        if kind is Decimal:
+            if not value.is_finite():
+                raise TradingResearchError("non-finite paper carrier decimal")
+            continue
+        if kind is datetime:
+            # datetime is a builtin, but its tzinfo can be arbitrary Python
+            # code (including __deepcopy__). Permit standard fixed/IANA zones.
+            if type(value.tzinfo) not in (timezone, ZoneInfo):
+                raise TradingResearchError("unsupported paper carrier timezone")
+            continue
+        if kind is timedelta:
+            continue
+        identity = id(value)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if len(seen) > 100_000:
+            raise TradingResearchError("paper carrier exceeds bounded size")
+        if kind is tuple:
+            pending.extend(value)
+        elif kind in (dict, MappingProxyType):
+            # Only canonical immutable odds snapshots use mapping proxies.
+            # Reject subclasses that can override iteration or lookups.
+            for key, item in value.items():
+                if type(key) is not str or type(item) is not Decimal:
+                    raise TradingResearchError("invalid paper odds selection carrier")
+                pending.append(item)
+        elif kind in records:
+            pending.extend(getattr(value, field.name) for field in fields(kind))
+        else:
+            raise TradingResearchError("behavioral paper carrier is forbidden")
+
+
 def _snapshot_validated_time_slice(time_slice: TimeSlice) -> TimeSlice:
     """Detach and re-admit a market slice at the last paper-execution boundary.
 
@@ -74,6 +130,7 @@ def _snapshot_validated_time_slice(time_slice: TimeSlice) -> TimeSlice:
     """
     if type(time_slice) is not TimeSlice or type(time_slice.events) is not tuple:
         raise TradingResearchError("paper replay requires a canonical time slice")
+    _require_inert_paper_carriers(time_slice)
     detached: list[MarketEvent] = []
     for event in time_slice.events:
         if type(event) is OddsSnapshot:
@@ -106,6 +163,7 @@ def _snapshot_validated_approved_order(order: RiskApprovedOrder) -> RiskApproved
     """
     if type(order) is not RiskApprovedOrder:
         raise TradingResearchError("paper replay requires a risk-approved order")
+    _require_inert_paper_carriers(order)
     detached = deepcopy(order)
     if (
         type(detached.intent) is not OrderIntent
