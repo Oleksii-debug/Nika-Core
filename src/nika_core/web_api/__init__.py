@@ -1,3 +1,4 @@
+from nika_core.web_api.asgi import ASGICommandApplication
 from nika_core.web_api.application import (
     WebApplicationBoundary,
     WebAuthorizationPort,
@@ -9,6 +10,7 @@ from nika_core.web_api.contracts import WebCommand, WebCommandResult, WebPrincip
 from nika_core.web_api.http_transport import HttpCommandAdapter, HttpCommandResponse
 
 __all__ = [
+    "ASGICommandApplication",
     "WebApplicationBoundary",
     "WebAuthorizationPort",
     "WebCommandAdmissionError",
