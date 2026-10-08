@@ -8,6 +8,55 @@
   const resultId = document.getElementById("result-id");
   const resultState = document.getElementById("result-state");
   let pending = false;
+  const MAX_RESPONSE_BYTES = 80 * 1024;
+
+  // Bound response allocation before decoding JSON. Browser input and even
+  // misconfigured server responses are not an authority for memory budgets.
+  async function readBoundedJson(response) {
+    const contentType = response.headers.get("content-type");
+    if (typeof contentType !== "string" ||
+        !/^application\/json(?:\s*;\s*charset=utf-8)?$/iu.test(contentType.trim())) {
+      throw new Error("unexpected response content type");
+    }
+    const lengthHeader = response.headers.get("content-length");
+    if (lengthHeader !== null &&
+        (!/^(?:0|[1-9][0-9]{0,5})$/u.test(lengthHeader) ||
+         Number(lengthHeader) > MAX_RESPONSE_BYTES)) {
+      throw new Error("invalid response length");
+    }
+    if (!response.body || typeof response.body.getReader !== "function") {
+      throw new Error("streaming response unavailable");
+    }
+    const reader = response.body.getReader();
+    const parts = [];
+    let total = 0;
+    try {
+      while (true) {
+        const item = await reader.read();
+        if (item.done) break;
+        if (!(item.value instanceof Uint8Array)) {
+          throw new Error("invalid response chunk");
+        }
+        total += item.value.byteLength;
+        if (total > MAX_RESPONSE_BYTES) {
+          throw new Error("response body exceeds limit");
+        }
+        parts.push(item.value);
+      }
+    } catch (error) {
+      await reader.cancel().catch(() => {});
+      throw error;
+    } finally {
+      reader.releaseLock();
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const part of parts) {
+      bytes.set(part, offset);
+      offset += part.byteLength;
+    }
+    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+  }
 
   function report(message) {
     status.textContent = message;
@@ -39,6 +88,7 @@
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
+      const requestId = crypto.randomUUID();
       const response = await fetch("/v1/commands", {
         method: "POST",
         mode: "same-origin",
@@ -47,14 +97,19 @@
         redirect: "error",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          request_id: crypto.randomUUID(),
+          request_id: requestId,
           action_id: "task.inspect",
           payload: { task_id: taskId }
         }),
         signal: controller.signal
       });
-      const outcome = await response.json();
-      if (!response.ok || !outcome || typeof outcome !== "object" ||
+      if (!response.ok) {
+        report("Стан недоступний або немає дозволу. Перевірте авторизацію й повторіть вручну.");
+        return;
+      }
+      const outcome = await readBoundedJson(response);
+      if (!outcome || typeof outcome !== "object" ||
+          outcome.request_id !== requestId ||
           outcome.status !== "completed" || outcome.code !== "ok" ||
           !outcome.data || outcome.data.task_id !== taskId ||
           typeof outcome.data.state !== "string" ||
