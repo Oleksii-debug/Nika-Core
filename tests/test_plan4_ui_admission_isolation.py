@@ -162,3 +162,96 @@ def test_foreign_task_and_absent_id_are_indistinguishable(tmp_path: Path) -> Non
         assert backend._cancel_futures == {}
     finally:
         backend.close()
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "forged\\nINFO: accepted",
+        "unsafe\\x00tail",
+        "direction-\\u202e",
+        "contains whitespace",
+        "nonascii-\\u00e9",
+        "x" * 121,
+    ],
+)
+def test_ui_bridge_rejects_status_spoofing_request_ids_before_effects(bad_id: str) -> None:
+    calls: list[str] = []
+    bridge = UIActionBridge(
+        SimpleNamespace(get=lambda action_id: calls.append(action_id)),
+        SimpleNamespace(),
+        handlers={"task.create": lambda _payload: calls.append("effect")},
+    )
+    result = bridge.dispatch({
+        "request_id": bad_id,
+        "action_id": "task.create",
+        "payload": {"command": "safe"},
+    })
+    assert result["status"] == "rejected"
+    assert result["request_id"] == "invalid"
+    assert bad_id not in result["message"]
+    assert calls == []
+
+
+def test_ui_bridge_rejects_request_id_subclass_without_behavioral_calls() -> None:
+    class BehavioralId(str):
+        def __str__(self) -> str:
+            raise AssertionError("untrusted request ID stringification")
+
+    bridge = UIActionBridge(SimpleNamespace(), SimpleNamespace())
+    response = bridge.dispatch({
+        "request_id": BehavioralId("normal"),
+        "action_id": "task.create",
+        "payload": {"command": "safe"},
+    })
+    assert response["status"] == "rejected"
+    assert response["request_id"] == "invalid"
+
+
+def test_desktop_task_projection_excludes_foreign_scope_even_after_restart(
+    tmp_path: Path,
+) -> None:
+    backend, queue = _backend(tmp_path)
+    own = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "public task"},
+    )
+    foreign = [
+        queue.create(
+            workspace_id="private-workspace",
+            agent_id="private-agent",
+            payload={"command": f"PRIVATE TASK {i}"},
+        )
+        for i in range(60)
+    ]
+    other_agent = queue.create(
+        workspace_id="default",
+        agent_id="private-agent",
+        payload={"command": "PRIVATE AGENT TASK"},
+    )
+    try:
+        tasks = backend.snapshot()["tasks"]
+        assert [item["task_id"] for item in tasks] == [own.task_id]
+        assert all(item["command"] == "public task" for item in tasks)
+        bridge = UIActionBridge(
+            SimpleNamespace(), SimpleNamespace(), state_provider=backend.snapshot
+        )
+        view = bridge.get_state()
+        assert view["ok"] is True
+        assert view["state"]["tasks"] == tasks
+        assert all(
+            item["task_id"] not in {record.task_id for record in foreign}
+            for item in view["state"]["tasks"]
+        )
+        assert other_agent.task_id not in {item["task_id"] for item in tasks}
+    finally:
+        backend.close()
+
+    restarted, _ = _backend(tmp_path)
+    try:
+        assert [item["task_id"] for item in restarted.snapshot()["tasks"]] == [
+            own.task_id
+        ]
+    finally:
+        restarted.close()
