@@ -67,6 +67,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
     importlib_names = {"importlib"}
     builtins_names = {"builtins"}
     getattr_names = {"getattr"}
+    vars_names = {"vars"}
     dynamic_function_names = {"__import__"}
     dynamic_source_names = {"exec", "eval", "compile"}
     for node in ast.walk(tree):
@@ -91,6 +92,11 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
                     for alias in node.names
                     if alias.name == "getattr"
                 )
+                vars_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "vars"
+                )
                 dynamic_function_names.update(
                     alias.asname or alias.name
                     for alias in node.names
@@ -112,6 +118,10 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
             continue
+        # Direct authority namespace access can return dynamic import/eval
+        # handles without a named attribute and bypass the ordinary drift gate.
+        if node.attr == "__dict__" and node.value.id in builtins_names | importlib_names:
+            imports.add("<dynamic-authority-namespace>")
         if node.value.id in builtins_names and node.attr in {"exec", "eval", "compile"}:
             parent = parents.get(node)
             if not (isinstance(parent, ast.Call) and parent.func is node):
@@ -127,6 +137,35 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
+        # vars(module), builtins.vars(module) and getattr(module, "__dict__")
+        # leak an unrestricted loader/evaluator namespace. These are forbidden
+        # only for tracked imported authority modules, not ordinary objects.
+        via_vars = (
+            (isinstance(func, ast.Name) and func.id in vars_names)
+            or (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id in builtins_names
+                and func.attr == "vars"
+            )
+        )
+        if (
+            via_vars
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in builtins_names | importlib_names
+        ):
+            imports.add("<dynamic-authority-namespace>")
+        if (
+            isinstance(func, ast.Name)
+            and func.id in getattr_names
+            and len(node.args) in (2, 3)
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in builtins_names | importlib_names
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "__dict__"
+        ):
+            imports.add("<dynamic-authority-namespace>")
         # A computed attribute name on the importlib/builtins authorities could
         # select __import__, import_module or an evaluator without a literal
         # attribute in the AST. Stable Nika ports must not resolve such names.
@@ -510,3 +549,44 @@ def test_architecture_guard_rejects_computed_importlib_loader_name() -> None:
         "loader('mcp')\n"
     )
     assert direct_engine_imports(source) == ("<nonliteral-dynamic-attribute>",)
+
+
+def test_architecture_guard_rejects_builtin_namespace_dictionary_escape() -> None:
+    source = (
+        "import builtins as host\n"
+        "loader = host.__dict__['__import__']\n"
+        "loader('langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-authority-namespace>",)
+
+
+def test_architecture_guard_rejects_aliased_vars_namespace_escape() -> None:
+    source = (
+        "import importlib as importer\n"
+        "from builtins import vars as get_namespace\n"
+        "loader = get_namespace(importer)['import_module']\n"
+        "loader('mcp')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-authority-namespace>",)
+
+
+def test_architecture_guard_rejects_getattr_namespace_escape() -> None:
+    source = (
+        "import builtins as host\n"
+        "namespace = getattr(host, '__dict__')\n"
+        "namespace['exec']('import langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-authority-namespace>",)
+
+
+def test_architecture_guard_keeps_safe_unrelated_namespace_reads() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "class Local: pass\n"
+        "value = Local()\n"
+        "fields = vars(value)\n"
+        "package_name = getattr(importer, '__name__')\n"
+        "formatter = getattr(host, 'repr')\n"
+    )
+    assert direct_engine_imports(source) == ()
