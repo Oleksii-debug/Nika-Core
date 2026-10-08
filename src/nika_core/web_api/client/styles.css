@@ -1,0 +1,9 @@
+body { font: 1.05rem/1.55 system-ui, sans-serif; max-width: 52rem; margin: 0 auto; padding: 1rem; }
+.skip-link { position: absolute; left: -100vw; }
+.skip-link:focus { position: static; }
+input, button { font: inherit; padding: .4rem; }
+input { display: block; width: min(100%, 34rem); box-sizing: border-box; margin: .5rem 0 1rem; }
+button { cursor: pointer; }
+:focus-visible { outline: 3px solid Highlight; outline-offset: 3px; }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; } }
