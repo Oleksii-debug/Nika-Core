@@ -5,16 +5,16 @@ import asyncio
 import pytest
 
 from nika_core.intelligence.brain import DeterministicBrain
-from nika_core.tools import ToolCall, ToolResult, ToolSpec
 from nika_core.intelligence.contracts import (
     DeterministicAction,
     DeterministicErrorCode,
-    DeterministicPlanningError,
     DeterministicGoal,
     DeterministicPlan,
+    DeterministicPlanningError,
     PlanStep,
     WorldState,
 )
+from nika_core.tools import ToolCall, ToolResult, ToolSpec
 
 
 class NeverDispatchTools:

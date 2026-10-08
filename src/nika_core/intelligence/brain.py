@@ -15,8 +15,8 @@ from nika_core.intelligence.contracts import (
     DeterministicGoal,
     DeterministicPlan,
     DeterministicPlanner,
-    PlanStep,
     DeterministicPlanningError,
+    PlanStep,
     WorldState,
     WorldStateObserver,
 )
@@ -146,12 +146,14 @@ def _require_plain_json_arguments(
 
 
 def _require_plain_facts(value: object) -> None:
-    """Validate immutable fact carriers before deepcopy can run foreign behavior."""
-    if (
-        type(value) is not frozenset
-        or any(type(fact) is not str or not fact.strip() for fact in value)
-    ):
+    """Admit bounded canonical symbolic facts before planning or durable effects."""
+    if type(value) is not frozenset or len(value) > 10000:
         raise ValueError("deterministic run inputs cannot be detached safely")
+    try:
+        for fact in value:
+            _require_run_identity(fact, name="fact")
+    except ValueError as exc:
+        raise ValueError("deterministic run inputs cannot be detached safely") from exc
 
 
 def _require_plain_plan(value: object) -> bool:
@@ -843,11 +845,14 @@ class DeterministicBrain:
         # The observer is replaceable and can retain or corrupt a frozen record.
         # Do not accept subclass behavior, mutable fact carriers, or nontext facts;
         # detach the authoritative observation before any subsequent await.
-        if (
-            type(observed) is not WorldState
-            or type(observed.facts) is not frozenset
-            or any(type(fact) is not str or not fact.strip() for fact in observed.facts)
-        ):
+        if type(observed) is not WorldState:
+            return None, _StateObservationFailure(
+                DeterministicErrorCode.STATE_OBSERVATION_FAILED,
+                "world-state observer returned an invalid state",
+            )
+        try:
+            _require_plain_facts(observed.facts)
+        except ValueError:
             return None, _StateObservationFailure(
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
                 "world-state observer returned an invalid state",

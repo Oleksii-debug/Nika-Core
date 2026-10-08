@@ -73,8 +73,12 @@ Custom object/dict/list subclasses, non-finite numbers, cycles, more than 32 lev
 nesting or more than 10,000 nested elements per action are rejected before invoking
 any caller-defined `__deepcopy__`, planner, journal reservation, or tool handler.
 Mutable frozen-record internals are also re-admitted before snapshot: state/goal/action
-facts must be exact immutable frozensets of nonempty text, action/tool identities must
-be canonical text, and contradictory mutated preconditions/effects are rejected.
+facts must be exact immutable frozensets of at most 10,000 canonical UTF-8 identifiers
+(each at most 512 bytes, NFC, without controls/bidi formatting or edge whitespace);
+action/tool identities must be canonical text, and contradictory mutated
+preconditions/effects are rejected. The same fail-closed fact fence applies to
+replaceable world-state observer output before the observed state becomes evidence.
+Malformed observer facts return STATE_OBSERVATION_FAILED without planner/tool effects.
 A malformed planner result is inspected as exact built-in plan/step records *before*
 deepcopy and again afterward. No planner-defined copy method is invoked for a
 rejected carrier. This is an admission fence, not a second tool-schema or permission authority.
