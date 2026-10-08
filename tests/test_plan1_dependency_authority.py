@@ -20,6 +20,33 @@ PROJECT = ROOT / "pyproject.toml"
 VALID_MODES = frozenset({"REUSE", "ADAPT"})
 VALID_ACTIVATION = frozenset({"required", "optional", "test-only", "build-only"})
 
+# Freeze the reviewed adoption *decision*, not merely the presence of a label.
+# Changing an engine's canonical owner or REUSE/ADAPT mode requires an explicit
+# reviewed code change, not a manifest-only edit that passes the drift guard.
+EXPECTED_GROUP_AUTHORITIES = {
+    "base": ("REUSE", "Nika-owned application DTOs, persistence, file/HTTP adapters"),
+    "agent": ("ADAPT", "AgentRuntimePort, SchedulerPort and ModelGateway"),
+    "embedded-ai": ("ADAPT", "ModelGateway provider adapter"),
+    "planning": ("ADAPT", "Deterministic Brain contracts and ToolExecutor"),
+    "gui": ("ADAPT", "Desktop UI action bridge"),
+    "browser": ("ADAPT", "Semantic browser interaction port"),
+    "windows-interaction": ("ADAPT", "Semantic UIA interaction port"),
+    "learning": ("ADAPT", "Experiments/promotion authority"),
+    "media": ("ADAPT", "Media acquisition/transcription boundaries"),
+    "credentials": ("REUSE", "Credential/Identity Broker reference boundary"),
+    "deployment": ("ADAPT", "Authorized deployment/staging adapter"),
+    "dev": ("REUSE", "Repository CI and source-verification harness"),
+    "qa": ("REUSE", "Release/QA provenance gate"),
+    "build-system": ("REUSE", "Nika package build backend and source distribution"),
+}
+EXPECTED_REJECTED_AUTHORITIES = {
+    "Microsoft Agent Framework": "SECONDARY_ONLY",
+    "CrewAI / Agno / Agent Zero": "REFERENCE_ONLY",
+    "Qdrant as durable state": "REJECT_AS_AUTHORITY",
+    "WebView2 / ASGI / HTTP DTO as domain core": "REJECT_AS_AUTHORITY",
+    "Direct provider SDK use from domain contracts": "REJECT_AS_AUTHORITY",
+}
+
 
 def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
@@ -102,6 +129,12 @@ def validate_manifest(manifest: dict[str, object], project: dict[str, object]) -
         if group.get("license_provenance") != "REQUIRES_PER_PACKAGE_RELEASE_REVIEW":
             raise ValueError("Unsubstantiated package-license clearance")
 
+    if seen != set(EXPECTED_GROUP_AUTHORITIES):
+        raise ValueError("Canonical adoption group ownership drift")
+    for group in actual:
+        if (group["mode"], group["canonical_owner"]) != EXPECTED_GROUP_AUTHORITIES[group["group"]]:
+            raise ValueError(f"Canonical adoption decision/owner drift: {group['group']}")
+
     exclusions = manifest.get("rejected_competing_authorities")
     if type(exclusions) is not list or len(exclusions) < 4:
         raise ValueError("Missing competing-authority decisions")
@@ -115,6 +148,9 @@ def validate_manifest(manifest: dict[str, object], project: dict[str, object]) -
         if item["technology"] in technologies:
             raise ValueError("Duplicate competing-authority decision")
         technologies.add(item["technology"])
+
+    if {item["technology"]: item["decision"] for item in exclusions} != EXPECTED_REJECTED_AUTHORITIES:
+        raise ValueError("Competing runtime/policy authority rejection drift")
 
 
 def test_current_plan1_dependency_inventory_matches_project_without_unsupported_claims() -> None:
@@ -203,3 +239,53 @@ def test_build_system_requirements_and_backend_fail_closed_on_drift() -> None:
     changed_pyproject["build-system"]["requires"].append("unreviewed-builder>=0")
     with pytest.raises(ValueError, match="constraints"):
         validate_manifest(manifest, changed_pyproject)
+
+
+@pytest.mark.parametrize(
+    ("group_name", "field", "replacement"),
+    [
+        ("base", "canonical_owner", "External SDK decides all app policy"),
+        ("agent", "mode", "REUSE"),
+        ("embedded-ai", "canonical_owner", "Unreviewed model provider"),
+        ("build-system", "mode", "ADAPT"),
+    ],
+)
+def test_adoption_manifest_cannot_silently_replace_approved_authority(
+    group_name: str, field: str, replacement: str
+) -> None:
+    manifest = read_manifest(MANIFEST.read_text(encoding="utf-8"))
+    project = tomllib.loads(PROJECT.read_text(encoding="utf-8"))
+    changed = copy.deepcopy(manifest)
+    group = next(item for item in changed["groups"] if item["group"] == group_name)
+    group[field] = replacement
+    with pytest.raises(ValueError, match="decision/owner drift"):
+        validate_manifest(changed, project)
+
+
+@pytest.mark.parametrize(
+    ("technology", "replacement"),
+    [
+        ("Qdrant as durable state", "REUSE"),
+        ("Microsoft Agent Framework", "PRIMARY"),
+        ("Direct provider SDK use from domain contracts", "ADAPT"),
+    ],
+)
+def test_manifest_cannot_reenable_rejected_competing_authority(
+    technology: str, replacement: str
+) -> None:
+    manifest = read_manifest(MANIFEST.read_text(encoding="utf-8"))
+    project = tomllib.loads(PROJECT.read_text(encoding="utf-8"))
+    changed = copy.deepcopy(manifest)
+    item = next(x for x in changed["rejected_competing_authorities"] if x["technology"] == technology)
+    item["decision"] = replacement
+    with pytest.raises(ValueError, match="rejection drift"):
+        validate_manifest(changed, project)
+
+
+def test_manifest_cannot_remove_all_competing_authority_rejections() -> None:
+    manifest = read_manifest(MANIFEST.read_text(encoding="utf-8"))
+    project = tomllib.loads(PROJECT.read_text(encoding="utf-8"))
+    changed = copy.deepcopy(manifest)
+    changed["rejected_competing_authorities"] = changed["rejected_competing_authorities"][:4]
+    with pytest.raises(ValueError, match="rejection drift"):
+        validate_manifest(changed, project)
