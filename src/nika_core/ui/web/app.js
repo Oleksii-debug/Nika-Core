@@ -514,7 +514,8 @@
     const canChange = valid && snapshot.can_change;
     autostartInput.disabled = !canChange || autostartUncertain;
     autostartSave.disabled = !canChange || autostartUncertain;
-    if (!canChange) autostartDirty = false;
+    // An uncertain OS write must not be presented as a confirmed clean edit.
+    if (!canChange && !autostartUncertain) autostartDirty = false;
     if (!autostartDirty) autostartInput.checked = current === "enabled";
     autostartStatus.textContent = messages[current]
       + (autostartDirty ? " Позначку змінено, але ще не збережено." : "")
