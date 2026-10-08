@@ -246,3 +246,127 @@ def test_uncopyable_action_payload_is_rejected_before_planning_or_tool_effect() 
             )
         )
     assert tools.calls == []
+
+
+def test_planner_retained_step_cannot_retarget_execution_after_return() -> None:
+    retained_step = PlanStep(action_id="read", tool_id="read.demo")
+
+    class RetainingPlanner:
+        def plan(self, *, state: object, goal: object, actions: object) -> DeterministicPlan:
+            return DeterministicPlan(steps=(retained_step,))
+
+    class MutatingObserver:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def observe(self) -> WorldState:
+            self.calls += 1
+            if self.calls == 1:
+                object.__setattr__(retained_step, "action_id", "injected")
+                return WorldState()
+            return WorldState(frozenset({"done"}))
+
+    tools = RecordingReadOnlyTools()
+    result = asyncio.run(
+        DeterministicBrain(
+            planner=RetainingPlanner(), tools=tools  # type: ignore[arg-type]
+        ).run(
+            run_id="planner-retained-result",
+            state=WorldState(),
+            goal=DeterministicGoal(required=frozenset({"done"})),
+            actions=(
+                DeterministicAction(
+                    action_id="read",
+                    adds=frozenset({"done"}),
+                    tool_id="read.demo",
+                ),
+            ),
+            state_observer=MutatingObserver(),
+        )
+    )
+    assert result.ok
+    assert result.completed_actions == ("read",)
+    assert result.plan.steps == (PlanStep("read", "read.demo"),)
+    assert len(tools.calls) == 1
+    assert tools.calls[0].tool_id == "read.demo"
+
+
+def test_observer_return_is_owned_snapshot_not_mutable_shared_authority() -> None:
+    shared = WorldState(frozenset({"safe"}))
+
+    class RetainingObserver:
+        async def observe(self) -> WorldState:
+            return shared
+
+    observed, failure = asyncio.run(
+        DeterministicBrain._observe_state(RetainingObserver(), timeout_seconds=1.0)
+    )
+    assert failure is None
+    assert observed == WorldState(frozenset({"safe"}))
+    assert observed is not shared
+    object.__setattr__(shared, "facts", frozenset({"forged"}))
+    assert observed == WorldState(frozenset({"safe"}))
+
+
+@pytest.mark.parametrize("bad_facts", [["forged"], frozenset({7}), frozenset({""})])
+def test_observer_corrupt_record_fails_before_any_tool_effect(bad_facts: object) -> None:
+    class CorruptObserver:
+        async def observe(self) -> WorldState:
+            observed = WorldState()
+            object.__setattr__(observed, "facts", bad_facts)
+            return observed
+
+    class SingleStepPlanner:
+        def plan(self, *, state: object, goal: object, actions: object) -> DeterministicPlan:
+            return DeterministicPlan(steps=(PlanStep("read", "effectful.tool"),))
+
+    tools = NeverDispatchTools()
+    result = asyncio.run(
+        DeterministicBrain(
+            planner=SingleStepPlanner(), tools=tools  # type: ignore[arg-type]
+        ).run(
+            run_id="corrupt-observation",
+            state=WorldState(),
+            goal=DeterministicGoal(required=frozenset({"done"})),
+            actions=(
+                DeterministicAction(
+                    action_id="read", adds=frozenset({"done"}), tool_id="effectful.tool"
+                ),
+            ),
+            state_observer=CorruptObserver(),
+        )
+    )
+    assert not result.ok
+    assert result.error_code is DeterministicErrorCode.STATE_OBSERVATION_FAILED
+    assert result.completed_actions == ()
+    assert tools.execute_calls == 0
+
+
+def test_uncopyable_planner_result_fails_before_any_effect() -> None:
+    class UncopyablePlan:
+        def __deepcopy__(self, memo: object) -> object:
+            raise RuntimeError("malicious plan copy")
+
+    class UncopyablePlanner:
+        def plan(self, *, state: object, goal: object, actions: object) -> object:
+            return UncopyablePlan()
+
+    tools = NeverDispatchTools()
+    result = asyncio.run(
+        DeterministicBrain(
+            planner=UncopyablePlanner(), tools=tools  # type: ignore[arg-type]
+        ).run(
+            run_id="uncopyable-plan",
+            state=WorldState(),
+            goal=DeterministicGoal(required=frozenset({"done"})),
+            actions=(
+                DeterministicAction(
+                    action_id="read", adds=frozenset({"done"}), tool_id="effectful.tool"
+                ),
+            ),
+        )
+    )
+    assert not result.ok
+    assert result.error_code is DeterministicErrorCode.INVALID_PLAN
+    assert result.planning_history == ()
+    assert tools.execute_calls == 0
