@@ -373,3 +373,153 @@ def test_replay_keeps_remaining_order_after_accounting_rejection() -> None:
     assert book.ledger.cash == Decimal(495)
     assert book.process_existing_order(order, time_slice) is update
     assert book.ledger.cash == Decimal(495)
+
+
+def test_partial_fill_cannot_consume_same_slice_twice_or_lose_accounting() -> None:
+    intent = OrderIntent(
+        "slice-intent", INSTRUMENT, Side.BUY, OrderType.MARKET,
+        Decimal(5), NOW, 0,
+    )
+    order = RiskApprovedOrder(
+        "slice-approval", intent, _authority("slice-order"), NOW, 0,
+        ExecutionPolicy("half", max_fill_fraction=Decimal("0.5")),
+    )
+    book = ReplayBook(PortfolioLedger(Decimal(1000)))
+    first_slice = TimeSlice(1, NOW, (_quote(NOW, size="4"),))
+    first = book.process_existing_order(order, first_slice)
+    assert first.state is OrderState.PARTIALLY_FILLED
+    assert first.remaining_quantity == Decimal(3)
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal(2)
+    assert book.ledger.cash == Decimal(798)
+
+    # Replayed equal data is idempotent: no phantom remaining-quantity debit.
+    assert book.process_existing_order(
+        order, TimeSlice(1, NOW, (_quote(NOW, size="4"),))
+    ) is first
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal(2)
+    assert book.ledger.cash == Decimal(798)
+
+    with pytest.raises(TradingResearchError, match="conflicting same-slice"):
+        book.process_existing_order(
+            order, TimeSlice(1, NOW, (_quote(NOW, ask="102", size="4"),))
+        )
+    assert book.ledger.cash == Decimal(798)
+
+    next_at = NOW + timedelta(seconds=1)
+    second = book.process_existing_order(
+        order, TimeSlice(2, next_at, (_quote(next_at, size="4"),))
+    )
+    assert second.remaining_quantity == Decimal(1)
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal(4)
+    assert book.ledger.cash == Decimal(596)
+    with pytest.raises(TradingResearchError, match="cannot move backwards"):
+        book.process_existing_order(order, first_slice)
+    assert book.ledger.cash == Decimal(596)
+
+    final_at = NOW + timedelta(seconds=2)
+    third = book.process_existing_order(
+        order, TimeSlice(3, final_at, (_quote(final_at, size="4"),))
+    )
+    assert third.state is OrderState.FILLED
+    assert third.remaining_quantity == Decimal(0)
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal(5)
+    assert book.ledger.cash == Decimal(495)
+    assert book.process_existing_order(order, first_slice) is third
+
+
+def test_pending_slice_cannot_be_repriced_at_same_sequence() -> None:
+    order = _approved()
+    book = ReplayBook(PortfolioLedger(Decimal(1000)))
+    empty = TimeSlice(1, NOW, ())
+    first = book.process_existing_order(order, empty)
+    assert first.state is OrderState.ACTIVE
+    assert book.process_existing_order(order, TimeSlice(1, NOW, ())) is first
+    with pytest.raises(TradingResearchError, match="conflicting same-slice"):
+        book.process_existing_order(order, TimeSlice(1, NOW, (_quote(NOW),)))
+    assert book.ledger.cash == Decimal(1000)
+
+
+def test_replay_rejects_same_approval_with_changed_intent_or_policy() -> None:
+    order = _approved()
+    book = ReplayBook(PortfolioLedger(Decimal(1000)))
+    first = book.process_existing_order(order, TimeSlice(1, NOW, ()))
+    assert first.state is OrderState.ACTIVE
+
+    changed_intent = OrderIntent(
+        order.intent.intent_id, INSTRUMENT, Side.BUY, OrderType.MARKET,
+        Decimal(4), NOW, 0,
+    )
+    changed_order = RiskApprovedOrder(
+        order.approval_id, changed_intent, order.authority,
+        order.approved_at, order.approved_slice, order.policy,
+    )
+    with pytest.raises(TradingResearchError, match="conflicting approved order"):
+        book.process_existing_order(
+            changed_order, TimeSlice(2, NOW + timedelta(seconds=1), ())
+        )
+    with pytest.raises(TradingResearchError, match="conflicting approved order"):
+        book.cancel(changed_order)
+    assert book.ledger.cash == Decimal(1000)
+
+    changed_policy_order = RiskApprovedOrder(
+        order.approval_id, order.intent, order.authority,
+        order.approved_at, order.approved_slice, ExecutionPolicy("different"),
+    )
+    with pytest.raises(TradingResearchError, match="conflicting approved order"):
+        book.process_existing_order(
+            changed_policy_order, TimeSlice(2, NOW + timedelta(seconds=1), ())
+        )
+    later = NOW + timedelta(seconds=1)
+    unchanged = book.process_existing_order(
+        order, TimeSlice(2, later, (_quote(later),))
+    )
+    assert unchanged.state is OrderState.FILLED
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal(5)
+
+
+def test_replay_rejects_later_index_with_regressing_utc_time() -> None:
+    order = _approved()
+    book = ReplayBook(PortfolioLedger(Decimal(1000)))
+    first = book.process_existing_order(order, TimeSlice(1, NOW, ()))
+    assert first.state is OrderState.ACTIVE
+    earlier = NOW - timedelta(seconds=1)
+    with pytest.raises(TradingResearchError, match="time cannot move backwards"):
+        book.process_existing_order(order, TimeSlice(2, earlier, (_quote(earlier),)))
+    assert book.ledger.cash == Decimal(1000)
+    later = NOW + timedelta(seconds=1)
+    final = book.process_existing_order(
+        order, TimeSlice(2, later, (_quote(later),))
+    )
+    assert final.state is OrderState.FILLED
+    assert book.ledger.cash == Decimal(495)
+
+
+def test_approved_order_snapshot_failure_precedes_any_replay_effect(monkeypatch) -> None:
+    import nika_core.trading_research.replay as replay_module
+
+    order = _approved()
+    book = ReplayBook(PortfolioLedger(Decimal(1000)))
+    first_slice = TimeSlice(1, NOW, (_quote(NOW),))
+
+    def unavailable_copy(_value):
+        raise RuntimeError("injected approved order copy failure")
+
+    monkeypatch.setattr(replay_module, "deepcopy", unavailable_copy)
+    with pytest.raises(RuntimeError, match="approved order copy failure"):
+        book.process_existing_order(order, first_slice)
+    assert book.ledger.cash == Decimal(1000)
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal(0)
+    assert not book._remaining
+    assert not book._terminal
+    assert not book._accepted_orders
+
+    with pytest.raises(RuntimeError, match="approved order copy failure"):
+        book.cancel(order)
+    assert not book._terminal
+    assert not book._accepted_orders
+
+    monkeypatch.undo()
+    update = book.process_existing_order(order, first_slice)
+    assert update.state is OrderState.FILLED
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal(5)
+    assert book.ledger.cash == Decimal(495)

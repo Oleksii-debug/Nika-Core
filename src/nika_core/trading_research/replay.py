@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -210,18 +211,48 @@ class ReplayBook:
     execution: SimulationExecutionEngine
     _remaining: dict[ReplayOrderKey, Decimal]
     _terminal: dict[ReplayOrderKey, OrderUpdate]
+    _last_slice: dict[ReplayOrderKey, tuple[int, datetime, tuple[bytes, ...], OrderUpdate]]
+    _accepted_orders: dict[ReplayOrderKey, RiskApprovedOrder]
 
     def __init__(self, ledger: PortfolioLedger) -> None:
         self.ledger = ledger
         self.execution = SimulationExecutionEngine()
         self._remaining = {}
         self._terminal = {}
+        self._last_slice = {}
+        self._accepted_orders = {}
 
     def process_existing_order(self, order: RiskApprovedOrder, time_slice: TimeSlice) -> OrderUpdate:
         key = _replay_order_key(order)
+        # A reused approval identity cannot change intent, policy or authority.
+        accepted = self._accepted_orders.get(key)
+        if accepted is not None and order != accepted:
+            raise TradingResearchError("conflicting approved order replay identity")
+        # Prepare the detached identity before accounting/cancellation effects.
+        # Even an unexpected copy failure cannot leave a partial transition.
+        order_snapshot = accepted if accepted is not None else deepcopy(order)
+        if order != order_snapshot:
+            raise TradingResearchError("unstable approved order replay identity")
         terminal = self._terminal.get(key)
         if terminal is not None:
             return terminal
+        # Each order may consume a market slice at most once. Without a
+        # per-order slice fence a repeated partial fill uses the same fill ID:
+        # PortfolioLedger deduplicates it but _remaining would still shrink,
+        # creating phantom execution quantity. Snapshot event bytes so mutable
+        # caller-held event objects cannot rewrite the replay identity.
+        slice_events = tuple(canonical_event_bytes(event) for event in time_slice.events)
+        previous = self._last_slice.get(key)
+        if previous is not None:
+            previous_index, previous_at, previous_events, previous_update = previous
+            if time_slice.index < previous_index:
+                raise TradingResearchError("order replay slice cannot move backwards")
+            if time_slice.index > previous_index and time_slice.at < previous_at:
+                raise TradingResearchError("order replay time cannot move backwards")
+            if time_slice.index == previous_index:
+                if time_slice.at != previous_at or slice_events != previous_events:
+                    raise TradingResearchError("conflicting same-slice order replay")
+                return previous_update
         remaining = self._remaining.get(key, order.intent.quantity)
         update = self.execution.execute(order, time_slice, remaining_quantity=remaining)
         # Accounting must succeed before advancing order replay state. A failed
@@ -229,16 +260,28 @@ class ReplayBook:
         if update.fill is not None:
             self.ledger.apply_fill(update.fill)
         self._remaining[key] = update.remaining_quantity
+        self._last_slice[key] = (time_slice.index, time_slice.at, slice_events, update)
+        self._accepted_orders.setdefault(key, order_snapshot)
         if update.state in {OrderState.FILLED, OrderState.EXPIRED, OrderState.CANCELLED}:
             self._terminal[key] = update
         return update
 
     def cancel(self, order: RiskApprovedOrder, reason: str = "cancelled by simulation") -> OrderUpdate:
         key = _replay_order_key(order)
+        # A reused approval identity cannot change intent, policy or authority.
+        accepted = self._accepted_orders.get(key)
+        if accepted is not None and order != accepted:
+            raise TradingResearchError("conflicting approved order replay identity")
+        # Prepare the detached identity before accounting/cancellation effects.
+        # Even an unexpected copy failure cannot leave a partial transition.
+        order_snapshot = accepted if accepted is not None else deepcopy(order)
+        if order != order_snapshot:
+            raise TradingResearchError("unstable approved order replay identity")
         terminal = self._terminal.get(key)
         if terminal is not None:
             return terminal
         remaining = self._remaining.get(key, order.intent.quantity)
         update = OrderUpdate(order.approval_id, OrderState.CANCELLED, remaining, reason=reason)
         self._terminal[key] = update
+        self._accepted_orders.setdefault(key, order_snapshot)
         return update
