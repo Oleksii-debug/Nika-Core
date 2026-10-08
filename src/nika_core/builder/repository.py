@@ -10,6 +10,37 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 
 
+def _expected_risk_evidence(definition: AgentDefinition) -> tuple[int, tuple[str, ...]]:
+    highest = max((grant.max_risk for grant in definition.tool_grants), default=0)
+    approvals = tuple(
+        sorted(
+            grant.tool_id
+            for grant in definition.tool_grants
+            if grant.max_risk == RiskTier.R4_HIGH_IMPACT
+        )
+    )
+    return highest, approvals
+
+
+def _validate_persisted_risk_evidence(
+    definition: AgentDefinition, *, highest_risk: object, approvals_json: object
+) -> tuple[str, ...]:
+    try:
+        approvals = json.loads(approvals_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("persisted agent risk/approval evidence is invalid") from exc
+    expected_risk, expected_approvals = _expected_risk_evidence(definition)
+    if (
+        type(highest_risk) is not int
+        or highest_risk != expected_risk
+        or type(approvals) is not list
+        or any(type(item) is not str for item in approvals)
+        or tuple(approvals) != expected_approvals
+    ):
+        raise ValueError("persisted agent risk/approval evidence is inconsistent")
+    return expected_approvals
+
+
 @dataclass(frozen=True, slots=True)
 class StoredAgentDefinition:
     definition: AgentDefinition
@@ -42,14 +73,7 @@ class AgentDefinitionRepository:
         definition = AgentDefinition.model_validate(
             compilation.definition.model_dump(mode="python")
         )
-        highest = max((grant.max_risk for grant in definition.tool_grants), default=0)
-        approvals = tuple(
-            sorted(
-                grant.tool_id
-                for grant in definition.tool_grants
-                if grant.max_risk == RiskTier.R4_HIGH_IMPACT
-            )
-        )
+        highest, approvals = _expected_risk_evidence(definition)
         if (
             not isinstance(compilation.highest_risk, RiskTier)
             or compilation.highest_risk.value != highest
@@ -111,7 +135,8 @@ class AgentDefinitionRepository:
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT definition_json, required_approvals_json, status FROM agent_definitions "
+                "SELECT definition_json, required_approvals_json, highest_risk, status "
+                "FROM agent_definitions "
                 "WHERE agent_id = ? AND version = ?",
                 (definition.agent_id, definition.version),
             ).fetchone()
@@ -120,7 +145,11 @@ class AgentDefinitionRepository:
             persisted = AgentDefinition.import_json(row["definition_json"])
             if persisted != definition:
                 raise ValueError("activation definition differs from persisted immutable draft")
-            required = tuple(str(item) for item in json.loads(row["required_approvals_json"]))
+            required = _validate_persisted_risk_evidence(
+                persisted,
+                highest_risk=row["highest_risk"],
+                approvals_json=row["required_approvals_json"],
+            )
             missing = sorted(set(required) - set(approved_tool_ids))
             if missing:
                 raise PermissionError(
@@ -190,7 +219,11 @@ class AgentDefinitionRepository:
     @staticmethod
     def _decode(row) -> StoredAgentDefinition:
         payload = AgentDefinition.import_json(row["definition_json"])
-        required = tuple(str(item) for item in json.loads(row["required_approvals_json"]))
+        required = _validate_persisted_risk_evidence(
+            payload,
+            highest_risk=row["highest_risk"],
+            approvals_json=row["required_approvals_json"],
+        )
         return StoredAgentDefinition(
             definition=payload,
             status=str(row["status"]),
