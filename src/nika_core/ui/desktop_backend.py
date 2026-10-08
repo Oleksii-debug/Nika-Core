@@ -21,6 +21,7 @@ from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.reference import ReferenceRuntime
 from nika_core.ui.autostart_settings import AutostartSettings
 from nika_core.ui.bridge_models import UIResult
+from nika_core.ui.payload_safety import validate_ui_payload
 from nika_core.windows_autostart import WindowsAutostartService
 
 _LOGGER = logging.getLogger(__name__)
@@ -118,9 +119,17 @@ class DesktopBackend:
             raise ValueError("Введіть команду перед створенням завдання.")
         task_payload: dict[str, Any] = {"command": command}
         if self._prepare_task_payload is not None:
-            task_payload = dict(self._prepare_task_payload(task_payload))
-            # A hostile prepared value can implement __eq__ to impersonate the
-            # approved text. Require an exact built-in string before comparing.
+            prepared = self._prepare_task_payload(task_payload)
+            # A composer is an extension boundary: never iterate a behavioral
+            # Mapping, store live mutable objects, or let SQLite serialize a
+            # non-JSON carrier. Validate and detach before any TaskQueue write.
+            if type(prepared) is not dict:
+                raise ValueError("Підготовка завдання має повернути звичайний JSON-об'єкт.")
+            try:
+                task_payload = validate_ui_payload(prepared)
+            except ValueError:
+                raise ValueError("Підготовка завдання повернула некоректні дані.") from None
+            # Reject command impersonation before creating the durable task.
             if type(task_payload.get("command")) is not str or task_payload["command"] != command:
                 raise ValueError("Підготовка завдання не може змінювати його команду.")
         record = self._queue.create(
