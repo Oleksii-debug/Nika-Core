@@ -21,3 +21,9 @@
 |7|4|WAITING_UPSTREAM|
 
 Update this registry whenever a new-plan Section reaches DONE/REOPENED or when a live audit proves an earlier migrated Section terminal.
+
+
+## Plan 1 — checkpoint 2026-10-08 (nonterminal)
+- **Section 1:** ACTIONABLE / IN_PROGRESS / NOT DONE. Existing stacked architecture/adoption lineage #1734 -> #1746 -> #1762 -> #1777 -> #1786 -> #1791, plus narrow defaulted-`getattr` import/evaluator guard PR #1804. Exact PR #1804 head `b3eb4ddf3e7ca258b13696c6a33a7ec1158d8867`; source blob `2603783ef904bbae6c97d3ce5fec71c71758cbe7`, read back from GitHub. New cases are authored, NOT executed/PASS. Exact-head Core CI #37832363833 and M12 #37832363614 were QUEUED; PF3 #37832363889 SKIPPED. Dependency provenance/resolution, full acceptance, safe ordered integration and postmerge main readback remain unproved.
+- **Section 2:** ACTIONABLE / IN_PROGRESS / NOT DONE. Existing stacked runtime contract lineage #1738 -> #1748 -> #1763 -> #1778 -> #1794; latest readback head `7b586c259f835d1ba818f09287e27bf3528ae6dc`. Core CI #37829667745 and M12 #37829667780 were QUEUED, not PASS. Cross-domain versioned command/query contracts, negative/recovery integration, Section 1 predecessor and main merge/readback remain unproved.
+- No terminal DONE, no fabricated Linux/Windows/NVDA qualification. Other plans' statuses remain unchanged.
