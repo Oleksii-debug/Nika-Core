@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "docs" / "PLAN1_DEPENDENCY_AUTHORITY.json"
 PROJECT = ROOT / "pyproject.toml"
 VALID_MODES = frozenset({"REUSE", "ADAPT"})
-VALID_ACTIVATION = frozenset({"required", "optional", "test-only"})
+VALID_ACTIVATION = frozenset({"required", "optional", "test-only", "build-only"})
 
 
 def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -47,6 +47,7 @@ def validate_manifest(manifest: dict[str, object], project: dict[str, object]) -
         or manifest.get("project") != metadata["name"]
         or manifest.get("source_path") != "pyproject.toml"
         or manifest.get("python_compatibility") != metadata["requires-python"]
+        or manifest.get("build_backend") != project["build-system"]["build-backend"]
     ):
         raise ValueError("Wrong Plan 1 identity, schema or Python compatibility")
 
@@ -54,7 +55,10 @@ def validate_manifest(manifest: dict[str, object], project: dict[str, object]) -
     if manifest.get("resolution_state") != "DECLARED_RANGES_ONLY_NOT_REPRODUCIBLE":
         raise ValueError("Resolved/locked dependency evidence cannot be invented")
 
-    expected = {"base": metadata["dependencies"]}
+    expected = {
+        "base": metadata["dependencies"],
+        "build-system": project["build-system"]["requires"],
+    }
     expected.update(project["project"]["optional-dependencies"])
     actual = manifest.get("groups")
     if type(actual) is not list or len(actual) != len(expected):
@@ -79,6 +83,17 @@ def validate_manifest(manifest: dict[str, object], project: dict[str, object]) -
             raise ValueError("Unknown reuse/adapt decision")
         if group.get("activation") not in VALID_ACTIVATION:
             raise ValueError("Unknown dependency activation boundary")
+        expected_activation = (
+            "build-only"
+            if name == "build-system"
+            else "required"
+            if name == "base"
+            else "test-only"
+            if name in {"dev", "qa"}
+            else "optional"
+        )
+        if group["activation"] != expected_activation:
+            raise ValueError(f"Incorrect dependency activation boundary: {name}")
         for field in ("canonical_owner", "capability"):
             if type(group.get(field)) is not str or not group[field].strip():
                 raise ValueError(f"Missing authority attribution: {name}/{field}")
@@ -153,3 +168,38 @@ def test_adoption_guard_rejects_duplicate_group_and_missing_package() -> None:
 def test_adoption_guard_rejects_duplicate_json_keys() -> None:
     with pytest.raises(ValueError, match="Duplicate manifest key"):
         read_manifest('{"schema_version":1,"schema_version":2}')
+
+
+def test_build_system_requirements_and_backend_fail_closed_on_drift() -> None:
+    manifest = read_manifest(MANIFEST.read_text(encoding="utf-8"))
+    project = tomllib.loads(PROJECT.read_text(encoding="utf-8"))
+    validate_manifest(manifest, project)
+
+    bad_backend = copy.deepcopy(manifest)
+    bad_backend["build_backend"] = "unreviewed.backend"
+    with pytest.raises(ValueError, match="identity"):
+        validate_manifest(bad_backend, project)
+
+    missing_build_requirement = copy.deepcopy(manifest)
+    build_groups = [
+        group for group in missing_build_requirement["groups"]
+        if group["group"] == "build-system"
+    ]
+    assert len(build_groups) == 1
+    build_groups[0]["requirements"].pop()
+    with pytest.raises(ValueError, match="constraints"):
+        validate_manifest(missing_build_requirement, project)
+
+    forged_build_activation = copy.deepcopy(manifest)
+    build_group = next(
+        group for group in forged_build_activation["groups"]
+        if group["group"] == "build-system"
+    )
+    build_group["activation"] = "optional"
+    with pytest.raises(ValueError, match="activation"):
+        validate_manifest(forged_build_activation, project)
+
+    changed_pyproject = copy.deepcopy(project)
+    changed_pyproject["build-system"]["requires"].append("unreviewed-builder>=0")
+    with pytest.raises(ValueError, match="constraints"):
+        validate_manifest(manifest, changed_pyproject)
