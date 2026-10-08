@@ -40,7 +40,7 @@ async function run(source) {
     "invalid",
     [{...good}, {...good}],
     [good, {action_id: "task.pause", label: "Пауза", binding: null}],
-    [good, {...good, action_id: "bad\\nidentity"}],
+    [good, {...good, action_id: "bad\nidentity"}],
   ];
   for (const invalid of badCases) {
     inventory.push(invalid);
@@ -66,6 +66,18 @@ async function run(source) {
   assert.equal(replacements, 1, "late malformed entries may not partially render");
   assert.equal(displayed.length, 1);
   console.log("PASS: failed refresh retains previously rendered keymap controls");
+
+  // Invisible bidi overrides and line breaks can spoof the NVDA action inventory.
+  for (const unsafe of ["Створити\nзавдання", "Створити\u202Eзавдання"]) {
+    inventory.push([{...good, label: unsafe}]);
+    await assert.rejects(ui.refreshKeymap());
+    assert.equal(replacements, 1);
+    assert.equal(displayed[0].children[0].textContent, good.label);
+  }
+  inventory.push([{...good, binding: "ctrl+n\u202E"}]);
+  await assert.rejects(ui.refreshKeymap());
+  assert.equal(replacements, 1);
+  console.log("PASS: control and bidi text cannot spoof the NVDA keymap");
 }
 
 if (require.main === module) {
