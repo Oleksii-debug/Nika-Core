@@ -1,3 +1,18 @@
+# Multi-Plan Parallel Closure Protocol v4 — owner directive 2026-10-08
+
+This directive overrides conflicting global-sequential work-selection rules for the new project-plan architecture.
+
+Before mutation read PROJECT_PLAN_INDEX.md, MULTI_PLAN_PARALLELISM_CONTRACT.md, MULTI_PLAN_CLOSURE_STATE.md, the assigned Drive plan and live GitHub.
+
+- Plans 1–6 are independent engineering plans; there is no global earliest Section across plans.
+- Within the assigned plan, audit/reuse existing implementation first, skip terminal DONE, and work the first ACTIONABLE unfinished Section.
+- Existing Nika code/PR/evidence is not greenfield. REUSE -> REPAIR -> CONVERGE.
+- Stable contracts/fixtures/mocks may unblock peer-plan dependencies, but they never count as whole-product/physical evidence.
+- Plan 7 is final convergence/physical acceptance/go-live and is not an ordinary parallel lane before required Plan 1–6 outputs exist.
+- Do not create duplicate persistence/runtime/security/scheduler/Capability Broker/ModelGateway/AgentRuntime authorities.
+- Human Windows/NVDA and real Web/Cloud acceptance belong to Plan 7, not intermediate blockers.
+- DONE is terminal unless demonstrated regression, invalid evidence, materially changed acceptance contract or breaking integration.
+
 # Nika Core autonomous development instructions
 
 ## CANONICAL WORKER-AUTONOMY OVERRIDE
