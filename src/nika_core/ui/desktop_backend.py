@@ -111,7 +111,16 @@ class DesktopBackend:
         self._ensure_defaults()
 
     def create_task(self, payload: Mapping[str, Any]) -> UIResult:
-        raw_command = payload.get("command", "")
+        # This facade also has direct Python callers: never assume that all
+        # ingress passed through the validating WebView command bridge.
+        # Validate and detach before reading command or invoking the composer.
+        if type(payload) is not dict:
+            raise ValueError("Команда повинна бути звичайним JSON-об'єктом.")
+        try:
+            admitted = validate_ui_payload(payload)
+        except ValueError:
+            raise ValueError("Команда містить некоректні JSON-дані.") from None
+        raw_command = admitted.get("command", "")
         if type(raw_command) is not str:
             raise ValueError("Команда має бути текстом.")
         command = raw_command.strip()
@@ -138,7 +147,16 @@ class DesktopBackend:
             payload=task_payload,
         )
         self._queue.transition(record.task_id, TaskState.READY)
-        self._schedule_start(record.task_id, command)
+        try:
+            self._schedule_start(record.task_id, command)
+        except Exception:
+            # A synchronous loop/submission failure must not leave an orphan
+            # READY task that the user might unknowingly submit a second time.
+            # A concurrent RUNNING transition is never rolled back here.
+            if self._queue.get(record.task_id).state == TaskState.READY:
+                self._queue.transition(record.task_id, TaskState.CANCELLED)
+            self._record_background_failure(record.task_id, "desktop.runtime_schedule_failed")
+            raise
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
@@ -212,7 +230,17 @@ class DesktopBackend:
         if not command:
             raise ValueError("Збережене завдання не містить команди для безпечного запуску.")
         self._queue.transition(record.task_id, TaskState.READY)
-        self._schedule_start(record.task_id, command)
+        try:
+            self._schedule_start(record.task_id, command)
+        except Exception:
+            # The resumed task has never reached RUNNING. Preserve PAUSED so
+            # an operator may retry safely after the host becomes available.
+            if self._queue.get(record.task_id).state == TaskState.READY:
+                self._queue.transition(record.task_id, TaskState.PAUSED)
+            self._record_background_failure(
+                record.task_id, "desktop.runtime_resume_schedule_failed"
+            )
+            raise
         return UIResult(
             request_id="desktop-handler",
             status="accepted",

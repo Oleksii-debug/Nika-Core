@@ -219,17 +219,38 @@ class UIActionBridge:
 
     def list_actions(self) -> list[dict[str, Any]]:
         try:
-            return [
-                UIActionView(
-                    action_id=action.action_id,
-                    label=action.label,
-                    category=action.category,
-                    scope=action.scope,
-                    binding=self._keymap.resolve(action.action_id),
-                    may_be_unbound=action.may_be_unbound,
-                ).model_dump()
-                for action in self._actions.all()
-            ]
+            views: list[dict[str, Any]] = []
+            for action in self._actions.all():
+                # Action Registry definitions and Keymap state can be loaded from
+                # extensions or persisted overrides. Do not reflect unbounded,
+                # multiline or bidi/control text into the keyboard/NVDA UI.
+                if (
+                    not self._safe_focus_target(action.action_id)
+                    or not all(
+                        type(field) is str
+                        and bool(field)
+                        and self._safe_accessible_status(field)
+                        for field in (action.label, action.category, action.scope)
+                    )
+                ):
+                    raise ValueError("invalid UI action metadata")
+                binding = self._keymap.resolve(action.action_id)
+                if binding is not None and (
+                    not self._bounded_keymap_text(binding, max_bytes=256)
+                    or not self._safe_accessible_status(binding)
+                ):
+                    raise ValueError("invalid UI keymap binding")
+                views.append(
+                    UIActionView(
+                        action_id=action.action_id,
+                        label=action.label,
+                        category=action.category,
+                        scope=action.scope,
+                        binding=binding,
+                        may_be_unbound=action.may_be_unbound,
+                    ).model_dump()
+                )
+            return views
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             logger.error(
                 "UI action list failed: exception_type=%s",
