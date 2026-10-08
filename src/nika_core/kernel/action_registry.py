@@ -185,7 +185,7 @@ def _clean_binding(binding: str | None) -> str | None:
             raise ValueError("shortcut exceeds the byte limit")
     except UnicodeEncodeError:
         raise ValueError("shortcut contains invalid Unicode") from None
-    if any(category(char) in {"Cc", "Cf", "Cs"} for char in binding):
+    if any(category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} for char in binding):
         raise ValueError("shortcut contains unsafe control or direction text")
     cleaned = "+".join(part.strip() for part in binding.split("+") if part.strip())
     return cleaned or None
