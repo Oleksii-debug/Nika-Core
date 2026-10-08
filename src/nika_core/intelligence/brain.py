@@ -205,6 +205,36 @@ class DeterministicBrain:
         # planner or a handler merely to rediscover an already-satisfied goal.
         # Journal reconciliation above still has priority over that success.
         if executed_steps == max_steps and self._goal_satisfied(current_state, goal):
+            # The supplied checkpoint may be stale. When a live observer is
+            # configured it remains authoritative even on a terminal resume;
+            # never claim success from an unobserved recovered state.
+            if state_observer is not None:
+                observed, observation_failure = await self._observe_state(
+                    state_observer, timeout_seconds=observation_timeout_seconds
+                )
+                if observation_failure is not None:
+                    return self._failure(
+                        plan=DeterministicPlan(steps=()),
+                        completed=completed,
+                        state=current_state,
+                        history=history,
+                        replans=replans,
+                        code=observation_failure.code,
+                        message=observation_failure.message,
+                    )
+                if observed is None:  # pragma: no cover - observer contract
+                    raise AssertionError("state observation returned no state or failure")
+                current_state = observed
+                if not self._goal_satisfied(current_state, goal):
+                    return self._failure(
+                        plan=DeterministicPlan(steps=()),
+                        completed=completed,
+                        state=current_state,
+                        history=history,
+                        replans=replans,
+                        code=DeterministicErrorCode.PLAN_TOO_LONG,
+                        message="recovered state changed after max_steps was exhausted",
+                    )
             return DeterministicBrainResult(
                 plan=DeterministicPlan(steps=()),
                 completed_actions=tuple(completed),

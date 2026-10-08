@@ -166,6 +166,9 @@ A recovered checkpoint at the exact budget may return terminal success without r
 only if its supplied authoritative state already satisfies the goal; an over-budget
 checkpoint or an unmet goal fails closed before a new tool effect. Existing task-level
 PENDING/UNCERTAIN journal reconciliation still precedes this terminal shortcut.
+When a WorldStateObserver is configured, even an exact-budget satisfied checkpoint is
+observed before it is accepted as terminal: drift blocks success, observation failures
+fail closed, and no additional tool effect or planner invocation is made.
 
 Run, optional task, and deterministic action/replay identities are admitted as exact,
 bounded canonical UTF-8 text before journal/planner/tool handling. Step/re-plan limits

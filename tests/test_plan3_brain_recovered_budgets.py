@@ -217,3 +217,84 @@ def test_action_and_checkpoint_ids_are_rejected_before_planner() -> None:
             )
         )
     assert planner.calls == 0
+
+
+def test_terminal_recovery_reobserves_authoritative_state_before_success() -> None:
+    class DriftObserver:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def observe(self) -> WorldState:
+            self.calls += 1
+            return WorldState()  # The previously satisfied fact has disappeared.
+
+    observer = DriftObserver()
+    planner = CountingPlanner()
+    result = asyncio.run(
+        DeterministicBrain(planner=planner, tools=ToolExecutor()).run(
+            run_id="observed-restart-drift",
+            state=WorldState(facts=frozenset({"prepared"})),
+            goal=DeterministicGoal(required=frozenset({"prepared"})),
+            actions=_ACTIONS,
+            previously_completed_action_ids=("prepare",),
+            max_steps=1,
+            state_observer=observer,
+        )
+    )
+    assert not result.ok
+    assert result.error_code is DeterministicErrorCode.PLAN_TOO_LONG
+    assert result.completed_actions == ("prepare",)
+    assert result.final_state == WorldState()
+    assert observer.calls == 1
+    assert planner.calls == 0
+
+
+def test_terminal_recovery_observer_failure_blocks_checkpoint_success() -> None:
+    class FailingObserver:
+        async def observe(self) -> WorldState:
+            raise RuntimeError("state unavailable")
+
+    planner = CountingPlanner()
+    result = asyncio.run(
+        DeterministicBrain(planner=planner, tools=ToolExecutor()).run(
+            run_id="observed-restart-error",
+            state=WorldState(facts=frozenset({"prepared"})),
+            goal=DeterministicGoal(required=frozenset({"prepared"})),
+            actions=_ACTIONS,
+            previously_completed_action_ids=("prepare",),
+            max_steps=1,
+            state_observer=FailingObserver(),
+        )
+    )
+    assert not result.ok
+    assert result.error_code is DeterministicErrorCode.STATE_OBSERVATION_FAILED
+    assert result.completed_actions == ("prepare",)
+    assert planner.calls == 0
+
+
+def test_terminal_recovery_observer_can_confirm_checkpoint_without_planner() -> None:
+    class ConfirmingObserver:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def observe(self) -> WorldState:
+            self.calls += 1
+            return WorldState(facts=frozenset({"prepared"}))
+
+    observer = ConfirmingObserver()
+    planner = CountingPlanner()
+    result = asyncio.run(
+        DeterministicBrain(planner=planner, tools=ToolExecutor()).run(
+            run_id="observed-restart-confirmed",
+            state=WorldState(facts=frozenset({"prepared"})),
+            goal=DeterministicGoal(required=frozenset({"prepared"})),
+            actions=_ACTIONS,
+            previously_completed_action_ids=("prepare",),
+            max_steps=1,
+            state_observer=observer,
+        )
+    )
+    assert result.ok
+    assert result.completed_actions == ("prepare",)
+    assert observer.calls == 1
+    assert planner.calls == 0
