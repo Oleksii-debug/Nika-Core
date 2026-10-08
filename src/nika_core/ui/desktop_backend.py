@@ -525,7 +525,11 @@ class DesktopBackend:
     ) -> TaskRecord | None:
         if payload is not None and "task_id" in payload:
             selected = self._selected_task(payload)
-            return selected if selected is not None and selected.state not in _TERMINAL_STATES else None
+            return (
+                selected
+                if selected is not None and selected.state not in _TERMINAL_STATES
+                else None
+            )
         return self._unqualified_task(
             states=tuple(state for state in TaskState if state not in _TERMINAL_STATES),
             action=action,
