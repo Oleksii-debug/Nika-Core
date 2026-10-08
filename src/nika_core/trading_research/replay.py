@@ -360,6 +360,7 @@ class ReplayBook:
     _terminal: dict[ReplayOrderKey, OrderUpdate]
     _last_slice: dict[ReplayOrderKey, tuple[int, datetime, tuple[bytes, ...], OrderUpdate]]
     _accepted_orders: dict[ReplayOrderKey, RiskApprovedOrder]
+    _approval_keys: dict[tuple[str, str, str], ReplayOrderKey]
 
     def __init__(self, ledger: PortfolioLedger) -> None:
         self.ledger = ledger
@@ -368,10 +369,27 @@ class ReplayBook:
         self._terminal = {}
         self._last_slice = {}
         self._accepted_orders = {}
+        self._approval_keys = {}
+
+    def _checked_replay_key(
+        self, order: RiskApprovedOrder
+    ) -> tuple[ReplayOrderKey, tuple[str, str, str]]:
+        key = _replay_order_key(order)
+        approval_scope = (
+            order.authority.workspace_id,
+            order.authority.run_id,
+            order.approval_id,
+        )
+        previous_key = self._approval_keys.get(approval_scope)
+        if previous_key is not None and previous_key != key:
+            raise TradingResearchError(
+                "conflicting paper approval scope: order identity changed"
+            )
+        return key, approval_scope
 
     def process_existing_order(self, order: RiskApprovedOrder, time_slice: TimeSlice) -> OrderUpdate:
         order = _snapshot_validated_approved_order(order)
-        key = _replay_order_key(order)
+        key, approval_scope = self._checked_replay_key(order)
         # A reused approval identity cannot change intent, policy or authority.
         accepted = self._accepted_orders.get(key)
         if accepted is not None and order != accepted:
@@ -411,13 +429,14 @@ class ReplayBook:
         self._remaining[key] = update.remaining_quantity
         self._last_slice[key] = (time_slice.index, time_slice.at, slice_events, update)
         self._accepted_orders.setdefault(key, order_snapshot)
+        self._approval_keys.setdefault(approval_scope, key)
         if update.state in {OrderState.FILLED, OrderState.EXPIRED, OrderState.CANCELLED}:
             self._terminal[key] = update
         return update
 
     def cancel(self, order: RiskApprovedOrder, reason: str = "cancelled by simulation") -> OrderUpdate:
         order = _snapshot_validated_approved_order(order)
-        key = _replay_order_key(order)
+        key, approval_scope = self._checked_replay_key(order)
         # A reused approval identity cannot change intent, policy or authority.
         accepted = self._accepted_orders.get(key)
         if accepted is not None and order != accepted:
@@ -434,4 +453,5 @@ class ReplayBook:
         update = OrderUpdate(order.approval_id, OrderState.CANCELLED, remaining, reason=reason)
         self._terminal[key] = update
         self._accepted_orders.setdefault(key, order_snapshot)
+        self._approval_keys.setdefault(approval_scope, key)
         return update
