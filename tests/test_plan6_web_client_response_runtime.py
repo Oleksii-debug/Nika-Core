@@ -43,7 +43,7 @@ const assert = require("node:assert/strict");
     "inspect-form", "task-id", "inspect-submit", "app-status",
     "task-details", "result-id", "result-state"
   ]) nodes[id] = new Element();
-  nodes["task-id"].value = "task-123";
+  nodes["task-id"].value = scenario === "bidi" ? "task-123\u202e" : "task-123";
 
   const result = {
     request_id: scenario === "mismatch" ? "other-request" : "fixed-request",
@@ -63,6 +63,7 @@ const assert = require("node:assert/strict");
     assert.equal(init.credentials, "omit");
     assert.equal(init.redirect, "error");
     assert.equal(JSON.parse(init.body).request_id, "fixed-request");
+    if (scenario === "edited") nodes["task-id"].value = "other-task";
     return {
       ok: true,
       headers: { get: name => name === "content-type" ? contentType :
@@ -88,7 +89,7 @@ const assert = require("node:assert/strict");
   await submit({ preventDefault() {} });
   const visible = !nodes["task-details"].hidden;
   assert.equal(visible, scenario === "ok");
-  assert.equal(fetchCalls, 1);
+  assert.equal(fetchCalls, scenario === "bidi" ? 0 : 1);
   assert.equal(nodes["inspect-submit"].disabled, false);
   assert.ok(!("aria-busy" in nodes["inspect-form"].attrs));
   if (scenario === "ok") {
@@ -98,6 +99,14 @@ const assert = require("node:assert/strict");
   if (scenario === "mismatch") {
     assert.match(nodes["app-status"].textContent, /Стан недоступний/u);
   }
+  if (scenario === "edited") {
+    assert.match(nodes["app-status"].textContent, /змінився/u);
+    assert.equal(nodes["result-id"].textContent, "");
+    assert.equal(nodes["result-state"].textContent, "");
+  }
+  if (scenario === "bidi") {
+    assert.match(nodes["app-status"].textContent, /ідентифікатор/u);
+  }
   if (scenario === "oversize") assert.equal(cancelCalls, 1);
   console.log("PASS", scenario);
 })().catch(error => { console.error(error); process.exitCode = 1; });
@@ -106,7 +115,8 @@ const assert = require("node:assert/strict");
 
 @pytest.mark.parametrize(
     "scenario",
-    ["ok", "mismatch", "oversize", "declared-oversize", "invalid-utf8", "wrong-mime"],
+    ["ok", "mismatch", "oversize", "declared-oversize", "invalid-utf8", "wrong-mime",
+     "edited", "bidi"],
 )
 def test_packaged_web_client_bounds_and_correlates_response(scenario: str) -> None:
     node = shutil.which("node")

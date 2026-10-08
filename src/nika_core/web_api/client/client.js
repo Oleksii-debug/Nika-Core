@@ -70,7 +70,8 @@
     // The server is the sole source of tenant/workspace/permission authority.
     // Never send identity, entitlement, local credentials or user-provided tokens.
     if (!taskId || taskId !== taskId.trim() ||
-        taskId.length > 120 || /\s|[\x00-\x1f\x7f]/u.test(taskId)) {
+        taskId.length > 120 ||
+        /\s|[\x00-\x1f\x7f\u200e\u200f\u2028-\u202e\u2066-\u2069]/u.test(taskId)) {
       details.hidden = true;
       report("Перевірте ідентифікатор завдання.");
       return;
@@ -115,6 +116,12 @@
           typeof outcome.data.state !== "string" ||
           !/^[A-Z_]{1,40}$/u.test(outcome.data.state)) {
         report("Стан недоступний або немає дозволу. Перевірте авторизацію й повторіть вручну.");
+        return;
+      }
+      // The form can be edited while a request is awaiting a response.
+      // Never present the result of an older input as the new selection.
+      if (field.value !== taskId) {
+        report("Ідентифікатор завдання змінився. Перевірте його ще раз.");
         return;
       }
       resultId.textContent = taskId;
