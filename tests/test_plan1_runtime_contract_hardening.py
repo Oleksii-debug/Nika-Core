@@ -8,6 +8,7 @@ from math import inf, nan
 import pytest
 
 from nika_core.runtime.contracts import (
+    MAX_RUNTIME_EVENT_SEQUENCE,
     RuntimeEvent,
     RuntimeOutcome,
     RuntimeRequest,
@@ -210,3 +211,14 @@ def test_runtime_budgets_accept_documented_ceiling_and_near_boundary() -> None:
     assert new.timeout_seconds == 86_400
     assert resume.max_steps == 9_999
     assert resume.timeout_seconds == 86_399.5
+
+
+@pytest.mark.parametrize("overflow", [2**53, 2**63, 10**100])
+def test_runtime_event_rejects_lossy_json_or_sqlite_sequence(overflow: int) -> None:
+    with pytest.raises(ValueError, match="portable integer limit"):
+        RuntimeEvent(overflow, "runtime.recorded")
+
+
+def test_runtime_event_sequence_accepts_portable_integer_ceiling() -> None:
+    event = RuntimeEvent(MAX_RUNTIME_EVENT_SEQUENCE, "runtime.recorded")
+    assert event.sequence == (1 << 53) - 1
