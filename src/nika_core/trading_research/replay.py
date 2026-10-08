@@ -360,7 +360,7 @@ class ReplayBook:
     _terminal: dict[ReplayOrderKey, OrderUpdate]
     _last_slice: dict[ReplayOrderKey, tuple[int, datetime, tuple[bytes, ...], OrderUpdate]]
     _accepted_orders: dict[ReplayOrderKey, RiskApprovedOrder]
-    _approval_keys: dict[tuple[str, str, str], ReplayOrderKey]
+    _approval_keys: dict[str, ReplayOrderKey]
 
     def __init__(self, ledger: PortfolioLedger) -> None:
         self.ledger = ledger
@@ -373,13 +373,12 @@ class ReplayBook:
 
     def _checked_replay_key(
         self, order: RiskApprovedOrder
-    ) -> tuple[ReplayOrderKey, tuple[str, str, str]]:
+    ) -> tuple[ReplayOrderKey, str]:
         key = _replay_order_key(order)
-        approval_scope = (
-            order.authority.workspace_id,
-            order.authority.run_id,
-            order.approval_id,
-        )
+        # Fill IDs are approval-scoped, not run-scoped. Sharing an approval ID
+        # with a different order/run/workspace can otherwise falsely dedupe
+        # accounting while advancing another paper order's remaining amount.
+        approval_scope = order.approval_id
         previous_key = self._approval_keys.get(approval_scope)
         if previous_key is not None and previous_key != key:
             raise TradingResearchError(
