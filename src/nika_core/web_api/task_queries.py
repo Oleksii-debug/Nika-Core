@@ -78,6 +78,20 @@ class WebTaskQueryHandler:
         if record.workspace_id != principal.workspace_id:
             # Never reveal foreign task metadata or its payload health.
             return self._reject(command.request_id, "not_found")
+        # TaskQueue.get reads and decodes outside the preflight SQLite
+        # connection. Workspace ownership can change after it returns a
+        # valid TaskRecord. Revalidate against the canonical store before
+        # emitting even the minimal task-state projection.
+        try:
+            with self._queue.store.connection() as conn:
+                current = conn.execute(
+                    "SELECT workspace_id FROM tasks WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()
+        except sqlite3.Error:
+            return self._storage_failure(command.request_id)
+        if current is None or current["workspace_id"] != principal.workspace_id:
+            return self._reject(command.request_id, "not_found")
         if type(record.payload) is not dict:
             # Canonical TaskRecord payload requires a JSON object. A valid
             # JSON scalar/list is damaged state, not a healthy task.
