@@ -115,3 +115,21 @@ principal identity, and a failing handler that changes its command carrier.
 These are committed regression cases, not an asserted executed pytest pass;
 exact-head CI, authenticated server composition, tenant ownership,
 durable cloud lifecycle and main integration still govern terminal closure.
+
+
+## Host authority admission (Plan 6 §1, component-only)
+
+When an ASGI Host header is supplied, it must match an exact configured HTTPS
+origin authority (case, port and IPv6 spelling included); when Origin is also
+supplied, the two authorities must match. Rejection occurs before principal
+resolution, JSON parsing and all Core effects, including for forged hosts,
+malformed bytes and wrong ports. Explicit non-browser requests without Origin
+remain supported only when their supplied Host belongs to the allowlist and
+the server has separately established WebPrincipal.
+
+This is strict ingress routing, not tenant account membership, an authentication
+service or deployment reverse-proxy verification. The server remains responsible
+for authenticating identities, controlling proxy headers, validating workspace
+ownership and ensuring HTTPS termination. Tests include forged Host/no-effect
+and valid Host paths; automated exact-head pass and upstream/main integration
+are required before any Section 1 closure claim.
