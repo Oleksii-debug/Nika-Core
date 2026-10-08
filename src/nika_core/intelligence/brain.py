@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import unicodedata
+from copy import deepcopy
 from dataclasses import dataclass
 
 from nika_core.intelligence.contracts import (
@@ -146,6 +147,19 @@ class DeterministicBrain:
             raise ValueError("actions must be an immutable tuple")
         if type(previously_completed_action_ids) is not tuple:
             raise ValueError("previously_completed_action_ids must be an immutable tuple")
+
+        # Treat caller-owned records as input, not mutable runtime authority. In
+        # particular, a frozen DeterministicAction still contains a mutable arguments
+        # mapping. A planner or state observer must not be able to change that mapping
+        # between plan validation, durable reservation and ToolExecutor dispatch.
+        if type(state) is not WorldState or type(goal) is not DeterministicGoal:
+            raise ValueError("state and goal must be canonical deterministic records")
+        if any(type(action) is not DeterministicAction for action in actions):
+            raise ValueError("actions must be canonical deterministic action records")
+        try:
+            state, goal, actions = deepcopy((state, goal, actions))
+        except Exception as exc:
+            raise ValueError("deterministic run inputs cannot be detached safely") from exc
 
         # Action IDs are durable completion/effect generation identities.
         # Admit all of them before planner or journal operations.
@@ -710,12 +724,16 @@ class DeterministicBrain:
                 code=DeterministicErrorCode.PLANNING_TIMEOUT,
             )
         try:
+            # Planner implementations are replaceable and run in another thread.
+            # Give them detached candidates rather than live validation/permission
+            # state: even object.__setattr__ can mutate frozen dataclass carriers.
+            planner_state, planner_goal, planner_actions = deepcopy((state, goal, actions))
             async with asyncio.timeout(remaining):
                 return await asyncio.to_thread(
                     self._planner.plan,
-                    state=state,
-                    goal=goal,
-                    actions=actions,
+                    state=planner_state,
+                    goal=planner_goal,
+                    actions=planner_actions,
                 )
         except TimeoutError as exc:
             raise DeterministicPlanningError(
