@@ -266,3 +266,49 @@ def test_oversized_planner_result_is_rejected_before_snapshot(
     assert planner.calls == 1
     assert tools.calls == []
 
+
+@pytest.mark.parametrize(
+    ("action_id", "tool_id"),
+    [
+        ("", "read.demo"),
+        ("finish\nforged-log", "read.demo"),
+        ("finish\u202e", "read.demo"),
+        ("e\u0301", "read.demo"),
+        ("\ud800", "read.demo"),
+        ("f" * 513, "read.demo"),
+        ("finish", "read.demo\rforged"),
+        ("finish", "\ud800"),
+        ("finish", "read.demo" + "x" * 513),
+    ],
+)
+def test_planner_identity_is_bounded_before_snapshot_or_history(
+    action_id: str, tool_id: str
+) -> None:
+    class UntrustedPlanner(SingleStepPlanner):
+        def plan(self, *, state: object, goal: object, actions: object) -> DeterministicPlan:
+            self.calls += 1
+            return DeterministicPlan(
+                steps=(PlanStep(action_id=action_id, tool_id=tool_id),)
+            )
+
+    planner, tools = UntrustedPlanner(), RecordingTools()
+    result = run_action(arguments={"safe": True}, planner=planner, tools=tools)
+    assert result.error_code is DeterministicErrorCode.INVALID_PLAN
+    assert result.error == "planner returned a malformed deterministic plan"
+    assert result.planning_history == ()
+    assert result.completed_actions == ()
+    assert result.final_state == WorldState()
+    assert planner.calls == 1
+    assert tools.calls == []
+
+
+def test_valid_planner_identity_still_completes_through_canonical_tools() -> None:
+    planner, tools = SingleStepPlanner(), RecordingTools()
+    result = run_action(arguments={"safe": True}, planner=planner, tools=tools)
+    assert result.ok
+    assert result.planning_history == (
+        DeterministicPlan(steps=(PlanStep("finish", "read.demo"),)),
+    )
+    assert result.completed_actions == ("finish",)
+    assert len(tools.calls) == 1
+    assert tools.calls[0].approved is False
