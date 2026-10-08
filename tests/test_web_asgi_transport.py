@@ -196,3 +196,89 @@ def test_configuration_rejects_non_https_and_wildcard_origins() -> None:
     for origin in ("http://nika.example", "*", "https://nika.example/"):
         with pytest.raises(ValueError, match="origins"):
             ASGICommandApplication(adapter, allowed_origins=frozenset({origin}))
+
+
+@pytest.mark.parametrize(
+    "bad_origin",
+    [
+        "https://user@nika.example",
+        "https://nika.example/path",
+        "https://nika.example?debug=1",
+        "https://nika.example#fragment",
+        "https://nika.example\\\@evil.example",
+        "https://nika.example:99999",
+        "https://nika.example:abc",
+        "https://nika.example:0",
+        "https://nika.example:0443",
+        "https://NIKA.example",
+        "https://nika.example.",
+        "https://nika..example",
+        "https://%6eika.example",
+        "https://nika.example\\n",
+        "https://ніка.example",
+        "https://[::1",
+    ],
+)
+def test_config_rejects_malformed_or_ambiguous_origins(bad_origin: str) -> None:
+    boundary = WebApplicationBoundary(authorization=_Allow(), handler=_Handler())
+    with pytest.raises(ValueError, match="origins"):
+        ASGICommandApplication(
+            HttpCommandAdapter(boundary), allowed_origins=frozenset({bad_origin})
+        )
+
+
+@pytest.mark.parametrize("good_origin", [
+    "https://nika.example",
+    "https://localhost:8443",
+    "https://127.0.0.1:8443",
+    "https://[::1]:8443",
+])
+def test_config_accepts_canonical_https_origin(good_origin: str) -> None:
+    boundary = WebApplicationBoundary(authorization=_Allow(), handler=_Handler())
+    app = ASGICommandApplication(
+        HttpCommandAdapter(boundary), allowed_origins=frozenset({good_origin})
+    )
+    scope = _scope(principal=_principal(), origin=good_origin.encode("ascii"))
+    assert _status(_call(app, scope)) == 200
+
+
+def test_config_rejection_prevents_untrusted_host_from_admission() -> None:
+    app, handler = _app()
+    output = _call(app, _scope(
+        principal=_principal(),
+        origin=b"https://nika.example.evil.example",
+    ))
+    assert _status(output) == 403
+    assert handler.calls == 0
+
+
+@pytest.mark.parametrize("headers, expected", [
+    ([(b"X-Test", b"x")] * 65, 431),
+    ([(b"x-large", b"x" * (16 * 1024 + 1))], 431),
+    ([(b"bad\nname", b"hello")], 400),
+    ([(b"x-safe", b"bad\x00value")], 400),
+    ([(b"x-safe", b"bad\r\nset-cookie: forged")], 400),
+    ([(b"", b"empty")], 400),
+])
+def test_oversized_or_malformed_headers_fail_before_effect(
+    headers: list[tuple[bytes, bytes]], expected: int
+) -> None:
+    app, handler = _app()
+    headers += [
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]
+    output = _call(app, _scope(principal=_principal(), headers=headers))
+    assert _status(output) == expected
+    assert handler.calls == 0
+
+
+def test_canonical_headers_accept_additional_bounded_field() -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+        (b"x-trace-id", b"opaque-123"),
+    ]))
+    assert _status(output) == 200
+    assert handler.calls == 1
