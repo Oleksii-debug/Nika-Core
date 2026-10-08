@@ -499,13 +499,27 @@ class MultiAgentStore:
     ) -> None:
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
-            cursor = conn.execute(
+            # Serialize with TeamCancellationJournal.begin(): once cancellation commits,
+            # a late PAUSED/RUNNING/WAITING_APPROVAL callback must never revive a member.
+            conn.execute("BEGIN IMMEDIATE")
+            team = conn.execute(
+                "SELECT state FROM multi_agent_teams WHERE team_id = ?",
+                (team_id,),
+            ).fetchone()
+            if team is None:
+                raise KeyError(f"unknown team: {team_id}")
+            if team["state"] != TeamState.ACTIVE.value:
+                raise RuntimeError("team is not active")
+            member = self._member_row(conn, team_id=team_id, member_id=member_id)
+            if member is None:
+                raise KeyError(f"unknown team member: {team_id}/{member_id}")
+            if member["state"] == MemberState.CANCELLED.value:
+                raise RuntimeError("cancelled member state is terminal")
+            conn.execute(
                 "UPDATE multi_agent_members SET state = ?, resume_token = ?, updated_at = ? "
                 "WHERE team_id = ? AND member_id = ?",
                 (state.value, resume_token, now, team_id, member_id),
             )
-            if cursor.rowcount != 1:
-                raise KeyError(f"unknown team member: {team_id}/{member_id}")
 
     def record_handoff(self, handoff: AgentHandoff) -> None:
         now = datetime.now(UTC).isoformat()
