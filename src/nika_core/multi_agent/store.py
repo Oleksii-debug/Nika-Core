@@ -499,6 +499,17 @@ class MultiAgentStore:
     ) -> None:
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
+            # Use the same writer lock as cancellation's durable state transition.
+            # A late runtime result must never resurrect a cancelled team member.
+            conn.execute("BEGIN IMMEDIATE")
+            team = conn.execute(
+                "SELECT state FROM multi_agent_teams WHERE team_id = ?",
+                (team_id,),
+            ).fetchone()
+            if team is None:
+                raise KeyError(f"unknown team: {team_id}")
+            if team["state"] != TeamState.ACTIVE.value:
+                raise RuntimeError("team is not active")
             cursor = conn.execute(
                 "UPDATE multi_agent_members SET state = ?, resume_token = ?, updated_at = ? "
                 "WHERE team_id = ? AND member_id = ?",
