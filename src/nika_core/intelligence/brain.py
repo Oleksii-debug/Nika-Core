@@ -722,6 +722,15 @@ class DeterministicBrain:
                 "deterministic planner timed out",
                 code=DeterministicErrorCode.PLANNING_TIMEOUT,
             ) from exc
+        except DeterministicPlanningError:
+            raise
+        except Exception as exc:
+            # Replaceable planner failures must not leak provider-specific details
+            # or cross the model-free execution boundary as arbitrary exceptions.
+            raise DeterministicPlanningError(
+                "deterministic planner adapter failed",
+                code=DeterministicErrorCode.PLANNER_FAILURE,
+            ) from exc
 
     @classmethod
     def _validate_plan(
