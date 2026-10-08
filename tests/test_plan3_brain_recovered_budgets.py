@@ -159,9 +159,9 @@ def test_unresolved_effect_overrides_exact_budget_terminal_success() -> None:
 
 @pytest.mark.parametrize(
     "identifier",
-    [" spaced", "bidi\\u202e".replace("\\u202e", "\u202e"),
-     "e\\u0301".replace("\\u0301", "\u0301"), "x" * 513, "\ud800"],
+    [" spaced", "bidi\u202e", "e\u0301", "x" * 513, "\ud800"],
 )
+
 def test_adversarial_run_identity_cannot_start_planner(identifier: str) -> None:
     planner = CountingPlanner()
     brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
@@ -184,7 +184,7 @@ def test_no_journal_task_id_is_still_canonical() -> None:
         asyncio.run(
             brain.run(
                 run_id="valid-run",
-                task_id="bad\\u202e".replace("\\u202e", "\u202e"),
+                task_id="bad\u202e",
                 state=WorldState(),
                 goal=DeterministicGoal(required=frozenset({"finished"})),
                 actions=_ACTIONS,
@@ -196,7 +196,7 @@ def test_no_journal_task_id_is_still_canonical() -> None:
 def test_action_and_checkpoint_ids_are_rejected_before_planner() -> None:
     planner = CountingPlanner()
     brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
-    rogue_action = DeterministicAction(action_id="rogue\\u202e".replace("\\u202e", "\u202e"))
+    rogue_action = DeterministicAction(action_id="rogue\u202e")
     with pytest.raises(ValueError, match="action_id"):
         asyncio.run(
             brain.run(
@@ -213,7 +213,7 @@ def test_action_and_checkpoint_ids_are_rejected_before_planner() -> None:
                 state=WorldState(),
                 goal=DeterministicGoal(required=frozenset({"finished"})),
                 actions=_ACTIONS,
-                previously_completed_action_ids=("rogue\\u202e".replace("\\u202e", "\u202e"),),
+                previously_completed_action_ids=("rogue\u202e",),
             )
         )
     assert planner.calls == 0
