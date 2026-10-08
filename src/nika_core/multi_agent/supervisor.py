@@ -327,10 +327,12 @@ class MultiAgentSupervisor:
                 return self._store.members(current.team_id)
             self._cancellations.mark_dispatching(current.operation_id, planned.member_id)
             try:
-                await self._runtime.cancel(
+                applied = await self._runtime.cancel(
                     task_id=planned.task_id,
                     thread_id=planned.thread_id,
                 )
+                if applied is False:
+                    raise RuntimeError("runtime cancellation not confirmed")
             except asyncio.CancelledError:
                 self._mark_cancel_uncertain(planned, "CancelledError")
                 raise
