@@ -26,7 +26,7 @@ Send = Callable[[dict[str, object]], Awaitable[None]]
 _MAX_RECEIVE_EVENTS = 1024
 
 
-_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\Z")
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 
 
 def _is_canonical_https_origin(value: object) -> bool:
