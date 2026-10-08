@@ -165,7 +165,12 @@ class PaperWorkspaceQuery:
                     "cash", "equity", "gross_exposure", "net_exposure",
                     "fees", "realized_pnl", "unrealized_pnl", "positions",
                 }
-                if type(payload) is not dict or set(payload) != required:
+                if (
+                    type(payload) is not dict
+                    or len(payload) != len(required)
+                    or any(type(key) is not str for key in payload)
+                    or set(payload) != required
+                ):
                     raise TradingResearchError("invalid paper account projection")
                 positions = payload["positions"]
                 if type(positions) is not list or len(positions) > 100_000:
@@ -177,7 +182,12 @@ class PaperWorkspaceQuery:
                     "venue_timezone",
                 }
                 for row in positions:
-                    if type(row) is not dict or set(row) != expected_position:
+                    if (
+                        type(row) is not dict
+                        or len(row) != len(expected_position)
+                        or any(type(key) is not str for key in row)
+                        or set(row) != expected_position
+                    ):
                         raise TradingResearchError("invalid paper position projection")
                     currency = _safe_identity(row["currency"])
                     if (

@@ -139,3 +139,22 @@ Ubuntu/Windows CI and inherited Trainer/Trader end-to-end gates remain needed.
 This is **component-only**, not a live Windows host identity binding, UI
 route, Trader approval/report journey, complete Section 1 or Section 2
 closure; do not call it `DONE` or claim NVDA/live-money evidence.
+
+
+## Plain-key admission before PAPER dictionary comparisons (Plan 5 §1 repair)
+
+The account and position projection requires **exact built-in str field keys**
+before set equality or field lookup. An exact built-in dict can contain str
+subclass keys whose custom equality runs during `set(dict) == required_keys`
+or `dict["field"]` even when the key looks textually identical. The adapter
+now checks dictionary length and key types first; only then compares keys or
+reads their values. Behavior-bearing key subclasses fail closed as corrupt
+evidence, without executing their equality methods or disclosing balances.
+
+`tests/test_plan5_trader_projection_integrity.py` includes both account-level
+and position-level hostile-key fixtures with normal and mid-read revoked Core
+authority; the latter still returns ACCESS_DENIED rather than revealing
+storage health. Existing healthy projections continue to use the same
+canonical repository, UIActionBridge, and read-only PAPER policy. Source
+and tests must pass exact-head hosted CI and integrate with the parent stack
+before **any terminal Section 1 DONE**; Section 2 is not advanced by this fix.
