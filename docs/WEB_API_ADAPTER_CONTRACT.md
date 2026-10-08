@@ -312,3 +312,17 @@ SQLite fault followed by readback after canonical store reopen. This is
 source-level candidate evidence until exact-head CI verifies it. This patch
 does not close hosted composition, real cloud execution, package provenance,
 performance/load acceptance, integration with current main, or Section 1.
+
+
+## Modern HTTP Host admission (Plan 6 §1 candidate)
+
+The ASGI server-owned `http_version` advertises HTTP/1.1, HTTP/2 or HTTP/3.
+For those versions, a missing `Host` is now rejected before reading an
+untrusted body or dispatching to Core, even when an allowed `Origin` was
+supplied. A present `Host` remains subject to exact configured HTTPS origin
+matching. HTTP/1.0 remains compatible with its optional Host semantics;
+this does not make browser headers an authentication or tenant authority.
+Negative tests cover 1.1/2/3 omission without any receive/Core effect, and
+positive tests retain the trusted-host HTTP/1.1 path. These authored tests
+require exact-head hosted verification, ancestor integration, packaging and
+postmerge readback before any Section 1 terminal DONE claim.
