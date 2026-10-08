@@ -4,6 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from math import isfinite
+from unicodedata import category, is_normalized
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -56,6 +57,19 @@ class RuntimeUnsupportedError(RuntimeError):
     pass
 
 
+def _validate_runtime_identity(value: str, field_name: str) -> None:
+    """Keep durable runtime identifiers canonical before admission or recovery."""
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be a string")
+    if not value or value != value.strip():
+        raise ValueError(f"{field_name} must be nonempty canonical text")
+    if not is_normalized("NFC", value) or any(
+        category(character) in {"Cc", "Cf", "Cs"} or character in "\\u0085\\u2028\\u2029"
+        for character in value
+    ):
+        raise ValueError(f"{field_name} contains noncanonical or control text")
+
+
 def _validate_limits(max_steps: int, timeout_seconds: float | None) -> None:
     """Reject malformed budgets before they reach provider/runtime effects."""
     if isinstance(max_steps, bool) or not isinstance(max_steps, int):
@@ -82,10 +96,8 @@ class RuntimeRequest:
     timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
-        if not self.task_id.strip():
-            raise ValueError("task_id must not be empty")
-        if not self.thread_id.strip():
-            raise ValueError("thread_id must not be empty")
+        _validate_runtime_identity(self.task_id, "task_id")
+        _validate_runtime_identity(self.thread_id, "thread_id")
         _validate_limits(self.max_steps, self.timeout_seconds)
 
 
@@ -100,8 +112,9 @@ class RuntimeResumeRequest:
     timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
-        if not self.task_id.strip() or not self.thread_id.strip() or not self.resume_token.strip():
-            raise ValueError("resume identifiers must not be empty")
+        _validate_runtime_identity(self.task_id, "task_id")
+        _validate_runtime_identity(self.thread_id, "thread_id")
+        _validate_runtime_identity(self.resume_token, "resume_token")
         if not isinstance(self.mode, RuntimeResumeMode):
             raise TypeError("mode must be a RuntimeResumeMode")
         _validate_limits(self.max_steps, self.timeout_seconds)
@@ -121,12 +134,7 @@ class RuntimeResumeProbe:
         if not isinstance(self.reason, str) or not self.reason.strip():
             raise ValueError("resume probe reason must be nonempty text")
         if self.checkpoint_id is not None:
-            if not isinstance(self.checkpoint_id, str):
-                raise TypeError("checkpoint_id must be a string when provided")
-            if not self.checkpoint_id.strip():
-                raise ValueError("checkpoint_id must not be empty")
-            if self.checkpoint_id != self.checkpoint_id.strip():
-                raise ValueError("checkpoint_id must not have surrounding whitespace")
+            _validate_runtime_identity(self.checkpoint_id, "checkpoint_id")
         if self.status == RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
             raise ValueError("ready resume probe requires checkpoint_id")
 
