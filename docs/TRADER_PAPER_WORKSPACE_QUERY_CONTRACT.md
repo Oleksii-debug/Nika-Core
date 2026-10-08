@@ -101,3 +101,41 @@ malicious UI arguments, mid-read revocation, corrupt evidence and unknown
 live-order actions. This is an **opt-in composition contract** pending real
 Windows/Web host route, semantic page/focus integration, and exact CI; a
 component test cannot be mistaken for physical NVDA or final section DONE.
+
+## Canonical Core standing-permission composition (Plan 5 scoped child)
+
+`standing_paper_read_authorizer(permissions, trusted_binding=...)` composes
+the incumbent `PaperWorkspaceQuery.authorize_read` port with the **existing**
+`StandingPermissionStore`. There is no Trader-side grant database or policy
+evaluator. The authenticated host resolves a fresh exact
+`StandingPermissionBinding` on every authorization call; never accept a
+client/model-provided permission ID, binding, subject or scope.
+
+The binding's `target` must equal the requested `workspace_id`; its
+`resource_id` must equal the requested `run_id`. Core independently checks
+permission ID, subject, user/project/task identity, action class
+`trader.paper.account.inspect`, local/no-network scope, resource, read-only
+risk ceiling, expiry, revocation, and delegated-parent continuity. Missing,
+expired, corrupt, conflicting, revoked or foreign authorization returns
+`False`. Invalid behavioral binding carriers are rejected before policy
+admission. The existing query calls this adapter **twice**, before storage
+read and before exposing a result (also on storage-error paths).
+
+For host opt-in, explicitly initialize and inject the existing Core
+`StandingPermissionStore`; issue only an externally approved, narrow
+`StandingPermissionScope` (one workspace, one run, finite expiry and
+`READ_ONLY` risk ceiling) through existing Core policy. Pass the returned
+authorizer to `PaperWorkspaceQuery(..., authorize_read=...)` and retain
+`paper_inspect_handler(..., host_scope=...)` so both authority and scope
+come only from the trusted host.
+
+`tests/test_plan5_trader_canonical_core_permission.py` covers real
+SQLite-backed standing permission admission, denial, exact subject/context/
+workspace/run isolation, absent/expired grant, hostile host, injected UI
+payload, mid-read revoke, and restart-persistent revoke. These tests are
+**authored, not independently executed** at this source checkpoint; exact
+Ubuntu/Windows CI and inherited Trainer/Trader end-to-end gates remain needed.
+
+This is **component-only**, not a live Windows host identity binding, UI
+route, Trader approval/report journey, complete Section 1 or Section 2
+closure; do not call it `DONE` or claim NVDA/live-money evidence.
