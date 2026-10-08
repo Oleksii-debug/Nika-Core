@@ -186,6 +186,19 @@
       ],
       "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
       "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "build-system",
+      "mode": "REUSE",
+      "canonical_owner": "Nika package build backend and source distribution",
+      "capability": "Build-system dependency and packaging authority",
+      "activation": "build-only",
+      "requirements": [
+        "setuptools>=75",
+        "wheel"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
     }
   ],
   "rejected_competing_authorities": [
@@ -214,5 +227,6 @@
       "decision": "REJECT_AS_AUTHORITY",
       "reason": "ModelGateway remains the single intelligence routing authority"
     }
-  ]
+  ],
+  "build_backend": "setuptools.build_meta"
 }
