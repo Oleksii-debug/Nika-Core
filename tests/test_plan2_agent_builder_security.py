@@ -388,3 +388,58 @@ def test_compiled_draft_cannot_outgrow_its_durable_restart_reader(tmp_path) -> N
     restarted = AgentDefinitionRepository(SQLiteStore(path))
     stored = restarted.get(oversized.agent_id, oversized.version)
     assert stored is not None and stored.definition == _definition()
+
+
+def test_compiled_approval_metadata_must_be_inert_plain_values_before_save(tmp_path) -> None:
+    from nika_core.builder.repository import AgentDefinitionRepository
+    from nika_core.data.sqlite import SQLiteStore
+
+    class _AlwaysEqualTuple(tuple):
+        def __eq__(self, other: object) -> bool:
+            del other
+            return True
+
+        def __ne__(self, other: object) -> bool:
+            del other
+            return False
+
+    class _TrapToolId(str):
+        def __eq__(self, other: object) -> bool:
+            del other
+            raise AssertionError("an untrusted approval string was compared")
+
+    path = tmp_path / "nika.db"
+    SQLiteStore(path).initialize()
+    repository = AgentDefinitionRepository(SQLiteStore(path))
+    definition = _definition().model_copy(
+        update={"tool_grants": (ToolGrant(tool_id="release.publish", max_risk=4),)}
+    )
+    compiler = _compiler(
+        ToolSpec("release.publish", "Publish", ToolRisk.HIGH_IMPACT)
+    )
+    compiled = compiler.compile(definition)
+    assert compiled.required_human_approvals == ("release.publish",)
+
+    # A tuple subclass can forge equality while serializing different durable evidence.
+    deceptive = replace(
+        compiled,
+        required_human_approvals=_AlwaysEqualTuple(("wrong.tool",)),
+    )
+    with pytest.raises(ValueError, match="compiled agent risk/approval"):
+        repository.save_draft(deceptive)
+
+    # A string subclass is not authority, even if its value appears identical.
+    hostile = replace(
+        compiled,
+        required_human_approvals=(_TrapToolId("release.publish"),),
+    )
+    with pytest.raises(ValueError, match="compiled agent risk/approval"):
+        repository.save_draft(hostile)
+
+    assert repository.next_version(definition.agent_id) == 1
+    assert repository.get(definition.agent_id, definition.version) is None
+    repository.save_draft(compiled)
+    restarted = AgentDefinitionRepository(SQLiteStore(path))
+    stored = restarted.get(definition.agent_id, definition.version)
+    assert stored is not None
+    assert stored.required_human_approvals == ("release.publish",)
