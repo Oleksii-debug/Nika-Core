@@ -50,6 +50,11 @@ from .orders import (
     fee_for,
     order_authority_sha256,
 )
+from .paper_actions import (
+    PAPER_ACCOUNT_INSPECT,
+    paper_inspect_definition,
+    paper_inspect_handler,
+)
 from .persistence import TradingStateRepository
 from .workspace_query import (
     PaperAccountView,
@@ -88,6 +93,7 @@ __all__ = [
     "OrderUpdate",
     "OutcomeSettlement",
     "Partition",
+    "PAPER_ACCOUNT_INSPECT",
     "PaperAccountView",
     "PaperPositionView",
     "PaperWorkspaceQuery",
@@ -125,6 +131,8 @@ __all__ = [
     "instrument_identity",
     "instrument_identity_sha256",
     "order_authority_sha256",
+    "paper_inspect_definition",
+    "paper_inspect_handler",
     "paper_state_provider",
     "trailing_mean",
 ]

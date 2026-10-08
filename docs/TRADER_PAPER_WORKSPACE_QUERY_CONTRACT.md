@@ -75,3 +75,29 @@ agent is introduced. Focused regression coverage:
 `tests/test_plan5_trader_projection_integrity.py`. This is a **bounded
 component hardening step**; it neither integrates the stacked Trader lineage
 into main nor closes the full AI Trader section.
+
+
+## Action Registry / UIActionBridge opt-in composition
+
+Plan 5 exposes a presentation-neutral, **read-only** action adapter:
+`paper_inspect_definition()` returns the stable
+`trader.paper.account.inspect` ActionDefinition (scope `trader.paper`,
+unbound by default and user-remappable through the existing Keymap).
+A trusted host registers this definition with its canonical ActionRegistry
+and installs `paper_inspect_handler(query, host_scope=...)` in the existing
+UIActionBridge handler mapping. No second bridge, policy, agent runtime,
+scheduler, broker or storage is instantiated.
+
+The command rejects *any* UI-provided payload (including scope, authority
+claims, or live-order parameters) before invoking host identity or SQLite.
+Its host-owned query rechecks Core read permission before and after evidence
+access. Accessible operator text explicitly says PAPER; no account or balance
+is fabricated when data are missing. Denial and corrupt/revoked evidence
+become bounded rejected responses with no raw exception or balance leakage.
+
+`tests/test_plan5_trader_paper_action_bridge.py` tests keyboard/keymap
+registration, valid and missing account projections, foreign-tenant denial,
+malicious UI arguments, mid-read revocation, corrupt evidence and unknown
+live-order actions. This is an **opt-in composition contract** pending real
+Windows/Web host route, semantic page/focus integration, and exact CI; a
+component test cannot be mistaken for physical NVDA or final section DONE.
