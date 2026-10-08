@@ -22,6 +22,7 @@ PaperState = Literal["NO_PAPER_DATA", "PAPER_DATA"]
 @dataclass(frozen=True, slots=True)
 class PaperPositionView:
     venue: str
+    venue_timezone: str
     instrument: str
     currency: str
     quantity: str
@@ -58,6 +59,7 @@ class PaperAccountView:
             "positions": [
                 {
                     "venue": position.venue,
+                    "venue_timezone": position.venue_timezone,
                     "instrument": position.instrument,
                     "currency": position.currency,
                     "quantity": position.quantity,
@@ -211,6 +213,7 @@ class PaperWorkspaceQuery:
                     projected.append(
                         PaperPositionView(
                             venue,
+                            venue_timezone,
                             instrument,
                             currency,
                             _safe_amount(row["quantity"]),

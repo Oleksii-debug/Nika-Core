@@ -179,3 +179,29 @@ no account/position balances. These are authored regressions, **not**
 executed tests or evidence of complete Trader acceptance. The child PR
 must receive exact-head CI, integrate through its parent stack and undergo
 postmerge main readback before any Section 1 terminal DONE.
+
+
+## Position timezone must be audible (Plan 5 §1, nonterminal child)
+
+The canonical identity includes both venue and venue timezone. Merely rejecting
+duplicate internal identities without emitting the timezone produces two
+indistinguishable text-first rows when one instrument is represented in two
+valid venue timezones. The read-only `PaperPositionView` and
+`to_accessible_state()["positions"]` now carry `venue_timezone` as an explicit
+plain string, adjacent to the venue. The existing _safe_identity fence admits
+this value before it reaches either Windows semantic UI or Web consumer.
+No timezone is inferred from locale, rounded, normalized away, or merged
+across two legitimate identities.
+
+Regression coverage updates the exact expected authorized PAPER JSON,
+a durable SQLite restart view, and the distinct-timezone dual-position
+projection. Invalid/malicious timezone still yields EVIDENCE_UNAVAILABLE
+(or ACCESS_DENIED when Core permission is revoked) without account fields.
+No new agent runtime, Core policy authority, credential store, persistence,
+scheduler, broker or real-order path is introduced.
+
+This is a component data-contract repair, **not** §1 DONE. A real Trader
+host route, keyboard/NVDA-facing positions table, explicit account/operator
+workflow, durable session and order recovery, recurring observation,
+combination/time-wave work, parent-stack integration, exact-head dual-OS CI,
+and main readback remain outstanding.
