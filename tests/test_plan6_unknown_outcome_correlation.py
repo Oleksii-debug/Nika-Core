@@ -81,3 +81,55 @@ def test_http_conflict_reconciles_using_original_request_id(mutate_id: bool) -> 
     assert result["request_id"] == "authorized-request"
     assert "unrelated-request" not in response.body.decode("utf-8")
     assert "mutated-request" not in response.body.decode("utf-8")
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [RuntimeError("private authorization service path"),
+     WebCommandOutcomeUnknownError("forged-auth-request")],
+)
+def test_authorization_fault_is_definite_pre_effect_failure(fault: Exception) -> None:
+    class _BrokenAuthorization:
+        def allows(self, principal, command):
+            raise fault
+
+    handler = _UnknownEffect()
+    boundary = WebApplicationBoundary(
+        authorization=_BrokenAuthorization(), handler=handler
+    )
+    with pytest.raises(RuntimeError, match="Web authorization port failed") as caught:
+        boundary.dispatch(principal=_principal(), command=_command())
+    assert caught.value.__cause__ is fault
+    assert handler.calls == 0
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [RuntimeError("private authorization service path"),
+     WebCommandOutcomeUnknownError("forged-auth-request")],
+)
+def test_http_authorization_fault_never_claims_unknown_effect(fault: Exception) -> None:
+    class _BrokenAuthorization:
+        def allows(self, principal, command):
+            raise fault
+
+    handler = _UnknownEffect()
+    adapter = HttpCommandAdapter(
+        WebApplicationBoundary(
+            authorization=_BrokenAuthorization(), handler=handler
+        )
+    )
+    response = adapter.handle(
+        principal=_principal(),
+        method="POST",
+        content_type="application/json",
+        body=json.dumps(_command()).encode("utf-8"),
+    )
+    body = json.loads(response.body)
+    assert handler.calls == 0
+    assert response.status_code == 500
+    assert body["status"] == "failed"
+    assert body["code"] == "internal_error"
+    assert body["request_id"] is None
+    assert "private authorization" not in response.body.decode("utf-8")
+    assert "forged-auth-request" not in response.body.decode("utf-8")
