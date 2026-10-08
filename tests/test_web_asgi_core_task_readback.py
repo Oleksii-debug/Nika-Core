@@ -140,3 +140,48 @@ def test_https_server_tenant_and_host_denial_do_not_inspect_core(tmp_path) -> No
     assert forged_host[1]["code"] == "host_forbidden"
     assert "workspace-a" not in json.dumps(forbidden)
     assert "workspace-a" not in json.dumps(forged_host)
+
+
+def test_https_foreign_deep_payload_skips_decoder_then_core_recovers(
+    tmp_path, monkeypatch,
+) -> None:
+    db = tmp_path / "nika.db"
+    store = SQLiteStore(db)
+    store.initialize()
+    queue = TaskQueue(store)
+    foreign = queue.create(
+        workspace_id="workspace-b", agent_id="foreign-agent",
+        payload={"secret": "do-not-expose"},
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            ("[" * 1800 + "0" + "]" * 1800, foreign.task_id),
+        )
+
+    def no_foreign_decode(_task_id: str):
+        raise AssertionError("ASGI must not decode a foreign Core task")
+
+    monkeypatch.setattr(queue, "get", no_foreign_decode)
+    app = _app(queue)
+    foreign_result = _query(app, _principal(), foreign.task_id)
+    missing_result = _query(app, _principal(), "unknown-task")
+    assert foreign_result == missing_result
+    assert foreign_result[0] == 409
+    assert foreign_result[1]["code"] == "not_found"
+    assert "do-not-expose" not in json.dumps(foreign_result)
+
+    # Repair the same canonical SQLite row, without Web-owned recovery state.
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET workspace_id = ?, payload_json = ? "
+            "WHERE task_id = ?",
+            ("workspace-a", "{}", foreign.task_id),
+        )
+    reopened = SQLiteStore(db)
+    reopened.initialize()
+    recovered = _query(_app(TaskQueue(reopened)), _principal(), foreign.task_id)
+    assert recovered[0] == 200
+    assert recovered[1]["data"] == {
+        "task_id": foreign.task_id, "state": "CREATED",
+    }
