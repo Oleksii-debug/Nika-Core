@@ -326,3 +326,27 @@ Negative tests cover 1.1/2/3 omission without any receive/Core effect, and
 positive tests retain the trusted-host HTTP/1.1 path. These authored tests
 require exact-head hosted verification, ancestor integration, packaging and
 postmerge readback before any Section 1 terminal DONE claim.
+
+
+## Protocol-version and transfer-coding admission (Plan 6 §1 candidate, NOT DONE)
+
+The canonical `ASGICommandApplication` rejects an explicitly supplied malformed or
+unknown server-side `http_version` before any receive call or Core effect. Known
+versions are `1.0`, `1.1`, `2`, and `3`; omission remains compatible with
+older/test ASGI environments that omit this optional scope key. HTTP/1.1+
+continues to require a configured trusted `Host` authority.
+
+ASGI already receives decoded HTTP bodies, so the adapter never parses wire
+chunk framing. When the ASGI server passes `Transfer-Encoding` to the
+application, only the exact HTTP/1.1 `chunked` coding is admitted; unsupported,
+noncanonical, or ambiguous codings fail closed, and explicit HTTP/1.0,
+HTTP/2 and HTTP/3 reject this header. Existing Content-Length versus
+Transfer-Encoding conflicts continue to reject before this check. This does
+not replace front-proxy request-smuggling defenses, TLS termination, hosted
+authentication, real Cloud recovery, deployment qualification, or cross-version
+interoperability testing.
+
+New positive/negative tests are authored in
+`tests/test_web_asgi_transport.py`; exact-head Ubuntu/Windows execution and
+integration into canonical `main` must still be verified. No tenant authorization
+or terminal Plan 6 section-closure credit follows from these ingress checks.
