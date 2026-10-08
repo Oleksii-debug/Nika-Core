@@ -88,6 +88,9 @@ class AgentDefinitionRepository:
             separators=(",", ":"),
         )
         with self._store.connection() as conn:
+            # Serialize version admission before inspecting the latest durable version.
+            # A concurrent caller must see the committed winner, not race the INSERT.
+            conn.execute("BEGIN IMMEDIATE")
             latest = conn.execute(
                 "SELECT MAX(version) AS version FROM agent_definitions WHERE agent_id = ?",
                 (definition.agent_id,),
@@ -134,6 +137,9 @@ class AgentDefinitionRepository:
             raise ValueError("disabled agent definition cannot be activated")
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
+            # Serialize activation/retirement across processes and SQLite connections.
+            # Verification, approval admission and the active-version swap are atomic.
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT definition_json, required_approvals_json, highest_risk, status "
                 "FROM agent_definitions "
