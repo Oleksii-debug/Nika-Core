@@ -36,29 +36,43 @@ class WebTaskQueryHandler:
             or any(not ch.isprintable() or ch.isspace() for ch in task_id)
         ):
             return self._reject(command.request_id, "invalid_query")
+        # TaskQueue.get deserializes payload_json before returning workspace
+        # identity. Reject absent/foreign rows using the canonical SQLite store
+        # *before* paying for untrusted JSON decoding; a huge corrupt foreign
+        # payload must never consume the owner's Web request budget.
+        # This is a projection-only membership fence, NOT tenant authorization.
+        # The server WebAuthorizationPort must authorize the principal first.
+        try:
+            with self._queue.store.connection() as conn:
+                owner = conn.execute(
+                    "SELECT workspace_id FROM tasks WHERE task_id = ?",
+                    (task_id,),
+                ).fetchone()
+        except sqlite3.Error:
+            return self._storage_failure(command.request_id)
+        if owner is None or owner["workspace_id"] != principal.workspace_id:
+            return self._reject(command.request_id, "not_found")
         try:
             record = self._queue.get(task_id)
         except KeyError:
+            # Deleted between scoped preflight and canonical read.
             return self._reject(command.request_id, "not_found")
         except sqlite3.Error:
-            # A failed canonical read is a definite query failure, not a
-            # possibly applied command. Never echo storage exception details.
+            # A failed canonical read is definite, never an unknown write.
             return self._storage_failure(command.request_id)
         except (ValueError, TypeError, RecursionError):
-            # TaskQueue.get() deserializes the payload *before* its caller can
-            # establish the workspace. If the persisted payload is corrupt or too deeply nested,
-            # a foreign task must still be indistinguishable from a missing
-            # task. Inspect only the canonical store's workspace column; do
-            # not parse or expose the corrupt payload or create Web state.
+            # A concurrent workspace transfer may have happened after preflight.
+            # Recheck only the canonical workspace metadata before revealing a
+            # storage failure; foreign and missing rows are always opaque.
             try:
                 with self._queue.store.connection() as conn:
-                    owner = conn.execute(
+                    current = conn.execute(
                         "SELECT workspace_id FROM tasks WHERE task_id = ?",
                         (task_id,),
                     ).fetchone()
             except sqlite3.Error:
                 return self._storage_failure(command.request_id)
-            if owner is None or owner["workspace_id"] != principal.workspace_id:
+            if current is None or current["workspace_id"] != principal.workspace_id:
                 return self._reject(command.request_id, "not_found")
             return self._storage_failure(command.request_id)
         if record.workspace_id != principal.workspace_id:
