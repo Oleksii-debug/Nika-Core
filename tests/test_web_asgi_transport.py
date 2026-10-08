@@ -498,3 +498,73 @@ def test_mutated_invalid_server_principal_is_rejected_before_network_read() -> N
     assert _status(result) == 401
     assert _payload(result)["code"] == "authentication_required"
     assert handler.calls == 0
+
+
+@pytest.mark.parametrize("invalid_version", [
+    "", "1", "1.01", "2.0", "HTTP/1.1", 11, True, [], {},
+])
+def test_explicit_invalid_asgi_http_version_fails_before_receive(
+    invalid_version: object,
+) -> None:
+    app, handler = _app()
+    scope = _scope(principal=_principal(), headers=[
+        (b"host", b"nika.example"),
+        (b"content-type", b"application/json"),
+    ])
+    scope["http_version"] = invalid_version
+    output = _call(app, scope, events=[])
+    assert _status(output) == 400
+    assert _payload(output)["code"] == "invalid_http_version"
+    assert handler.calls == 0
+
+
+@pytest.mark.parametrize(("version", "coding"), [
+    ("1.0", b"chunked"),
+    ("1.1", b"gzip"),
+    ("1.1", b"CHUNKED"),
+    ("1.1", b"chunked, gzip"),
+    ("1.1", b"chunked\\r\\n"),
+    ("2", b"chunked"),
+    ("3", b"chunked"),
+])
+def test_ambiguous_or_protocol_forbidden_transfer_coding_has_no_core_effect(
+    version: str, coding: bytes,
+) -> None:
+    app, handler = _app()
+    scope = _scope(principal=_principal(), headers=[
+        (b"host", b"nika.example"),
+        (b"content-type", b"application/json"),
+        (b"transfer-encoding", coding),
+    ])
+    scope["http_version"] = version
+    output = _call(app, scope, events=[])
+    assert _status(output) == 400
+    assert _payload(output)["code"] == "invalid_transfer_encoding"
+    assert handler.calls == 0
+
+
+def test_canonical_http11_chunked_asgi_body_dispatches_to_existing_core() -> None:
+    app, handler = _app()
+    scope = _scope(principal=_principal(), headers=[
+        (b"host", b"nika.example"),
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+        (b"transfer-encoding", b"chunked"),
+    ])
+    scope["http_version"] = "1.1"
+    body = _body()
+    output = _call(app, scope, events=[
+        {"type": "http.request", "body": body[:7], "more_body": True},
+        {"type": "http.request", "body": body[7:], "more_body": False},
+    ])
+    assert _status(output) == 200
+    assert handler.calls == 1
+
+
+def test_http10_without_transfer_coding_keeps_legacy_optional_host() -> None:
+    app, handler = _app()
+    scope = _scope(principal=_principal())
+    scope["http_version"] = "1.0"
+    output = _call(app, scope)
+    assert _status(output) == 200
+    assert handler.calls == 1
