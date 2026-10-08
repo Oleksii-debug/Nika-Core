@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -45,6 +46,14 @@ class ToolGrant(BaseModel):
         normalized = tuple(dict.fromkeys(item.strip() for item in value))
         if any(len(item) > 160 for item in normalized):
             raise ValueError("tool scope is too long")
+        # Permission identifiers may be read by an operator and compared after
+        # restart. Do not admit invisible/bidi controls or decomposed lookalikes
+        # that make review and exact authorization disagree.
+        if any(
+            not item.isprintable() or unicodedata.normalize("NFC", item) != item
+            for item in normalized
+        ):
+            raise ValueError("tool scope contains ambiguous Unicode")
         return normalized
 
 
