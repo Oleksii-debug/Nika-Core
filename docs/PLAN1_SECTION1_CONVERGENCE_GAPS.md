@@ -97,3 +97,24 @@ Status: **ACTIONABLE / PARTIAL**, preserving terminal truth. Do not update
 `MULTI_PLAN_CLOSURE_STATE.md` or the assigned Drive plan to DONE until the
 remaining applicable Section 1 evidence passes and the exact integration
 commit has been read back. Section 2 remains next in order, not skipped.
+
+## Environment-specific dependency observation (nonterminal)
+
+`scripts/plan1_dependency_environment.py` now records the *installed* versions
+of an explicitly selected subset of the declared dependency groups, evaluates
+the applicable PEP 508 environment markers, detects absent or out-of-range
+distributions, and retains SHA-256 hashes of the precise pyproject and adoption
+manifest inputs. Example after installing the CI extras:
+
+```sh
+python scripts/plan1_dependency_environment.py --groups base agent planning dev --output plan1-dependency-observation.json --strict
+```
+
+The generated JSON is an environment observation, **not a lockfile, dependency
+graph attestation, upstream/license clearance, vulnerability scan or a claim
+that any optional package has been installed elsewhere**. Upstream license
+metadata can be missing, inaccurate or ambiguous; independent license review
+and repeatable resolved dependency installation are still required. Unit tests
+cover missing/mismatched versions, platform marker skipping and fail-closed
+manifest drift. Exact-candidate cross-platform CI and ordered merge/readback
+remain mandatory; **Plan 1 Section 1 NOT DONE**.
