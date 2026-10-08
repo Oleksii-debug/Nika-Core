@@ -21,6 +21,14 @@ persistence engine or transport DTO hierarchy is introduced.
    instead of merely checking nonempty text, preventing multiline/bidi event
    name ambiguity.
 
+
+4. Runtime event `sequence` now fails closed above the signed-portable JSON
+   integer ceiling `(2**53) - 1`, preventing lossy browser/Web projection and
+   oversized SQLite integer binding. The existing nonnegative, exact-`int`
+   contract still applies; the boundary value remains valid. New negative
+   tests cover 2**53, 2**63 and very large integers. These fixtures have not
+   yet been executed by exact-head CI.
+
 ## Regression tests
 
 `tests/test_plan1_runtime_identity_bounds.py` exercises each of the five
