@@ -57,10 +57,16 @@ class RuntimeUnsupportedError(RuntimeError):
     pass
 
 
+MAX_RUNTIME_ID_UTF8_BYTES = 512
+
+
 def _validate_runtime_identity(value: str, field_name: str) -> None:
-    """Keep durable runtime identifiers canonical before admission or recovery."""
+    """Keep durable runtime identifiers canonical, bounded, before admission or recovery."""
     if type(value) is not str:
         raise TypeError(f"{field_name} must be a string")
+    # Bound code points before any O(n) Unicode normalization or encoding work.
+    if len(value) > MAX_RUNTIME_ID_UTF8_BYTES or len(value.encode("utf-8")) > MAX_RUNTIME_ID_UTF8_BYTES:
+        raise ValueError(f"{field_name} exceeds the durable identity size limit")
     if not value or value != value.strip():
         raise ValueError(f"{field_name} must be nonempty canonical text")
     if not is_normalized("NFC", value) or any(
@@ -77,8 +83,8 @@ def _validate_limits(max_steps: int, timeout_seconds: float | None) -> None:
     if max_steps < 1:
         raise ValueError("max_steps must be positive")
     if timeout_seconds is not None:
-        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
-            raise TypeError("timeout_seconds must be a number when provided")
+        if type(timeout_seconds) not in (int, float):
+            raise TypeError("timeout_seconds must be a plain number when provided")
         try:
             finite = isfinite(timeout_seconds)
         except OverflowError:
@@ -154,8 +160,7 @@ class RuntimeEvent:
             raise TypeError("event sequence must be a plain integer")
         if self.sequence < 0:
             raise ValueError("sequence must not be negative")
-        if not isinstance(self.event_type, str) or not self.event_type.strip():
-            raise ValueError("event_type must be nonempty text")
+        _validate_runtime_identity(self.event_type, "event_type")
 
 
 @dataclass(frozen=True, slots=True)
