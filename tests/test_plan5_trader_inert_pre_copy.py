@@ -170,3 +170,70 @@ def test_mappingproxy_over_behavioral_mapping_never_calls_backing_methods() -> N
     with pytest.raises(TradingResearchError, match="behavioral paper odds mapping"):
         SimulationExecutionEngine().execute(_order(), slice_)
     assert invoked == []
+
+
+@pytest.mark.parametrize("change", ["order_id", "instrument", "run_id", "workspace_id"])
+def test_approval_id_cannot_alias_another_paper_order_or_scope(change: str) -> None:
+    from dataclasses import replace
+
+    book = ReplayBook(PortfolioLedger(Decimal("1000")))
+    accepted = _order()
+    first = book.process_existing_order(accepted, _slice())
+    assert first.state is OrderState.FILLED
+    assert book.ledger.cash == Decimal("798")
+
+    intent = accepted.intent
+    authority = accepted.authority
+    if change == "order_id":
+        authority = replace(authority, order_id="another-order")
+    elif change == "instrument":
+        intent = replace(
+            intent,
+            instrument=Instrument("OTHER", Venue("PAPER", "UTC"), "USD"),
+        )
+    elif change == "run_id":
+        authority = replace(authority, run_id="other-run")
+    else:
+        authority = replace(authority, workspace_id="other-workspace")
+    alias = replace(accepted, intent=intent, authority=authority)
+    with pytest.raises(TradingResearchError, match="conflicting paper approval scope"):
+        book.process_existing_order(alias, TimeSlice(2, NOW + timedelta(seconds=1), ()))
+    with pytest.raises(TradingResearchError, match="conflicting paper approval scope"):
+        book.cancel(alias)
+    assert book.ledger.cash == Decimal("798")
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal("2")
+    assert len(book._remaining) == len(book._accepted_orders) == len(book._approval_keys) == 1
+
+
+def test_cancel_fences_approval_alias_without_financial_effect() -> None:
+    from dataclasses import replace
+
+    book = ReplayBook(PortfolioLedger(Decimal("1000")))
+    cancelled = book.cancel(_order())
+    assert cancelled.state is OrderState.CANCELLED
+    alias = replace(_order(), authority=OrderAuthority(
+        "trader", "other-run", "another-order", NOW, 0,
+    ))
+    with pytest.raises(TradingResearchError, match="conflicting paper approval scope"):
+        book.cancel(alias)
+    assert book.ledger.cash == Decimal("1000")
+    assert len(book._terminal) == len(book._approval_keys) == 1
+
+
+def test_rejected_account_fill_does_not_prematurely_reserve_approval_id() -> None:
+    # The boundary must still permit safe recovery after a failed account
+    # admission: only committed paper order transitions acquire the ID fence.
+    class RejectOnceLedger(PortfolioLedger):
+        def apply_fill(self, fill):
+            if not hasattr(self, "rejected"):
+                self.rejected = True
+                raise TradingResearchError("injected account failure")
+            return super().apply_fill(fill)
+
+    book = ReplayBook(RejectOnceLedger(Decimal("1000")))
+    with pytest.raises(TradingResearchError, match="injected account failure"):
+        book.process_existing_order(_order(), _slice())
+    assert book._approval_keys == {}
+    assert book._remaining == {}
+    assert book.process_existing_order(_order(), _slice()).state is OrderState.FILLED
+    assert book.ledger.cash == Decimal("798")
