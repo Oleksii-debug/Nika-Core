@@ -67,6 +67,10 @@ class AgentDefinitionRepository:
         return int(row["version"] or 0) + 1
 
     def save_draft(self, compilation: CompilationResult) -> None:
+        # A subclass may override accessors and substitute approval evidence
+        # between validation and persistence. Admit only the inert port result.
+        if type(compilation) is not CompilationResult:
+            raise TypeError("compilation must be a plain CompilationResult")
         # A frozen CompilationResult is not an authority boundary: callers may construct
         # or mutate it after compilation. Fail closed before persisting risk/approval
         # metadata that activation later treats as durable authorization evidence.
@@ -82,13 +86,17 @@ class AgentDefinitionRepository:
             or compilation.required_human_approvals != approvals
         ):
             raise ValueError("compiled agent risk/approval evidence is inconsistent")
+        # Snapshot the recomputed trusted evidence once. A caller sharing the
+        # shallow-frozen compilation may still mutate it via object.__setattr__
+        # after the check, so no subsequent SQLite/audit field may reread it.
+        admitted_risk, admitted_approvals = highest, approvals
         now = datetime.now(UTC).isoformat()
         payload = definition.model_dump_json()
         # Durable drafts must pass the same bounded, unambiguous JSON ingress as
         # restart/activation; otherwise save succeeds but no readback is possible.
         AgentDefinition.import_json(payload)
         approvals_json = json.dumps(
-            compilation.required_human_approvals,
+            admitted_approvals,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -115,7 +123,7 @@ class AgentDefinitionRepository:
                     definition.version,
                     payload,
                     approvals_json,
-                    int(compilation.highest_risk),
+                    admitted_risk,
                     now,
                 ),
             )
@@ -127,8 +135,8 @@ class AgentDefinitionRepository:
                 payload={
                     "agent_id": definition.agent_id,
                     "version": definition.version,
-                    "highest_risk": int(compilation.highest_risk),
-                    "required_approvals": list(compilation.required_human_approvals),
+                    "highest_risk": admitted_risk,
+                    "required_approvals": list(admitted_approvals),
                 },
             )
 
