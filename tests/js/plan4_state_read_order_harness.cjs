@@ -172,6 +172,28 @@ async function main() {
   assert.equal(displayed[3][0].task_id, "authorized");
   console.log("PASS: authorized local task resumes after foreign task rejection");
 
+  // Corrupted local task labels and state must not become NVDA target options.
+  for (const [index, task] of [
+    {task_id: "bad\u202Espoof", state: "queued"},
+    {task_id: "valid", state: {behavioral: true}},
+    {task_id: "valid", state: "queued", command: "bad\u202Ecommand"},
+  ].entries()) {
+    older = refreshState();
+    pending[17 + index].resolve({ok: true, state: {tasks: [task]}});
+    assert.equal(await older, false);
+    assert.equal(outages, 11 + index);
+    assert.equal(displayed.length, 4);
+    console.log("PASS: malformed semantic task projection is rejected before DOM mutation");
+  }
+  older = refreshState();
+  pending[20].resolve({ok: true, state: {
+    tasks: [{task_id: "valid-recovered", state: "queued", command: "Safe task"}],
+  }});
+  assert.equal(await older, true);
+  assert.equal(displayed.length, 5);
+  assert.equal(displayed[4][0].task_id, "valid-recovered");
+  console.log("PASS: validated task projection restores keyboard target after corrupt reads");
+
   const pollFactory = new Function("ctx",
     "const {window, document, refreshState, inFlightActions}=ctx;"
     + "let statePollHandle=null;"
