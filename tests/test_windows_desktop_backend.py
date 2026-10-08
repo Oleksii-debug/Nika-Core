@@ -190,6 +190,34 @@ def test_create_task_rejects_empty_command(tmp_path: Path) -> None:
         backend.create_task({"command": "   "})
 
 
+@pytest.mark.parametrize("invalid", [None, False, 42, ["run"], {"x": "run"}])
+def test_create_task_rejects_nontext_command_without_persisting(
+    tmp_path: Path, invalid: object
+) -> None:
+    backend, queue, _store = build_backend(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="Команда має бути текстом"):
+            backend.create_task({"command": invalid})
+        assert queue.list_recent() == []
+    finally:
+        backend.close()
+
+
+class _ExplodingCommand:
+    def __str__(self) -> str:
+        raise AssertionError("untrusted command must never be coerced")
+
+
+def test_create_task_does_not_coerce_untrusted_command_object(tmp_path: Path) -> None:
+    backend, queue, _store = build_backend(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="Команда має бути текстом"):
+            backend.create_task({"command": _ExplodingCommand()})
+        assert queue.list_recent() == []
+    finally:
+        backend.close()
+
+
 def test_create_task_runs_real_no_llm_runtime_and_persists_result(tmp_path: Path) -> None:
     backend, queue, _store = build_backend(tmp_path)
     result = backend.create_task({"command": "перевір локальний стан"})

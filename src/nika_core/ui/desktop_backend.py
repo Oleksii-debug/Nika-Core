@@ -110,7 +110,10 @@ class DesktopBackend:
         self._ensure_defaults()
 
     def create_task(self, payload: Mapping[str, Any]) -> UIResult:
-        command = str(payload.get("command", "")).strip()
+        raw_command = payload.get("command", "")
+        if type(raw_command) is not str:
+            raise ValueError("Команда має бути текстом.")
+        command = raw_command.strip()
         if not command:
             raise ValueError("Введіть команду перед створенням завдання.")
         task_payload: dict[str, Any] = {"command": command}
