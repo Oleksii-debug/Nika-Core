@@ -369,6 +369,7 @@ class ReplayBook:
     _last_slice: dict[ReplayOrderKey, tuple[int, datetime, tuple[bytes, ...], OrderUpdate]]
     _accepted_orders: dict[ReplayOrderKey, RiskApprovedOrder]
     _approval_keys: dict[str, ReplayOrderKey]
+    _scope: tuple[str, str] | None
 
     def __init__(self, ledger: PortfolioLedger) -> None:
         self.ledger = ledger
@@ -378,11 +379,18 @@ class ReplayBook:
         self._last_slice = {}
         self._accepted_orders = {}
         self._approval_keys = {}
+        self._scope = None
 
     def _checked_replay_key(
         self, order: RiskApprovedOrder
     ) -> tuple[ReplayOrderKey, str]:
         key = _replay_order_key(order)
+        # One ReplayBook owns exactly one portfolio ledger. Its accounting
+        # cannot be shared across workspaces or runs, even with distinct
+        # approval IDs. The scope is bound only by a committed transition.
+        requested_scope = (order.authority.workspace_id, order.authority.run_id)
+        if self._scope is not None and requested_scope != self._scope:
+            raise TradingResearchError("paper replay ledger scope changed")
         # Fill IDs are approval-scoped, not run-scoped. Sharing an approval ID
         # with a different order/run/workspace can otherwise falsely dedupe
         # accounting while advancing another paper order's remaining amount.
@@ -437,6 +445,7 @@ class ReplayBook:
         self._last_slice[key] = (time_slice.index, time_slice.at, slice_events, update)
         self._accepted_orders.setdefault(key, order_snapshot)
         self._approval_keys.setdefault(approval_scope, key)
+        self._scope = (order.authority.workspace_id, order.authority.run_id)
         if update.state in {OrderState.FILLED, OrderState.EXPIRED, OrderState.CANCELLED}:
             self._terminal[key] = update
         return update
@@ -461,4 +470,5 @@ class ReplayBook:
         self._terminal[key] = update
         self._accepted_orders.setdefault(key, order_snapshot)
         self._approval_keys.setdefault(approval_scope, key)
+        self._scope = (order.authority.workspace_id, order.authority.run_id)
         return update
