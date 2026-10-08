@@ -43,17 +43,17 @@ class ToolGrant(BaseModel):
         # Downstream authorization may interpret an absent scope as unrestricted.
         if any(not item.strip() for item in value):
             raise ValueError("tool scope must not be blank")
+        # Validate the original values before stripping surrounding spaces:
+        # strip() also removes Unicode line separators and control characters
+        # that must never be silently converted to a different grant.
+        if any(
+            not item.isprintable() or unicodedata.normalize("NFC", item) != item
+            for item in value
+        ):
+            raise ValueError("tool scope contains ambiguous Unicode")
         normalized = tuple(dict.fromkeys(item.strip() for item in value))
         if any(len(item) > 160 for item in normalized):
             raise ValueError("tool scope is too long")
-        # Permission identifiers may be read by an operator and compared after
-        # restart. Do not admit invisible/bidi controls or decomposed lookalikes
-        # that make review and exact authorization disagree.
-        if any(
-            not item.isprintable() or unicodedata.normalize("NFC", item) != item
-            for item in normalized
-        ):
-            raise ValueError("tool scope contains ambiguous Unicode")
         return normalized
 
 
