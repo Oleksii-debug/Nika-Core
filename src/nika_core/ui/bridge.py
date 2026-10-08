@@ -287,7 +287,10 @@ class UIActionBridge:
         if not self._bounded_keymap_text(data):
             return {
                 "ok": False,
-                "message": "Не вдалося експортувати комбінації клавіш: некоректний розмір або текст.",
+                "message": (
+                    "Не вдалося експортувати комбінації клавіш: "
+                    "некоректний розмір або текст."
+                ),
             }
         return {"ok": True, "data": data, "message": "Shortcut map exported."}
 
