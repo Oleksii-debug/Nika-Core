@@ -155,6 +155,25 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
             parent = parents.get(node)
             if not (isinstance(parent, ast.Call) and parent.func is node):
                 imports.add("<hoisted-dynamic-import>")
+    # Import/evaluation handles can be *referenced* without an immediate call:
+    # from importlib import import_module as load; deferred = load
+    # or evaluator = eval. Reject acquisition rather than relying only on
+    # the later invocation, which may occur in a different module.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+            continue
+        if node.id not in dynamic_function_names | dynamic_source_names:
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Call) and parent.func is node:
+            # The immediate invocation is handled below with precise vendor
+            # diagnostics and nonliteral-source failure.
+            continue
+        imports.add(
+            "<dynamic-source-execution>"
+            if node.id in dynamic_source_names
+            else "<hoisted-dynamic-import>"
+        )
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -686,3 +705,38 @@ def test_architecture_guard_preserves_explicit_safe_authority_imports() -> None:
         "safe_repr(package_util)\n"
     )
     assert direct_engine_imports(source) == ()
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "from importlib import import_module as loader\\n".replace("\\n", "\n")
+            + "deferred = loader\\n".replace("\\n", "\n"),
+            ("<hoisted-dynamic-import>",),
+        ),
+        (
+            "from builtins import __import__ as get_module\\n".replace("\\n", "\n")
+            + "deferred = get_module\\n".replace("\\n", "\n"),
+            ("<hoisted-dynamic-import>",),
+        ),
+        (
+            "from builtins import eval as run_expr\\n".replace("\\n", "\n")
+            + "handler = run_expr\\n".replace("\\n", "\n"),
+            ("<dynamic-source-execution>",),
+        ),
+        (
+            "handler = eval\\n".replace("\\n", "\n"),
+            ("<dynamic-source-execution>",),
+        ),
+        (
+            "from builtins import repr as safe_repr\\n".replace("\\n", "\n")
+            + "handler = safe_repr\\n".replace("\\n", "\n"),
+            (),
+        ),
+    ],
+)
+def test_architecture_guard_rejects_hoisted_function_authorities(
+    source: str, expected: tuple[str, ...]
+) -> None:
+    assert direct_engine_imports(source) == expected
