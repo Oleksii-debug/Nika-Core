@@ -193,6 +193,6 @@ def test_corrupted_snapshot_after_restart_never_becomes_account_truth(tmp_path) 
     reopened_again.initialize()
     with pytest.raises(RuntimeError, match="non-finite"):
         reopened_again.account_payload("trader-workspace", "paper-run")
-    with pytest.raises(RuntimeError, match="non-finite"):
+    with pytest.raises(RuntimeError, match="conflicting durable account state"):
         reopened_again.commit_fill_and_account(fill, valid)
     assert reopened_again.fill_count("trader-workspace", "paper-run") == 1
