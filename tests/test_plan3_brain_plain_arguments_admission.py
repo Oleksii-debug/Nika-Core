@@ -267,18 +267,17 @@ def test_oversized_planner_result_is_rejected_before_snapshot(
     assert tools.calls == []
 
 
-
 @pytest.mark.parametrize(
     ("action_id", "tool_id"),
     [
         ("", "read.demo"),
-        ("finish\\nforged-log", "read.demo"),
-        ("finish\\u202e", "read.demo"),
-        ("e\\u0301", "read.demo"),
-        ("\\ud800", "read.demo"),
+        ("finish\nforged-log", "read.demo"),
+        ("finish\u202e", "read.demo"),
+        ("e\u0301", "read.demo"),
+        ("\ud800", "read.demo"),
         ("f" * 513, "read.demo"),
-        ("finish", "read.demo\\rforged"),
-        ("finish", "\\ud800"),
+        ("finish", "read.demo\rforged"),
+        ("finish", "\ud800"),
         ("finish", "read.demo" + "x" * 513),
     ],
 )
@@ -307,7 +306,9 @@ def test_valid_planner_identity_still_completes_through_canonical_tools() -> Non
     planner, tools = SingleStepPlanner(), RecordingTools()
     result = run_action(arguments={"safe": True}, planner=planner, tools=tools)
     assert result.ok
-    assert result.planning_history == (DeterministicPlan(steps=(PlanStep("finish", "read.demo"),)),)
+    assert result.planning_history == (
+        DeterministicPlan(steps=(PlanStep("finish", "read.demo"),)),
+    )
     assert result.completed_actions == ("finish",)
     assert len(tools.calls) == 1
     assert tools.calls[0].approved is False
