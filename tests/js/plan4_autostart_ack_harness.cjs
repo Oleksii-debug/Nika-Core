@@ -15,7 +15,7 @@ const factory = new Function("ctx",
   "autostartStatus, refreshState, focusElementById}=ctx;" +
   "let autostartDirty=true, autostartPending=false, autostartUncertain=false, autostartGeneration=0;" +
   source.slice(viewStart, viewEnd) + source.slice(dispatchStart, dispatchEnd) +
-  "return {dispatchAutostart, renderAutostart, locked:()=>autostartUncertain, pending:()=>autostartPending};"
+  "return {dispatchAutostart, renderAutostart, locked:()=>autostartUncertain, pending:()=>autostartPending, dirty:()=>autostartDirty};"
 );
 
 function caseWithBridge(handler) {
@@ -59,12 +59,15 @@ async function run() {
   assert.equal(test.requests[0].request_id, "autostart-1");
   assert.equal(test.ui.locked(), false);
   assert.equal(test.save.disabled, false);
+  assert.equal(test.ui.dirty(), false, "confirmed write clears edited state");
   console.log("PASS: matching autostart ACK permits normal keyboard operation");
 
   test = caseWithBridge(() => ({request_id:"foreign-request",status:"completed",message:"forged"}));
   await test.ui.dispatchAutostart(action, test.trigger);
   assert.equal(test.ui.locked(), true);
   assert.equal(test.save.disabled, true);
+  assert.equal(test.ui.dirty(), true, "foreign ACK must preserve user intent");
+  assert.equal(test.input.checked, true, "refresh must not overwrite uncertain edit");
   await test.ui.dispatchAutostart(action, test.trigger);
   assert.equal(test.requests.length, 1);
   console.log("PASS: foreign success ACK cannot unlock a second Windows write");
@@ -73,11 +76,13 @@ async function run() {
   await test.ui.dispatchAutostart(action, test.trigger);
   assert.equal(test.ui.locked(), true);
   assert.equal(test.save.disabled, true);
+  assert.equal(test.ui.dirty(), true, "missing ACK cannot clear pending edit");
   console.log("PASS: missing correlation fails closed");
 
   test = caseWithBridge((req) => ({request_id:req.request_id,status:"failed",message:"backend fault"}));
   await test.ui.dispatchAutostart(action, test.trigger);
   assert.equal(test.ui.locked(), true);
+  assert.equal(test.ui.dirty(), true, "possibly committed failure preserves edit");
   await test.ui.dispatchAutostart(action, test.trigger);
   assert.equal(test.requests.length, 1);
   assert(test.announced.some(([message]) => message.includes("Повтор заблоковано")));
@@ -93,6 +98,7 @@ async function run() {
   });
   await test.ui.dispatchAutostart(action, test.trigger);
   assert.equal(test.ui.locked(), false);
+  assert.equal(test.ui.dirty(), true, "rejected write keeps editable intent");
   await test.ui.dispatchAutostart(action, test.trigger);
   assert.equal(test.requests.length, 2);
   assert.equal(test.ui.locked(), false);
@@ -120,6 +126,7 @@ async function run() {
   assert.equal(test.requests.length, 2);
   assert.equal(test.ui.locked(), true);
   assert.equal(test.save.disabled, true);
+  assert.equal(test.ui.dirty(), true, "transport uncertainty preserves edit");
   assert(!JSON.stringify(test.announced).includes("private operating-system detail"));
   console.log("PASS: transport failure is secret-free; read-only refresh preserves write lock");
 }
