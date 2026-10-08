@@ -40,3 +40,81 @@ def test_download_budget_rejected_before_sdk_or_lock(invalid_timeout: object) ->
     assert manager_calls == 0
     assert provider._model_management_lock.locked() is False
     assert provider._inference_lock.locked() is False
+
+
+@pytest.mark.parametrize(
+    "field,malformed",
+    [
+        ("provider_id", object()),
+        ("model", ["changed-model"]),
+        ("license_reference", ""),
+        ("expected_model_id", 37),
+    ],
+)
+def test_mutated_authorization_rejected_before_sdk(
+    field: str, malformed: object,
+) -> None:
+    manager_calls = 0
+
+    def forbidden_manager() -> object:
+        nonlocal manager_calls
+        manager_calls += 1
+        raise AssertionError("malformed authorization reached the Foundry SDK")
+
+    provider = FoundryLocalProvider(
+        default_model="safe-model", manager_factory=forbidden_manager,
+    )
+    permit = ModelDownloadAuthorization(
+        provider_id="foundry-local",
+        model="safe-model",
+        license_reference="REVIEWED-LICENSE",
+    )
+    object.__setattr__(permit, field, malformed)
+
+    with pytest.raises(ValueError, match="authorization|must not be empty"):
+        asyncio.run(provider.download_model(permit))
+    assert manager_calls == 0
+    assert not provider._model_management_lock.locked()
+    assert not provider._inference_lock.locked()
+
+
+def test_authorization_is_detached_across_lock_await(monkeypatch: pytest.MonkeyPatch) -> None:
+    class CachedModel:
+        id = "variant-v1"
+        alias = "safe-model"
+        is_cached = True
+        is_loaded = False
+
+        def get_path(self) -> str:
+            return "fake-cache-path"
+
+    selected: list[str] = []
+    model = CachedModel()
+    provider = FoundryLocalProvider(default_model="safe-model")
+    def lookup(alias: str) -> CachedModel:
+        selected.append(alias)
+        return model
+
+    monkeypatch.setattr(provider, "_get_model", lookup)
+    permit = ModelDownloadAuthorization(
+        provider_id="foundry-local",
+        model="safe-model",
+        license_reference="REVIEWED-LICENSE",
+    )
+
+    async def exercise() -> object:
+        await provider._model_management_lock.acquire()
+        task = asyncio.create_task(provider.download_model(permit, timeout_seconds=3))
+        try:
+            await asyncio.sleep(0)
+            object.__setattr__(permit, "model", "attacker-model")
+        finally:
+            provider._model_management_lock.release()
+        return await task
+
+    evidence = asyncio.run(exercise())
+    assert selected == ["safe-model"]
+    assert evidence.model_id == "variant-v1"
+    assert evidence.alias == "safe-model"
+    assert not provider._model_management_lock.locked()
+    assert not provider._inference_lock.locked()
