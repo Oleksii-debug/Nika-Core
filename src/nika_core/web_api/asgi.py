@@ -9,7 +9,10 @@ set a *trusted* ASGI scheme; forwarded browser headers are not consulted.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
+from ipaddress import IPv6Address
+import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from nika_core.web_api.contracts import WebPrincipal
 from nika_core.web_api.http_transport import (
@@ -21,6 +24,60 @@ from nika_core.web_api.http_transport import (
 Receive = Callable[[], Awaitable[dict[str, object]]]
 Send = Callable[[dict[str, object]], Awaitable[None]]
 _MAX_RECEIVE_EVENTS = 1024
+
+
+_DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\Z")
+
+
+def _is_canonical_https_origin(value: object) -> bool:
+    """Reject ambiguous/invalid Origin allowlist entries before any request exists.
+
+    Browsers serialize Origin as scheme://host[:port], never a URL with
+    userinfo, path, query or fragment. Accept ASCII DNS/IPv4 and bracketed
+    IPv6 only, with normalized lowercase host and a valid optional port.
+    """
+    if type(value) is not str or len(value) > 255:
+        return False
+    if not value.startswith("https://") or any(
+        ord(char) < 33 or ord(char) > 126 for char in value
+    ):
+        return False
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return False
+    host = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or host is None
+        or "%" in host
+        or port == 0
+    ):
+        return False
+    if ":" in host:
+        try:
+            IPv6Address(host)
+        except ValueError:
+            return False
+        authority = f"[{host}]"
+    else:
+        if (
+            len(host) > 253
+            or host.endswith(".")
+            or not all(_DNS_LABEL.fullmatch(label) for label in host.split("."))
+        ):
+            return False
+        authority = host
+    if port is not None:
+        authority += f":{port}"
+    return value == f"https://{authority}"
 
 
 class ASGICommandApplication:
@@ -36,13 +93,7 @@ class ASGICommandApplication:
             raise ValueError("adapter must be the existing HTTP command adapter")
         if type(allowed_origins) is not frozenset or not allowed_origins:
             raise ValueError("configure explicit trusted HTTPS Web origins")
-        if any(
-            type(origin) is not str
-            or not origin.startswith("https://")
-            or origin.endswith("/")
-            or any(ch.isspace() for ch in origin)
-            for origin in allowed_origins
-        ):
+        if any(not _is_canonical_https_origin(origin) for origin in allowed_origins):
             raise ValueError("allowed origins must be exact HTTPS origins")
         self._adapter = adapter
         self._allowed_origins = allowed_origins
