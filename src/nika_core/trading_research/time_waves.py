@@ -59,6 +59,15 @@ def _admit_event(event: object, at: datetime) -> tuple[datetime, InstrumentIdent
         or time.available_at.tzinfo is not UTC
     ):
         raise TradingResearchError("invalid time-wave timestamps")
+    # Frozen market carriers can be mutated after temporal visibility admission.
+    # A source observation must not follow its advertised availability time.
+    source_at = time.source_at
+    if source_at is not None and (
+        type(source_at) is not datetime
+        or source_at.tzinfo is not UTC
+        or source_at > time.available_at
+    ):
+        raise TradingResearchError("invalid time-wave source-time provenance")
     if time.available_at > at:
         raise FutureAccessError("time-wave event not yet available at decision time")
     identity = instrument_identity(event.instrument)
