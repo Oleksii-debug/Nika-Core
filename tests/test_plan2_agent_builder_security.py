@@ -288,3 +288,103 @@ def test_sqlite_restart_rejects_tampered_risk_evidence_before_activation(
         )
     restarted.activate(definition, approved_tool_ids=frozenset({"release.publish"}))
     assert restarted.require_active(definition.agent_id, definition.version).status == "active"
+
+def test_concurrent_draft_admission_has_one_version_after_restart(tmp_path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from nika_core.builder.repository import AgentDefinitionRepository
+    from nika_core.data.sqlite import SQLiteStore
+
+    path = tmp_path / "nika.db"
+    SQLiteStore(path).initialize()
+    definition = _definition()
+    compiled = _compiler(
+        ToolSpec("web.read", "Read", ToolRisk.READ_ONLY)
+    ).compile(definition)
+    ready = Barrier(2)
+
+    def save(_: int) -> str:
+        # Two independent connections race the same draft identity/version.
+        ready.wait(timeout=10)
+        writer = AgentDefinitionRepository(SQLiteStore(path))
+        try:
+            writer.save_draft(compiled)
+        except ValueError as exc:
+            assert "next immutable version" in str(exc)
+            return "conflict"
+        return "saved"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(save, range(2)))
+
+    assert sorted(outcomes) == ["conflict", "saved"]
+    restarted = AgentDefinitionRepository(SQLiteStore(path))
+    stored = restarted.get(definition.agent_id, definition.version)
+    assert stored is not None and stored.status == "draft"
+    assert stored.definition == definition
+    assert restarted.next_version(definition.agent_id) == 2
+
+
+def test_concurrent_activation_preserves_single_durable_active_version(tmp_path) -> None:
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from nika_core.builder.repository import AgentDefinitionRepository
+    from nika_core.data.sqlite import SQLiteStore
+
+    path = tmp_path / "nika.db"
+    SQLiteStore(path).initialize()
+    repository = AgentDefinitionRepository(SQLiteStore(path))
+    compiler = _compiler(ToolSpec("web.read", "Read", ToolRisk.READ_ONLY))
+    first = _definition()
+    second = first.model_copy(update={"version": 2})
+    repository.save_draft(compiler.compile(first))
+    repository.save_draft(compiler.compile(second))
+    ready = Barrier(2)
+
+    def activate(definition: AgentDefinition) -> None:
+        ready.wait(timeout=10)
+        AgentDefinitionRepository(SQLiteStore(path)).activate(definition)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(activate, (first, second)))
+
+    restarted = AgentDefinitionRepository(SQLiteStore(path))
+    statuses = {
+        version: restarted.get(first.agent_id, version).status
+        for version in (1, 2)
+    }
+    assert sorted(statuses.values()) == ["active", "retired"]
+    active = restarted.active(first.agent_id)
+    assert active is not None and active.status == "active"
+    assert active.definition.version in (1, 2)
+
+def test_compiled_draft_cannot_outgrow_its_durable_restart_reader(tmp_path) -> None:
+    from nika_core.builder.repository import AgentDefinitionRepository
+    from nika_core.data.sqlite import SQLiteStore
+
+    path = tmp_path / "nika.db"
+    SQLiteStore(path).initialize()
+    repository = AgentDefinitionRepository(SQLiteStore(path))
+    compiler = _compiler(ToolSpec("web.read", "Read", ToolRisk.READ_ONLY))
+    scopes = tuple(f"scope-{index:05d}-" + "x" * 140 for index in range(7500))
+    oversized = _definition().model_copy(
+        update={
+            "tool_grants": (
+                ToolGrant(tool_id="web.read", max_risk=0, scopes=scopes),
+            ),
+        }
+    )
+    compilation = compiler.compile(oversized)
+    assert len(compilation.definition.model_dump_json().encode("utf-8")) > 1024 * 1024
+
+    with pytest.raises(ValueError, match="size limit"):
+        repository.save_draft(compilation)
+
+    assert repository.get(oversized.agent_id, oversized.version) is None
+    assert repository.next_version(oversized.agent_id) == 1
+    repository.save_draft(compiler.compile(_definition()))
+    restarted = AgentDefinitionRepository(SQLiteStore(path))
+    stored = restarted.get(oversized.agent_id, oversized.version)
+    assert stored is not None and stored.definition == _definition()

@@ -82,12 +82,18 @@ class AgentDefinitionRepository:
             raise ValueError("compiled agent risk/approval evidence is inconsistent")
         now = datetime.now(UTC).isoformat()
         payload = definition.model_dump_json()
+        # Durable drafts must pass the same bounded, unambiguous JSON ingress as
+        # restart/activation; otherwise save succeeds but no readback is possible.
+        AgentDefinition.import_json(payload)
         approvals_json = json.dumps(
             compilation.required_human_approvals,
             ensure_ascii=False,
             separators=(",", ":"),
         )
         with self._store.connection() as conn:
+            # Serialize version admission before inspecting the latest durable version.
+            # A concurrent caller must see the committed winner, not race the INSERT.
+            conn.execute("BEGIN IMMEDIATE")
             latest = conn.execute(
                 "SELECT MAX(version) AS version FROM agent_definitions WHERE agent_id = ?",
                 (definition.agent_id,),
@@ -134,6 +140,9 @@ class AgentDefinitionRepository:
             raise ValueError("disabled agent definition cannot be activated")
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
+            # Serialize activation/retirement across processes and SQLite connections.
+            # Verification, approval admission and the active-version swap are atomic.
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
                 "SELECT definition_json, required_approvals_json, highest_risk, status "
                 "FROM agent_definitions "
