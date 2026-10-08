@@ -59,6 +59,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
     imports: set[str] = set()
     importlib_names = {"importlib"}
     builtins_names = {"builtins"}
+    getattr_names = {"getattr"}
     dynamic_function_names = {"__import__"}
     dynamic_source_names = {"exec", "eval", "compile"}
     for node in ast.walk(tree):
@@ -78,6 +79,11 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
                     if alias.name == "import_module"
                 )
             if node.module == "builtins":
+                getattr_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "getattr"
+                )
                 dynamic_function_names.update(
                     alias.asname or alias.name
                     for alias in node.names
@@ -97,6 +103,18 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
+        # Refuse acquisition of dangerous builtin source evaluators, including
+        # when the retrieved callable is stored and invoked in a later statement.
+        if (
+            isinstance(func, ast.Name)
+            and func.id in getattr_names
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in builtins_names
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in {"exec", "eval", "compile"}
+        ):
+            imports.add("<dynamic-source-execution>")
         # Core ports have no reason to evaluate dynamically supplied Python code.
         # Otherwise a vendor import can be hidden inside a string and evade the
         # import AST walk. This is a drift fence, not a Python sandbox.
@@ -123,10 +141,26 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
             and isinstance(func.value, ast.Name)
             and func.value.id in builtins_names
         )
+        # Resolve builtin getattr wrappers around source evaluation. Dynamic
+        # string execution is prohibited in stable Core contracts, even when
+        # the builtin is accessed indirectly rather than as builtins.exec.
+        via_builtin_source_getattr = (
+            isinstance(func, ast.Call)
+            and isinstance(func.func, ast.Name)
+            and func.func.id in getattr_names
+            and len(func.args) == 2
+            and isinstance(func.args[0], ast.Name)
+            and func.args[0].id in builtins_names
+            and isinstance(func.args[1], ast.Constant)
+            and func.args[1].value in {"exec", "eval", "compile"}
+        )
+        if via_builtin_source_getattr:
+            imports.add("<dynamic-source-execution>")
+            continue
         via_getattr = (
             isinstance(func, ast.Call)
             and isinstance(func.func, ast.Name)
-            and func.func.id == "getattr"
+            and func.func.id in getattr_names
             and len(func.args) == 2
             and isinstance(func.args[0], ast.Name)
             and isinstance(func.args[1], ast.Constant)
@@ -256,3 +290,44 @@ def test_architecture_guard_rejects_compilation_with_unknown_source() -> None:
         "compile_code(source, '<port>', 'exec')\n"
     )
     assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
+
+
+def test_architecture_guard_rejects_getattr_wrapped_builtin_execution() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "resolve(host, 'exec')('import langgraph')\n"
+        "getattr(host, 'eval')('1 + 1')\n"
+        "resolve(host, 'compile')(source, '<core>', 'exec')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
+
+
+def test_architecture_guard_rejects_aliased_getattr_dynamic_import() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "resolve(host, '__import__')('mcp')\n"
+        "resolve(host, 'repr')('safe')\n"
+    )
+    assert direct_engine_imports(source) == ("mcp",)
+
+
+def test_architecture_guard_rejects_hoisted_builtin_source_loader() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "runner = resolve(host, 'exec')\n"
+        "runner('import langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
+
+
+def test_architecture_guard_allows_hoisted_safe_builtin_getattr() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "runner = resolve(host, 'repr')\n"
+        "runner('safe')\n"
+    )
+    assert direct_engine_imports(source) == ()
