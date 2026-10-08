@@ -8,6 +8,7 @@ set a *trusted* ASGI scheme; forwarded browser headers are not consulted.
 """
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from ipaddress import IPv6Address
@@ -24,6 +25,7 @@ from nika_core.web_api.http_transport import (
 Receive = Callable[[], Awaitable[dict[str, object]]]
 Send = Callable[[dict[str, object]], Awaitable[None]]
 _MAX_RECEIVE_EVENTS = 1024
+_MAX_RECEIVE_SECONDS = 15.0  # Entire request body, not a fresh timeout per chunk.
 _MAX_HEADER_FIELDS = 64
 _MAX_HEADER_BYTES = 16 * 1024
 _HTTP_TOKEN = frozenset(
@@ -261,9 +263,21 @@ class ASGICommandApplication:
 
         chunks: list[bytes] = []
         length = 0
+        # One monotonic, request-wide deadline prevents fragmented slow-loris
+        # uploads from holding a Core execution slot indefinitely. This is
+        # transport admission only, not a new task scheduler/retry mechanism.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _MAX_RECEIVE_SECONDS
         for _ in range(_MAX_RECEIVE_EVENTS):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return self._error(408, "request_receive_timeout")
             try:
-                event = await receive()
+                event = await asyncio.wait_for(receive(), timeout=remaining)
+            except TimeoutError:
+                # No Core command has been dispatched. Do not retry or leak
+                # any fragment, session value, or exception text.
+                return self._error(408, "request_receive_timeout")
             except Exception:  # noqa: BLE001 - fail closed on pre-effect ASGI I/O faults
                 # Receive failed before Core dispatch: no write outcome is unknown.
                 # Do not leak exception text (possibly including request/secret data).
