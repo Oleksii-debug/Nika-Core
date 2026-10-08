@@ -312,6 +312,7 @@ def test_architecture_guard_rejects_aliased_getattr_dynamic_import() -> None:
     )
     assert direct_engine_imports(source) == ("mcp",)
 
+
 def test_architecture_guard_rejects_hoisted_builtin_source_loader() -> None:
     source = (
         "import builtins as host\n"
