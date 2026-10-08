@@ -292,3 +292,23 @@ The wheel/installer/provenance authority is unchanged by this code-only repair;
 exact-head Core CI (Ubuntu/Windows), M12 packaging evidence, dependency
 ancestry, production auth/composition and main integration still require
 independent verification before terminal DONE.
+
+
+## Parsed task snapshots and late workspace transfer (Plan 6 §1, nonterminal)
+
+TaskQueue.get reads a canonical SQLite row then decodes JSON after its
+connection has closed. The preliminary workspace check alone does not defend
+against a transfer or deletion after successful decoding. The Web read-only
+projection now performs a final canonical SQLite workspace lookup before
+returning a task ID/state. Foreign/deleted rows return the same opaque
+not_found response as an absent task. A final metadata read fault fails closed
+with definite, sanitized storage_unavailable rather than disclosing the
+decoded snapshot. No secondary task store, auth policy, scheduler or retry
+path is introduced; this is not a substitute for server-owned tenant
+authorization or an atomic command/effect lifecycle.
+
+Three added regression tests cover late transfer, late deletion, and final
+SQLite fault followed by readback after canonical store reopen. This is
+source-level candidate evidence until exact-head CI verifies it. This patch
+does not close hosted composition, real cloud execution, package provenance,
+performance/load acceptance, integration with current main, or Section 1.
