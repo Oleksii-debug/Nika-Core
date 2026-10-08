@@ -7,12 +7,27 @@ from decimal import Decimal
 from enum import IntEnum
 
 from .accounting import PortfolioLedger
-from .contracts import MarketEvent, Quote, TradingResearchError, require_aware_utc
+from .contracts import (
+    Bar,
+    EventTime,
+    Instrument,
+    MarketEvent,
+    OddsSnapshot,
+    OutcomeSettlement,
+    Quote,
+    Tick,
+    TradingResearchError,
+    Venue,
+    require_aware_utc,
+)
 from .dataset import canonical_event_bytes, event_sort_key
 from .identity import InstrumentIdentity, instrument_identity, instrument_identity_sha256
+from .risk import _validate_policy
 from .orders import (
+    OrderIntent,
     OrderState,
     OrderType,
+    OrderAuthority,
     RiskApprovedOrder,
     Side,
     SimulatedFill,
@@ -48,6 +63,72 @@ class TimeSlice:
         object.__setattr__(self, "events", ordered)
 
 
+
+def _snapshot_validated_time_slice(time_slice: TimeSlice) -> TimeSlice:
+    """Detach and re-admit a market slice at the last paper-execution boundary.
+
+    Frozen data classes can be modified with object.__setattr__, so validity at
+    initial construction cannot grant perpetual authorization to consume data.
+    Rebuild each event (including mapping-backed odds) before validation: the
+    replay and its evidence must read one detached version of the same slice.
+    """
+    if type(time_slice) is not TimeSlice or type(time_slice.events) is not tuple:
+        raise TradingResearchError("paper replay requires a canonical time slice")
+    detached: list[MarketEvent] = []
+    for event in time_slice.events:
+        if type(event) is OddsSnapshot:
+            copied = OddsSnapshot(
+                deepcopy(event.instrument),
+                deepcopy(event.time),
+                dict(event.selections),
+                event.source_sequence,
+            )
+        elif type(event) in (Bar, Tick, Quote, OutcomeSettlement):
+            copied = deepcopy(event)
+        else:
+            raise TradingResearchError("unsupported paper market event")
+        if type(copied.time) is not EventTime:
+            raise TradingResearchError("paper market event requires EventTime")
+        copied.time.__post_init__()
+        copied.__post_init__()
+        detached.append(copied)
+    admitted = TimeSlice(time_slice.index, time_slice.at, tuple(detached))
+    if admitted != time_slice:
+        raise TradingResearchError("unstable paper market slice identity")
+    return admitted
+
+
+def _snapshot_validated_approved_order(order: RiskApprovedOrder) -> RiskApprovedOrder:
+    """Re-admit mutable frozen carriers before a paper execution/cancel effect.
+
+    Approval provenance stays with the canonical RiskEngine and host authority;
+    replay may not silently accept structurally invalid post-approval mutation.
+    """
+    if type(order) is not RiskApprovedOrder:
+        raise TradingResearchError("paper replay requires a risk-approved order")
+    detached = deepcopy(order)
+    if (
+        type(detached.intent) is not OrderIntent
+        or type(detached.authority) is not OrderAuthority
+        or type(detached.intent.instrument) is not Instrument
+        or type(detached.intent.instrument.venue) is not Venue
+        or type(detached.intent.side) is not Side
+        or type(detached.intent.order_type) is not OrderType
+        or type(detached.intent.quantity) is not Decimal
+        or not detached.intent.quantity.is_finite()
+    ):
+        raise TradingResearchError("invalid paper approved order carrier")
+    detached.intent.instrument.venue.__post_init__()
+    detached.intent.instrument.__post_init__()
+    detached.intent.__post_init__()
+    detached.authority.__post_init__()
+    _validate_policy(detached.policy)
+    detached.__post_init__()
+    if detached != order:
+        raise TradingResearchError("unstable paper approved order identity")
+    return detached
+
+
 @dataclass(frozen=True, slots=True)
 class OrderUpdate:
     approval_id: str
@@ -67,6 +148,8 @@ class SimulationExecutionEngine:
         *,
         remaining_quantity: Decimal | None = None,
     ) -> OrderUpdate:
+        time_slice = _snapshot_validated_time_slice(time_slice)
+        order = _snapshot_validated_approved_order(order)
         quantity = order.intent.quantity if remaining_quantity is None else remaining_quantity
         if quantity <= 0:
             raise TradingResearchError("remaining_quantity must be positive")
@@ -223,6 +306,7 @@ class ReplayBook:
         self._accepted_orders = {}
 
     def process_existing_order(self, order: RiskApprovedOrder, time_slice: TimeSlice) -> OrderUpdate:
+        order = _snapshot_validated_approved_order(order)
         key = _replay_order_key(order)
         # A reused approval identity cannot change intent, policy or authority.
         accepted = self._accepted_orders.get(key)
@@ -241,6 +325,7 @@ class ReplayBook:
         # PortfolioLedger deduplicates it but _remaining would still shrink,
         # creating phantom execution quantity. Snapshot event bytes so mutable
         # caller-held event objects cannot rewrite the replay identity.
+        time_slice = _snapshot_validated_time_slice(time_slice)
         slice_events = tuple(canonical_event_bytes(event) for event in time_slice.events)
         previous = self._last_slice.get(key)
         if previous is not None:
@@ -254,7 +339,7 @@ class ReplayBook:
                     raise TradingResearchError("conflicting same-slice order replay")
                 return previous_update
         remaining = self._remaining.get(key, order.intent.quantity)
-        update = self.execution.execute(order, time_slice, remaining_quantity=remaining)
+        update = self.execution.execute(order_snapshot, time_slice, remaining_quantity=remaining)
         # Accounting must succeed before advancing order replay state. A failed
         # account admission must leave this order replayable after recovery.
         if update.fill is not None:
@@ -267,6 +352,7 @@ class ReplayBook:
         return update
 
     def cancel(self, order: RiskApprovedOrder, reason: str = "cancelled by simulation") -> OrderUpdate:
+        order = _snapshot_validated_approved_order(order)
         key = _replay_order_key(order)
         # A reused approval identity cannot change intent, policy or authority.
         accepted = self._accepted_orders.get(key)
