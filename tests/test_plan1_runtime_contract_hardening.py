@@ -102,26 +102,27 @@ def test_failed_runtime_result_keeps_explicit_error_authority() -> None:
     with pytest.raises(ValueError, match="failed outcome"):
         RuntimeResult(outcome=RuntimeOutcome.FAILED)
 
-@pytest.mark.parametrize("bad_id", [None, False, 7, object(), " task", "task ", "a\\nb", "a\\u202eb", "e\\u0301", "a\\u2028b"])
+
+@pytest.mark.parametrize("bad_id", [None, False, 7, object(), " task", "task ", "a\nb", "a\u202eb", "e\u0301", "a\u2028b"])
 def test_runtime_request_rejects_hostile_or_noncanonical_task_id(bad_id: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         RuntimeRequest(task_id=bad_id, thread_id="thread")
 
 
-@pytest.mark.parametrize("bad_id", [None, True, "thread\\rforged", "thread\\u200bhidden", "thread "])
+@pytest.mark.parametrize("bad_id", [None, True, "thread\rforged", "thread\u200bhidden", "thread "])
 def test_resume_rejects_hostile_thread_id_before_effects(bad_id: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         RuntimeResumeRequest(task_id="task", thread_id=bad_id, resume_token="cursor")
 
 
-@pytest.mark.parametrize("bad_id", [None, 3, "cursor\\u0000injected", "cursor\\u2029fake"])
+@pytest.mark.parametrize("bad_id", [None, 3, "cursor\u0000injected", "cursor\u2029fake"])
 def test_resume_rejects_hostile_resume_token(bad_id: object) -> None:
     with pytest.raises((TypeError, ValueError)):
         RuntimeResumeRequest(task_id="task", thread_id="thread", resume_token=bad_id)
 
 
 def test_resume_probe_rejects_hostile_checkpoint_identity_even_if_ready() -> None:
-    for bad in (3, "checkpoint\\ntrusted", "e\\u0301"):
+    for bad in (3, "checkpoint\ntrusted", "e\u0301"):
         with pytest.raises((TypeError, ValueError)):
             RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.READY,
