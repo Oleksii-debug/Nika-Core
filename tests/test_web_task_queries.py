@@ -202,6 +202,14 @@ def test_valid_json_with_wrong_canonical_payload_shape_fails_closed_and_recovers
             (corrupt_json, record.task_id),
         )
 
+    # Even malformed state is not an existence/health oracle for another
+    # workspace. It must look identical to a genuinely absent task.
+    foreign = _inspect(_adapter(queue), _principal("workspace-b"), record.task_id)
+    missing = _inspect(_adapter(queue), _principal("workspace-b"), "no-such-task")
+    assert foreign.status_code == missing.status_code == 409
+    assert json.loads(foreign.body)["code"] == "not_found"
+    assert foreign.body == missing.body
+
     response = _inspect(_adapter(queue), _principal(), record.task_id)
     result = json.loads(response.body)
     assert response.status_code == 200
