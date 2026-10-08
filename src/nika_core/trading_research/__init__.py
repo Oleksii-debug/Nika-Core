@@ -1,5 +1,6 @@
 """Causality-first contracts for the paper-only AI Trader Research Lab."""
 
+from .accounting import AccountSnapshot, PortfolioLedger, Position
 from .causality import (
     AvailabilityCache,
     FeatureLineage,
@@ -35,9 +36,39 @@ from .dataset import (
     ValidationReport,
     event_sort_key,
 )
-from .strategy import DecisionContext, Strategy, StrategyDecision
+from .identity import InstrumentIdentity, instrument_identity, instrument_identity_sha256
+from .orders import (
+    ExecutionPolicy,
+    OrderAuthority,
+    OrderIntent,
+    OrderState,
+    OrderType,
+    RiskApprovedOrder,
+    Side,
+    SimulatedFill,
+    apply_slippage,
+    fee_for,
+    order_authority_sha256,
+)
+from .paper_actions import (
+    PAPER_ACCOUNT_INSPECT,
+    paper_inspect_definition,
+    paper_inspect_handler,
+)
+from .paper_core_permission import standing_paper_read_authorizer
+from .persistence import TradingStateRepository
+from .workspace_query import (
+    PaperAccountView,
+    PaperPositionView,
+    PaperWorkspaceQuery,
+    paper_state_provider,
+)
+from .replay import OrderUpdate, ReplayBook, ReplayPhase, SimulationExecutionEngine, TimeSlice
+from .risk import PendingRiskOrder, RiskEngine, RiskLimits, RiskRejected, RiskState
+from .strategy import DecisionContext, OrderStrategy, Strategy, StrategyDecision
 
 __all__ = [
+    "AccountSnapshot",
     "AvailabilityCache",
     "Bar",
     "CausalityViolation",
@@ -46,28 +77,64 @@ __all__ = [
     "DatasetVersion",
     "DecisionContext",
     "EventTime",
+    "ExecutionPolicy",
     "FeatureLineage",
     "FeaturePoint",
     "FutureAccessError",
     "InMemoryDataProvider",
     "Instrument",
+    "InstrumentIdentity",
     "MarketEvent",
     "OddsSnapshot",
+    "OrderAuthority",
+    "OrderIntent",
+    "OrderState",
+    "OrderStrategy",
+    "OrderType",
+    "OrderUpdate",
     "OutcomeSettlement",
     "Partition",
+    "PAPER_ACCOUNT_INSPECT",
+    "PaperAccountView",
+    "PaperPositionView",
+    "PaperWorkspaceQuery",
+    "PendingRiskOrder",
+    "PortfolioLedger",
+    "Position",
     "Provenance",
     "Quote",
+    "ReplayBook",
+    "ReplayPhase",
+    "RiskApprovedOrder",
+    "RiskEngine",
+    "RiskLimits",
+    "RiskRejected",
+    "RiskState",
+    "Side",
+    "SimulatedFill",
+    "SimulationExecutionEngine",
     "Strategy",
     "StrategyDecision",
     "TemporalView",
     "Tick",
+    "TimeSlice",
     "TradingResearchError",
+    "TradingStateRepository",
     "TrainOnlyStandardizer",
     "ValidationIssue",
     "ValidationReport",
     "Venue",
+    "apply_slippage",
     "causal_shift",
     "event_sort_key",
+    "fee_for",
     "fill_missing",
+    "instrument_identity",
+    "instrument_identity_sha256",
+    "order_authority_sha256",
+    "paper_inspect_definition",
+    "paper_inspect_handler",
+    "standing_paper_read_authorizer",
+    "paper_state_provider",
     "trailing_mean",
 ]

@@ -1,0 +1,239 @@
+"""Plan 5 §1: no behavioral nested data may execute before paper admission."""
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta, tzinfo
+from decimal import Decimal
+
+import pytest
+
+from nika_core.trading_research.accounting import PortfolioLedger
+from nika_core.trading_research.contracts import (
+    EventTime, Instrument, OddsSnapshot, Quote, TradingResearchError, Venue,
+)
+from nika_core.trading_research.orders import (
+    ExecutionPolicy, OrderAuthority, OrderIntent, OrderState, OrderType,
+    RiskApprovedOrder, Side,
+)
+from nika_core.trading_research.replay import (
+    ReplayBook, SimulationExecutionEngine, TimeSlice,
+)
+
+
+NOW = datetime(2026, 1, 1, tzinfo=UTC)
+INSTRUMENT = Instrument("INERT", Venue("PAPER", "UTC"), "USD")
+
+
+def _order() -> RiskApprovedOrder:
+    return RiskApprovedOrder(
+        "approval", OrderIntent(
+            "intent", INSTRUMENT, Side.BUY, OrderType.MARKET,
+            Decimal("2"), NOW, 0,
+        ), OrderAuthority("trader", "research", "order", NOW, 0),
+        NOW, 0, ExecutionPolicy("paper"),
+    )
+
+
+def _slice() -> TimeSlice:
+    return TimeSlice(
+        1, NOW, (
+            Quote(
+                INSTRUMENT, EventTime(NOW, NOW, NOW),
+                Decimal("99"), Decimal("101"), Decimal("10"), Decimal("10"),
+            ),
+        ),
+    )
+
+
+def test_behavioral_decimal_does_not_execute_deepcopy_before_paper_accounting() -> None:
+    invoked: list[str] = []
+
+    class BehavioralDecimal(Decimal):
+        def __deepcopy__(self, memo: dict) -> object:
+            invoked.append("copy")
+            raise AssertionError("hostile decimal deepcopy called")
+
+    slice_ = _slice()
+    object.__setattr__(slice_.events[0], "ask", BehavioralDecimal("101"))
+    book = ReplayBook(PortfolioLedger(Decimal("1000")))
+    with pytest.raises(TradingResearchError, match="behavioral paper carrier"):
+        book.process_existing_order(_order(), slice_)
+    assert invoked == []
+    assert book.ledger.cash == Decimal("1000")
+    assert book._last_slice == {}
+    # A rejection must not poison later clean replays.
+    assert book.process_existing_order(_order(), _slice()).state is OrderState.FILLED
+
+
+def test_direct_simulator_rejects_behavioral_policy_latency_before_copy() -> None:
+    invoked: list[str] = []
+
+    class BehavioralDelay(timedelta):
+        def __deepcopy__(self, memo: dict) -> object:
+            invoked.append("copy")
+            raise AssertionError("hostile policy deepcopy called")
+
+    order = _order()
+    object.__setattr__(order.policy, "latency", BehavioralDelay(seconds=0))
+    with pytest.raises(TradingResearchError, match="behavioral paper carrier"):
+        SimulationExecutionEngine().execute(order, _slice())
+    assert invoked == []
+
+
+def test_behavioral_timezone_is_rejected_before_deepcopy() -> None:
+    invoked: list[str] = []
+
+    class BehavioralZone(tzinfo):
+        def utcoffset(self, dt: datetime | None) -> timedelta:
+            return timedelta(0)
+
+        def dst(self, dt: datetime | None) -> timedelta:
+            return timedelta(0)
+
+        def tzname(self, dt: datetime | None) -> str:
+            return "hostile"
+
+        def __deepcopy__(self, memo: dict) -> object:
+            invoked.append("copy")
+            raise AssertionError("hostile timezone deepcopy called")
+
+    slice_ = _slice()
+    object.__setattr__(
+        slice_.events[0].time,
+        "event_at",
+        datetime(2026, 1, 1, tzinfo=BehavioralZone()),
+    )
+    with pytest.raises(TradingResearchError, match="unsupported paper carrier timezone"):
+        SimulationExecutionEngine().execute(_order(), slice_)
+    assert invoked == []
+
+
+def test_behavioral_odds_mapping_rejected_without_items_iteration() -> None:
+    invoked: list[str] = []
+
+    class BehavioralDict(dict):
+        def items(self):
+            invoked.append("items")
+            raise AssertionError("hostile odds iteration called")
+
+    odds = OddsSnapshot(
+        INSTRUMENT, EventTime(NOW, NOW, NOW), {"home": Decimal("2")},
+    )
+    slice_ = TimeSlice(1, NOW, (odds,))
+    object.__setattr__(
+        odds, "selections", BehavioralDict({"home": Decimal("2")}),
+    )
+    with pytest.raises(TradingResearchError, match="behavioral paper carrier"):
+        SimulationExecutionEngine().execute(_order(), slice_)
+    assert invoked == []
+
+
+def test_standard_fixed_and_iana_timezones_remain_eligible() -> None:
+    from zoneinfo import ZoneInfo
+
+    order = _order()
+    quote = _slice().events[0]
+    time = quote.time
+    object.__setattr__(
+        time, "event_at", datetime(2026, 1, 1, tzinfo=ZoneInfo("UTC")),
+    )
+    result = SimulationExecutionEngine().execute(order, TimeSlice(1, NOW, (quote,)))
+    assert result.state is OrderState.FILLED
+
+
+def test_valid_mappingproxy_odds_still_passes_market_snapshot_admission() -> None:
+    odds = OddsSnapshot(
+        INSTRUMENT, EventTime(NOW, NOW, NOW), {"home": Decimal("2")},
+    )
+    result = SimulationExecutionEngine().execute(
+        _order(), TimeSlice(1, NOW, (odds,)),
+    )
+    assert result.state is OrderState.ACTIVE
+    assert result.fill is None
+
+
+def test_mappingproxy_over_behavioral_mapping_never_calls_backing_methods() -> None:
+    from types import MappingProxyType
+
+    invoked: list[str] = []
+
+    class BehavioralDict(dict):
+        def items(self):
+            invoked.append("items")
+            raise AssertionError("untrusted mapping proxy backing was iterated")
+
+    odds = OddsSnapshot(
+        INSTRUMENT, EventTime(NOW, NOW, NOW), {"home": Decimal("2")},
+    )
+    slice_ = TimeSlice(1, NOW, (odds,))
+    proxy = MappingProxyType(BehavioralDict({"home": Decimal("2")}))
+    object.__setattr__(odds, "selections", proxy)
+    with pytest.raises(TradingResearchError, match="behavioral paper odds mapping"):
+        SimulationExecutionEngine().execute(_order(), slice_)
+    assert invoked == []
+
+
+@pytest.mark.parametrize("change", ["order_id", "instrument", "run_id", "workspace_id"])
+def test_approval_id_cannot_alias_another_paper_order_or_scope(change: str) -> None:
+    from dataclasses import replace
+
+    book = ReplayBook(PortfolioLedger(Decimal("1000")))
+    accepted = _order()
+    first = book.process_existing_order(accepted, _slice())
+    assert first.state is OrderState.FILLED
+    assert book.ledger.cash == Decimal("798")
+
+    intent = accepted.intent
+    authority = accepted.authority
+    if change == "order_id":
+        authority = replace(authority, order_id="another-order")
+    elif change == "instrument":
+        intent = replace(
+            intent,
+            instrument=Instrument("OTHER", Venue("PAPER", "UTC"), "USD"),
+        )
+    elif change == "run_id":
+        authority = replace(authority, run_id="other-run")
+    else:
+        authority = replace(authority, workspace_id="other-workspace")
+    alias = replace(accepted, intent=intent, authority=authority)
+    with pytest.raises(TradingResearchError, match="conflicting paper approval scope"):
+        book.process_existing_order(alias, TimeSlice(2, NOW + timedelta(seconds=1), ()))
+    with pytest.raises(TradingResearchError, match="conflicting paper approval scope"):
+        book.cancel(alias)
+    assert book.ledger.cash == Decimal("798")
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal("2")
+    assert len(book._remaining) == len(book._accepted_orders) == len(book._approval_keys) == 1
+
+
+def test_cancel_fences_approval_alias_without_financial_effect() -> None:
+    from dataclasses import replace
+
+    book = ReplayBook(PortfolioLedger(Decimal("1000")))
+    cancelled = book.cancel(_order())
+    assert cancelled.state is OrderState.CANCELLED
+    alias = replace(_order(), authority=OrderAuthority(
+        "trader", "other-run", "another-order", NOW, 0,
+    ))
+    with pytest.raises(TradingResearchError, match="conflicting paper approval scope"):
+        book.cancel(alias)
+    assert book.ledger.cash == Decimal("1000")
+    assert len(book._terminal) == len(book._approval_keys) == 1
+
+
+def test_rejected_account_fill_does_not_prematurely_reserve_approval_id() -> None:
+    # The boundary must still permit safe recovery after a failed account
+    # admission: only committed paper order transitions acquire the ID fence.
+    class RejectOnceLedger(PortfolioLedger):
+        def apply_fill(self, fill):
+            if not hasattr(self, "rejected"):
+                self.rejected = True
+                raise TradingResearchError("injected account failure")
+            return super().apply_fill(fill)
+
+    book = ReplayBook(RejectOnceLedger(Decimal("1000")))
+    with pytest.raises(TradingResearchError, match="injected account failure"):
+        book.process_existing_order(_order(), _slice())
+    assert book._approval_keys == {}
+    assert book._remaining == {}
+    assert book.process_existing_order(_order(), _slice()).state is OrderState.FILLED
+    assert book.ledger.cash == Decimal("798")
