@@ -176,6 +176,10 @@ class PaperWorkspaceQuery:
                 if type(positions) is not list or len(positions) > 100_000:
                     raise TradingResearchError("invalid paper position projection")
                 projected: list[PaperPositionView] = []
+                # Persisted PAPER identity is (venue, timezone, instrument,
+                # currency). Reject a faulty adapter that duplicates rows
+                # rather than reporting a fictitious second position.
+                seen_positions: set[tuple[str, str, str, str]] = set()
                 expected_position = {
                     "venue_id", "instrument_id", "currency",
                     "quantity", "average_price", "realized_pnl",
@@ -189,6 +193,9 @@ class PaperWorkspaceQuery:
                         or set(row) != expected_position
                     ):
                         raise TradingResearchError("invalid paper position projection")
+                    venue = _safe_identity(row["venue_id"])
+                    venue_timezone = _safe_identity(row["venue_timezone"])
+                    instrument = _safe_identity(row["instrument_id"])
                     currency = _safe_identity(row["currency"])
                     if (
                         len(currency) != 3
@@ -197,10 +204,14 @@ class PaperWorkspaceQuery:
                         or not currency.isupper()
                     ):
                         raise TradingResearchError("invalid paper currency projection")
+                    position_id = (venue, venue_timezone, instrument, currency)
+                    if position_id in seen_positions:
+                        raise TradingResearchError("duplicate paper position projection")
+                    seen_positions.add(position_id)
                     projected.append(
                         PaperPositionView(
-                            _safe_identity(row["venue_id"]),
-                            _safe_identity(row["instrument_id"]),
+                            venue,
+                            instrument,
                             currency,
                             _safe_amount(row["quantity"]),
                             _safe_amount(row["average_price"]),
