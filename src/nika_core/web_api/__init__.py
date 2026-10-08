@@ -9,9 +9,11 @@ from nika_core.web_api.asgi import ASGICommandApplication
 from nika_core.web_api.contracts import WebCommand, WebCommandResult, WebPrincipal
 from nika_core.web_api.http_transport import HttpCommandAdapter, HttpCommandResponse
 from nika_core.web_api.task_queries import WebTaskQueryHandler
+from nika_core.web_api.web_client import AccessibleWebClientApplication
 
 __all__ = [
     "ASGICommandApplication",
+    "AccessibleWebClientApplication",
     "HttpCommandAdapter",
     "HttpCommandResponse",
     "WebApplicationBoundary",
