@@ -514,7 +514,7 @@
     const canChange = valid && snapshot.can_change && !autostartEffectUncertain;
     autostartInput.disabled = !canChange;
     autostartSave.disabled = !canChange;
-    if (!canChange) autostartDirty = false;
+    if (!canChange && !autostartEffectUncertain) autostartDirty = false;
     if (!autostartDirty) autostartInput.checked = current === "enabled";
     autostartStatus.textContent = autostartEffectUncertain
       ? "Зміна автозапуску не підтверджена. Повторне збереження заблоковано до перезапуску вікна; перевірте стан Windows."
