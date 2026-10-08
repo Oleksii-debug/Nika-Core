@@ -237,7 +237,9 @@ class DesktopBackend:
             # an operator may retry safely after the host becomes available.
             if self._queue.get(record.task_id).state == TaskState.READY:
                 self._queue.transition(record.task_id, TaskState.PAUSED)
-            self._record_background_failure(record.task_id, "desktop.runtime_resume_schedule_failed")
+            self._record_background_failure(
+                record.task_id, "desktop.runtime_resume_schedule_failed"
+            )
             raise
         return UIResult(
             request_id="desktop-handler",
