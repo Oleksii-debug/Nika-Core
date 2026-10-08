@@ -201,13 +201,13 @@ class DeterministicBrain:
                     ),
                 )
 
-        # An exact-budget checkpoint can already be terminal. Never invoke the
-        # planner or a handler merely to rediscover an already-satisfied goal.
-        # Journal reconciliation above still has priority over that success.
-        if executed_steps == max_steps and self._goal_satisfied(current_state, goal):
-            # The supplied checkpoint may be stale. When a live observer is
-            # configured it remains authoritative even on a terminal resume;
-            # never claim success from an unobserved recovered state.
+        # A checkpoint with an already-satisfied goal is terminal irrespective of
+        # how much budget remains. Never plan an unnecessary external effect just
+        # because a prior run stopped short of the step ceiling.
+        # Task-wide unresolved journal records above still take precedence.
+        if self._goal_satisfied(current_state, goal):
+            # The caller's recovered state may be stale. Re-observe it before
+            # claiming success when an authoritative observer is configured.
             if state_observer is not None:
                 observed, observation_failure = await self._observe_state(
                     state_observer, timeout_seconds=observation_timeout_seconds
@@ -226,22 +226,34 @@ class DeterministicBrain:
                     raise AssertionError("state observation returned no state or failure")
                 current_state = observed
                 if not self._goal_satisfied(current_state, goal):
-                    return self._failure(
+                    if executed_steps == max_steps:
+                        return self._failure(
+                            plan=DeterministicPlan(steps=()),
+                            completed=completed,
+                            state=current_state,
+                            history=history,
+                            replans=replans,
+                            code=DeterministicErrorCode.PLAN_TOO_LONG,
+                            message="recovered state changed after max_steps was exhausted",
+                        )
+                    # Observed drift invalidated terminality. Continue through
+                    # the normal validated planner using the remaining budget.
+                else:
+                    return DeterministicBrainResult(
                         plan=DeterministicPlan(steps=()),
-                        completed=completed,
-                        state=current_state,
-                        history=history,
-                        replans=replans,
-                        code=DeterministicErrorCode.PLAN_TOO_LONG,
-                        message="recovered state changed after max_steps was exhausted",
+                        completed_actions=tuple(completed),
+                        final_state=current_state,
+                        planning_history=tuple(history),
+                        replans=0,
                     )
-            return DeterministicBrainResult(
-                plan=DeterministicPlan(steps=()),
-                completed_actions=tuple(completed),
-                final_state=current_state,
-                planning_history=tuple(history),
-                replans=0,
-            )
+            else:
+                return DeterministicBrainResult(
+                    plan=DeterministicPlan(steps=()),
+                    completed_actions=tuple(completed),
+                    final_state=current_state,
+                    planning_history=tuple(history),
+                    replans=0,
+                )
 
         loop = asyncio.get_running_loop()
         planning_deadline = loop.time() + planning_timeout_seconds
