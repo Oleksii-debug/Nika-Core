@@ -50,3 +50,28 @@ must qualify on exact-head Ubuntu/Windows CI, integrate in order to main,
 and receive readback before any terminal DONE. A fixture projection is not
 physical NVDA or real broker/market evidence. Plan 5 Section 2 remains
 unstarted while Section 1 is unfinished.
+
+
+## Additional projection-integrity fence (child implementation)
+
+The read-model re-admits exact built-in JSON-like account and position
+containers when converting canonical SQLite evidence to the presentation-neutral
+PAPER state. The source decoder is authoritative for account invariants; this
+last-mile fence prevents a faulty/replaced read adapter from leaking custom
+behavioral carriers into Windows UIA, Web semantic tables, or text reports.
+It requires the known account and position field sets, exact plain UTF-8
+numeric strings of at most 128 bytes, finite Decimal parse, one-line,
+trimmed, printable position identifiers up to 512 bytes and a plain
+three-letter uppercase ASCII currency. Positions beyond the existing
+100,000-row durable limit fail closed rather than being silently truncated.
+Existing valid decimal strings remain unchanged so no balance is fabricated
+or rounded.
+
+On malformed evidence, the existing provider returns EVIDENCE_UNAVAILABLE
+without balances/positions. A fresh Core authorization check is performed on
+this failure path too; revoked permission takes precedence as ACCESS_DENIED.
+No additional policy evaluator, persistence, runtime, scheduler or domain
+agent is introduced. Focused regression coverage:
+`tests/test_plan5_trader_projection_integrity.py`. This is a **bounded
+component hardening step**; it neither integrates the stacked Trader lineage
+into main nor closes the full AI Trader section.
