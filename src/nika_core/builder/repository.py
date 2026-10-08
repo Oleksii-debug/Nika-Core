@@ -74,8 +74,13 @@ class AgentDefinitionRepository:
         # A frozen CompilationResult is not an authority boundary: callers may construct
         # or mutate it after compilation. Fail closed before persisting risk/approval
         # metadata that activation later treats as durable authorization evidence.
+        # Hold one inert definition reference: behavioral model subclasses can
+        # override serialization and launder caller-controlled approval data.
+        source_definition = compilation.definition
+        if type(source_definition) is not AgentDefinition:
+            raise TypeError("compiled definition must be a plain AgentDefinition")
         definition = AgentDefinition.model_validate(
-            compilation.definition.model_dump(mode="python")
+            source_definition.model_dump(mode="python")
         )
         highest, approvals = _expected_risk_evidence(definition)
         if (
@@ -154,6 +159,8 @@ class AgentDefinitionRepository:
             raise TypeError("approved tool IDs must be a frozenset of plain strings")
         # A model_copy(update=...) or frozen-object mutation can bypass Pydantic
         # until we re-admit the incoming definition before comparing it to SQLite.
+        if type(definition) is not AgentDefinition:
+            raise TypeError("activation definition must be a plain AgentDefinition")
         definition = AgentDefinition.model_validate(definition.model_dump(mode="python"))
         if not definition.enabled:
             raise ValueError("disabled agent definition cannot be activated")
