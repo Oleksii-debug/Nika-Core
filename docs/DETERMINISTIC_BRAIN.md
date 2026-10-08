@@ -39,7 +39,13 @@ No Unified Planning problem, fluent, action, plan, result, Aries, gRPC, SQLite o
 type is exposed by the Nika deterministic planning contracts.
 
 Action catalogs and restored completion checkpoints are each bounded at 10,000 entries,
-and rejected before deepcopy, planning, journal inspection or tool effects. This protects the
+and rejected before deepcopy, planning, journal inspection or tool effects.
+Caller execution budgets use the same 10,000 ceiling for maximum steps and replans;
+model-free planning and observation timeout inputs are limited to 86,400 seconds.
+Oversized finite numbers are rejected before planner or durable journal inspection.
+These upper bounds prevent caller-controlled huge integers and deadlines from
+bypassing practical resource limits, without changing an already admitted run.
+ This protects the
 canonical runtime from adversarially oversized replay inputs without introducing another
 runtime authority or changing ToolExecutor permissions.
 

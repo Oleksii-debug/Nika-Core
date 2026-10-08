@@ -87,6 +87,8 @@ def _positive_finite_seconds(value: object, *, name: str) -> float:
         raise ValueError(f"{name} must be a positive finite number")
     if seconds <= 0:
         raise ValueError(f"{name} must be greater than zero")
+    if seconds > 86_400:
+        raise ValueError(f"{name} must not exceed 86400 seconds")
     return seconds
 
 
@@ -208,10 +210,13 @@ class DeterministicBrain:
         _require_run_identity(run_id, name="run_id")
         if task_id is not None:
             _require_run_identity(task_id, name="task_id")
-        if type(max_steps) is not int or max_steps <= 0:
-            raise ValueError("max_steps must be a positive integer")
-        if type(max_replans) is not int or max_replans < 0:
-            raise ValueError("max_replans must be a non-negative integer")
+        # Bound authority to the same catalog ceiling even if a hostile caller
+        # supplies a huge Python integer. Never let planner output or replan
+        # work escape the supported 10k action budget.
+        if type(max_steps) is not int or not 1 <= max_steps <= 10_000:
+            raise ValueError("max_steps must be an integer between 1 and 10000")
+        if type(max_replans) is not int or not 0 <= max_replans <= 10_000:
+            raise ValueError("max_replans must be an integer between 0 and 10000")
         planning_timeout_seconds = _positive_finite_seconds(
             planning_timeout_seconds, name="planning_timeout_seconds"
         )
