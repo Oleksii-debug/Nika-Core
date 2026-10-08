@@ -58,3 +58,21 @@ def test_small_catalog_preserves_canonical_plan_execution() -> None:
     assert result.completed_actions == ("finish",)
     assert result.final_state.facts == frozenset({"done"})
     assert planner.calls == 1
+
+
+def test_single_completed_checkpoint_replays_no_action_after_restart() -> None:
+    # Simulate a fresh Brain constructed after durable caller recovery.
+    planner = CountingPlanner()
+    result = asyncio.run(
+        DeterministicBrain(planner=planner, tools=ToolExecutor()).run(
+            run_id="restarted-action-catalog",
+            state=WorldState(facts=frozenset({"done"})),
+            goal=DeterministicGoal(required=frozenset({"done"})),
+            actions=(DeterministicAction("finish", adds=frozenset({"done"})),),
+            previously_completed_action_ids=("finish",),
+        )
+    )
+    assert result.ok
+    assert result.completed_actions == ("finish",)
+    assert result.planning_history == ()
+    assert planner.calls == 0
