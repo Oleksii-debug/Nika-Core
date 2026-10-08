@@ -111,6 +111,7 @@
   let keymapMutationPending = false;
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
+  let stateReadGeneration = 0;
   let teamStateSignature = null;
   let stateUnavailableReported = false;
   const maxActivityItems = 200;
@@ -578,6 +579,8 @@
   });
 
   async function refreshState({ announceTeamTransitions = true } = {}) {
+    // A stale poll must never overwrite a more recent task-control readback.
+    const readGeneration = ++stateReadGeneration;
     const autostartReadGeneration = autostartGeneration;
     if (!globalThis.pywebview?.api?.get_state) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
@@ -588,11 +591,14 @@
     try {
       response = await globalThis.pywebview.api.get_state();
     } catch {
+      if (readGeneration !== stateReadGeneration) return null;
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       reportStateUnavailable();
       return false;
     }
-    if (!response?.ok) {
+    if (readGeneration !== stateReadGeneration) return null;
+    if (response?.ok !== true || !response.state || typeof response.state !== "object"
+        || Array.isArray(response.state)) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       reportStateUnavailable();
       return false;
@@ -872,9 +878,12 @@
   function startStatePolling() {
     if (statePollHandle !== null || typeof window.setInterval !== "function") return;
     statePollHandle = window.setInterval(async () => {
-      if (document.hidden) return;
+      // A durable command's post-acknowledgement reconciliation takes priority.
+      if (document.hidden || inFlightActions.size > 0) return;
       const ready = await refreshState();
-      document.documentElement.dataset.nikaReady = ready ? "true" : "false";
+      if (ready !== null) {
+        document.documentElement.dataset.nikaReady = ready ? "true" : "false";
+      }
     }, 1500);
   }
 
