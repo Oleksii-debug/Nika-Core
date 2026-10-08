@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +41,61 @@ class FoundryModelEvidence:
     supports_tool_calling: bool | None
 
 
+
+def _require_foundry_evidence_text(
+    value: object, *, field: str, limit: int
+) -> str:
+    """Admit exact, bounded public model/evidence identifiers before the SDK."""
+    if type(value) is not str or not value or len(value) > limit:
+        raise ValueError(f"{field} must contain canonical bounded text")
+    if (
+        value != value.strip()
+        or unicodedata.normalize("NFC", value) != value
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+            for character in value
+        )
+    ):
+        raise ValueError(f"{field} must contain canonical bounded text")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must contain canonical bounded text") from exc
+    if len(encoded) > limit:
+        raise ValueError(f"{field} must contain canonical bounded text")
+    return value
+
+
+def _snapshot_download_authorization(
+    authorization: ModelDownloadAuthorization,
+) -> ModelDownloadAuthorization:
+    """Detach exact, validated model-license intent before async SDK work."""
+    if type(authorization) is not ModelDownloadAuthorization:
+        raise ValueError("download authorization must be a canonical record")
+    provider_id = authorization.provider_id
+    model = authorization.model
+    license_reference = authorization.license_reference
+    expected_model_id = authorization.expected_model_id
+    # The same canonical public identifier admission applies to acquisition,
+    # provider configuration, and model inspection; none grant download consent.
+    for field, limit in (
+        (provider_id, 128),
+        (model, 512),
+        (license_reference, 4096),
+        (expected_model_id, 512),
+    ):
+        if field is not None:
+            _require_foundry_evidence_text(
+                field, field="download authorization", limit=limit
+            )
+    return ModelDownloadAuthorization(
+        provider_id=provider_id,
+        model=model,
+        license_reference=license_reference,
+        expected_model_id=expected_model_id,
+    )
+
+
 class FoundryLocalProvider:
     """Embedded Foundry Local provider using Microsoft's in-process Python SDK.
 
@@ -70,20 +127,16 @@ class FoundryLocalProvider:
         resource_observer: ResourceObserverPort | None = None,
         manager_factory: Callable[[], Any] | None = None,
     ) -> None:
-        if not default_model.strip():
-            raise ValueError("default_model must not be empty")
-        if default_model != default_model.strip():
-            raise ValueError("default_model must not contain surrounding whitespace")
+        _require_foundry_evidence_text(default_model, field="default_model", limit=512)
         if allow_download:
             raise ValueError(
                 "allow_download on FoundryLocalProvider is no longer supported; "
                 "use download_model() with ModelDownloadAuthorization"
             )
         if expected_model_id is not None:
-            if not expected_model_id.strip():
-                raise ValueError("expected_model_id must not be empty")
-            if expected_model_id != expected_model_id.strip():
-                raise ValueError("expected_model_id must not contain surrounding whitespace")
+            _require_foundry_evidence_text(
+                expected_model_id, field="expected_model_id", limit=512
+            )
         if resource_policy is not None and resource_observer is None:
             raise ValueError("resource_observer is required when resource_policy is configured")
 
@@ -206,12 +259,39 @@ class FoundryLocalProvider:
         and retains the shared provider/model-management slots until the native
         worker really exits.
         """
+        # Frozen dataclasses can still be mutated via object.__setattr__. Take an
+        # owned, validated authorization snapshot *before* any await/SDK/lock;
+        # later caller mutation must not change the model or license authority.
+        authorization = _snapshot_download_authorization(authorization)
         if authorization.provider_id != self.capabilities.provider_id:
             raise ValueError(
                 "download authorization provider does not match Foundry Local provider"
             )
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be greater than zero")
+        # Authorization does not authorize an unbounded native model download.
+        # Reject bool/NaN/infinity/overflow before touching the SDK or acquiring locks.
+        if type(timeout_seconds) not in (int, float):
+            raise ValueError("timeout_seconds must be finite and between 0 and 86400")
+        try:
+            seconds = float(timeout_seconds)
+        except OverflowError as exc:
+            raise ValueError(
+                "timeout_seconds must be finite and between 0 and 86400"
+            ) from exc
+        if not math.isfinite(seconds) or not 0 < seconds <= 86400:
+            raise ValueError("timeout_seconds must be finite and between 0 and 86400")
+        timeout_seconds = seconds
+        # The SDK cancellation signal must be the exact inert threading.Event.
+        # A behavioral __bool__ carrier must never disable caller cancellation.
+        if cancel_event is not None and type(cancel_event) is not Event:
+            raise ValueError("cancel_event must be an exact threading.Event")
+        effective_cancel_event = cancel_event if cancel_event is not None else Event()
+        if effective_cancel_event.is_set():
+            raise ModelGatewayError(
+                ModelErrorCode.CANCELLED,
+                "Foundry Local model acquisition was cancelled before admission",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
         if (
             self._expected_model_id is not None
             and authorization.expected_model_id is not None
@@ -229,13 +309,19 @@ class FoundryLocalProvider:
         management_acquired = False
         inference_acquired = False
         worker: asyncio.Task[None] | None = None
-        effective_cancel_event = cancel_event or Event()
         try:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError
             await asyncio.wait_for(self._model_management_lock.acquire(), timeout=remaining)
             management_acquired = True
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    "Foundry Local model acquisition was cancelled before SDK access",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
 
             model = self._get_model(authorization.model)
             expected_model_id = authorization.expected_model_id or self._expected_model_id
@@ -248,6 +334,13 @@ class FoundryLocalProvider:
                 raise TimeoutError
             await asyncio.wait_for(self._inference_lock.acquire(), timeout=remaining)
             inference_acquired = True
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    "Foundry Local model acquisition was cancelled before download",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
 
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -293,6 +386,13 @@ class FoundryLocalProvider:
 
             evidence = self._model_evidence(model)
             self._validate_model_identity(model, expected_model_id)
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    "Foundry Local model acquisition was cancelled",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
             if not evidence.cached:
                 if effective_cancel_event.is_set():
                     raise ModelGatewayError(
@@ -349,11 +449,10 @@ class FoundryLocalProvider:
 
     def inspect_model(self, model_alias: str | None = None) -> FoundryModelEvidence:
         """Return read-only public-SDK metadata for release/hardware evidence."""
-        alias = model_alias or self._default_model
-        if not alias.strip():
-            raise ValueError("model_alias must not be empty")
-        if alias != alias.strip():
-            raise ValueError("model_alias must not contain surrounding whitespace")
+        # An explicit empty/invalid alias must never silently fall back to the
+        # configured model and produce misleading hardware/provenance evidence.
+        alias = self._default_model if model_alias is None else model_alias
+        _require_foundry_evidence_text(alias, field="model_alias", limit=512)
         model = self._get_model(alias)
         if self._expected_model_id is not None:
             self._validate_model_identity(model, self._expected_model_id)
