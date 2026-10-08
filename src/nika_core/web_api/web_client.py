@@ -16,6 +16,7 @@ from nika_core.web_api.asgi import (
     _HTTP_TOKEN,
     _MAX_HEADER_BYTES,
     _MAX_HEADER_FIELDS,
+    _UNIQUE_SECURITY_HEADERS,
 )
 
 _ASSETS = {
@@ -85,6 +86,7 @@ class AccessibleWebClientApplication:
         if type(headers) not in {list, tuple} or len(headers) > _MAX_HEADER_FIELDS:
             return False
         hosts: list[bytes] = []
+        seen_security: set[bytes] = set()
         total_bytes = 0
         for pair in headers:
             if type(pair) not in {list, tuple} or len(pair) != 2:
@@ -101,7 +103,15 @@ class AccessibleWebClientApplication:
                 or any(char in value for char in (0, 10, 13))
             ):
                 return False
-            if name.lower() == b"host":
+            # A public static GET must not admit duplicate authentication,
+            # origin or framing metadata ignored by the command endpoint.
+            # Reuse the same security-header inventory as canonical ASGI.
+            key = name.lower()
+            if key in _UNIQUE_SECURITY_HEADERS:
+                if key in seen_security:
+                    return False
+                seen_security.add(key)
+            if key == b"host":
                 hosts.append(value)
         if len(hosts) != 1:
             return False
