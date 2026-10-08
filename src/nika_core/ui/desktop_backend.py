@@ -371,14 +371,26 @@ class DesktopBackend:
         with self._active_lock:
             existing = self._active_futures.get(task_id)
             if existing is not None and not existing.done():
+                # The caller has already constructed this coroutine. Refusing it without
+                # closing leaks an unawaited runtime operation.
+                coroutine.close()
                 raise ValueError("Завдання вже має активне runtime-виконання.")
+            try:
+                future = self._host().submit(coroutine)
+            except BaseException:
+                # Do not record a phantom active task when loop startup/submission fails.
+                # Shutdown signals still propagate unchanged.
+                coroutine.close()
+                raise
             self._active_threads[task_id] = thread_id
-            future = self._host().submit(coroutine)
             self._active_futures[task_id] = future
         future.add_done_callback(lambda done: self._runtime_done(task_id, done))
 
     def _cancel_done(self, task_id: str, future: Future[bool]) -> None:
         with self._active_lock:
+            if self._cancel_futures.get(task_id) is not future:
+                # A completed older cancellation must not clear/report on its successor.
+                return
             self._cancel_futures.pop(task_id, None)
         if future.cancelled():
             self._record_background_failure(task_id, "desktop.runtime_cancel_interrupted")
@@ -392,6 +404,9 @@ class DesktopBackend:
 
     def _runtime_done(self, task_id: str, future: Future[Any]) -> None:
         with self._active_lock:
+            if self._active_futures.get(task_id) is not future:
+                # Late callbacks cannot erase newer resume/start ownership or fail it.
+                return
             self._active_threads.pop(task_id, None)
             self._active_futures.pop(task_id, None)
         if future.cancelled() or future.exception() is None:
