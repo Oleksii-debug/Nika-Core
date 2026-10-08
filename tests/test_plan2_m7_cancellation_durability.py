@@ -31,11 +31,12 @@ class _EffectThenErrorRuntime:
     def __init__(self) -> None:
         self.cancel_effects: list[str] = []
 
-    async def cancel(self, *, task_id: str, thread_id: str) -> None:
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         del thread_id
         self.cancel_effects.append(task_id)
         if len(self.cancel_effects) == 2:
             raise RuntimeError("uncertain cancellation result after external effect")
+        return True
 
 
 class _RecordingRuntime:
