@@ -38,7 +38,11 @@ class ToolGrant(BaseModel):
     @field_validator("scopes")
     @classmethod
     def normalize_scopes(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        normalized = tuple(dict.fromkeys(item.strip() for item in value if item.strip()))
+        # An explicitly blank scope must never silently become an absent scope.
+        # Downstream authorization may interpret an absent scope as unrestricted.
+        if any(not item.strip() for item in value):
+            raise ValueError("tool scope must not be blank")
+        normalized = tuple(dict.fromkeys(item.strip() for item in value))
         if any(len(item) > 160 for item in normalized):
             raise ValueError("tool scope is too long")
         return normalized
