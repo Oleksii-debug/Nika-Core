@@ -492,3 +492,34 @@ def test_replay_rejects_later_index_with_regressing_utc_time() -> None:
     )
     assert final.state is OrderState.FILLED
     assert book.ledger.cash == Decimal(495)
+
+
+def test_approved_order_snapshot_failure_precedes_any_replay_effect(monkeypatch) -> None:
+    import nika_core.trading_research.replay as replay_module
+
+    order = _approved()
+    book = ReplayBook(PortfolioLedger(Decimal(1000)))
+    first_slice = TimeSlice(1, NOW, (_quote(NOW),))
+
+    def unavailable_copy(_value):
+        raise RuntimeError("injected approved order copy failure")
+
+    monkeypatch.setattr(replay_module, "deepcopy", unavailable_copy)
+    with pytest.raises(RuntimeError, match="approved order copy failure"):
+        book.process_existing_order(order, first_slice)
+    assert book.ledger.cash == Decimal(1000)
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal(0)
+    assert not book._remaining
+    assert not book._terminal
+    assert not book._accepted_orders
+
+    with pytest.raises(RuntimeError, match="approved order copy failure"):
+        book.cancel(order)
+    assert not book._terminal
+    assert not book._accepted_orders
+
+    monkeypatch.undo()
+    update = book.process_existing_order(order, first_slice)
+    assert update.state is OrderState.FILLED
+    assert book.ledger.position(INSTRUMENT).quantity == Decimal(5)
+    assert book.ledger.cash == Decimal(495)
