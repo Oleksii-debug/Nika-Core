@@ -209,8 +209,12 @@ class RuntimeResult:
             and self.resume_token is None
         ):
             raise ValueError("resumable outcome requires a usable resume token")
-        if self.outcome == RuntimeOutcome.FAILED and not self.error:
-            raise ValueError("failed outcome requires an error")
+        if self.error is not None and type(self.error) is not str:
+            raise TypeError("runtime error must be a plain string")
+        if self.outcome == RuntimeOutcome.FAILED and (
+            self.error is None or not self.error.strip()
+        ):
+            raise ValueError("failed outcome requires a nonempty error")
         if self.error_code is not None and not isinstance(self.error_code, RuntimeErrorCode):
             raise TypeError("error_code must be a RuntimeErrorCode when provided")
         if self.outcome != RuntimeOutcome.FAILED and self.error_code is not None:
