@@ -103,3 +103,89 @@ class _UnsafeGateway:
 def test_model_draft_cannot_launder_duplicate_permission_keys() -> None:
     with pytest.raises(ValueError, match="duplicate JSON object key"):
         asyncio.run(AgentDraftService(_UnsafeGateway()).draft("Create safe agent"))
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("version", True),
+        ("max_steps", 1.0),
+        ("max_steps", "10"),
+        ("enabled", "true"),
+    ),
+)
+def test_compiler_readmits_unvalidated_copy_before_authorizing(
+    field: str, value: object,
+) -> None:
+    # model_copy(update=...) deliberately skips Pydantic validation.
+    document = _definition().model_copy(update={field: value})
+    with pytest.raises(ValidationError):
+        _compiler(ToolSpec("web.read", "Read", ToolRisk.READ_ONLY)).compile(document)
+
+
+def test_compiler_rejects_mutated_nested_grant_before_authorizing() -> None:
+    grant = ToolGrant(tool_id="web.read", max_risk=0)
+    object.__setattr__(grant, "max_risk", 0.0)
+    document = _definition().model_copy(update={"tool_grants": (grant,)})
+    with pytest.raises(ValidationError):
+        _compiler(ToolSpec("web.read", "Read", ToolRisk.READ_ONLY)).compile(document)
+
+
+def test_durable_duplicate_json_key_fails_closed_at_activation_and_restart(
+    tmp_path,
+) -> None:
+    from nika_core.builder.repository import AgentDefinitionRepository
+    from nika_core.data.sqlite import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    repository = AgentDefinitionRepository(store)
+    definition = _definition()
+    repository.save_draft(
+        _compiler(ToolSpec("web.read", "Read", ToolRisk.READ_ONLY)).compile(definition)
+    )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT definition_json FROM agent_definitions WHERE agent_id = ? AND version = ?",
+            (definition.agent_id, definition.version),
+        ).fetchone()
+        assert row is not None
+        original = str(row["definition_json"])
+        tampered = original.replace(
+            '"max_steps":100', '"max_steps":100,"max_steps":100000'
+        )
+        assert tampered != original
+        conn.execute(
+            "UPDATE agent_definitions SET definition_json = ? "
+            "WHERE agent_id = ? AND version = ?",
+            (tampered, definition.agent_id, definition.version),
+        )
+
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        repository.activate(definition)
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        repository.get(definition.agent_id, definition.version)
+
+    # Restoring exact validated durable evidence recovers activation without new authority.
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE agent_definitions SET definition_json = ? "
+            "WHERE agent_id = ? AND version = ?",
+            (original, definition.agent_id, definition.version),
+        )
+    repository.activate(definition)
+    assert (
+        repository.require_active(definition.agent_id, definition.version).definition
+        == definition
+    )
+
+    # A previously active version must also fail closed after on-disk tampering.
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE agent_definitions SET definition_json = ? "
+            "WHERE agent_id = ? AND version = ?",
+            (tampered, definition.agent_id, definition.version),
+        )
+    restarted = AgentDefinitionRepository(SQLiteStore(tmp_path / "nika.db"))
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        restarted.require_active(definition.agent_id, definition.version)
