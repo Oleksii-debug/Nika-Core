@@ -111,7 +111,16 @@ class DesktopBackend:
         self._ensure_defaults()
 
     def create_task(self, payload: Mapping[str, Any]) -> UIResult:
-        raw_command = payload.get("command", "")
+        # This facade also has direct Python callers: never assume that all
+        # ingress passed through the validating WebView command bridge.
+        # Validate and detach before reading command or invoking the composer.
+        if type(payload) is not dict:
+            raise ValueError("Команда повинна бути звичайним JSON-об'єктом.")
+        try:
+            admitted = validate_ui_payload(payload)
+        except ValueError:
+            raise ValueError("Команда містить некоректні JSON-дані.") from None
+        raw_command = admitted.get("command", "")
         if type(raw_command) is not str:
             raise ValueError("Команда має бути текстом.")
         command = raw_command.strip()
