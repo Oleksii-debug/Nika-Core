@@ -144,6 +144,34 @@ async function main() {
   assert.equal(displayed[2][0].task_id, "safe-after-corruption");
   console.log("PASS: clean snapshot recovers semantic task state after rejected siblings");
 
+  older = refreshState();
+  pending[14].resolve({ok: true, state: {
+    tasks: [{task_id: "foreign", workspace_id: "another-workspace", agent_id: "nika.default"}],
+  }});
+  assert.equal(await older, false);
+  assert.equal(outages, 9);
+  assert.equal(displayed.length, 3);
+  console.log("PASS: foreign-workspace task is not announced through desktop state");
+
+  older = refreshState();
+  pending[15].resolve({ok: true, state: {
+    tasks: [{task_id: "foreign-agent", workspace_id: "default", agent_id: "other-agent"}],
+  }});
+  assert.equal(await older, false);
+  assert.equal(outages, 10);
+  assert.equal(displayed.length, 3);
+  console.log("PASS: foreign-agent task is not announced through desktop state");
+
+  older = refreshState();
+  pending[16].resolve({ok: true, state: {
+    tasks: [{task_id: "authorized", workspace_id: "default", agent_id: "nika.default"}],
+  }});
+  assert.equal(await older, true);
+  assert.equal(outages, 10);
+  assert.equal(displayed.length, 4);
+  assert.equal(displayed[3][0].task_id, "authorized");
+  console.log("PASS: authorized local task resumes after foreign task rejection");
+
   const pollFactory = new Function("ctx",
     "const {window, document, refreshState, inFlightActions}=ctx;"
     + "let statePollHandle=null;"
