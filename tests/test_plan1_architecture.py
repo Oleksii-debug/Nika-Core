@@ -711,27 +711,27 @@ def test_architecture_guard_preserves_explicit_safe_authority_imports() -> None:
     ("source", "expected"),
     [
         (
-            "from importlib import import_module as loader\\n".replace("\\n", "\n")
-            + "deferred = loader\\n".replace("\\n", "\n"),
+            "from importlib import import_module as loader\n"
+            + "deferred = loader\n",
             ("<hoisted-dynamic-import>",),
         ),
         (
-            "from builtins import __import__ as get_module\\n".replace("\\n", "\n")
-            + "deferred = get_module\\n".replace("\\n", "\n"),
+            "from builtins import __import__ as get_module\n"
+            + "deferred = get_module\n",
             ("<hoisted-dynamic-import>",),
         ),
         (
-            "from builtins import eval as run_expr\\n".replace("\\n", "\n")
-            + "handler = run_expr\\n".replace("\\n", "\n"),
+            "from builtins import eval as run_expr\n"
+            + "handler = run_expr\n",
             ("<dynamic-source-execution>",),
         ),
         (
-            "handler = eval\\n".replace("\\n", "\n"),
+            "handler = eval\n",
             ("<dynamic-source-execution>",),
         ),
         (
-            "from builtins import repr as safe_repr\\n".replace("\\n", "\n")
-            + "handler = safe_repr\\n".replace("\\n", "\n"),
+            "from builtins import repr as safe_repr\n"
+            + "handler = safe_repr\n",
             (),
         ),
     ],
