@@ -190,6 +190,34 @@ def test_create_task_rejects_empty_command(tmp_path: Path) -> None:
         backend.create_task({"command": "   "})
 
 
+@pytest.mark.parametrize("invalid", [None, False, 42, ["run"], {"x": "run"}])
+def test_create_task_rejects_nontext_command_without_persisting(
+    tmp_path: Path, invalid: object
+) -> None:
+    backend, queue, _store = build_backend(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="Команда має бути текстом"):
+            backend.create_task({"command": invalid})
+        assert queue.list_recent() == []
+    finally:
+        backend.close()
+
+
+class _ExplodingCommand:
+    def __str__(self) -> str:
+        raise AssertionError("untrusted command must never be coerced")
+
+
+def test_create_task_does_not_coerce_untrusted_command_object(tmp_path: Path) -> None:
+    backend, queue, _store = build_backend(tmp_path)
+    try:
+        with pytest.raises(ValueError, match="Команда має бути текстом"):
+            backend.create_task({"command": _ExplodingCommand()})
+        assert queue.list_recent() == []
+    finally:
+        backend.close()
+
+
 def test_create_task_runs_real_no_llm_runtime_and_persists_result(tmp_path: Path) -> None:
     backend, queue, _store = build_backend(tmp_path)
     result = backend.create_task({"command": "перевір локальний стан"})
@@ -370,3 +398,76 @@ def test_bridge_returns_read_only_desktop_snapshot(tmp_path: Path) -> None:
     response = bridge.get_state()
     assert response["ok"] is True
     assert response["state"]["agents"][0]["agent_id"] == "nika.default"
+
+
+def test_plan4_explicit_task_controls_select_by_id(tmp_path: Path) -> None:
+    """Selection follows canonical task identity, never list ordering or label text."""
+    backend, queue, _store = build_backend(tmp_path)
+    first_id = create_ready_task(queue, "first task")
+    second_id = create_ready_task(queue, "second task")
+    try:
+        assert backend.pause_task({"task_id": first_id}).status == "completed"
+        assert queue.get(first_id).state == TaskState.PAUSED
+        assert queue.get(second_id).state == TaskState.READY
+
+        assert backend.resume_task({"task_id": first_id}).status == "accepted"
+        wait_for_state(queue, first_id, TaskState.COMPLETED)
+        assert queue.get(second_id).state == TaskState.READY
+    finally:
+        backend.close()
+
+
+def test_plan4_explicit_stop_cancels_only_selected_live_task(tmp_path: Path) -> None:
+    runtime = MultiTaskBlockingRuntime()
+    backend, queue, _store = build_backend(tmp_path, runtime=runtime)
+    backend.create_task({"command": "selected live task"})
+    backend.create_task({"command": "other live task"})
+    assert runtime.wait_started(2)
+    by_command = {
+        str(record.payload["command"]): record for record in queue.list_recent(limit=10)
+    }
+    selected = by_command["selected live task"].task_id
+    other = by_command["other live task"].task_id
+    wait_for_state(queue, selected, TaskState.RUNNING)
+    wait_for_state(queue, other, TaskState.RUNNING)
+    try:
+        assert backend.stop_agent({"task_id": selected}).status == "accepted"
+        wait_for_state(queue, selected, TaskState.CANCELLED)
+        assert runtime.cancelled_ids() == frozenset({selected})
+        assert queue.get(other).state == TaskState.RUNNING
+    finally:
+        runtime.release.set()
+        wait_for_state(queue, other, TaskState.COMPLETED)
+        backend.close()
+
+
+@pytest.mark.parametrize("invalid_id", [None, False, 42, "", " ../other", "x" * 129])
+def test_plan4_malformed_explicit_task_id_has_no_control_effect(
+    tmp_path: Path, invalid_id: object
+) -> None:
+    backend, queue, _store = build_backend(tmp_path)
+    first_id = create_ready_task(queue, "preserve task")
+    try:
+        for control in (backend.pause_task, backend.resume_task, backend.stop_agent):
+            with pytest.raises(ValueError, match="коректний текстовий ідентифікатор"):
+                control({"task_id": invalid_id})
+            assert queue.get(first_id).state == TaskState.READY
+    finally:
+        backend.close()
+
+
+def test_plan4_unknown_and_terminal_explicit_target_fail_closed(tmp_path: Path) -> None:
+    backend, queue, _store = build_backend(tmp_path)
+    first_id = create_ready_task(queue, "preserve task")
+    completed_id = create_ready_task(queue, "already done")
+    queue.transition(completed_id, TaskState.RUNNING)
+    queue.transition(completed_id, TaskState.COMPLETED)
+    try:
+        with pytest.raises(ValueError, match="Вказане завдання не знайдено"):
+            backend.stop_agent({"task_id": "missing-task-id"})
+        with pytest.raises(ValueError, match="Немає активного завдання"):
+            backend.stop_agent({"task_id": completed_id})
+        assert queue.get(first_id).state == TaskState.READY
+        assert queue.get(completed_id).state == TaskState.COMPLETED
+    finally:
+        backend.close()

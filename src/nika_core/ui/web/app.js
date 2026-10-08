@@ -19,8 +19,12 @@
   const autostartStatus = document.getElementById("autostart-status");
   let autostartDirty = false;
   let autostartPending = false;
+  // Unknown OS write outcome must not be silently retried within this UI session.
+  let autostartUncertain = false;
   let autostartGeneration = 0;
   const tasksList = document.getElementById("tasks-list");
+  const taskTarget = document.getElementById("task-target");
+  let taskTargetSignature = null;
   const agentsList = document.getElementById("agents-list");
   const workspacesList = document.getElementById("workspaces-list");
   const tasksEmpty = document.getElementById("tasks-empty");
@@ -103,9 +107,17 @@
   });
   let actions = [];
   let actionsReady = false;
+  let keymapReadGeneration = 0;
+  // One outstanding durable task command per UI session: a second click must not mint a new request ID.
+  const taskMutationActions = new Set(["task.create", "task.pause", "task.resume", "agent.stop"]);
+  const inFlightActions = new Set();
+  let keymapMutationPending = false;
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
+  let stateReadGeneration = 0;
   let teamStateSignature = null;
+  let stateUnavailableReported = false;
+  const maxActivityItems = 200;
 
   function announce(message, assertive = false) {
     statusNode.setAttribute("aria-live", assertive ? "assertive" : "polite");
@@ -113,10 +125,14 @@
   }
 
   function appendLog(message) {
-    if (!message) return;
+    if (!message || activityLog.lastElementChild?.textContent === message) return;
     const item = document.createElement("li");
     item.textContent = message;
     activityLog.appendChild(item);
+    if (activityLog.childElementCount > maxActivityItems) {
+      activityLog.firstElementChild.remove();
+      activityLog.setAttribute("aria-label", "Журнал активності: останні 200 повідомлень");
+    }
   }
 
   function requestId() {
@@ -172,6 +188,35 @@
     }
   }
 
+  function renderTaskTargets(items) {
+    if (!taskTarget) return;
+    const targets = Array.isArray(items) ? items.filter(
+      (item) => item && typeof item.task_id === "string"
+        && item.task_id.length > 0
+        && item.workspace_id === "default"
+        && item.agent_id === "nika.default"
+    ).map((item) => ({
+      id: item.task_id,
+      label: `${typeof item.command === "string" ? item.command.slice(0, 120) : "Без назви"} — ${typeof item.state === "string" ? item.state : "невідомий стан"} — ${item.task_id}`,
+    })) : [];
+    const signature = JSON.stringify(targets);
+    if (taskTargetSignature === signature) return;
+    const previousId = taskTarget.value;
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Без явного вибору — тільки одне відповідне завдання";
+    const options = [placeholder];
+    for (const item of targets) {
+      const option = document.createElement("option");
+      option.value = item.id;
+      option.textContent = item.label;
+      options.push(option);
+    }
+    taskTarget.replaceChildren(...options);
+    if (targets.some((item) => item.id === previousId)) taskTarget.value = previousId;
+    taskTargetSignature = signature;
+  }
+
   function validProductProject(project) {
     if (!project || typeof project !== "object" || Array.isArray(project)) return false;
     const stringFields = ["title", "project_id", "goal", "state"];
@@ -197,6 +242,8 @@
   function reportStateUnavailable() {
     renderProductProjectUnavailable(productProjectUnavailableMessage);
     renderTeamTaskUnavailable();
+    if (stateUnavailableReported) return;
+    stateUnavailableReported = true;
     announce(productProjectUnavailableMessage, true);
     appendLog(productProjectUnavailableMessage);
   }
@@ -466,12 +513,16 @@
       && snapshot.can_change === ["enabled", "disabled", "stale"].includes(snapshot.state);
     const current = valid ? snapshot.state : "error";
     const canChange = valid && snapshot.can_change;
-    autostartInput.disabled = !canChange;
-    autostartSave.disabled = !canChange;
-    if (!canChange) autostartDirty = false;
+    autostartInput.disabled = !canChange || autostartUncertain;
+    autostartSave.disabled = !canChange || autostartUncertain;
+    // Transient OS-read errors must not erase an unsaved keyboard edit.
+    // Only an exact matching configure ACK can confirm and clear this intent.
     if (!autostartDirty) autostartInput.checked = current === "enabled";
     autostartStatus.textContent = messages[current]
-      + (autostartDirty ? " Позначку змінено, але ще не збережено." : "");
+      + (autostartDirty ? " Позначку змінено, але ще не збережено." : "")
+      + (autostartUncertain
+        ? " Результат попереднього запису непідтверджений. Повтор заблоковано до перезапуску вікна."
+        : "");
   }
 
   autostartInput?.addEventListener("change", () => {
@@ -482,6 +533,10 @@
   async function dispatchAutostart(actionId, trigger) {
     if (autostartPending) return;
     const save = actionId === "settings.autostart.configure";
+    if (save && autostartUncertain) {
+      announce("Запис автозапуску не підтверджено. Повтор заблоковано до перезапуску вікна.", true);
+      return;
+    }
     if (save && (!autostartInput || autostartInput.disabled)) return;
     const payload = save ? { enabled: autostartInput.checked } : {};
     autostartPending = true;
@@ -489,15 +544,35 @@
     autostartInput.disabled = true;
     autostartSave.disabled = true;
     try {
-      const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
-      if (!["completed", "failed", "rejected"].includes(result?.status)) throw new Error("Invalid acknowledgement");
+      const issuedRequestId = requestId();
+      const result = await globalThis.pywebview.api.dispatch({
+        request_id: issuedRequestId, action_id: actionId, payload,
+      });
+      if (!result || result.request_id !== issuedRequestId
+          || !["completed", "failed", "rejected"].includes(result.status)) {
+        throw new Error("Invalid autostart acknowledgement");
+      }
       const failed = result.status !== "completed";
-      if (!failed || !save) autostartDirty = false;
-      announce(result.message, failed);
-      appendLog(result.message);
+      // A backend failure can follow a committed OS registry write.
+      if (save && result.status === "failed") autostartUncertain = true;
+      // A read-only refresh cannot acknowledge or erase an unsaved OS-setting edit.
+      if (save && !failed) autostartDirty = false;
+      const message = typeof result.message === "string" && result.message
+        ? result.message : (failed ? "Не вдалося змінити автозапуск." : "Автозапуск оновлено.");
+      announce(message, failed);
+      appendLog(message);
+      if (save && autostartUncertain) {
+        announce("Можливий частковий запис автозапуску. Повтор заблоковано до перезапуску вікна.", true);
+      }
     } catch {
-      // The OS write may have completed before the bridge disconnected. No blind retry.
-      announce("Немає підтвердження зміни автозапуску. Перечитайте стан перед повтором.", true);
+      // The OS write may have completed before the bridge disconnected.
+      if (save) autostartUncertain = true;
+      announce(
+        save
+          ? "Немає достовірного підтвердження автозапуску. Повтор заблоковано до перезапуску вікна."
+          : "Немає підтвердження читання автозапуску. Перечитайте стан.",
+        true,
+      );
     } finally {
       autostartPending = false;
       autostartGeneration += 1;
@@ -535,6 +610,8 @@
   });
 
   async function refreshState({ announceTeamTransitions = true } = {}) {
+    // A stale poll must never overwrite a more recent task-control readback.
+    const readGeneration = ++stateReadGeneration;
     const autostartReadGeneration = autostartGeneration;
     if (!globalThis.pywebview?.api?.get_state) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
@@ -545,28 +622,86 @@
     try {
       response = await globalThis.pywebview.api.get_state();
     } catch {
+      if (readGeneration !== stateReadGeneration) return null;
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       reportStateUnavailable();
       return false;
     }
-    if (!response?.ok) {
+    if (readGeneration !== stateReadGeneration) return null;
+    if (response?.ok !== true || !response.state || typeof response.state !== "object"
+        || Array.isArray(response.state)) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       reportStateUnavailable();
       return false;
     }
-    const state = response.state || {};
+    const state = response.state;
+    // Stage all list projections before mutating task targeting or live regions.
+    // Malformed agent/workspace data must not partly commit a task readback.
+    const agentItems = state.agents ?? [];
+    const workspaceItems = state.workspaces ?? [];
+    if (!Array.isArray(agentItems) || !Array.isArray(workspaceItems)
+        || agentItems.length > 256 || workspaceItems.length > 256
+        || agentItems.some((item) => !item || typeof item !== "object"
+          || Array.isArray(item) || typeof item.name !== "string"
+          || !item.name.trim() || item.name.length > 160
+          || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.name)
+          || typeof item.goal !== "string" || item.goal.length > 1024
+          || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.goal))
+        || workspaceItems.some((item) => !item || typeof item !== "object"
+          || Array.isArray(item) || typeof item.name !== "string"
+          || !item.name.trim() || item.name.length > 160
+          || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.name)
+          || (item.description != null && (typeof item.description !== "string"
+            || item.description.length > 1024
+            || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.description))))
+        || !Array.isArray(state.tasks) || state.tasks.length > 256 || state.tasks.some(
+      (item) => !item || typeof item !== "object" || Array.isArray(item)
+        || typeof item.task_id !== "string" || !item.task_id.trim()
+        || item.task_id.length > 256
+        || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.task_id)
+        || (item.state != null && (typeof item.state !== "string"
+          || !item.state.trim() || item.state.length > 128
+          || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.state)))
+        || (item.command != null && (typeof item.command !== "string"
+          || item.command.length > 8192
+          || /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(item.command)))
+        // The desktop task projection is scoped to the canonical local
+        // workspace/agent. Never announce a foreign task from a bad bridge read.
+        || (item.workspace_id != null && item.workspace_id !== "default")
+        || (item.agent_id != null && item.agent_id !== "nika.default")
+    ) || (Array.isArray(state.tasks)
+      && new Set(state.tasks.map((item) => item.task_id)).size !== state.tasks.length)) {
+      if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
+      reportStateUnavailable();
+      return false;
+    }
+    // Do not publish a new task-control target if a sibling project/team
+    // projection is corrupt. The entire read is one operator-visible snapshot.
+    const projectView = state.product_project ?? null;
+    const teamView = state.v01_team_task ?? null;
+    const unavailableTeam = teamView && typeof teamView === "object"
+      && !Array.isArray(teamView) && teamView.available === false;
+    if ((projectView != null && !validProductProject(projectView))
+        || (teamView != null && !unavailableTeam && !validTeamTaskProjection(teamView))) {
+      if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
+      reportStateUnavailable();
+      return false;
+    }
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     renderSourceSetup(state.v01_sources ?? null);
-    renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}`);
-    renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
-    renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
-    const productReady = renderProductProject(state.product_project ?? null);
-    const teamRender = renderTeamTask(state.v01_team_task ?? null);
+    const taskItems = state.tasks;
+    renderItems(tasksList, tasksEmpty, taskItems, (item) => `${item.command || "Без назви"} — ${item.state}`);
+    renderTaskTargets(taskItems);
+    renderItems(agentsList, agentsEmpty, agentItems, (item) => `${item.name} — ${item.goal}`);
+    renderItems(workspacesList, workspacesEmpty, workspaceItems, (item) => `${item.name} — ${item.description || "Без опису"}`);
+    const productReady = renderProductProject(projectView);
+    const teamRender = renderTeamTask(teamView);
     if (!teamRender.ok) {
       announce(teamTaskUnavailableMessage, true);
       return false;
     }
     if (!productReady) return false;
+    stateUnavailableReported = false;
     if (announceTeamTransitions && teamRender.changed) {
       announce("Стан командного завдання оновлено.");
     }
@@ -582,32 +717,234 @@
       await dispatchAutostart(actionId, trigger);
       return;
     }
-    const payload = {};
-    if (actionId === "task.create") payload.command = commandInput.value.trim();
-    if (actionId === "team.sources.configure") {
-      payload.revision = sourceRevision;
-      for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
+    // Group task controls: pause/resume/stop must not race an unacknowledged task creation.
+    const durableMutation = taskMutationActions.has(actionId) || actionId === "team.sources.configure";
+    const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
+    if (inFlightActions.has(lockKey)) {
+      announce("Попередню команду ще обробляють. Дочекайтеся підтвердження.", false);
+      return;
     }
-    const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
-    const failed = result.status === "failed" || result.status === "rejected";
-    if (actionId === "team.sources.configure" && result.status === "completed") sourceDirty = false;
-    announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
-    appendLog(result.message);
-    const stateReady = await refreshState();
-    document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
-    const focusId = result.focus_id || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
-    if (focusId) focusElementById(focusId);
-    else trigger?.focus?.();
+    inFlightActions.add(lockKey);
+    let keepLocked = false;
+    const reconcileUncertain = async (message) => {
+      announce(message, true);
+      appendLog(message);
+      let stateReady = false;
+      try {
+        stateReady = await refreshState();
+      } catch {
+        reportStateUnavailable();
+      }
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (durableMutation) keepLocked = true;
+      if (stateReady) {
+        const reconciled = durableMutation
+          ? "Стан перечитано після непідтвердженої дії. Повтор заблоковано до перезапуску вікна; перевірте результат."
+          : "Стан перечитано після непідтвердженої дії. Перевірте результат перед повтором.";
+        announce(reconciled, true);
+        appendLog(reconciled);
+      } else {
+        keepLocked = true;
+        announce(
+          "Немає безпечного підтвердження поточного стану. Повтор цієї дії заблоковано до перезапуску вікна.",
+          true,
+        );
+      }
+      trigger?.focus?.();
+    };
+    try {
+      const payload = {};
+      if (actionId === "task.create") payload.command = commandInput.value.trim();
+      if (["task.pause", "task.resume", "agent.stop"].includes(actionId) && taskTarget?.value) {
+        payload.task_id = taskTarget.value;
+      }
+      if (actionId === "team.sources.configure") {
+        payload.revision = sourceRevision;
+        for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
+      }
+      // Bind the acknowledgement to this exact user-issued request. A stale
+      // or misrouted success cannot confirm an unrelated durable task effect.
+      const issuedRequestId = requestId();
+      let result;
+      try {
+        result = await globalThis.pywebview.api.dispatch({
+          request_id: issuedRequestId, action_id: actionId, payload,
+        });
+      } catch {
+        // The durable effect may have committed before the bridge disconnected. Never retry blindly.
+        await reconcileUncertain(
+          "Немає підтвердження виконання дії. Стан буде перечитано перед можливим повтором.",
+        );
+        return;
+      }
+      if (!result || result.request_id !== issuedRequestId
+          || !["accepted", "completed", "failed", "rejected"].includes(result.status)) {
+        await reconcileUncertain(
+          "Міст повернув непідтверджений результат. Стан буде перечитано перед можливим повтором.",
+        );
+        return;
+      }
+      const failed = ["failed", "rejected"].includes(result.status);
+      // A backend "failed" response may follow a committed durable effect.
+      // Unlike an input rejection, it is not proof that retry is harmless.
+      const uncertainBackendFailure = durableMutation && result.status === "failed";
+      if (uncertainBackendFailure) keepLocked = true;
+      const message = typeof result.message === "string" && result.message
+        ? result.message
+        : (failed
+          ? "Дію відхилено."
+          : (result.status === "accepted" ? "Дію прийнято до виконання." : "Виконано."));
+      if (actionId === "team.sources.configure" && result.status === "completed") {
+        sourceDirty = false;
+      }
+      announce(message, failed);
+      appendLog(message);
+      let stateReady = false;
+      try {
+        stateReady = await refreshState();
+      } catch {
+        reportStateUnavailable();
+      }
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (uncertainBackendFailure) {
+        const caution = "Невідомо, чи дія частково виконана до помилки. "
+          + "Перевірте список завдань; повтор заблоковано до перезапуску вікна.";
+        announce(caution, true);
+        appendLog(caution);
+      }
+      if (!stateReady) {
+        if (!failed && durableMutation) keepLocked = true;
+        announce(
+          failed
+            ? "Не вдалося оновити стан після відхиленої дії. Причина є в журналі."
+            : (result.status === "accepted"
+              ? (durableMutation
+                ? "Дію прийнято, але оновлений стан недоступний. Повтор заблоковано до перезапуску вікна."
+                : "Дію прийнято, але оновлений стан недоступний. Не повторюйте її без перевірки.")
+              : (durableMutation
+                ? "Дію підтверджено, але оновлений стан недоступний. Повтор заблоковано до перезапуску вікна."
+                : "Дію підтверджено, але оновлений стан недоступний. Перечитайте стан.")),
+          true,
+        );
+      }
+      const focusId = result.focus_id
+        || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
+      if (focusId) focusElementById(focusId);
+      else trigger?.focus?.();
+    } finally {
+      if (!keepLocked) inFlightActions.delete(lockKey);
+    }
+  }
+
+  async function mutateKeymap(operation, focusId = null, failureTarget = null) {
+    if (keymapMutationPending) {
+      announce("Зміна карти клавіш ще виконується. Дочекайтеся підтвердження.", false);
+      return;
+    }
+    keymapMutationPending = true;
+    let keepPending = false;
+    const reconcileUncertainKeymap = async (message) => {
+      announce(message, true);
+      appendLog(message);
+      let keymapReady = false;
+      try {
+        keymapReady = await refreshKeymap();
+      } catch {
+        keymapReady = false;
+      }
+      if (keymapReady) {
+        const reconciled = "Карту клавіш перечитано після непідтвердженої зміни. Перевірте її перед повтором.";
+        announce(reconciled, true);
+        appendLog(reconciled);
+      } else {
+        actionsReady = false;
+        keepPending = true;
+        announce(
+          "Немає безпечного підтвердження карти клавіш. Повтор змін заблоковано до перезапуску вікна.",
+          true,
+        );
+      }
+      failureTarget?.focus?.();
+    };
+    try {
+      let response;
+      try {
+        response = await operation();
+      } catch {
+        await reconcileUncertainKeymap(
+          "Немає підтвердження зміни клавіш. Карта буде перечитана перед можливим повтором.",
+        );
+        return;
+      }
+      if (!response || typeof response.ok !== "boolean") {
+        await reconcileUncertainKeymap(
+          "Міст повернув непідтверджену зміну клавіш. Карта буде перечитана перед можливим повтором.",
+        );
+        return;
+      }
+      const message = typeof response.message === "string" && response.message
+        ? response.message : (response.ok ? "Зміни збережено." : "Зміну відхилено.");
+      announce(message, !response.ok);
+      appendLog(message);
+      if (!response.ok) {
+        failureTarget?.focus?.();
+        return;
+      }
+      try {
+        if (!await refreshKeymap()) throw new Error("keymap unavailable");
+      } catch {
+        actionsReady = false;
+        keepPending = true;
+        announce(
+          "Зміну підтверджено, але карту клавіш не вдалося перечитати. Повтор змін заблоковано до перезапуску вікна.",
+          true,
+        );
+        failureTarget?.focus?.();
+        return;
+      }
+      if (focusId) focusElementById(focusId);
+    } finally {
+      if (!keepPending) keymapMutationPending = false;
+    }
   }
 
   async function refreshKeymap() {
+    const readGeneration = ++keymapReadGeneration;
     if (!globalThis.pywebview?.api?.list_actions) {
       actionsReady = false;
       return false;
     }
-    actions = await globalThis.pywebview.api.list_actions();
-    keymapBody.replaceChildren();
-    for (const action of actions) {
+    // Validate and stage the complete registry projection before touching the
+    // active keyboard editor. A malformed refresh must not partially erase it.
+    let nextActions;
+    try {
+      nextActions = await globalThis.pywebview.api.list_actions();
+    } catch (error) {
+      if (readGeneration !== keymapReadGeneration) return null;
+      actionsReady = false;
+      throw error;
+    }
+    // A stale read must never replace newer verified keyboard controls.
+    if (readGeneration !== keymapReadGeneration) return null;
+    if (!Array.isArray(nextActions) || nextActions.length > 512
+        || nextActions.some((action) => !action || typeof action !== "object"
+          || Array.isArray(action)
+          || typeof action.action_id !== "string"
+          || !/^[A-Za-z0-9_.:-]{1,120}$/.test(action.action_id)
+          || typeof action.label !== "string" || !action.label || action.label.length > 256
+          // UI labels/shortcuts must not contain invisible direction overrides
+          // or control characters that spoof the NVDA keyboard inventory.
+          || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(action.label)
+          || (action.binding != null && (typeof action.binding !== "string"
+            || action.binding.length > 256
+            || /[\u0000-\u001F\u007F-\u009F\u2028-\u202E\u2066-\u2069]/.test(action.binding)))
+          || typeof action.may_be_unbound !== "boolean")
+        || new Set(nextActions.map((action) => action.action_id)).size !== nextActions.length) {
+      actionsReady = false;
+      throw new Error("Invalid action inventory");
+    }
+    const nextRows = [];
+    for (const action of nextActions) {
       const accessibleActionLabel = keymapAccessibleActionLabel(action);
       const row = document.createElement("tr");
       const labelCell = document.createElement("th");
@@ -634,12 +971,11 @@
           : `Зберегти комбінацію для ${accessibleActionLabel}`,
       );
       save.addEventListener("click", async () => {
-        const response = await globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null);
-        announce(response.message, !response.ok);
-        if (response.ok) {
-          await refreshKeymap();
-          focusElementById(saveFocusId);
-        } else input.focus();
+        await mutateKeymap(
+          () => globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null),
+          saveFocusId,
+          input,
+        );
       });
       const restore = document.createElement("button");
       const restoreFocusId = keymapControlId(action.action_id, "restore");
@@ -651,17 +987,18 @@
         `Відновити комбінацію за замовчуванням для ${accessibleActionLabel}`,
       );
       restore.addEventListener("click", async () => {
-        const response = await globalThis.pywebview.api.restore_default(action.action_id);
-        announce(response.message, !response.ok);
-        if (response.ok) {
-          await refreshKeymap();
-          focusElementById(restoreFocusId);
-        }
+        await mutateKeymap(
+          () => globalThis.pywebview.api.restore_default(action.action_id),
+          restoreFocusId,
+          restore,
+        );
       });
       controlCell.append(save, document.createTextNode(" "), restore);
       row.append(labelCell, bindingCell, controlCell);
-      keymapBody.appendChild(row);
+      nextRows.push(row);
     }
+    keymapBody.replaceChildren(...nextRows);
+    actions = nextActions;
     actionsReady = true;
     return true;
   }
@@ -669,9 +1006,12 @@
   function startStatePolling() {
     if (statePollHandle !== null || typeof window.setInterval !== "function") return;
     statePollHandle = window.setInterval(async () => {
-      if (document.hidden) return;
+      // A durable command's post-acknowledgement reconciliation takes priority.
+      if (document.hidden || inFlightActions.size > 0) return;
       const ready = await refreshState();
-      document.documentElement.dataset.nikaReady = ready ? "true" : "false";
+      if (ready !== null) {
+        document.documentElement.dataset.nikaReady = ready ? "true" : "false";
+      }
     }, 1500);
   }
 
@@ -708,23 +1048,40 @@
   }
 
   document.getElementById("keymap-export").addEventListener("click", async () => {
-    const response = await globalThis.pywebview.api.export_keymap();
-    announce(response.message, !response.ok);
-    if (response.ok) {
-      keymapJson.value = response.data;
-      keymapJson.focus();
+    if (keymapMutationPending) {
+      announce("Дочекайтеся збереження карти клавіш перед експортом.");
+      return;
+    }
+    try {
+      const response = await globalThis.pywebview.api.export_keymap();
+      if (!response || typeof response.ok !== "boolean"
+          || (response.ok && typeof response.data !== "string")) {
+        throw new Error("invalid keymap export acknowledgement");
+      }
+      const message = typeof response.message === "string" && response.message
+        ? response.message : (response.ok ? "Карту експортовано." : "Не вдалося експортувати карту.");
+      announce(message, !response.ok);
+      if (response.ok) {
+        keymapJson.value = response.data;
+        keymapJson.focus();
+      }
+    } catch {
+      announce("Не вдалося підтвердити експорт карти клавіш. Повторіть після перевірки мосту.", true);
     }
   });
 
   document.getElementById("keymap-import").addEventListener("click", async () => {
-    const response = await globalThis.pywebview.api.import_keymap(keymapJson.value);
-    announce(response.message, !response.ok);
-    if (response.ok) await refreshKeymap();
-    else keymapJson.focus();
+    await mutateKeymap(
+      () => globalThis.pywebview.api.import_keymap(keymapJson.value),
+      null,
+      keymapJson,
+    );
   });
 
   document.addEventListener("click", (event) => {
-    const trigger = event.target.closest?.("[data-action-id]");
+    // Only semantic command buttons dispatch actions. Keymap editor inputs
+    // also carry action IDs for editing, but must never execute an action.
+    const trigger = event.target.closest?.("button[data-action-id]");
     if (!trigger) return;
     void dispatch(trigger.dataset.actionId, trigger);
   });

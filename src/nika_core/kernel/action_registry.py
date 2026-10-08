@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from unicodedata import category
 
 from nika_core.data.sqlite import SQLiteStore
 
@@ -174,6 +175,18 @@ class Keymap:
 def _clean_binding(binding: str | None) -> str | None:
     if binding is None:
         return None
+    # This is the canonical persistence gate for WebView input, imported keymaps
+    # and direct Python callers. Never save a shortcut that corrupts the NVDA
+    # action list on readback. Preserve ordinary printable Unicode keys.
+    if type(binding) is not str or len(binding) > 256:
+        raise ValueError("shortcut must be bounded plain text")
+    try:
+        if len(binding.encode("utf-8")) > 256:
+            raise ValueError("shortcut exceeds the byte limit")
+    except UnicodeEncodeError:
+        raise ValueError("shortcut contains invalid Unicode") from None
+    if any(category(char) in {"Cc", "Cf", "Cs"} for char in binding):
+        raise ValueError("shortcut contains unsafe control or direction text")
     cleaned = "+".join(part.strip() for part in binding.split("+") if part.strip())
     return cleaned or None
 
