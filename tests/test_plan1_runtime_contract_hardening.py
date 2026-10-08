@@ -173,3 +173,40 @@ def test_resume_probe_rejects_hostile_checkpoint_identity_even_if_ready() -> Non
     )
     assert valid.can_resume is True
 
+
+
+@pytest.mark.parametrize("budget", [10_001, 10**80])
+def test_new_run_rejects_excessive_step_budget(budget: int) -> None:
+    with pytest.raises(ValueError, match="max_steps must be between"):
+        RuntimeRequest("task", "thread", max_steps=budget)
+
+
+@pytest.mark.parametrize("budget", [10_001, 10**80])
+def test_resume_rejects_excessive_step_budget(budget: int) -> None:
+    with pytest.raises(ValueError, match="max_steps must be between"):
+        RuntimeResumeRequest("task", "thread", "checkpoint", max_steps=budget)
+
+
+@pytest.mark.parametrize("budget", [86_400.001, 100_000, 10**80])
+def test_new_run_rejects_excessive_time_budget(budget: float | int) -> None:
+    with pytest.raises(ValueError, match="timeout_seconds must not exceed"):
+        RuntimeRequest("task", "thread", timeout_seconds=budget)
+
+
+@pytest.mark.parametrize("budget", [86_400.001, 100_000, 10**80])
+def test_resume_rejects_excessive_time_budget(budget: float | int) -> None:
+    with pytest.raises(ValueError, match="timeout_seconds must not exceed"):
+        RuntimeResumeRequest("task", "thread", "checkpoint", timeout_seconds=budget)
+
+
+def test_runtime_budgets_accept_documented_ceiling_and_near_boundary() -> None:
+    new = RuntimeRequest(
+        "task", "thread", max_steps=10_000, timeout_seconds=86_400
+    )
+    resume = RuntimeResumeRequest(
+        "task", "thread", "checkpoint", max_steps=9_999, timeout_seconds=86_399.5
+    )
+    assert new.max_steps == 10_000
+    assert new.timeout_seconds == 86_400
+    assert resume.max_steps == 9_999
+    assert resume.timeout_seconds == 86_399.5

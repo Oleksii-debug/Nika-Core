@@ -57,6 +57,8 @@ class RuntimeUnsupportedError(RuntimeError):
     pass
 
 
+MAX_RUNTIME_STEPS = 10_000
+MAX_RUNTIME_TIMEOUT_SECONDS = 86_400
 MAX_RUNTIME_ID_UTF8_BYTES = 512
 MAX_RUNTIME_PROBE_REASON_UTF8_BYTES = 2048
 MAX_RUNTIME_RESULT_ERROR_UTF8_BYTES = 4096
@@ -131,8 +133,8 @@ def _validate_limits(max_steps: int, timeout_seconds: float | None) -> None:
     """Reject malformed budgets before they reach provider/runtime effects."""
     if type(max_steps) is not int:
         raise TypeError("max_steps must be a plain integer, not bool or float")
-    if max_steps < 1:
-        raise ValueError("max_steps must be positive")
+    if not 1 <= max_steps <= MAX_RUNTIME_STEPS:
+        raise ValueError(f"max_steps must be between 1 and {MAX_RUNTIME_STEPS}")
     if timeout_seconds is not None:
         if type(timeout_seconds) not in (int, float):
             raise TypeError("timeout_seconds must be a plain number when provided")
@@ -142,6 +144,10 @@ def _validate_limits(max_steps: int, timeout_seconds: float | None) -> None:
             finite = False
         if not finite or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and positive when provided")
+        if timeout_seconds > MAX_RUNTIME_TIMEOUT_SECONDS:
+            raise ValueError(
+                f"timeout_seconds must not exceed {MAX_RUNTIME_TIMEOUT_SECONDS}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
