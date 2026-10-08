@@ -227,3 +227,27 @@ must independently enforce real tenant membership and entitlements. The
 regression covers syntactically corrupt foreign JSON, body parity with missing
 tasks, legitimate local failure, correction and canonical SQLite reopen. No
 claim of hosted multi-tenant qualification or terminal DONE follows.
+
+
+## Web task inspection response admission (Plan 6 §2, component only)
+
+The read-only accessible browser shell keeps the server as the only source of
+tenant/workspace/entitlement authority. It now binds every successful
+`task.inspect` response to the request's freshly generated ID, in addition
+to the exact task ID and bounded Core state code. A stale/cross-request
+response must never be rendered as a fresh task state.
+
+The browser now admits JSON UTF-8 response media types only and incrementally
+reads the response stream with an 80-KiB ceiling. An oversized Content-Length
+or streamed body, invalid UTF-8, absent streaming API, malformed JSON, or
+unexpected content type fails closed to a bounded textual status; the browser
+does not silently retry or trust response metadata as authorization. These
+are client-side resource/error guards, not a replacement for the server's
+canonical 80-KiB `HttpCommandAdapter` cap, its idempotency policy, origin/host
+checks, and server-owned authentication.
+
+Automated Node-backed tests exercise actual packaged JavaScript with a fake
+DOM and fragmented/trusted response contract (including mismatch and oversized
+responses); these are **not** physical browser/screen-reader, Cloud hosting,
+multi-tenant commercial account, or load qualification. CI and integration
+remain required before terminal Section 2 DONE.
