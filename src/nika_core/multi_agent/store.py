@@ -497,6 +497,8 @@ class MultiAgentStore:
         state: MemberState,
         resume_token: str | None = None,
     ) -> None:
+        if state not in _NONTERMINAL_MEMBER_STATES or state is MemberState.SPAWNED:
+            raise ValueError("direct member updates require an in-flight state")
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
             # Serialize with TeamCancellationJournal.begin(): once cancellation commits,
@@ -513,8 +515,8 @@ class MultiAgentStore:
             member = self._member_row(conn, team_id=team_id, member_id=member_id)
             if member is None:
                 raise KeyError(f"unknown team member: {team_id}/{member_id}")
-            if member["state"] == MemberState.CANCELLED.value:
-                raise RuntimeError("cancelled member state is terminal")
+            if member["state"] in {value.value for value in _TERMINAL_MEMBER_STATES}:
+                raise RuntimeError("terminal member state cannot be changed")
             conn.execute(
                 "UPDATE multi_agent_members SET state = ?, resume_token = ?, updated_at = ? "
                 "WHERE team_id = ? AND member_id = ?",
