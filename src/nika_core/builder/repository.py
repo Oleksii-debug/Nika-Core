@@ -4,10 +4,41 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from nika_core.builder.compiler import CompilationResult
+from nika_core.builder.compiler import CompilationResult, RiskTier
 from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
+
+
+def _expected_risk_evidence(definition: AgentDefinition) -> tuple[int, tuple[str, ...]]:
+    highest = max((grant.max_risk for grant in definition.tool_grants), default=0)
+    approvals = tuple(
+        sorted(
+            grant.tool_id
+            for grant in definition.tool_grants
+            if grant.max_risk == RiskTier.R4_HIGH_IMPACT
+        )
+    )
+    return highest, approvals
+
+
+def _validate_persisted_risk_evidence(
+    definition: AgentDefinition, *, highest_risk: object, approvals_json: object
+) -> tuple[str, ...]:
+    try:
+        approvals = json.loads(approvals_json)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("persisted agent risk/approval evidence is invalid") from exc
+    expected_risk, expected_approvals = _expected_risk_evidence(definition)
+    if (
+        type(highest_risk) is not int
+        or highest_risk != expected_risk
+        or type(approvals) is not list
+        or any(type(item) is not str for item in approvals)
+        or tuple(approvals) != expected_approvals
+    ):
+        raise ValueError("persisted agent risk/approval evidence is inconsistent")
+    return expected_approvals
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,15 +67,33 @@ class AgentDefinitionRepository:
         return int(row["version"] or 0) + 1
 
     def save_draft(self, compilation: CompilationResult) -> None:
-        definition = compilation.definition
+        # A frozen CompilationResult is not an authority boundary: callers may construct
+        # or mutate it after compilation. Fail closed before persisting risk/approval
+        # metadata that activation later treats as durable authorization evidence.
+        definition = AgentDefinition.model_validate(
+            compilation.definition.model_dump(mode="python")
+        )
+        highest, approvals = _expected_risk_evidence(definition)
+        if (
+            not isinstance(compilation.highest_risk, RiskTier)
+            or compilation.highest_risk.value != highest
+            or compilation.required_human_approvals != approvals
+        ):
+            raise ValueError("compiled agent risk/approval evidence is inconsistent")
         now = datetime.now(UTC).isoformat()
         payload = definition.model_dump_json()
+        # Durable drafts must pass the same bounded, unambiguous JSON ingress as
+        # restart/activation; otherwise save succeeds but no readback is possible.
+        AgentDefinition.import_json(payload)
         approvals_json = json.dumps(
             compilation.required_human_approvals,
             ensure_ascii=False,
             separators=(",", ":"),
         )
         with self._store.connection() as conn:
+            # Serialize version admission before inspecting the latest durable version.
+            # A concurrent caller must see the committed winner, not race the INSERT.
+            conn.execute("BEGIN IMMEDIATE")
             latest = conn.execute(
                 "SELECT MAX(version) AS version FROM agent_definitions WHERE agent_id = ?",
                 (definition.agent_id,),
@@ -91,17 +140,25 @@ class AgentDefinitionRepository:
             raise ValueError("disabled agent definition cannot be activated")
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
+            # Serialize activation/retirement across processes and SQLite connections.
+            # Verification, approval admission and the active-version swap are atomic.
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT definition_json, required_approvals_json, status FROM agent_definitions "
+                "SELECT definition_json, required_approvals_json, highest_risk, status "
+                "FROM agent_definitions "
                 "WHERE agent_id = ? AND version = ?",
                 (definition.agent_id, definition.version),
             ).fetchone()
             if row is None:
                 raise KeyError("agent definition draft does not exist")
-            persisted = AgentDefinition.model_validate_json(row["definition_json"])
+            persisted = AgentDefinition.import_json(row["definition_json"])
             if persisted != definition:
                 raise ValueError("activation definition differs from persisted immutable draft")
-            required = tuple(str(item) for item in json.loads(row["required_approvals_json"]))
+            required = _validate_persisted_risk_evidence(
+                persisted,
+                highest_risk=row["highest_risk"],
+                approvals_json=row["required_approvals_json"],
+            )
             missing = sorted(set(required) - set(approved_tool_ids))
             if missing:
                 raise PermissionError(
@@ -170,10 +227,14 @@ class AgentDefinitionRepository:
 
     @staticmethod
     def _decode(row) -> StoredAgentDefinition:
-        payload = json.loads(row["definition_json"])
-        required = tuple(str(item) for item in json.loads(row["required_approvals_json"]))
+        payload = AgentDefinition.import_json(row["definition_json"])
+        required = _validate_persisted_risk_evidence(
+            payload,
+            highest_risk=row["highest_risk"],
+            approvals_json=row["required_approvals_json"],
+        )
         return StoredAgentDefinition(
-            definition=AgentDefinition.model_validate(payload),
+            definition=payload,
             status=str(row["status"]),
             required_human_approvals=required,
             highest_risk=int(row["highest_risk"]),
