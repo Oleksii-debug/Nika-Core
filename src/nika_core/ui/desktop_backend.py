@@ -133,7 +133,9 @@ class DesktopBackend:
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
-            message=f"Завдання прийнято до виконання: {command}",
+            # Never mirror an arbitrary user command (possibly containing secrets)
+            # into the screen-reader live status/activity transcript.
+            message="Завдання прийнято до виконання.",
             focus_id="tasks-heading",
         )
 
@@ -282,12 +284,20 @@ class DesktopBackend:
                 "ORDER BY updated_at DESC, created_at DESC LIMIT 50",
                 (_DEFAULT_WORKSPACE_ID, _DEFAULT_AGENT_ID),
             ).fetchall()
-        records = (self._queue.get(row["task_id"]) for row in rows)
-        return tuple(
-            record for record in records
-            if record.workspace_id == _DEFAULT_WORKSPACE_ID
-            and record.agent_id == _DEFAULT_AGENT_ID
-        )
+        records: list[TaskRecord] = []
+        for row in rows:
+            try:
+                record = self._queue.get(row["task_id"])
+            except KeyError:
+                # A task can vanish after the scoped SQL query. Keep the rest of
+                # the authorized view available instead of failing the whole UI.
+                continue
+            if (
+                record.workspace_id == _DEFAULT_WORKSPACE_ID
+                and record.agent_id == _DEFAULT_AGENT_ID
+            ):
+                records.append(record)
+        return tuple(records)
 
     def snapshot(self) -> dict[str, Any]:
         return {
@@ -515,7 +525,11 @@ class DesktopBackend:
     ) -> TaskRecord | None:
         if payload is not None and "task_id" in payload:
             selected = self._selected_task(payload)
-            return selected if selected is not None and selected.state not in _TERMINAL_STATES else None
+            return (
+                selected
+                if selected is not None and selected.state not in _TERMINAL_STATES
+                else None
+            )
         return self._unqualified_task(
             states=tuple(state for state in TaskState if state not in _TERMINAL_STATES),
             action=action,
@@ -555,7 +569,15 @@ class DesktopBackend:
             )
         if not rows:
             return None
-        record = self._queue.get(rows[0]["task_id"])
+        try:
+            record = self._queue.get(rows[0]["task_id"])
+        except KeyError:
+            # Another owner can remove the selected row between the scoped
+            # SQL read and TaskQueue readback. Never echo a stale task ID or
+            # accidentally route an unqualified control to another task.
+            raise ValueError(
+                "Стан завдання змінився; оновіть список і повторіть дію."
+            ) from None
         if (
             record.workspace_id != _DEFAULT_WORKSPACE_ID
             or record.agent_id != _DEFAULT_AGENT_ID

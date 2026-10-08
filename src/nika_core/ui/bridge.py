@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from typing import Any
+from unicodedata import category
 
 from pydantic import ValidationError
 
@@ -88,7 +89,7 @@ class UIActionBridge:
             return UIResult(
                 request_id=command.request_id,
                 status="rejected",
-                message=str(exc),
+                message=self._safe_input_error_message(exc),
             ).model_dump()
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             # This is the final pywebview boundary. Keep unexpected backend failures inside
@@ -105,6 +106,11 @@ class UIActionBridge:
             ).model_dump()
 
         if isinstance(outcome, UIResult):
+            if (
+                not self._safe_accessible_status(outcome.message)
+                or not self._safe_focus_target(outcome.focus_id)
+            ):
+                return self._unsafe_handler_status(command.action_id, command.request_id)
             if outcome.request_id != command.request_id:
                 return UIResult(
                     request_id=command.request_id,
@@ -128,10 +134,46 @@ class UIActionBridge:
                 status="failed",
                 message="Не вдалося виконати дію через внутрішню помилку.",
             ).model_dump()
+        if not self._safe_accessible_status(message):
+            return self._unsafe_handler_status(command.action_id, command.request_id)
         return UIResult(
             request_id=command.request_id,
             status="completed",
             message=message,
+        ).model_dump()
+
+    @staticmethod
+    def _safe_accessible_status(message: object) -> bool:
+        """Keep returned action text bounded and single-line for NVDA/status logs."""
+        if type(message) is not str:
+            return False
+        try:
+            if len(message.encode("utf-8")) > 2048:
+                return False
+        except UnicodeEncodeError:
+            return False
+        return not any(category(char) in {"Cc", "Cf", "Cs"} for char in message)
+
+    @staticmethod
+    def _safe_focus_target(focus_id: object) -> bool:
+        if focus_id is None:
+            return True
+        return (
+            type(focus_id) is str
+            and 1 <= len(focus_id) <= 120
+            and all(
+                char.isascii() and (char.isalnum() or char in "-_.:")
+                for char in focus_id
+            )
+        )
+
+    @staticmethod
+    def _unsafe_handler_status(action_id: str, request_id: str) -> dict[str, Any]:
+        logger.error("UI action returned unsafe status: action_id=%s", action_id)
+        return UIResult(
+            request_id=request_id,
+            status="failed",
+            message="Не вдалося виконати дію через некоректний текст стану.",
         ).model_dump()
 
     @staticmethod
@@ -198,19 +240,25 @@ class UIActionBridge:
             ) from None
 
     def set_binding(self, action_id: str, binding: str | None) -> dict[str, Any]:
+        # These methods are directly callable by pywebview. Do not invoke
+        # behavioral str subclasses from a hostile in-process caller.
+        if type(action_id) is not str or (binding is not None and type(binding) is not str):
+            return {"ok": False, "message": "Action and shortcut must be plain text."}
         try:
             self._keymap.set_binding(action_id, binding)
         except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
+            return {"ok": False, "message": self._safe_input_error_message(exc)}
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             return self._unexpected_keymap_failure("set_binding", exc)
         return {"ok": True, "message": "Shortcut saved."}
 
     def restore_default(self, action_id: str) -> dict[str, Any]:
+        if type(action_id) is not str:
+            return {"ok": False, "message": "Action ID must be plain text."}
         try:
             self._keymap.restore_default(action_id)
         except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
+            return {"ok": False, "message": self._safe_input_error_message(exc)}
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             return self._unexpected_keymap_failure("restore_default", exc)
         return {"ok": True, "message": "Default shortcut restored."}
@@ -223,15 +271,37 @@ class UIActionBridge:
         return {"ok": True, "data": data, "message": "Shortcut map exported."}
 
     def import_keymap(self, data: str) -> dict[str, Any]:
-        if not isinstance(data, str):
+        if type(data) is not str:
             return {"ok": False, "message": "Shortcut map must be JSON text."}
         try:
             self._keymap.import_json(data)
         except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
+            return {"ok": False, "message": self._safe_input_error_message(exc)}
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             return self._unexpected_keymap_failure("import_keymap", exc)
         return {"ok": True, "message": "Shortcut map imported."}
+
+    @staticmethod
+    def _safe_input_error_message(exc: Exception) -> str:
+        """Project only bounded plain-text admission errors to assistive status.
+
+        A built-in ValueError can still carry an object in args whose __str__
+        invokes provider code or exposes secrets. Never stringify that object.
+        """
+        fallback = "Некоректний запит або стан операції."
+        if type(exc) not in (KeyError, TypeError, ValueError):
+            return fallback
+        if len(exc.args) != 1 or type(exc.args[0]) is not str:
+            return fallback
+        message = exc.args[0]
+        try:
+            if not message or len(message.encode("utf-8")) > 2048:
+                return fallback
+        except UnicodeEncodeError:
+            return fallback
+        if any(category(char) in {"Cc", "Cf", "Cs"} for char in message):
+            return fallback
+        return message
 
     @staticmethod
     def _unexpected_keymap_failure(operation: str, exc: Exception) -> dict[str, Any]:
