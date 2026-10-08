@@ -68,7 +68,8 @@ async function run(source) {
   console.log("PASS: failed refresh retains previously rendered keymap controls");
 
   // Invisible bidi overrides and line breaks can spoof the NVDA action inventory.
-  for (const unsafe of ["Створити\nзавдання", "Створити\u202Eзавдання"]) {
+  for (const unsafe of ["Створити\nзавдання", "Створити\u202Eзавдання",
+    "Створити\u2028завдання", "Створити\u2029завдання"]) {
     inventory.push([{...good, label: unsafe}]);
     await assert.rejects(ui.refreshKeymap());
     assert.equal(replacements, 1);
@@ -77,7 +78,12 @@ async function run(source) {
   inventory.push([{...good, binding: "ctrl+n\u202E"}]);
   await assert.rejects(ui.refreshKeymap());
   assert.equal(replacements, 1);
-  console.log("PASS: control and bidi text cannot spoof the NVDA keymap");
+  for (const character of ["\u2028", "\u2029"]) {
+    inventory.push([{...good, binding: "ctrl+n" + character}]);
+    await assert.rejects(ui.refreshKeymap());
+    assert.equal(replacements, 1);
+  }
+  console.log("PASS: control, bidi and Unicode line separators cannot spoof the NVDA keymap");
   inventory.push([good]);
   assert.equal(await ui.refreshKeymap(), true, "safe inventory must recover");
   assert.equal(replacements, 2);
