@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import StrEnum
 from math import isfinite
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 from uuid import uuid4
 
 from nika_core.builder.spec import ToolGrant
@@ -33,6 +33,29 @@ class HandoffKind(StrEnum):
     ERROR = "error"
 
 
+class CancellationOperationState(StrEnum):
+    CANCELLING = "cancelling"
+    RECONCILE_REQUIRED = "reconcile_required"
+    COMPLETED = "completed"
+
+
+class CancellationEffectState(StrEnum):
+    PLANNED = "planned"
+    DISPATCHING = "dispatching"
+    CONFIRMED = "confirmed"
+    RECONCILE_REQUIRED = "reconcile_required"
+
+
+class CancellationProbeState(StrEnum):
+    CANCELLED = "cancelled"
+    NOT_CANCELLED = "not_cancelled"
+    UNKNOWN = "unknown"
+
+
+class CancellationReconciliationRequired(RuntimeError):
+    """Raised when an external cancellation effect cannot be safely replayed."""
+
+
 @dataclass(frozen=True, slots=True)
 class TeamQuota:
     max_depth: int = 3
@@ -41,6 +64,17 @@ class TeamQuota:
     max_parallel: int = 4
 
     def __post_init__(self) -> None:
+        # These limits flow into SQLite admission and asyncio.Semaphore. Python's
+        # numeric comparisons admit bool and fractional floats, which can silently
+        # grant an extra runtime slot or persist misleading team limits.
+        for name in (
+            "max_depth",
+            "max_children_per_parent",
+            "max_total_agents",
+            "max_parallel",
+        ):
+            if type(getattr(self, name)) is not int:
+                raise TypeError(f"{name} must be an integer")
         if self.max_depth < 1:
             raise ValueError("max_depth must be at least 1")
         if self.max_children_per_parent < 1:
@@ -119,6 +153,81 @@ class EvaluationScore:
             raise ValueError("evaluation score must be finite")
 
 
+@dataclass(frozen=True, slots=True)
+class CancellationEffect:
+    operation_id: str
+    team_id: str
+    member_id: str
+    task_id: str
+    thread_id: str
+    sequence: int
+    state: CancellationEffectState
+    error_type: str | None = None
+
+    def __post_init__(self) -> None:
+        values = (
+            self.operation_id,
+            self.team_id,
+            self.member_id,
+            self.task_id,
+            self.thread_id,
+        )
+        if any(not value.strip() for value in values):
+            raise ValueError("cancellation effect identity must be complete")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int):
+            raise TypeError("cancellation effect sequence must be an integer")
+        if self.sequence < 0:
+            raise ValueError("cancellation effect sequence must not be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationOperation:
+    operation_id: str
+    team_id: str
+    state: CancellationOperationState
+    expected_effect_count: int
+    effects: tuple[CancellationEffect, ...]
+
+    def __post_init__(self) -> None:
+        if not self.operation_id.strip() or not self.team_id.strip():
+            raise ValueError("cancellation operation identity must be complete")
+        if isinstance(self.expected_effect_count, bool) or not isinstance(
+            self.expected_effect_count, int
+        ):
+            raise TypeError("cancellation expected effect count must be an integer")
+        if self.expected_effect_count < 0:
+            raise ValueError("cancellation expected effect count must not be negative")
+
+
+@dataclass(frozen=True, slots=True)
+class CancellationProbeRequest:
+    operation_id: str
+    team_id: str
+    member_id: str
+    task_id: str
+    thread_id: str
+
+    def __post_init__(self) -> None:
+        values = (
+            self.operation_id,
+            self.team_id,
+            self.member_id,
+            self.task_id,
+            self.thread_id,
+        )
+        if any(not value.strip() for value in values):
+            raise ValueError("cancellation probe identity must be complete")
+
+
+@runtime_checkable
+class CancellationReconciliationPort(Protocol):
+    async def inspect_cancellation(
+        self, request: CancellationProbeRequest
+    ) -> CancellationProbeState:
+        """Inspect one exact prior cancellation dispatch without causing another cancel effect."""
+        ...
+
+
 def attenuate_grants(
     parent_grants: tuple[ToolGrant, ...], requested_grants: tuple[ToolGrant, ...]
 ) -> tuple[ToolGrant, ...]:
@@ -131,7 +240,12 @@ def attenuate_grants(
             raise PermissionError(f"child requested ungranted tool: {requested.tool_id}")
         if requested.max_risk > parent.max_risk:
             raise PermissionError(f"child requested higher risk for tool: {requested.tool_id}")
-        if not set(requested.scopes).issubset(parent.scopes):
+        # An empty scope tuple denotes the unscoped (unrestricted) grant.
+        # A constrained parent cannot delegate an unrestricted child;
+        # an unrestricted parent may delegate a narrower scoped grant.
+        if parent.scopes and (
+            not requested.scopes or not set(requested.scopes).issubset(parent.scopes)
+        ):
             raise PermissionError(f"child requested broader scope for tool: {requested.tool_id}")
         result.append(requested)
     return tuple(result)

@@ -6,6 +6,14 @@ from nika_core.multi_agent.checker import (
 )
 from nika_core.multi_agent.contracts import (
     AgentHandoff,
+    CancellationEffect,
+    CancellationEffectState,
+    CancellationOperation,
+    CancellationOperationState,
+    CancellationProbeRequest,
+    CancellationProbeState,
+    CancellationReconciliationPort,
+    CancellationReconciliationRequired,
     ChildRequest,
     EvaluationScore,
     HandoffKind,
@@ -28,6 +36,14 @@ from nika_core.multi_agent.supervisor import ChildExecution, MultiAgentSuperviso
 
 __all__ = [
     "AgentHandoff",
+    "CancellationEffect",
+    "CancellationEffectState",
+    "CancellationOperation",
+    "CancellationOperationState",
+    "CancellationProbeRequest",
+    "CancellationProbeState",
+    "CancellationReconciliationPort",
+    "CancellationReconciliationRequired",
     "CheckerSourceState",
     "CheckerStatus",
     "CheckerSummary",
