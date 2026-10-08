@@ -205,7 +205,7 @@ class DeterministicBrain:
         # how much budget remains. Never plan an unnecessary external effect just
         # because a prior run stopped short of the step ceiling.
         # Task-wide unresolved journal records above still take precedence.
-        if self._goal_satisfied(current_state, goal):
+        if executed_steps <= max_steps and self._goal_satisfied(current_state, goal):
             # The caller's recovered state may be stale. Re-observe it before
             # claiming success when an authoritative observer is configured.
             if state_observer is not None:
