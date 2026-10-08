@@ -28,6 +28,7 @@ from .identity import InstrumentIdentity, instrument_identity, instrument_identi
 from .risk import _validate_policy
 from .orders import (
     OrderIntent,
+    ExecutionPolicy,
     OrderState,
     OrderType,
     OrderAuthority,
@@ -215,8 +216,15 @@ class SimulationExecutionEngine:
         time_slice = _snapshot_validated_time_slice(time_slice)
         order = _snapshot_validated_approved_order(order)
         quantity = order.intent.quantity if remaining_quantity is None else remaining_quantity
-        if quantity <= 0:
-            raise TradingResearchError("remaining_quantity must be positive")
+        if (
+            type(quantity) is not Decimal
+            or not quantity.is_finite()
+            or quantity <= 0
+            or quantity > order.intent.quantity
+        ):
+            raise TradingResearchError(
+                "remaining_quantity must be a finite Decimal within approved bounds"
+            )
         if order.intent.expires_at is not None and time_slice.at >= order.intent.expires_at:
             return OrderUpdate(order.approval_id, OrderState.EXPIRED, quantity, reason="order expired")
         if time_slice.index <= order.authority.submitted_slice:
