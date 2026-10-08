@@ -236,8 +236,7 @@ class UIActionBridge:
                     raise ValueError("invalid UI action metadata")
                 binding = self._keymap.resolve(action.action_id)
                 if binding is not None and (
-                    type(binding) is not str
-                    or len(binding) > 256
+                    not self._bounded_keymap_text(binding, max_bytes=256)
                     or not self._safe_accessible_status(binding)
                 ):
                     raise ValueError("invalid UI keymap binding")
