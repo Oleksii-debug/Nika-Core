@@ -53,6 +53,18 @@ A deterministic run receives:
 - for durable non-read-only tool execution, a `DeterministicEffectJournal` plus the stable
   `task_id` owned by the runtime/task lifecycle.
 
+The selected replaceable planner is not an execution authority: its returned plan must be an
+actual `DeterministicPlan` with immutable tuple steps and exact `PlanStep` carriers with text
+action/tool identifiers. An invalid planner payload is discarded before entering plan history
+or `ToolExecutor`, with a typed `INVALID_PLAN` failure and no effect reservation. A provider
+cannot smuggle arbitrary objects or list-backed steps into the approved execution plan.
+
+Unexpected exceptions from replaceable planner adapters are normalized to a typed
+`PLANNER_FAILURE` without surfacing provider-specific exception text. Intentional
+`DeterministicPlanningError` outcomes retain their original error code, and cancellation
+still propagates to the caller. No planner exception can itself authorize a tool call.
+
+
 Before the first tool action in each returned plan, Nika simulates the entire plan against the
 current state. Unknown action IDs, planner/tool identity mismatch, repeated completed actions,
 false preconditions, deterministic no-op effects, oversized plans, or plans that do not reach the
