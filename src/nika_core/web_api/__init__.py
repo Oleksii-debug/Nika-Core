@@ -8,6 +8,7 @@ from nika_core.web_api.application import (
 )
 from nika_core.web_api.contracts import WebCommand, WebCommandResult, WebPrincipal
 from nika_core.web_api.http_transport import HttpCommandAdapter, HttpCommandResponse
+from nika_core.web_api.task_queries import WebTaskQueryHandler
 
 __all__ = [
     "ASGICommandApplication",
@@ -21,4 +22,5 @@ __all__ = [
     "WebPrincipal",
     "HttpCommandAdapter",
     "HttpCommandResponse",
+    "WebTaskQueryHandler",
 ]
