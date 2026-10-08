@@ -80,6 +80,16 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
                     builtins_names.add(alias.asname or "builtins")
         elif isinstance(node, ast.ImportFrom) and node.module:
             names = (node.module,)
+            # Importing module namespace dictionaries directly bypasses the
+            # attribute/getattr/vars drift fence. Wildcard imports from the
+            # builtin/loader authorities can likewise expose evaluators and
+            # dynamic importers without a distinct imported symbol.
+            if node.module in {"builtins", "importlib"}:
+                for alias in node.names:
+                    if alias.name == "__dict__":
+                        imports.add("<dynamic-authority-namespace>")
+                    elif alias.name == "*":
+                        imports.add("<wildcard-authority-import>")
             if node.module == "importlib":
                 dynamic_function_names.update(
                     alias.asname or alias.name
@@ -639,5 +649,40 @@ def test_architecture_guard_allows_safe_builtins_getattr_on_inert_objects() -> N
         "class Local: pass\n"
         "safe = host.getattr(host, 'repr')\n"
         "value = host.getattr(Local(), '__class__')\n"
+    )
+    assert direct_engine_imports(source) == ()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from builtins import __dict__ as exported\n"
+        "loader = exported['__import__']\n"
+        "loader('langgraph')\n",
+        "from importlib import __dict__ as exported\n"
+        "loader = exported['import_module']\n"
+        "loader('mcp')\n",
+    ],
+)
+def test_architecture_guard_rejects_exported_authority_namespaces(source: str) -> None:
+    assert direct_engine_imports(source) == ("<dynamic-authority-namespace>",)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from builtins import *\n",
+        "from importlib import *\n",
+    ],
+)
+def test_architecture_guard_rejects_wildcard_authority_imports(source: str) -> None:
+    assert direct_engine_imports(source) == ("<wildcard-authority-import>",)
+
+
+def test_architecture_guard_preserves_explicit_safe_authority_imports() -> None:
+    source = (
+        "from builtins import repr as safe_repr\n"
+        "from importlib import util as package_util\n"
+        "safe_repr(package_util)\n"
     )
     assert direct_engine_imports(source) == ()
