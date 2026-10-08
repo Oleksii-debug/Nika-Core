@@ -33,6 +33,11 @@ enable public ingress without that middleware and a real authorization port.
 ## Failure, security and performance
 - Fail closed before effects for HTTP downgrades, unknown routes, unsafe Origins,
   cookies, missing server principal, duplicate sensitive headers and bad streams.
+- Configuration rejects malformed HTTPS origin authorities (userinfo, paths, queries,
+  fragments, invalid ports, noncanonical domain/IPv6 spellings and controls).
+- The HTTP edge admits at most 64 headers and 16 KiB of header name/value bytes;
+  malformed header names, CR/LF/NUL in values and larger header sets are rejected
+  before the canonical application handler. Header abuse tests assert zero effects.
 - Enforce the existing 256 KiB bounded JSON body and 1,024 receive-event limit;
   no unlimited request buffering or optional untrusted schema coercion.
 - Pass approved envelopes to the existing detached Web command boundary.
