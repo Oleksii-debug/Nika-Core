@@ -565,7 +565,15 @@ class DesktopBackend:
             )
         if not rows:
             return None
-        record = self._queue.get(rows[0]["task_id"])
+        try:
+            record = self._queue.get(rows[0]["task_id"])
+        except KeyError:
+            # Another owner can remove the selected row between the scoped
+            # SQL read and TaskQueue readback. Never echo a stale task ID or
+            # accidentally route an unqualified control to another task.
+            raise ValueError(
+                "Стан завдання змінився; оновіть список і повторіть дію."
+            ) from None
         if (
             record.workspace_id != _DEFAULT_WORKSPACE_ID
             or record.agent_id != _DEFAULT_AGENT_ID
