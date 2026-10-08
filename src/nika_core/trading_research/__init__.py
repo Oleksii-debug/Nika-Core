@@ -51,7 +51,12 @@ from .orders import (
     order_authority_sha256,
 )
 from .persistence import TradingStateRepository
-from .workspace_query import PaperAccountView, PaperPositionView, PaperWorkspaceQuery
+from .workspace_query import (
+    PaperAccountView,
+    PaperPositionView,
+    PaperWorkspaceQuery,
+    paper_state_provider,
+)
 from .replay import OrderUpdate, ReplayBook, ReplayPhase, SimulationExecutionEngine, TimeSlice
 from .risk import PendingRiskOrder, RiskEngine, RiskLimits, RiskRejected, RiskState
 from .strategy import DecisionContext, OrderStrategy, Strategy, StrategyDecision
@@ -120,5 +125,6 @@ __all__ = [
     "instrument_identity",
     "instrument_identity_sha256",
     "order_authority_sha256",
+    "paper_state_provider",
     "trailing_mean",
 ]
