@@ -66,6 +66,7 @@ from .workspace_query import (
 from .replay import OrderUpdate, ReplayBook, ReplayPhase, SimulationExecutionEngine, TimeSlice
 from .risk import PendingRiskOrder, RiskEngine, RiskLimits, RiskRejected, RiskState
 from .strategy import DecisionContext, OrderStrategy, Strategy, StrategyDecision
+from .time_waves import TimeWave, group_visible_time_waves
 
 __all__ = [
     "AccountSnapshot",
@@ -118,6 +119,7 @@ __all__ = [
     "TemporalView",
     "Tick",
     "TimeSlice",
+    "TimeWave",
     "TradingResearchError",
     "TradingStateRepository",
     "TrainOnlyStandardizer",
@@ -129,6 +131,7 @@ __all__ = [
     "event_sort_key",
     "fee_for",
     "fill_missing",
+    "group_visible_time_waves",
     "instrument_identity",
     "instrument_identity_sha256",
     "order_authority_sha256",
