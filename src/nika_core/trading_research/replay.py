@@ -224,9 +224,11 @@ class ReplayBook:
             return terminal
         remaining = self._remaining.get(key, order.intent.quantity)
         update = self.execution.execute(order, time_slice, remaining_quantity=remaining)
-        self._remaining[key] = update.remaining_quantity
+        # Accounting must succeed before advancing order replay state. A failed
+        # account admission must leave this order replayable after recovery.
         if update.fill is not None:
             self.ledger.apply_fill(update.fill)
+        self._remaining[key] = update.remaining_quantity
         if update.state in {OrderState.FILLED, OrderState.EXPIRED, OrderState.CANCELLED}:
             self._terminal[key] = update
         return update

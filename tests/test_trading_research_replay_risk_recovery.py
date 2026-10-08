@@ -284,3 +284,92 @@ def test_crash_before_commit_leaves_no_partial_fill_or_account_state(tmp_path) -
     restarted.initialize()
     assert restarted.fill_count("workspace", "run") == 0
     assert restarted.account_payload("workspace", "run") is None
+
+@pytest.mark.parametrize("corruption", ["invalid-payload", "missing-fill"])
+def test_later_fill_cannot_erase_corrupt_prior_account(tmp_path, corruption: str) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    repo = TradingStateRepository(store)
+    repo.initialize()
+    first = _fill("fill-first")
+    assert repo.commit_fill_and_account(first, _snapshot(first))
+
+    with store.connection() as conn:
+        if corruption == "invalid-payload":
+            conn.execute(
+                "UPDATE trading_research_run_account_state SET payload = ? "
+                "WHERE workspace_id = ? AND run_id = ?",
+                ("{", "workspace", "run"),
+            )
+        else:
+            conn.execute(
+                "UPDATE trading_research_run_account_state SET last_fill_id = ? "
+                "WHERE workspace_id = ? AND run_id = ?",
+                ("missing-fill", "workspace", "run"),
+            )
+        prior_row = conn.execute(
+            "SELECT payload, last_fill_id FROM trading_research_run_account_state "
+            "WHERE workspace_id = ? AND run_id = ?",
+            ("workspace", "run"),
+        ).fetchone()
+        prior_values = (prior_row["payload"], prior_row["last_fill_id"])
+
+    later = _fill("fill-later")
+    with pytest.raises(RuntimeError):
+        repo.commit_fill_and_account(later, _snapshot(later))
+    assert repo.fill_count("workspace", "run") == 1
+    assert not repo.has_fill("workspace", "run", later.fill_id)
+    with store.connection() as conn:
+        unchanged = conn.execute(
+            "SELECT payload, last_fill_id FROM trading_research_run_account_state "
+            "WHERE workspace_id = ? AND run_id = ?",
+            ("workspace", "run"),
+        ).fetchone()
+    assert (unchanged["payload"], unchanged["last_fill_id"]) == prior_values
+
+
+def test_later_fill_accepts_valid_previous_account_and_survives_restart(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    repo = TradingStateRepository(store)
+    repo.initialize()
+    ledger = PortfolioLedger(Decimal(1000))
+    first = _fill("first")
+    ledger.apply_fill(first)
+    assert repo.commit_fill_and_account(
+        first, ledger.snapshot({instrument_identity(INSTRUMENT): Decimal(100)})
+    )
+    second = _fill("second")
+    ledger.apply_fill(second)
+    assert repo.commit_fill_and_account(
+        second, ledger.snapshot({instrument_identity(INSTRUMENT): Decimal(100)})
+    )
+    restarted = TradingStateRepository(SQLiteStore(tmp_path / "nika.db"))
+    restarted.initialize()
+    assert restarted.fill_count("workspace", "run") == 2
+    payload = restarted.account_payload("workspace", "run")
+    assert payload is not None
+    assert payload["cash"] == "598"
+    assert payload["fees"] == "2"
+
+def test_replay_keeps_remaining_order_after_accounting_rejection() -> None:
+    class RejectingLedger(PortfolioLedger):
+        def apply_fill(self, fill: SimulatedFill) -> None:
+            raise TradingResearchError("injected account failure")
+
+    order = _approved()
+    book = ReplayBook(RejectingLedger(Decimal(1000)))
+    time_slice = TimeSlice(1, NOW, (_quote(NOW),))
+    with pytest.raises(TradingResearchError, match="injected account failure"):
+        book.process_existing_order(order, time_slice)
+
+    # Simulate repair/restart of the failed accounting adapter: the same order
+    # and full remaining quantity must still be replayable exactly once.
+    book.ledger = PortfolioLedger(Decimal(1000))
+    update = book.process_existing_order(order, time_slice)
+    assert update.state is OrderState.FILLED
+    assert update.fill is not None
+    assert update.fill.quantity == Decimal(5)
+    assert book.ledger.cash == Decimal(495)
+    assert book.process_existing_order(order, time_slice) is update
+    assert book.ledger.cash == Decimal(495)
