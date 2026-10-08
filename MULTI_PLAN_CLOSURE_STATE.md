@@ -70,3 +70,10 @@ Update this registry whenever a new-plan Section reaches DONE/REOPENED or when a
 - **Exact-head CI:** Core `37843400912` and M12 `37843400854` QUEUED, **not PASS**; PF3 skipped. Full inherited §11 acceptance, dual-OS green, safe merge and postmerge readback pending.
 - **Section 2:** ACTIONABLE / NOT DONE; incumbent #1784/#1787 remains separate, not terminal and not merged; cannot skip Section 1 for closure.
 - **Truth:** `PLAN2_S1_DONE=false; PLAN2_S2_DONE=false; MAIN_INTEGRATED=false`. Canonical Drive Plan 2 recorded matching nonterminal evidence; human NVDA/whole-product evidence not claimed.
+
+## Plan 2 — scoped §1 hardening and §2 dependency-convergence checkpoint (NONTERMINAL)
+- **Section 1:** ACTIONABLE / IN_PROGRESS / NOT DONE. Existing draft [#1845](https://github.com/Oleksii-debug/Nika-Core/pull/1845) advanced to `45187391faa5b6c3c7f4dae21e76406450210f87`, bounds corrupt SQLite approval JSON (size/nesting) and adds oversized/deep-nesting restart/activation denial tests; production/test blob readback `a9b1d49ba938e4ed389b3ec1532a26195a30ee60` / `32c059870933490401123943c411efef26e940db`.
+- **Section 1 qualification:** authored not executed/PASS; Core CI `37844052153`, M12 `37844052112` QUEUED; inherited legacy §11 matrix, exact-head dual-OS green, safe main integration and postmerge readback pending.
+- **Section 2:** ACTIONABLE / PREPARATORY / NOT DONE. Dependent draft [#1846](https://github.com/Oleksii-debug/Nika-Core/pull/1846) at `fbb3e4fcc0359a93171617d1d5a75aa2882102f8` exactly reuses 10 M7 source/test blobs from #1784/#1787 on top of #1845; GitHub blob readback 10/10. No duplicate runtime or scheduler.
+- **Section 2 qualification:** Core CI `37844123140`, M12 `37844122983` QUEUED; §1 predecessor, full §12 recovery/negative/security acceptance, main integration and postmerge verification pending.
+- **Truth:** `PLAN2_S1_DONE=false; PLAN2_S2_DONE=false; MAIN_INTEGRATED=false`. Matching NONTERMINAL checkpoints read back in canonical Drive **2. Другий план** only. No human/NVDA or whole-product claim.
