@@ -889,22 +889,42 @@ class DeterministicBrain:
         *,
         timeout_seconds: float,
     ) -> tuple[WorldState | None, _StateObservationFailure | None]:
-        # asyncio.timeout can be suppressed by a replaceable observer that
-        # catches CancelledError. Preserve the absolute deadline as authority:
-        # a late "success" is not fresh state evidence for a tool or recovery.
+        # A replaceable observer may suppress cancellation forever. Shield its
+        # task so a timeout only bounds *our* wait, never waits for the adapter
+        # to acknowledge cancellation. Late observations cannot grant effects.
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
+
+        def _discard_observer_completion(done: asyncio.Task[WorldState]) -> None:
+            # Cancelled or late-failing detached adapters must not emit an
+            # unhandled-task exception after Nika rejected their evidence.
+            if not done.cancelled():
+                try:
+                    done.exception()
+                except Exception:
+                    pass
+
+        observation_task: asyncio.Task[WorldState] | None = None
         try:
-            async with asyncio.timeout_at(deadline):
-                observed = await observer.observe()
+            observation_task = asyncio.create_task(observer.observe())
+            observation_task.add_done_callback(_discard_observer_completion)
+            observed = await asyncio.wait_for(
+                asyncio.shield(observation_task), timeout=timeout_seconds
+            )
         except TimeoutError:
+            if observation_task is not None:
+                observation_task.cancel()
             return None, _StateObservationFailure(
                 DeterministicErrorCode.STATE_OBSERVATION_TIMEOUT,
                 "world-state observation timed out",
             )
         except asyncio.CancelledError:
+            if observation_task is not None:
+                observation_task.cancel()
             raise
         except Exception as exc:  # noqa: BLE001 - normalize observer adapter failures.
+            if observation_task is not None:
+                observation_task.cancel()
             return None, _StateObservationFailure(
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
                 f"world-state observation failed: {type(exc).__name__}",
