@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import unicodedata
+from copy import deepcopy
 from dataclasses import dataclass
 
 from nika_core.intelligence.contracts import (
@@ -147,6 +148,19 @@ class DeterministicBrain:
         if type(previously_completed_action_ids) is not tuple:
             raise ValueError("previously_completed_action_ids must be an immutable tuple")
 
+        # Treat caller-owned records as input, not mutable runtime authority. In
+        # particular, a frozen DeterministicAction still contains a mutable arguments
+        # mapping. A planner or state observer must not be able to change that mapping
+        # between plan validation, durable reservation and ToolExecutor dispatch.
+        if type(state) is not WorldState or type(goal) is not DeterministicGoal:
+            raise ValueError("state and goal must be canonical deterministic records")
+        if any(type(action) is not DeterministicAction for action in actions):
+            raise ValueError("actions must be canonical deterministic action records")
+        try:
+            state, goal, actions = deepcopy((state, goal, actions))
+        except Exception as exc:
+            raise ValueError("deterministic run inputs cannot be detached safely") from exc
+
         # Action IDs are durable completion/effect generation identities.
         # Admit all of them before planner or journal operations.
         for action in actions:
@@ -289,6 +303,21 @@ class DeterministicBrain:
                 actions=available_actions,
                 planning_deadline=planning_deadline,
             )
+            # A planner may retain its result and mutate frozen PlanStep objects
+            # after returning. Own an independent plan snapshot before validation,
+            # history, observer awaits, and ToolExecutor dispatch.
+            try:
+                plan = deepcopy(plan)
+            except Exception:
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                    message="planner returned an unsafe deterministic plan carrier",
+                )
             # The planner is a replaceable/untrusted adapter. Validate its carrier
             # before indexing a step or publishing it as durable plan evidence.
             # Malformed steps must never reach ToolExecutor or a journal reservation.
@@ -687,12 +716,19 @@ class DeterministicBrain:
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
                 f"world-state observation failed: {type(exc).__name__}",
             )
-        if not isinstance(observed, WorldState):
+        # The observer is replaceable and can retain or corrupt a frozen record.
+        # Do not accept subclass behavior, mutable fact carriers, or nontext facts;
+        # detach the authoritative observation before any subsequent await.
+        if (
+            type(observed) is not WorldState
+            or type(observed.facts) is not frozenset
+            or any(type(fact) is not str or not fact.strip() for fact in observed.facts)
+        ):
             return None, _StateObservationFailure(
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
-                "world-state observer returned an invalid state type",
+                "world-state observer returned an invalid state",
             )
-        return observed, None
+        return WorldState(facts=frozenset(observed.facts)), None
 
     async def _plan(
         self,
@@ -710,12 +746,16 @@ class DeterministicBrain:
                 code=DeterministicErrorCode.PLANNING_TIMEOUT,
             )
         try:
+            # Planner implementations are replaceable and run in another thread.
+            # Give them detached candidates rather than live validation/permission
+            # state: even object.__setattr__ can mutate frozen dataclass carriers.
+            planner_state, planner_goal, planner_actions = deepcopy((state, goal, actions))
             async with asyncio.timeout(remaining):
                 return await asyncio.to_thread(
                     self._planner.plan,
-                    state=state,
-                    goal=goal,
-                    actions=actions,
+                    state=planner_state,
+                    goal=planner_goal,
+                    actions=planner_actions,
                 )
         except TimeoutError as exc:
             raise DeterministicPlanningError(

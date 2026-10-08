@@ -59,6 +59,23 @@ action/tool identifiers. An invalid planner payload is discarded before entering
 or `ToolExecutor`, with a typed `INVALID_PLAN` failure and no effect reservation. A provider
 cannot smuggle arbitrary objects or list-backed steps into the approved execution plan.
 
+Planner inputs are detached twice: the Brain snapshots caller-provided state, goal
+and action records at run admission, and each replaceable planner invocation receives
+its own detached copy. Frozen dataclasses can still contain mutable nested arguments
+or be forcibly assigned by a hostile adapter; planner/caller mutations therefore
+cannot alter the Brain's authoritative validation state, goal, or dispatched tool
+arguments. Unsnapshotable run inputs fail before planner, effect journal or tools.
+The copies create no new storage, approval source, or runtime authority.
+
+The planner's returned plan is also detached before plan validation, evidence/history,
+observer awaits, and tool dispatch. Retaining a frozen-but-forcibly-mutable PlanStep
+cannot rewrite the action chosen after the planner returns. Uncopyable or malformed
+plan carriers fail with INVALID_PLAN before tool effects. Observer results must be
+exact WorldState records with immutable frozenset[str] facts; the Brain constructs
+an owned result rather than trusting an object the adapter may mutate afterward.
+Malformed observation records fail with STATE_OBSERVATION_FAILED. None of these
+adapters can grant authority to a model, planner, tool, or alternative runtime.
+
 Unexpected exceptions from replaceable planner adapters are normalized to a typed
 `PLANNER_FAILURE` without surfacing provider-specific exception text. Intentional
 `DeterministicPlanningError` outcomes retain their original error code, and cancellation
