@@ -31,11 +31,12 @@ class _EffectThenErrorRuntime:
     def __init__(self) -> None:
         self.cancel_effects: list[str] = []
 
-    async def cancel(self, *, task_id: str, thread_id: str) -> None:
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         del thread_id
         self.cancel_effects.append(task_id)
         if len(self.cancel_effects) == 2:
             raise RuntimeError("uncertain cancellation result after external effect")
+        return True
 
 
 class _RecordingRuntime:
@@ -521,4 +522,58 @@ def test_explicit_cancel_refusal_requires_probe_before_retry(tmp_path: Path) -> 
         )
     )
     assert [request.member_id for request in probe.requests] == ["root"]
+    assert safe_runtime.cancel_effects == ["team:team-cancel:root", "team:team-cancel:child"]
+
+
+class _HostileAcknowledgement:
+    def __bool__(self) -> bool:
+        raise AssertionError("an arbitrary runtime acknowledgement must never be coerced")
+
+
+@pytest.mark.parametrize(
+    "acknowledgement",
+    (None, 0, 1, "acknowledged", _HostileAcknowledgement()),
+)
+def test_non_true_cancel_acknowledgement_requires_durable_reconciliation(
+    tmp_path: Path, acknowledgement: object,
+) -> None:
+    class _UnverifiedRuntime(_RecordingRuntime):
+        async def cancel(self, *, task_id: str, thread_id: str) -> object:
+            del thread_id
+            self.cancel_effects.append(task_id)
+            return acknowledgement
+
+    path, store = _make_store(tmp_path)
+    runtime = _UnverifiedRuntime()
+    with pytest.raises(CancellationReconciliationRequired, match="uncertain cancellation result"):
+        asyncio.run(_supervisor(store, runtime).cancel_team("team-cancel"))
+    assert runtime.cancel_effects == ["team:team-cancel:root"]
+    _assert_cancelled(store)
+
+    # A non-True response never becomes "confirmed" evidence, even after restart.
+    with SQLiteStore(path).connection() as conn:
+        rows = conn.execute(
+            "SELECT member_id, state FROM multi_agent_cancellation_effects "
+            "WHERE team_id = ? ORDER BY sequence",
+            ("team-cancel",),
+        ).fetchall()
+    assert [(row["member_id"], row["state"]) for row in rows] == [
+        ("root", "reconcile_required"),
+        ("child", "planned"),
+    ]
+
+    restarted = MultiAgentStore(SQLiteStore(path))
+    safe_runtime = _RecordingRuntime()
+    with pytest.raises(CancellationReconciliationRequired, match="requires reconciliation"):
+        asyncio.run(_supervisor(restarted, safe_runtime).cancel_team("team-cancel"))
+    assert safe_runtime.cancel_effects == []
+
+    # Only an explicit read-only probe can authorize a fresh retry.
+    probe = _Probe(CancellationProbeState.NOT_CANCELLED)
+    asyncio.run(
+        _supervisor(restarted, safe_runtime, probe=probe).reconcile_team_cancellation(
+            "team-cancel"
+        )
+    )
+    assert [req.member_id for req in probe.requests] == ["root"]
     assert safe_runtime.cancel_effects == ["team:team-cancel:root", "team:team-cancel:child"]
