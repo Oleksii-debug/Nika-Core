@@ -57,6 +57,22 @@ def _app() -> tuple[ASGICommandApplication, _Handler]:
     ), handler
 
 
+def _headers_for_scope(
+    headers: list[tuple[bytes, bytes]] | None,
+    origin: bytes,
+) -> list[tuple[bytes, bytes]]:
+    if headers is None:
+        return [
+            (b"host", origin.removeprefix(b"https://")),
+            (b"origin", origin),
+            (b"content-type", b"application/json"),
+        ]
+    items = list(headers)
+    if not any(type(name) is bytes and name.lower() == b"host" for name, _ in items):
+        items.insert(0, (b"host", b"nika.example"))
+    return items
+
+
 def _scope(
     *,
     principal: WebPrincipal | None = None,
@@ -70,10 +86,7 @@ def _scope(
         "path": "/v1/commands",
         "query_string": b"",
         "method": "POST",
-        "headers": headers if headers is not None else [
-            (b"origin", origin),
-            (b"content-type", b"application/json"),
-        ],
+        "headers": _headers_for_scope(headers, origin),
         "state": {"nika_principal": principal} if principal else {},
     }
 
@@ -348,3 +361,51 @@ def test_matching_content_length_and_fragmented_body_keep_core_boundary() -> Non
     ])
     assert _status(output) == 200
     assert handler.calls == 1
+
+
+@pytest.mark.parametrize("bad_host", [
+    b"nika.example.evil",
+    b"NIKA.example",
+    b"nika.example:443",
+    b"nika.example@attacker.example",
+    b"nika.example/path",
+    b"nika.example\\evil",
+    b"nika.example\\xff",
+])
+def test_host_authority_spoof_rejected_before_core_effect(bad_host: bytes) -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"host", bad_host),
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]))
+    assert _status(output) == 403
+    assert _payload(output)["code"] == "host_forbidden"
+    assert handler.calls == 0
+
+
+def test_missing_host_is_rejected_without_core_effect() -> None:
+    app, handler = _app()
+    scope = _scope(principal=_principal())
+    scope["headers"] = [
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]
+    output = _call(app, scope)
+    assert _status(output) == 400
+    assert _payload(output)["code"] == "host_required"
+    assert handler.calls == 0
+
+
+def test_host_is_not_derived_from_untrusted_forwarded_host() -> None:
+    app, handler = _app()
+    output = _call(app, _scope(principal=_principal(), headers=[
+        (b"host", b"attacker.example"),
+        (b"x-forwarded-host", b"nika.example"),
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ]))
+    assert _status(output) == 403
+    assert handler.calls == 0
+
+
