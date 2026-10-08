@@ -162,3 +162,62 @@ def test_unsafe_operator_identity_is_not_rendered_in_accessible_state() -> None:
     query = PaperWorkspaceQuery(repo, authorize_read=lambda _w, _r: True)
     with pytest.raises(TradingResearchError, match="paper account evidence unavailable"):
         query.read_account("mine", "r1")
+
+
+def test_existing_ui_bridge_renders_shared_paper_state_without_a_new_runtime(tmp_path) -> None:
+    from nika_core.kernel.action_registry import ActionRegistry, Keymap
+    from nika_core.ui.bridge import UIActionBridge
+    from nika_core.trading_research.workspace_query import paper_state_provider
+
+    repo = FakeRepository()
+    query = PaperWorkspaceQuery(repo, authorize_read=lambda w, r: (w, r) == ("mine", "r1"))
+    registry = ActionRegistry()
+    bridge = UIActionBridge(
+        registry,
+        Keymap(SQLiteStore(tmp_path / "nika.db"), registry),
+        state_provider=paper_state_provider(query, host_scope=lambda: ("mine", "r1")),
+    )
+    result = bridge.get_state()
+    assert result["ok"] is True
+    assert result["state"]["mode"] == "PAPER_ONLY"
+    assert result["state"]["state"] == "NO_PAPER_DATA"
+
+    # A client cannot select another workspace via a UI command payload.
+    assert repo.calls == [("mine", "r1")]
+
+
+def test_semantic_ui_adapter_reports_denial_and_corruption_not_empty(tmp_path) -> None:
+    from nika_core.kernel.action_registry import ActionRegistry, Keymap
+    from nika_core.ui.bridge import UIActionBridge
+    from nika_core.trading_research.workspace_query import paper_state_provider
+
+    repo = FakeRepository()
+    grants = False
+    query = PaperWorkspaceQuery(repo, authorize_read=lambda _w, _r: grants)
+    registry = ActionRegistry()
+    bridge = UIActionBridge(
+        registry,
+        Keymap(SQLiteStore(tmp_path / "nika.db"), registry),
+        state_provider=paper_state_provider(query, host_scope=lambda: ("mine", "r1")),
+    )
+    denied = bridge.get_state()["state"]
+    assert denied["state"] == "ACCESS_DENIED"
+    assert "balance" not in denied
+    assert repo.calls == []
+
+    grants = True
+    repo.payload = {"positions": "corrupted"}
+    unavailable = bridge.get_state()["state"]
+    assert unavailable["state"] == "EVIDENCE_UNAVAILABLE"
+    assert "cash" not in unavailable
+    assert repo.calls == [("mine", "r1")]
+
+
+def test_invalid_host_identity_never_queries_trader_repository() -> None:
+    from nika_core.trading_research.workspace_query import paper_state_provider
+
+    repo = FakeRepository()
+    query = PaperWorkspaceQuery(repo, authorize_read=lambda _w, _r: True)
+    projection = paper_state_provider(query, host_scope=lambda: ("mine", "r1", "foreign"))
+    assert projection()["state"] == "ACCESS_DENIED"
+    assert repo.calls == []
