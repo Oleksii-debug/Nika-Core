@@ -135,7 +135,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
         if (
             isinstance(func, ast.Name)
             and func.id in getattr_names
-            and len(node.args) == 2
+            and len(node.args) in (2, 3)
             and isinstance(node.args[0], ast.Name)
             and isinstance(node.args[1], ast.Constant)
             and (
@@ -197,7 +197,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
             isinstance(func, ast.Call)
             and isinstance(func.func, ast.Name)
             and func.func.id in getattr_names
-            and len(func.args) == 2
+            and len(func.args) in (2, 3)
             and isinstance(func.args[0], ast.Name)
             and func.args[0].id in builtins_names
             and isinstance(func.args[1], ast.Constant)
@@ -210,7 +210,7 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
             isinstance(func, ast.Call)
             and isinstance(func.func, ast.Name)
             and func.func.id in getattr_names
-            and len(func.args) == 2
+            and len(func.args) in (2, 3)
             and isinstance(func.args[0], ast.Name)
             and isinstance(func.args[1], ast.Constant)
             and (
@@ -441,3 +441,38 @@ def test_architecture_guard_keeps_precise_immediate_attribute_calls() -> None:
         "importer.import_module('httpx')\n"
     )
     assert direct_engine_imports(source) == ("httpx", "mcp")
+
+
+
+def test_architecture_guard_rejects_getattr_default_argument_import_escape() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "loader = getattr(host, '__import__', None)\n"
+        "other = getattr(importer, 'import_module', None)\n"
+        "loader('langgraph')\n"
+        "other('mcp')\n"
+    )
+    assert direct_engine_imports(source) == ("<hoisted-dynamic-import>",)
+
+
+def test_architecture_guard_catches_immediate_defaulted_import_and_evaluator() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "getattr(host, '__import__', None)('litellm')\n"
+        "getattr(importer, 'import_module', None)('playwright')\n"
+        "getattr(host, 'exec', None)('import langgraph')\n"
+    )
+    assert direct_engine_imports(source) == (
+        "<dynamic-source-execution>", "litellm", "playwright"
+    )
+
+
+def test_architecture_guard_preserves_safe_defaulted_getattr() -> None:
+    source = (
+        "import builtins as host\n"
+        "present = getattr(host, 'repr', None)\n"
+        "present(42)\n"
+    )
+    assert direct_engine_imports(source) == ()
