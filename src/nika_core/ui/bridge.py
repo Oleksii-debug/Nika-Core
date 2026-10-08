@@ -13,7 +13,7 @@ from nika_core.ui.payload_safety import validate_ui_payload
 logger = logging.getLogger(__name__)
 
 ActionHandler = Callable[[Mapping[str, Any]], UIResult | str | None]
-StateProvider = Callable[[], Mapping[str, Any]]
+StateProvider = Callable[[], dict[str, Any]]
 
 
 class UIActionBridge:
@@ -132,7 +132,13 @@ class UIActionBridge:
         try:
             # The state provider is host-owned, but its nested data may include plugin
             # projections. Return only bounded, detached JSON to the WebView transport.
-            state = validate_ui_payload(dict(self._state_provider()))
+            raw_state = self._state_provider()
+            # Only the canonical built-in dict is admitted. Coercing arbitrary
+            # providers with dict(...) can run user-defined iteration or lose
+            # noncanonical state semantics before the bounded JSON snapshot.
+            if type(raw_state) is not dict:
+                raise ValueError("desktop state must be a plain JSON object")
+            state = validate_ui_payload(raw_state)
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             logger.error(
                 "Desktop state provider failed: exception_type=%s",
