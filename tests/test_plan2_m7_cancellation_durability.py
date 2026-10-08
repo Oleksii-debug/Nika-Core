@@ -376,3 +376,44 @@ def test_future_cancellation_extension_schema_fails_closed(tmp_path: Path) -> No
 
     with pytest.raises(RuntimeError, match="newer than supported"):
         _supervisor(store, _RecordingRuntime())
+
+
+def test_explicit_cancel_refusal_requires_probe_before_retry(tmp_path: Path) -> None:
+    class _RefusingRuntime(_RecordingRuntime):
+        async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+            del thread_id
+            self.cancel_effects.append(task_id)
+            return False
+
+    path, store = _make_store(tmp_path)
+    runtime = _RefusingRuntime()
+    with pytest.raises(CancellationReconciliationRequired, match="uncertain cancellation result"):
+        asyncio.run(_supervisor(store, runtime).cancel_team("team-cancel"))
+    assert runtime.cancel_effects == ["team:team-cancel:root"]
+    _assert_cancelled(store)
+
+    restarted = MultiAgentStore(SQLiteStore(path))
+    safe_runtime = _RecordingRuntime()
+    with pytest.raises(CancellationReconciliationRequired, match="requires reconciliation"):
+        asyncio.run(_supervisor(restarted, safe_runtime).cancel_team("team-cancel"))
+    assert safe_runtime.cancel_effects == []
+
+    with SQLiteStore(path).connection() as conn:
+        effects = conn.execute(
+            "SELECT member_id, state FROM multi_agent_cancellation_effects "
+            "WHERE team_id = ? ORDER BY sequence",
+            ("team-cancel",),
+        ).fetchall()
+    assert [(item["member_id"], item["state"]) for item in effects] == [
+        ("root", "reconcile_required"),
+        ("child", "planned"),
+    ]
+
+    probe = _Probe(CancellationProbeState.NOT_CANCELLED)
+    asyncio.run(
+        _supervisor(restarted, safe_runtime, probe=probe).reconcile_team_cancellation(
+            "team-cancel"
+        )
+    )
+    assert [request.member_id for request in probe.requests] == ["root"]
+    assert safe_runtime.cancel_effects == ["team:team-cancel:root", "team:team-cancel:child"]
