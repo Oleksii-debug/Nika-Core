@@ -205,7 +205,7 @@ def test_configuration_rejects_non_https_and_wildcard_origins() -> None:
         "https://nika.example/path",
         "https://nika.example?debug=1",
         "https://nika.example#fragment",
-        "https://nika.example\\\\@evil.example",
+        "https://nika.example\\\@evil.example",
         "https://nika.example:99999",
         "https://nika.example:abc",
         "https://nika.example:0",
@@ -255,9 +255,9 @@ def test_config_rejection_prevents_untrusted_host_from_admission() -> None:
 @pytest.mark.parametrize("headers, expected", [
     ([(b"X-Test", b"x")] * 65, 431),
     ([(b"x-large", b"x" * (16 * 1024 + 1))], 431),
-    ([(b"bad\\nname", b"hello")], 400),
-    ([(b"x-safe", b"bad\\x00value")], 400),
-    ([(b"x-safe", b"bad\\r\\nset-cookie: forged")], 400),
+    ([(b"bad\nname", b"hello")], 400),
+    ([(b"x-safe", b"bad\x00value")], 400),
+    ([(b"x-safe", b"bad\r\nset-cookie: forged")], 400),
     ([(b"", b"empty")], 400),
 ])
 def test_oversized_or_malformed_headers_fail_before_effect(
