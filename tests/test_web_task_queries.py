@@ -60,7 +60,7 @@ def test_real_task_queue_query_is_scoped_and_excludes_payload(tmp_path) -> None:
     result = _inspect(adapter, _principal(), first.task_id)
     assert result.status_code == 200
     response = json.loads(result.body)
-    assert response["data"] == {"task_id": first.task_id, "state": "created"}
+    assert response["data"] == {"task_id": first.task_id, "state": "CREATED"}
     assert b"never-return-this-secret" not in result.body
     assert b"agent-a" not in result.body
 
