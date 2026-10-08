@@ -63,3 +63,22 @@ def test_compiler_readmission_rejects_a_bypassed_blank_scope() -> None:
     )
     with pytest.raises(ValidationError, match="tool scope must not be blank"):
         compiler.compile(definition)
+
+
+@pytest.mark.parametrize(
+    "scope",
+    (
+        "repo:read\u202e",  # bidirectional override
+        "repo:read\u200b",  # zero-width space
+        "repo:read\u2028",  # line separator
+        "repo:read\nextra",  # control character
+        "caf\u0065\u0301:read",  # decomposed equivalent of NFC café
+    ),
+)
+def test_invisible_or_ambiguous_scope_cannot_be_compiled(scope: str) -> None:
+    with pytest.raises(ValidationError, match="ambiguous Unicode"):
+        ToolGrant(tool_id="web.read", scopes=(scope,))
+
+
+def test_visible_canonical_unicode_scope_remains_valid() -> None:
+    assert ToolGrant(tool_id="web.read", scopes=("café:read",)).scopes == ("café:read",)
