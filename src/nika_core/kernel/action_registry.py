@@ -147,11 +147,24 @@ class Keymap:
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
     def import_json(self, data: str) -> None:
-        raw = json.loads(data)
-        if raw.get("format_version") != self.FORMAT_VERSION:
+        # Duplicate JSON members are ambiguous on import: json.loads normally
+        # keeps only the final value, concealing a conflicting shortcut entry.
+        # Reject before inspecting actions or entering the SQLite write transaction.
+        def unique_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            values: dict[str, object] = {}
+            for key, value in pairs:
+                if key in values:
+                    raise ValueError("duplicate keymap JSON member")
+                values[key] = value
+            return values
+
+        raw = json.loads(data, object_pairs_hook=unique_members)
+        if type(raw) is not dict:
+            raise ValueError("keymap must be a JSON object")
+        if type(raw.get("format_version")) is not int or raw["format_version"] != self.FORMAT_VERSION:
             raise ValueError("unsupported keymap format version")
         bindings = raw.get("bindings")
-        if not isinstance(bindings, dict):
+        if type(bindings) is not dict:
             raise TypeError("keymap bindings must be an object")
         proposed: dict[str, str | None] = {}
         for action_id, binding in bindings.items():
