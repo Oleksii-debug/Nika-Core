@@ -170,10 +170,10 @@ def test_rejects_unrelated_asgi_protocol() -> None:
 
 
 @pytest.mark.parametrize("headers", [
-    [(b"host", b"nika.example"), (b"x-ignored", b"bad\\r\\nX-Policy: owner")],
-    [(b"host", b"nika.example"), (b"x-ignored", b"bad\\x00value")],
+    [(b"host", b"nika.example"), (b"x-ignored", b"bad\r\nX-Policy: owner")],
+    [(b"host", b"nika.example"), (b"x-ignored", b"bad\x00value")],
     [(b"host", b"nika.example"), (b"invalid name", b"value")],
-    [(b"host", b"nika.example"), (b"invalid\\x7fname", b"value")],
+    [(b"host", b"nika.example"), (b"invalid\x7fname", b"value")],
     [(b"host", b"nika.example"), (b"", b"value")],
     [(b"host", b"nika.example"), (b"x-padding", b"x" * (16 * 1024))],
     [(b"host", b"nika.example")] + [(b"x-test", b"ok")] * 64,
