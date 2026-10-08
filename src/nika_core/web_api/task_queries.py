@@ -33,6 +33,10 @@ class WebTaskQueryHandler:
             not task_id
             or task_id != task_id.strip()
             or len(task_id) > 120
+            # Canonical TaskQueue IDs are ASCII; accepting a printable
+            # lookalike Unicode identifier creates a screen-reader spoofing
+            # and unnecessary SQLite lookup surface for untrusted Web clients.
+            or not task_id.isascii()
             or any(not ch.isprintable() or ch.isspace() for ch in task_id)
         ):
             return self._reject(command.request_id, "invalid_query")
