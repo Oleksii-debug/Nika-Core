@@ -158,3 +158,24 @@ storage health. Existing healthy projections continue to use the same
 canonical repository, UIActionBridge, and read-only PAPER policy. Source
 and tests must pass exact-head hosted CI and integrate with the parent stack
 before **any terminal Section 1 DONE**; Section 2 is not advanced by this fix.
+
+
+## Complete position-identity re-admission (Plan 5 §1 candidate)
+
+The last-mile read projection now validates the previously ignored
+`venue_timezone` as an exact, printable, nonblank and UTF-8-bounded plain
+string. It also rejects duplicate PAPER positions with the canonical
+`(venue_id, venue_timezone, instrument_id, currency)` identity, even if
+quantity or price differs. A substituted/faulty read adapter cannot
+silently inflate the screen-reader-visible position count; this mirrors the
+identity uniqueness of `TradingStateRepository` without introducing a new
+ledger or policy authority.
+
+`tests/test_plan5_trader_position_identity_projection.py` exercises malformed
+and behavior-bearing hidden timezone values, duplicate identity, mid-read
+Core revocation precedence, distinct legitimate timezone identities and
+normal projection. Error and denial states remain secret-free and contain
+no account/position balances. These are authored regressions, **not**
+executed tests or evidence of complete Trader acceptance. The child PR
+must receive exact-head CI, integrate through its parent stack and undergo
+postmerge main readback before any Section 1 terminal DONE.
