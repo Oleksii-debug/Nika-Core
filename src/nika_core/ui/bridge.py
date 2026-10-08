@@ -37,6 +37,14 @@ class UIActionBridge:
         self._state_provider = state_provider
 
     def dispatch(self, raw: object) -> dict[str, Any]:
+        # A pywebview command must originate as a plain JSON object. Do not
+        # introspect arbitrary mappings/objects at this security boundary.
+        if type(raw) is not dict:
+            return UIResult(
+                request_id="invalid",
+                status="rejected",
+                message="Invalid UI command: expected a plain JSON object.",
+            ).model_dump()
         try:
             command = UICommand.model_validate(raw)
         except ValidationError as exc:

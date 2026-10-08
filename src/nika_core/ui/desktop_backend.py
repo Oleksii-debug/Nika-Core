@@ -119,7 +119,9 @@ class DesktopBackend:
         task_payload: dict[str, Any] = {"command": command}
         if self._prepare_task_payload is not None:
             task_payload = dict(self._prepare_task_payload(task_payload))
-            if task_payload.get("command") != command:
+            # A hostile prepared value can implement __eq__ to impersonate the
+            # approved text. Require an exact built-in string before comparing.
+            if type(task_payload.get("command")) is not str or task_payload["command"] != command:
                 raise ValueError("Підготовка завдання не може змінювати його команду.")
         record = self._queue.create(
             workspace_id=_DEFAULT_WORKSPACE_ID,
@@ -484,7 +486,8 @@ class DesktopBackend:
         except KeyError:
             raise ValueError("Вказане завдання не знайдено.") from None
         if record.workspace_id != _DEFAULT_WORKSPACE_ID or record.agent_id != _DEFAULT_AGENT_ID:
-            raise ValueError("Вказане завдання не належить поточному робочому простору.")
+            # Avoid exposing existence of another workspace's task via UI errors.
+            raise ValueError("Вказане завдання не знайдено.")
         return record
 
     def _only_controllable(
