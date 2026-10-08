@@ -320,11 +320,11 @@ def test_valid_planner_identity_still_completes_through_canonical_tools() -> Non
         "",
         " leading",
         "trailing ",
-        "line\\nbreak",
-        "bidi\\u202ereordered",
-        "e\\u0301",
+        "line\nbreak",
+        "bidi\u202ereordered",
+        "e\u0301",
         "x" * 513,
-        "\\ud800",
+        "\ud800",
     ],
 )
 def test_nested_argument_field_name_cannot_spoof_evidence_or_tool_schema(
@@ -342,7 +342,7 @@ def test_nested_argument_field_name_cannot_spoof_evidence_or_tool_schema(
 
 
 def test_normal_nested_field_names_keep_plain_unicode_values() -> None:
-    arguments = {"outer": {"user_text": "line\\nbidi \\u202e is text, not a field name"}}
+    arguments = {"outer": {"user_text": "line\nbidi \u202e is text, not a field name"}}
     planner, tools = SingleStepPlanner(), RecordingTools()
     result = run_action(arguments=arguments, planner=planner, tools=tools)
     assert result.ok  # type: ignore[attr-defined]
