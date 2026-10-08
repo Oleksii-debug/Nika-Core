@@ -702,6 +702,10 @@
         return;
       }
       const failed = ["failed", "rejected"].includes(result.status);
+      // A backend "failed" response may follow a committed durable effect.
+      // Unlike an input rejection, it is not proof that retry is harmless.
+      const uncertainBackendFailure = durableMutation && result.status === "failed";
+      if (uncertainBackendFailure) keepLocked = true;
       const message = typeof result.message === "string" && result.message
         ? result.message
         : (failed
@@ -719,6 +723,12 @@
         reportStateUnavailable();
       }
       document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (uncertainBackendFailure) {
+        const caution = "Невідомо, чи дія частково виконана до помилки. "
+          + "Перевірте список завдань; повтор заблоковано до перезапуску вікна.";
+        announce(caution, true);
+        appendLog(caution);
+      }
       if (!stateReady) {
         if (!failed && durableMutation) keepLocked = true;
         announce(
