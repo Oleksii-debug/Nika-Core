@@ -15,8 +15,8 @@ from nika_core.intelligence.contracts import (
     DeterministicGoal,
     DeterministicPlan,
     DeterministicPlanner,
-    PlanStep,
     DeterministicPlanningError,
+    PlanStep,
     WorldState,
     WorldStateObserver,
 )
