@@ -43,7 +43,7 @@ const assert = require("node:assert/strict");
     "inspect-form", "task-id", "inspect-submit", "app-status",
     "task-details", "result-id", "result-state"
   ]) nodes[id] = new Element();
-  nodes["task-id"].value = scenario === "bidi" ? "task-123\\u202e" : "task-123";
+  nodes["task-id"].value = scenario === "bidi" ? "task-123\u202e" : "task-123";
 
   const result = {
     request_id: scenario === "mismatch" ? "other-request" : "fixed-request",
