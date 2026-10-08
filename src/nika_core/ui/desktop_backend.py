@@ -6,6 +6,7 @@ import threading
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from typing import Any
+from unicodedata import category
 
 from nika_core.kernel.agent_registry import AgentDefinition, AgentRegistry
 from nika_core.kernel.audit import AuditLog
@@ -21,6 +22,7 @@ from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.reference import ReferenceRuntime
 from nika_core.ui.autostart_settings import AutostartSettings
 from nika_core.ui.bridge_models import UIResult
+from nika_core.ui.payload_safety import validate_ui_payload
 from nika_core.windows_autostart import WindowsAutostartService
 
 _LOGGER = logging.getLogger(__name__)
@@ -110,13 +112,35 @@ class DesktopBackend:
         self._ensure_defaults()
 
     def create_task(self, payload: Mapping[str, Any]) -> UIResult:
-        command = str(payload.get("command", "")).strip()
+        # This facade also has direct Python callers: never assume that all
+        # ingress passed through the validating WebView command bridge.
+        # Validate and detach before reading command or invoking the composer.
+        if type(payload) is not dict:
+            raise ValueError("Команда повинна бути звичайним JSON-об'єктом.")
+        try:
+            admitted = validate_ui_payload(payload)
+        except ValueError:
+            raise ValueError("Команда містить некоректні JSON-дані.") from None
+        raw_command = admitted.get("command", "")
+        if type(raw_command) is not str:
+            raise ValueError("Команда має бути текстом.")
+        command = raw_command.strip()
         if not command:
             raise ValueError("Введіть команду перед створенням завдання.")
         task_payload: dict[str, Any] = {"command": command}
         if self._prepare_task_payload is not None:
-            task_payload = dict(self._prepare_task_payload(task_payload))
-            if task_payload.get("command") != command:
+            prepared = self._prepare_task_payload(task_payload)
+            # A composer is an extension boundary: never iterate a behavioral
+            # Mapping, store live mutable objects, or let SQLite serialize a
+            # non-JSON carrier. Validate and detach before any TaskQueue write.
+            if type(prepared) is not dict:
+                raise ValueError("Підготовка завдання має повернути звичайний JSON-об'єкт.")
+            try:
+                task_payload = validate_ui_payload(prepared)
+            except ValueError:
+                raise ValueError("Підготовка завдання повернула некоректні дані.") from None
+            # Reject command impersonation before creating the durable task.
+            if type(task_payload.get("command")) is not str or task_payload["command"] != command:
                 raise ValueError("Підготовка завдання не може змінювати його команду.")
         record = self._queue.create(
             workspace_id=_DEFAULT_WORKSPACE_ID,
@@ -124,16 +148,28 @@ class DesktopBackend:
             payload=task_payload,
         )
         self._queue.transition(record.task_id, TaskState.READY)
-        self._schedule_start(record.task_id, command)
+        try:
+            self._schedule_start(record.task_id, command)
+        except Exception:
+            # A synchronous loop/submission failure must not leave an orphan
+            # READY task that the user might unknowingly submit a second time.
+            # A concurrent RUNNING transition is never rolled back here.
+            if self._queue.get(record.task_id).state == TaskState.READY:
+                self._queue.transition(record.task_id, TaskState.CANCELLED)
+            self._record_background_failure(record.task_id, "desktop.runtime_schedule_failed")
+            raise
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
-            message=f"Завдання прийнято до виконання: {command}",
+            # Never mirror an arbitrary user command (possibly containing secrets)
+            # into the screen-reader live status/activity transcript.
+            message="Завдання прийнято до виконання.",
             focus_id="tasks-heading",
         )
 
-    def pause_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_controllable(action="призупинення")
+    def pause_task(self, payload: Mapping[str, Any]) -> UIResult:
+        payload = self._admit_task_control_payload(payload)
+        record = self._only_controllable(action="призупинення", payload=payload)
         if record is None:
             raise ValueError("Немає активного завдання, яке можна призупинити.")
         if record.state == TaskState.RUNNING:
@@ -159,8 +195,9 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def resume_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_with_state(TaskState.PAUSED, action="продовження")
+    def resume_task(self, payload: Mapping[str, Any]) -> UIResult:
+        payload = self._admit_task_control_payload(payload)
+        record = self._only_with_state(TaskState.PAUSED, action="продовження", payload=payload)
         if record is None:
             raise ValueError("Немає призупиненого завдання для продовження.")
 
@@ -189,11 +226,24 @@ class DesktopBackend:
                 "Призупинене завдання не має збереженої runtime-сесії; "
                 "повторний старт відхилено, щоб не дублювати побічні ефекти."
             )
-        command = str(record.payload.get("command", "")).strip()
+        raw_command = record.payload.get("command")
+        if type(raw_command) is not str:
+            raise ValueError("Збережене завдання не містить коректної текстової команди.")
+        command = raw_command.strip()
         if not command:
             raise ValueError("Збережене завдання не містить команди для безпечного запуску.")
         self._queue.transition(record.task_id, TaskState.READY)
-        self._schedule_start(record.task_id, command)
+        try:
+            self._schedule_start(record.task_id, command)
+        except Exception:
+            # The resumed task has never reached RUNNING. Preserve PAUSED so
+            # an operator may retry safely after the host becomes available.
+            if self._queue.get(record.task_id).state == TaskState.READY:
+                self._queue.transition(record.task_id, TaskState.PAUSED)
+            self._record_background_failure(
+                record.task_id, "desktop.runtime_resume_schedule_failed"
+            )
+            raise
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
@@ -201,12 +251,14 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def stop_agent(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_controllable(action="зупинки")
+    def stop_agent(self, payload: Mapping[str, Any]) -> UIResult:
+        payload = self._admit_task_control_payload(payload)
+        record = self._only_controllable(action="зупинки", payload=payload)
         if record is None:
             cancelled = self._only_with_state(
                 TaskState.CANCELLED,
                 action="повторної зупинки",
+                payload=payload,
             )
             if cancelled is not None:
                 return UIResult(
@@ -260,10 +312,38 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
+    def _visible_task_records(self) -> tuple[TaskRecord, ...]:
+        """Query authorized desktop tasks before applying the 50-row UI limit.
+
+        Filtering an unscoped recent list after LIMIT would hide legitimate
+        older tasks whenever foreign workspaces had many recent records.
+        The existing TaskQueue/SQLite store remains the sole task authority.
+        """
+        with self._queue.store.connection() as conn:
+            rows = conn.execute(
+                "SELECT task_id FROM tasks WHERE workspace_id = ? AND agent_id = ? "
+                "ORDER BY updated_at DESC, created_at DESC LIMIT 50",
+                (_DEFAULT_WORKSPACE_ID, _DEFAULT_AGENT_ID),
+            ).fetchall()
+        records: list[TaskRecord] = []
+        for row in rows:
+            try:
+                record = self._queue.get(row["task_id"])
+            except KeyError:
+                # A task can vanish after the scoped SQL query. Keep the rest of
+                # the authorized view available instead of failing the whole UI.
+                continue
+            if (
+                record.workspace_id == _DEFAULT_WORKSPACE_ID
+                and record.agent_id == _DEFAULT_AGENT_ID
+            ):
+                records.append(record)
+        return tuple(records)
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "autostart": self.autostart_settings.snapshot(),
-            "tasks": [self._task_view(record) for record in self._queue.list_recent(limit=50)],
+            "tasks": [self._task_view(record) for record in self._visible_task_records()],
             "agents": [
                 {
                     "agent_id": item.agent_id,
@@ -348,13 +428,18 @@ class DesktopBackend:
         existing = self._cancel_futures.get(task_id)
         if existing is not None and not existing.done():
             raise ValueError("Запит на зупинку цього завдання вже виконується.")
-        future = self._host().submit(
-            self._coordinator.cancel(
-                self._runtime,
-                task_id=task_id,
-                thread_id=thread_id,
-            )
+        coroutine = self._coordinator.cancel(
+            self._runtime,
+            task_id=task_id,
+            thread_id=thread_id,
         )
+        try:
+            future = self._host().submit(coroutine)
+        except BaseException:
+            # Do not leak an unawaited cancellation or record phantom ownership
+            # if loop startup/submission failed. Shutdown signals still propagate.
+            coroutine.close()
+            raise
         self._cancel_futures[task_id] = future
         return future
 
@@ -367,14 +452,26 @@ class DesktopBackend:
         with self._active_lock:
             existing = self._active_futures.get(task_id)
             if existing is not None and not existing.done():
+                # The caller has already constructed this coroutine. Refusing it without
+                # closing leaks an unawaited runtime operation.
+                coroutine.close()
                 raise ValueError("Завдання вже має активне runtime-виконання.")
+            try:
+                future = self._host().submit(coroutine)
+            except BaseException:
+                # Do not record a phantom active task when loop startup/submission fails.
+                # Shutdown signals still propagate unchanged.
+                coroutine.close()
+                raise
             self._active_threads[task_id] = thread_id
-            future = self._host().submit(coroutine)
             self._active_futures[task_id] = future
         future.add_done_callback(lambda done: self._runtime_done(task_id, done))
 
     def _cancel_done(self, task_id: str, future: Future[bool]) -> None:
         with self._active_lock:
+            if self._cancel_futures.get(task_id) is not future:
+                # A completed older cancellation must not clear/report on its successor.
+                return
             self._cancel_futures.pop(task_id, None)
         if future.cancelled():
             self._record_background_failure(task_id, "desktop.runtime_cancel_interrupted")
@@ -388,6 +485,9 @@ class DesktopBackend:
 
     def _runtime_done(self, task_id: str, future: Future[Any]) -> None:
         with self._active_lock:
+            if self._active_futures.get(task_id) is not future:
+                # Late callbacks cannot erase newer resume/start ownership or fail it.
+                return
             self._active_threads.pop(task_id, None)
             self._active_futures.pop(task_id, None)
         if future.cancelled() or future.exception() is None:
@@ -441,35 +541,128 @@ class DesktopBackend:
                 )
             )
 
-    def _only_controllable(self, *, action: str) -> TaskRecord | None:
-        records = [
-            record
-            for record in self._queue.list_recent(limit=50)
-            if record.state not in _TERMINAL_STATES
-        ]
-        return self._require_unambiguous(records, action=action)
-
-    def _only_with_state(self, state: TaskState, *, action: str) -> TaskRecord | None:
-        records = [
-            record for record in self._queue.list_recent(limit=50) if record.state == state
-        ]
-        return self._require_unambiguous(records, action=action)
-
     @staticmethod
-    def _require_unambiguous(
-        records: list[TaskRecord],
-        *,
-        action: str,
+    def _admit_task_control_payload(payload: object) -> dict[str, Any]:
+        """Admit a detached selector before reading durable task state.
+
+        Direct desktop callers bypass the WebView Pydantic command boundary.
+        A behavioral Mapping could otherwise lie about task_id presence and
+        turn an intended explicit control into an unqualified task control.
+        Only an empty selector or one builtin task_id key is valid.
+        """
+        if type(payload) is not dict or len(payload) > 1:
+            raise ValueError("Некоректні параметри керування завданням.")
+        if not payload:
+            return {}
+        key = next(iter(payload))
+        if type(key) is not str or key != "task_id":
+            raise ValueError("Некоректні параметри керування завданням.")
+        task_id = payload["task_id"]
+        if type(task_id) is not str:
+            raise ValueError("Потрібен коректний текстовий ідентифікатор завдання.")
+        return {"task_id": task_id}
+
+    def _selected_task(self, payload: Mapping[str, Any]) -> TaskRecord | None:
+        """Resolve an explicit durable task ID; never guess across workspace or agent scope."""
+        if "task_id" not in payload:
+            return None
+        task_id = payload["task_id"]
+        if (
+            type(task_id) is not str
+            or not 1 <= len(task_id) <= 128
+            or not all(char.isascii() and (char.isalnum() or char in "-_.") for char in task_id)
+        ):
+            raise ValueError("Потрібен коректний текстовий ідентифікатор завдання.")
+        try:
+            record = self._queue.get(task_id)
+        except KeyError:
+            raise ValueError("Вказане завдання не знайдено.") from None
+        if record.workspace_id != _DEFAULT_WORKSPACE_ID or record.agent_id != _DEFAULT_AGENT_ID:
+            # Avoid exposing existence of another workspace's task via UI errors.
+            raise ValueError("Вказане завдання не знайдено.")
+        return record
+
+    def _only_controllable(
+        self, *, action: str, payload: Mapping[str, Any] | None = None
     ) -> TaskRecord | None:
-        if len(records) > 1:
+        if payload is not None and "task_id" in payload:
+            selected = self._selected_task(payload)
+            return (
+                selected
+                if selected is not None and selected.state not in _TERMINAL_STATES
+                else None
+            )
+        return self._unqualified_task(
+            states=tuple(state for state in TaskState if state not in _TERMINAL_STATES),
+            action=action,
+        )
+
+    def _only_with_state(
+        self, state: TaskState, *, action: str, payload: Mapping[str, Any] | None = None
+    ) -> TaskRecord | None:
+        if payload is not None and "task_id" in payload:
+            selected = self._selected_task(payload)
+            return selected if selected is not None and selected.state == state else None
+        return self._unqualified_task(states=(state,), action=action)
+
+    def _unqualified_task(
+        self, *, states: tuple[TaskState, ...], action: str
+    ) -> TaskRecord | None:
+        """Fail closed on all durable matches, not only the latest 50 UI rows.
+
+        The task table is the existing TaskQueue authority. No other agent or
+        workspace may be controlled by the default desktop action.
+        """
+        if not states:
+            return None
+        allowed = tuple(state.value for state in states)
+        placeholders = ", ".join("?" for _ in allowed)
+        with self._queue.store.connection() as conn:
+            rows = conn.execute(
+                "SELECT task_id FROM tasks "
+                "WHERE workspace_id = ? AND agent_id = ? "
+                f"AND state IN ({placeholders}) "
+                "ORDER BY updated_at DESC, created_at DESC LIMIT 2",
+                (_DEFAULT_WORKSPACE_ID, _DEFAULT_AGENT_ID, *allowed),
+            ).fetchall()
+        if len(rows) > 1:
             raise ValueError(
                 f"Є кілька завдань, доступних для {action}; потрібен явний вибір завдання."
             )
-        return records[0] if records else None
+        if not rows:
+            return None
+        try:
+            record = self._queue.get(rows[0]["task_id"])
+        except KeyError:
+            # Another owner can remove the selected row between the scoped
+            # SQL read and TaskQueue readback. Never echo a stale task ID or
+            # accidentally route an unqualified control to another task.
+            raise ValueError(
+                "Стан завдання змінився; оновіть список і повторіть дію."
+            ) from None
+        if (
+            record.workspace_id != _DEFAULT_WORKSPACE_ID
+            or record.agent_id != _DEFAULT_AGENT_ID
+            or record.state.value not in allowed
+        ):
+            raise ValueError("Стан завдання змінився; оновіть список і повторіть дію.")
+        return record
 
     @staticmethod
     def _task_view(record: TaskRecord) -> dict[str, Any]:
-        command = str(record.payload.get("command", "")).strip()
+        raw_command = record.payload.get("command")
+        # This is an accessible list preview, not durable task authority.
+        # Bound it before copying or walking a potentially huge saved command;
+        # never let controls/bidi markers spoof screen-reader list entries.
+        command = ""
+        if type(raw_command) is str:
+            preview = raw_command[:160]
+            command = "".join(
+                " " if category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} else char
+                for char in preview
+            ).strip()
+            if len(raw_command) > 160:
+                command += "…"
         return {
             "task_id": record.task_id,
             "workspace_id": record.workspace_id,
