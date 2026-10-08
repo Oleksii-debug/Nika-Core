@@ -554,7 +554,8 @@
       const failed = result.status !== "completed";
       // A backend failure can follow a committed OS registry write.
       if (save && result.status === "failed") autostartUncertain = true;
-      if (!failed || !save) autostartDirty = false;
+      // A read-only refresh cannot acknowledge or erase an unsaved OS-setting edit.
+      if (save && !failed) autostartDirty = false;
       const message = typeof result.message === "string" && result.message
         ? result.message : (failed ? "Не вдалося змінити автозапуск." : "Автозапуск оновлено.");
       announce(message, failed);
