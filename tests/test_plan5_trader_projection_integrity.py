@@ -171,3 +171,39 @@ def test_revocation_on_projection_failure_dominates_health_disclosure() -> None:
     assert state["state"] == "ACCESS_DENIED"
     assert "cash" not in state and "positions" not in state
     assert checks == 2 and repo.reads == 1
+
+
+@pytest.mark.parametrize("container", ["account", "position"])
+@pytest.mark.parametrize("revoke_during_read", [False, True])
+def test_behavioral_dictionary_keys_rejected_without_callbacks(
+    container: str, revoke_during_read: bool,
+) -> None:
+    """Do not invoke foreign equality hooks even for an exact built-in dict."""
+    callbacks: list[str] = []
+
+    class HostileKey(str):
+        def __hash__(self) -> int:
+            return str.__hash__(self)
+
+        def __eq__(self, other: object) -> bool:
+            callbacks.append("equality")
+            raise AssertionError("untrusted dictionary key equality executed")
+
+    payload = clean_account()
+    if container == "account":
+        payload.pop("cash")
+        payload[HostileKey("cash")] = "98"
+    else:
+        position = payload["positions"][0]
+        position.pop("venue_id")
+        position[HostileKey("venue_id")] = "SIM"
+
+    repo = Repository(payload)
+    state, checks = projected(repo, revocation=revoke_during_read)
+    assert callbacks == []
+    assert checks == 2 and repo.reads == 1
+    assert state["mode"] == "PAPER_ONLY"
+    assert state["state"] == (
+        "ACCESS_DENIED" if revoke_during_read else "EVIDENCE_UNAVAILABLE"
+    )
+    assert "cash" not in state and "positions" not in state
