@@ -24,6 +24,26 @@ class RiskRejected(TradingResearchError):
     """Raised when a simulated order breaches an explicit research risk limit."""
 
 
+def _finite_decimal(value: object, name: str) -> Decimal:
+    """Risk authority never accepts NaN, infinity, floats, or coerced numbers."""
+    if type(value) is not Decimal or not value.is_finite():
+        raise TradingResearchError(f"{name} must be a finite Decimal")
+    return value
+
+
+def _validate_snapshot(snapshot: AccountSnapshot) -> None:
+    if type(snapshot) is not AccountSnapshot:
+        raise TradingResearchError("risk snapshot must be AccountSnapshot")
+    for name in (
+        "cash", "fees", "realized_pnl", "unrealized_pnl", "equity",
+        "gross_exposure", "net_exposure",
+    ):
+        _finite_decimal(getattr(snapshot, name), f"snapshot {name}")
+    for position in snapshot.positions:
+        for name in ("quantity", "average_price", "realized_pnl"):
+            _finite_decimal(getattr(position, name), f"position {name}")
+
+
 @dataclass(frozen=True, slots=True)
 class RiskLimits:
     max_abs_position: Decimal
@@ -43,10 +63,19 @@ class RiskLimits:
             self.max_drawdown,
             self.max_leverage,
         )
-        if any(value < 0 for value in values):
-            raise TradingResearchError("risk limits cannot be negative")
+        for value, name in zip(
+            values,
+            ("max_abs_position", "max_gross_exposure", "max_net_exposure",
+             "max_session_loss", "max_drawdown", "max_leverage"),
+            strict=True,
+        ):
+            _finite_decimal(value, f"risk {name}")
+            if value < 0:
+                raise TradingResearchError("risk limits cannot be negative")
         if self.max_leverage == 0:
             raise TradingResearchError("max_leverage must be positive")
+        if type(self.allow_short) is not bool:
+            raise TradingResearchError("allow_short must be boolean")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,8 +84,10 @@ class RiskState:
     session_start_equity: Decimal
 
     def __post_init__(self) -> None:
-        if self.peak_equity < 0 or self.session_start_equity < 0:
-            raise TradingResearchError("risk equity anchors cannot be negative")
+        for name in ("peak_equity", "session_start_equity"):
+            value = _finite_decimal(getattr(self, name), name)
+            if value < 0:
+                raise TradingResearchError("risk equity anchors cannot be negative")
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,13 +99,16 @@ class PendingRiskOrder:
     remaining_quantity: Decimal | None = None
 
     def __post_init__(self) -> None:
-        if self.mark_price <= 0:
+        mark = _finite_decimal(self.mark_price, "pending mark_price")
+        if mark <= 0:
             raise TradingResearchError("pending mark_price must be positive")
         remaining = (
             self.order.intent.quantity
             if self.remaining_quantity is None
-            else Decimal(self.remaining_quantity)
+            else self.remaining_quantity
         )
+        _finite_decimal(remaining, "pending remaining_quantity")
+        _finite_decimal(self.order.intent.quantity, "pending order quantity")
         if remaining <= 0 or remaining > self.order.intent.quantity:
             raise TradingResearchError("pending remaining_quantity must be in (0, order quantity]")
         object.__setattr__(self, "remaining_quantity", remaining)
@@ -88,6 +122,9 @@ class _ExecutionReservation:
 
 class RiskEngine:
     def __init__(self, limits: RiskLimits) -> None:
+        if type(limits) is not RiskLimits:
+            raise TradingResearchError("risk limits must be RiskLimits")
+        limits.__post_init__()
         self._limits = limits
 
     def approve(
@@ -104,9 +141,23 @@ class RiskEngine:
         risk_state: RiskState,
         pending_orders: tuple[PendingRiskOrder, ...] = (),
     ) -> RiskApprovedOrder:
+        self._limits.__post_init__()
+        _validate_snapshot(snapshot)
+        if type(risk_state) is not RiskState:
+            raise TradingResearchError("approve requires RiskState")
+        risk_state.__post_init__()
+        if type(intent) is not OrderIntent or type(policy) is not ExecutionPolicy:
+            raise TradingResearchError("approve requires validated intent and execution policy")
+        _finite_decimal(intent.quantity, "intent quantity")
+        if type(approved_slice) is not int or approved_slice < 0:
+            raise TradingResearchError("approved_slice must be non-negative integer")
         approved_at = require_aware_utc(approved_at, "approved_at")
         if type(authority) is not OrderAuthority:
             raise TradingResearchError("approve requires host OrderAuthority")
+        _finite_decimal(mark_price, "mark_price")
+        _finite_decimal(pending_signed_quantity, "pending_signed_quantity")
+        for field in ("slippage_bps", "fee_bps", "fixed_fee", "max_fill_fraction"):
+            _finite_decimal(getattr(policy, field), f"execution policy {field}")
         if mark_price <= 0:
             raise TradingResearchError("mark_price must be positive")
         if pending_orders and pending_signed_quantity != 0:
@@ -121,6 +172,9 @@ class RiskEngine:
 
         seen_pending_approvals: set[str] = set()
         for pending in pending_orders:
+            if type(pending) is not PendingRiskOrder:
+                raise TradingResearchError("pending orders must be PendingRiskOrder")
+            pending.__post_init__()
             if pending.order.approval_id in seen_pending_approvals:
                 raise TradingResearchError("duplicate pending approval_id")
             seen_pending_approvals.add(pending.order.approval_id)
@@ -236,6 +290,11 @@ class RiskEngine:
         )
 
     def assert_post_fill(self, snapshot: AccountSnapshot, risk_state: RiskState) -> None:
+        self._limits.__post_init__()
+        _validate_snapshot(snapshot)
+        if type(risk_state) is not RiskState:
+            raise TradingResearchError("post-fill requires RiskState")
+        risk_state.__post_init__()
         for position in snapshot.positions:
             if not self._limits.allow_short and position.quantity < 0:
                 raise RiskRejected("post-fill short position breach")
@@ -265,6 +324,7 @@ def _record_mark(
     identity: InstrumentIdentity,
     mark_price: Decimal,
 ) -> None:
+    _finite_decimal(mark_price, "risk mark")
     existing = marks.get(identity)
     if existing is not None and existing != mark_price:
         raise TradingResearchError(f"inconsistent risk marks for instrument {identity!r}")
