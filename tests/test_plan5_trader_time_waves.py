@@ -118,6 +118,40 @@ def test_behavioral_identity_carrier_cannot_run_callbacks() -> None:
     assert called == []
 
 
+@pytest.mark.parametrize(
+    "source_at",
+    [
+        AT + timedelta(minutes=1),
+        datetime(2026, 1, 1, 11),  # naive timestamp
+        "2026-01-01T11:00:00Z",
+    ],
+)
+def test_source_time_mutation_after_view_creation_fails_closed(source_at: object) -> None:
+    event = quote(30, -5)
+    temporal = view([event])
+    object.__setattr__(event.time, "source_at", source_at)
+    with pytest.raises(TradingResearchError, match="source-time provenance"):
+        group_visible_time_waves(temporal)
+
+
+def test_source_must_not_follow_available_after_view_creation() -> None:
+    event = quote(30, -5)
+    temporal = view([event])
+    object.__setattr__(event.time, "source_at", AT - timedelta(minutes=4))
+    with pytest.raises(TradingResearchError, match="source-time provenance"):
+        group_visible_time_waves(temporal)
+
+
+def test_valid_utc_source_time_preserves_prematch_wave() -> None:
+    event = quote(30, -5)
+    temporal = view([event])
+    object.__setattr__(event.time, "source_at", AT - timedelta(minutes=10))
+    waves = group_visible_time_waves(temporal, window_minutes=30)
+    assert len(waves) == 1
+    assert waves[0].event_count == 1
+    assert waves[0].start_at == AT + timedelta(minutes=30)
+
+
 def test_report_values_are_detached_from_mutable_source_objects() -> None:
     event = quote(20, -10)
     result = group_visible_time_waves(view([event]), window_minutes=30)
