@@ -267,12 +267,16 @@ class DeterministicBrain:
             # aggregate node/UTF-8-byte budgets across the complete run.
             catalog_nodes = [100_000]
             catalog_utf8_bytes = [4 * 1024 * 1024]
+            catalog_fact_slots = 0
             for action in actions:
                 _require_run_identity(action.action_id, name="action_id")
                 if action.tool_id is not None:
                     _require_run_identity(action.tool_id, name="tool_id")
                 for facts in (action.requires, action.forbids, action.adds, action.removes):
                     _require_plain_facts(facts)
+                    catalog_fact_slots += len(facts)
+                    if catalog_fact_slots > 100_000:
+                        raise ValueError("deterministic action fact catalog exceeds 100000 entries")
                 if action.requires & action.forbids or action.adds & action.removes:
                     raise ValueError("contradictory deterministic action")
                 _require_plain_json_arguments(
