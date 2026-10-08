@@ -6,6 +6,7 @@ import threading
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from typing import Any
+from unicodedata import category
 
 from nika_core.kernel.agent_registry import AgentDefinition, AgentRegistry
 from nika_core.kernel.audit import AuditLog
@@ -650,8 +651,18 @@ class DesktopBackend:
     @staticmethod
     def _task_view(record: TaskRecord) -> dict[str, Any]:
         raw_command = record.payload.get("command")
-        # Never invoke behavioral __str__ objects when composing a screen-reader view.
-        command = raw_command.strip() if type(raw_command) is str else ""
+        # This is an accessible list preview, not durable task authority.
+        # Bound it before copying or walking a potentially huge saved command;
+        # never let controls/bidi markers spoof screen-reader list entries.
+        command = ""
+        if type(raw_command) is str:
+            preview = raw_command[:160]
+            command = "".join(
+                " " if category(char) in {"Cc", "Cf", "Cs", "Zl", "Zp"} else char
+                for char in preview
+            ).strip()
+            if len(raw_command) > 160:
+                command += "…"
         return {
             "task_id": record.task_id,
             "workspace_id": record.workspace_id,
