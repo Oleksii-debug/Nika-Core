@@ -272,3 +272,23 @@ payload failure. Tests are authored and require exact-head CI execution.
 This component does **not** establish server-account authentication,
 commercial entitlements, durable cloud workers, multi-tenant production,
 Windows package proof, or terminal Section 1/2 DONE.
+
+## Canonical SQLite read failure after workspace transfer (Plan 6 §1, nonterminal)
+
+The preflight workspace lookup is deliberately advisory: a task can move or be
+deleted before the canonical `TaskQueue.get` finishes. An SQLite read exception
+is not proof that the row remains in the caller's workspace. The same metadata
+recheck used for corrupt JSON now also applies to `sqlite3.Error`. If the
+task is missing or foreign on recheck, the caller receives the same opaque
+`not_found` result as for a missing task; if still owned or metadata is
+unavailable, it receives a bounded, secret-free `storage_unavailable` result.
+No read retry, alternate store, task mutation or new authority is introduced.
+
+Three focused negative/recovery tests cover transfer-then-SQLite-failure,
+delete-then-SQLite-failure and still-owned SQLite-failure followed by recovery
+through reopening the canonical SQLite store. This is repository-controllable
+component coverage only, not hosted-Cloud/tenant/service/package acceptance.
+The wheel/installer/provenance authority is unchanged by this code-only repair;
+exact-head Core CI (Ubuntu/Windows), M12 packaging evidence, dependency
+ancestry, production auth/composition and main integration still require
+independent verification before terminal DONE.
