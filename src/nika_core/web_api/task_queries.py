@@ -6,6 +6,8 @@ and entitlement before the WebApplicationBoundary calls this handler.
 """
 from __future__ import annotations
 
+import sqlite3
+
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.web_api.contracts import WebCommand, WebCommandResult, WebPrincipal
 
@@ -38,6 +40,16 @@ class WebTaskQueryHandler:
             record = self._queue.get(task_id)
         except KeyError:
             return self._reject(command.request_id, "not_found")
+        except sqlite3.Error:
+            # Inspection is read-only: a database read fault is a definite
+            # failed query, never an unknown task creation/cancellation effect.
+            # Preserve the request ID, but do not expose file paths or SQL.
+            return WebCommandResult.create(
+                request_id=command.request_id,
+                status="failed",
+                code="storage_unavailable",
+                message="Task state is temporarily unavailable.",
+            )
         if record.workspace_id != principal.workspace_id:
             # Do not disclose whether another workspace owns the task.
             return self._reject(command.request_id, "not_found")
