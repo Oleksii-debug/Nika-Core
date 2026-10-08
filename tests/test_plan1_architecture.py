@@ -105,7 +105,25 @@ def direct_engine_imports(source: str) -> tuple[str, ...]:
             and isinstance(func.value, ast.Name)
             and func.value.id in builtins_names
         )
-        if not (direct or via_importlib or via_builtins):
+        via_getattr = (
+            isinstance(func, ast.Call)
+            and isinstance(func.func, ast.Name)
+            and func.func.id == "getattr"
+            and len(func.args) == 2
+            and isinstance(func.args[0], ast.Name)
+            and isinstance(func.args[1], ast.Constant)
+            and (
+                (
+                    func.args[0].id in importlib_names
+                    and func.args[1].value == "import_module"
+                )
+                or (
+                    func.args[0].id in builtins_names
+                    and func.args[1].value == "__import__"
+                )
+            )
+        )
+        if not (direct or via_importlib or via_builtins or via_getattr):
             continue
         if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(
             node.args[0].value, str
@@ -182,4 +200,22 @@ def test_architecture_guard_blocks_builtins_import_alias_escape() -> None:
 
 def test_architecture_guard_rejects_nonliteral_builtins_import() -> None:
     source = "from builtins import __import__ as load\nload(unknown_engine)\n"
+    assert direct_engine_imports(source) == ("<nonliteral-dynamic-import>",)
+
+
+def test_architecture_guard_rejects_getattr_dynamic_engine_imports() -> None:
+    source = (
+        "import importlib as loader\\n"
+        "import builtins as standard\\n"
+        "getattr(loader, 'import_module')('langgraph.graph')\\n"
+        "getattr(standard, '__import__')('mcp')\\n"
+    )
+    assert direct_engine_imports(source) == ("langgraph.graph", "mcp")
+
+
+def test_architecture_guard_rejects_getattr_nonliteral_provider_name() -> None:
+    source = (
+        "import importlib\\n"
+        "getattr(importlib, 'import_module')(user_supplied_module)\\n"
+    )
     assert direct_engine_imports(source) == ("<nonliteral-dynamic-import>",)
