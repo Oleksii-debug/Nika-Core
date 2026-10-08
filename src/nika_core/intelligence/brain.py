@@ -90,6 +90,31 @@ def _positive_finite_seconds(value: object, *, name: str) -> float:
     return seconds
 
 
+
+def _require_plain_json_arguments(value: object, *, depth: int = 0, budget: list[int]) -> None:
+    """Reject behavioral objects before a caller-controlled deepcopy is attempted."""
+    budget[0] -= 1
+    if budget[0] < 0 or depth > 32:
+        raise ValueError("deterministic run inputs cannot be detached safely")
+    kind = type(value)
+    if value is None or kind in (str, bool, int):
+        return
+    if kind is float and math.isfinite(value):
+        return
+    if kind in (list, tuple):
+        for item in value:
+            _require_plain_json_arguments(item, depth=depth + 1, budget=budget)
+        return
+    if kind is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                break
+            _require_plain_json_arguments(item, depth=depth + 1, budget=budget)
+        else:
+            return
+    raise ValueError("deterministic run inputs cannot be detached safely")
+
+
 class DeterministicBrain:
     """Plan, validate, re-plan and execute explicit workflows without a language model."""
 
@@ -157,6 +182,11 @@ class DeterministicBrain:
         if any(type(action) is not DeterministicAction for action in actions):
             raise ValueError("actions must be canonical deterministic action records")
         try:
+            # Only plain inert JSON-like values may be copied into authority-bearing
+            # actions. A foreign __deepcopy__ could return an alias or execute code.
+            # Validate before invoking deepcopy, and bound deeply nested payloads.
+            for action in actions:
+                _require_plain_json_arguments(action.arguments, budget=[10000])
             state, goal, actions = deepcopy((state, goal, actions))
         except Exception as exc:
             raise ValueError("deterministic run inputs cannot be detached safely") from exc
