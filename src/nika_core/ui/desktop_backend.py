@@ -192,7 +192,10 @@ class DesktopBackend:
                 "Призупинене завдання не має збереженої runtime-сесії; "
                 "повторний старт відхилено, щоб не дублювати побічні ефекти."
             )
-        command = str(record.payload.get("command", "")).strip()
+        raw_command = record.payload.get("command")
+        if type(raw_command) is not str:
+            raise ValueError("Збережене завдання не містить коректної текстової команди.")
+        command = raw_command.strip()
         if not command:
             raise ValueError("Збережене завдання не містить команди для безпечного запуску.")
         self._queue.transition(record.task_id, TaskState.READY)
@@ -535,7 +538,9 @@ class DesktopBackend:
 
     @staticmethod
     def _task_view(record: TaskRecord) -> dict[str, Any]:
-        command = str(record.payload.get("command", "")).strip()
+        raw_command = record.payload.get("command")
+        # Never invoke behavioral __str__ objects when composing a screen-reader view.
+        command = raw_command.strip() if type(raw_command) is str else ""
         return {
             "task_id": record.task_id,
             "workspace_id": record.workspace_id,
