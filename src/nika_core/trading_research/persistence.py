@@ -125,6 +125,11 @@ class TradingStateRepository:
                 ):
                     raise RuntimeError("conflicting durable account state")
                 return False
+            # Do not erase corrupt prior evidence with a subsequent paper fill.
+            # The validation and insertion share the same IMMEDIATE transaction.
+            prior_account = _validated_account_row(conn, workspace_id, run_id)
+            if prior_account is not None:
+                _decode_account_payload(str(prior_account["payload"]))
             conn.execute(
                 "INSERT INTO trading_research_run_fills("
                 "workspace_id, run_id, fill_id, approval_id, intent_id, order_id, "
