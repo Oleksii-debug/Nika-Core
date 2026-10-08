@@ -236,3 +236,33 @@ def test_planner_must_not_invoke_behavioral_step_deepcopy() -> None:
     assert poisoned_id.deepcopy_calls == 0
     assert planner.calls == 1
     assert tools.calls == []
+
+def test_oversized_planner_result_is_rejected_before_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import nika_core.intelligence.brain as brain_module
+
+    class OversizedPlanner(SingleStepPlanner):
+        def plan(self, *, state: object, goal: object, actions: object) -> DeterministicPlan:
+            self.calls += 1
+            return DeterministicPlan(
+                steps=(PlanStep(action_id="finish", tool_id="read.demo"),) * 101
+            )
+
+    original_deepcopy = brain_module.deepcopy
+    copied_plans: list[DeterministicPlan] = []
+
+    def guarded_deepcopy(value: object) -> object:
+        if type(value) is DeterministicPlan:
+            copied_plans.append(value)
+            raise AssertionError("oversized planner output was snapshotted")
+        return original_deepcopy(value)
+
+    monkeypatch.setattr(brain_module, "deepcopy", guarded_deepcopy)
+    planner, tools = OversizedPlanner(), RecordingTools()
+    result = run_action(arguments={"safe": True}, planner=planner, tools=tools)
+    assert result.error_code is DeterministicErrorCode.PLAN_TOO_LONG
+    assert copied_plans == []
+    assert planner.calls == 1
+    assert tools.calls == []
+
