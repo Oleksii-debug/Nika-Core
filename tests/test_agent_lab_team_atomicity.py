@@ -21,8 +21,9 @@ from nika_core.multi_agent import (
 class _NoopCancelRuntime:
     capabilities = frozenset()
 
-    async def cancel(self, *, task_id: str, thread_id: str) -> None:
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         del task_id, thread_id
+        return True
 
 
 class _UnusedDefinitions:
