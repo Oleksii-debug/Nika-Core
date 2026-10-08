@@ -136,3 +136,77 @@ def test_completed_submission_releases_ownership(tmp_path: Path) -> None:
             assert "task-id" not in backend._active_threads
     finally:
         backend.close()
+
+
+def test_unqualified_pause_fails_closed_with_targets_outside_latest_50(tmp_path: Path) -> None:
+    backend, queue = _build(tmp_path)
+    first = queue.create(
+        workspace_id="default", agent_id="nika.default", payload={"command": "first"}
+    )
+    second = queue.create(
+        workspace_id="default", agent_id="nika.default", payload={"command": "second"}
+    )
+    queue.transition(first.task_id, TaskState.READY)
+    queue.transition(second.task_id, TaskState.READY)
+    # Both live targets are obscured by newer completed tasks in the UI snapshot.
+    for index in range(55):
+        terminal = queue.create(
+            workspace_id="default",
+            agent_id="nika.default",
+            payload={"command": f"done-{index}"},
+        )
+        queue.transition(terminal.task_id, TaskState.READY)
+        queue.transition(terminal.task_id, TaskState.RUNNING)
+        queue.transition(terminal.task_id, TaskState.COMPLETED)
+    try:
+        with pytest.raises(ValueError, match="кілька завдань"):
+            backend.pause_task({})
+        assert queue.get(first.task_id).state == TaskState.READY
+        assert queue.get(second.task_id).state == TaskState.READY
+    finally:
+        backend.close()
+
+
+def test_unqualified_actions_never_select_other_agent_or_workspace(tmp_path: Path) -> None:
+    backend, queue = _build(tmp_path)
+    foreign = queue.create(
+        workspace_id="another-workspace", agent_id="another-agent",
+        payload={"command": "do not control"},
+    )
+    queue.transition(foreign.task_id, TaskState.READY)
+    try:
+        with pytest.raises(ValueError, match="Немає активного завдання"):
+            backend.pause_task({})
+        with pytest.raises(ValueError, match="Немає активного завдання агента"):
+            backend.stop_agent({})
+        assert queue.get(foreign.task_id).state == TaskState.READY
+    finally:
+        backend.close()
+
+
+def test_unqualified_resume_detects_old_paused_target_behind_recent_history(tmp_path: Path) -> None:
+    backend, queue = _build(tmp_path)
+    paused = queue.create(
+        workspace_id="default", agent_id="nika.default", payload={"command": "resume me"}
+    )
+    queue.transition(paused.task_id, TaskState.READY)
+    queue.transition(paused.task_id, TaskState.PAUSED)
+    # Newer terminal rows must not hide the only resumable task.
+    for index in range(55):
+        terminal = queue.create(
+            workspace_id="default", agent_id="nika.default",
+            payload={"command": f"done-{index}"},
+        )
+        queue.transition(terminal.task_id, TaskState.READY)
+        queue.transition(terminal.task_id, TaskState.RUNNING)
+        queue.transition(terminal.task_id, TaskState.COMPLETED)
+    try:
+        assert backend.resume_task({}).status == "accepted"
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if queue.get(paused.task_id).state == TaskState.COMPLETED:
+                break
+            time.sleep(0.01)
+        assert queue.get(paused.task_id).state == TaskState.COMPLETED
+    finally:
+        backend.close()
