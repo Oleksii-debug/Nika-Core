@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 from ..data.sqlite import SQLiteStore
-from .accounting import AccountSnapshot
-from .orders import SimulatedFill
+from .accounting import AccountSnapshot, Position
+from .contracts import Instrument, TradingResearchError, Venue
+from .orders import OrderAuthority, Side, SimulatedFill
 
 _TRADER_SCHEMA_VERSION = 3
 _MIGRATION_COLUMN_TYPES = {
@@ -98,6 +101,10 @@ class TradingStateRepository:
             _verify_v3_schema(conn)
 
     def commit_fill_and_account(self, fill: SimulatedFill, snapshot: AccountSnapshot) -> bool:
+        # Bind durable evidence to detached admitted records, never caller-owned
+        # frozen dataclasses whose fields can be replaced after validation.
+        fill = _require_durable_fill(fill)
+        snapshot = _require_durable_snapshot(snapshot)
         payload = _snapshot_payload(snapshot)
         _decode_account_payload(payload)
         workspace_id = fill.authority.workspace_id
@@ -180,6 +187,113 @@ class TradingStateRepository:
         return _decode_account_payload(payload)
 
 
+
+
+def _require_plain_instrument(value: object) -> Instrument:
+    """Detach canonical instrument identity without untrusted callbacks."""
+    if (
+        type(value) is not Instrument
+        or type(value.venue) is not Venue
+        or any(
+            type(part) is not str
+            for part in (
+                value.instrument_id,
+                value.currency,
+                value.venue.venue_id,
+                value.venue.timezone,
+            )
+        )
+    ):
+        raise TradingResearchError("durable paper instrument must be canonical")
+    venue = Venue(value.venue.venue_id, value.venue.timezone)
+    expected = Instrument(value.instrument_id, venue, value.currency)
+    if expected != value:
+        raise TradingResearchError("durable paper instrument identity changed")
+    return expected
+
+
+def _require_plain_utc_time(value: object, name: str) -> None:
+    # A forged timezone can execute code during astimezone or database serialization.
+    if type(value) is not datetime or type(value.tzinfo) not in (timezone, ZoneInfo):
+        raise TradingResearchError(f"{name} must use a canonical timezone")
+    if value.utcoffset() is None:
+        raise TradingResearchError(f"{name} must be timezone-aware")
+
+
+def _require_durable_fill(fill: SimulatedFill) -> SimulatedFill:
+    """Re-admit and detach exact paper evidence before JSON/SQLite effects."""
+    if (
+        type(fill) is not SimulatedFill
+        or type(fill.authority) is not OrderAuthority
+        or type(fill.side) is not Side
+        or type(fill.filled_slice) is not int
+    ):
+        raise TradingResearchError("durable paper fill must be canonical")
+    for name in ("fill_id", "approval_id", "intent_id"):
+        if type(getattr(fill, name)) is not str:
+            raise TradingResearchError(f"durable paper {name} must be plain text")
+    for name in ("workspace_id", "run_id", "order_id"):
+        if type(getattr(fill.authority, name)) is not str:
+            raise TradingResearchError(f"durable paper {name} must be plain text")
+    if type(fill.authority.submitted_slice) is not int:
+        raise TradingResearchError("durable paper submitted_slice must be integer")
+    for name in ("quantity", "price", "fee"):
+        value = getattr(fill, name)
+        if type(value) is not Decimal or not value.is_finite():
+            raise TradingResearchError(f"durable paper {name} must be a finite Decimal")
+    instrument = _require_plain_instrument(fill.instrument)
+    _require_plain_utc_time(fill.authority.submitted_at, "paper submitted_at")
+    _require_plain_utc_time(fill.filled_at, "paper filled_at")
+    authority = OrderAuthority(
+        fill.authority.workspace_id, fill.authority.run_id,
+        fill.authority.order_id, fill.authority.submitted_at,
+        fill.authority.submitted_slice,
+    )
+    detached = SimulatedFill(
+        fill.fill_id, fill.approval_id, fill.intent_id, authority,
+        instrument, fill.side, fill.quantity, fill.price, fill.fee,
+        fill.filled_at, fill.filled_slice,
+    )
+    if detached != fill:
+        raise TradingResearchError("durable paper fill identity changed")
+    return detached
+
+
+def _require_durable_snapshot(snapshot: AccountSnapshot) -> AccountSnapshot:
+    """Detach exact account/position records before serializing to JSON."""
+    if type(snapshot) is not AccountSnapshot or type(snapshot.positions) is not tuple:
+        raise TradingResearchError("durable paper account snapshot must be canonical")
+    amounts: dict[str, Decimal] = {}
+    for name in (
+        "cash", "fees", "realized_pnl", "unrealized_pnl",
+        "equity", "gross_exposure", "net_exposure",
+    ):
+        value = getattr(snapshot, name)
+        if type(value) is not Decimal or not value.is_finite():
+            raise TradingResearchError(f"durable paper {name} must be a finite Decimal")
+        amounts[name] = value
+    if len(snapshot.positions) > 100_000:
+        raise TradingResearchError("durable paper positions exceed maximum")
+    positions: list[Position] = []
+    for position in snapshot.positions:
+        if type(position) is not Position:
+            raise TradingResearchError("durable paper position must be canonical")
+        instrument = _require_plain_instrument(position.instrument)
+        for name in ("quantity", "average_price", "realized_pnl"):
+            value = getattr(position, name)
+            if type(value) is not Decimal or not value.is_finite():
+                raise TradingResearchError(f"durable paper position {name} is invalid")
+        positions.append(
+            Position(instrument, position.quantity, position.average_price, position.realized_pnl)
+        )
+    detached = AccountSnapshot(
+        amounts["cash"], amounts["fees"], amounts["realized_pnl"],
+        amounts["unrealized_pnl"], amounts["equity"], amounts["gross_exposure"],
+        amounts["net_exposure"], tuple(positions),
+    )
+    if detached != snapshot:
+        raise TradingResearchError("durable paper account snapshot changed")
+    return detached
 
 
 def _validated_account_row(
