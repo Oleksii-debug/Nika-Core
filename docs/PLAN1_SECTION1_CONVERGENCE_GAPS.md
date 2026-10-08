@@ -45,6 +45,27 @@ imports into six Nika-owned port/contract modules, with negative tests for
 nested/dynamic imports. Those tests are not a substitute for integration or
 runtime trust-boundary tests.
 
+## Added Section 1 drift/adversarial admission evidence (2026-10-08)
+
+- The dependency-adoption guard now pins the reviewed `REUSE`/`ADAPT`
+  decision and canonical Nika owner for all 14 current groups, plus the
+  allowlisted decisions rejecting five competing runtime/domain authorities.
+  A nonempty manifest label is no longer sufficient to silently rewrite an
+  approved architecture decision.
+- New negative cases cover forged framework decisions, vendor-owned policy
+  labels, optional-provider reassignment and removed rejection entries.
+- The inherited AST architecture guard now recognizes direct or aliased
+  `builtins.__import__` and `from builtins import __import__ as ...`
+  import paths, including nonliteral arguments, in the designated stable
+  Nika contract modules. This is a targeted guard, not an all-path Python
+  runtime sandbox.
+- Exact GitHub commits `50e494daa0c862c97191f47747e04c86d6ac8213`
+  and `73aed268fa2c6744e4b36c8bd453021d47a72111` were
+  persisted on the existing Section-1 convergence branch; source blob
+  readback was completed. Authored negative tests are not a CI PASS.
+- These changes neither add new dependencies nor a second orchestration,
+  model, scheduler, policy or persistence authority.
+
 ## Deliberate non-claims — currently NOT terminal DONE
 
 1. `pyproject.toml` declares ranges; this checkout has **no committed
