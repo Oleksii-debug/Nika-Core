@@ -14,6 +14,7 @@ from nika_core.intelligence.contracts import (
     DeterministicGoal,
     DeterministicPlan,
     DeterministicPlanner,
+    PlanStep,
     DeterministicPlanningError,
     WorldState,
     WorldStateObserver,
@@ -288,6 +289,28 @@ class DeterministicBrain:
                 actions=available_actions,
                 planning_deadline=planning_deadline,
             )
+            # The planner is a replaceable/untrusted adapter. Validate its carrier
+            # before indexing a step or publishing it as durable plan evidence.
+            # Malformed steps must never reach ToolExecutor or a journal reservation.
+            if (
+                type(plan) is not DeterministicPlan
+                or type(plan.steps) is not tuple
+                or any(
+                    type(step) is not PlanStep
+                    or type(step.action_id) is not str
+                    or (step.tool_id is not None and type(step.tool_id) is not str)
+                    for step in plan.steps
+                )
+            ):
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                    message="planner returned a malformed deterministic plan",
+                )
             history.append(plan)
 
             validation_failure = self._validate_plan(
