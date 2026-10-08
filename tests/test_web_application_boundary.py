@@ -380,3 +380,36 @@ def test_unknown_effect_reports_request_identity_before_handler_mutation() -> No
     with pytest.raises(WebCommandOutcomeUnknownError) as caught:
         boundary.dispatch(principal=_principal(), command=_command())
     assert caught.value.request_id == "request-1"
+
+
+@pytest.mark.parametrize("identifier_field", ["request_id", "action_id"])
+def test_web_machine_tokens_reject_non_nfc_before_authorization(identifier_field) -> None:
+    authorization = _Allow(True)
+    handler = _Handler()
+    boundary = WebApplicationBoundary(authorization=authorization, handler=handler)
+    command = _command()
+    command[identifier_field] = (
+        "reque\u0301st-1" if identifier_field == "request_id" else "taske\u0301.inspect"
+    )
+    with pytest.raises(WebCommandAdmissionError):
+        boundary.dispatch(principal=_principal(), command=command)
+    assert authorization.calls == []
+    assert handler.calls == []
+
+    # Normalized Unicode, if used by an existing registry, remains admissible.
+    command[identifier_field] = (
+        "requ\u00e9st-1" if identifier_field == "request_id" else "task\u00e9.inspect"
+    )
+    assert WebCommand.from_untrusted(command).request_id == command["request_id"]
+
+
+def test_web_result_machine_code_rejects_non_nfc() -> None:
+    with pytest.raises(ValueError, match="NFC"):
+        WebCommandResult.create(
+            request_id="request-1", status="completed", code="e\u0301chec",
+            message="Failed safely.",
+        )
+    assert WebCommandResult.create(
+        request_id="request-1", status="completed", code="\u00e9chec",
+        message="Passed.",
+    ).code == "\u00e9chec"
