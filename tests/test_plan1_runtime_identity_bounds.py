@@ -80,3 +80,9 @@ def test_runtime_event_type_is_canonical_and_does_not_inject_fake_events() -> No
     assert RuntimeEvent(sequence=0, event_type="runtime.started").event_type == (
         "runtime.started"
     )
+
+
+@pytest.mark.parametrize("factory", [_request, _resume, _probe, _result, _event])
+def test_surrogate_identity_is_a_controlled_admission_error(factory) -> None:
+    with pytest.raises(ValueError, match="invalid Unicode"):
+        factory("\\ud800")
