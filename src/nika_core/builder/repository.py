@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from nika_core.builder.compiler import CompilationResult
+from nika_core.builder.compiler import CompilationResult, RiskTier
 from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
@@ -36,7 +36,26 @@ class AgentDefinitionRepository:
         return int(row["version"] or 0) + 1
 
     def save_draft(self, compilation: CompilationResult) -> None:
-        definition = compilation.definition
+        # A frozen CompilationResult is not an authority boundary: callers may construct
+        # or mutate it after compilation. Fail closed before persisting risk/approval
+        # metadata that activation later treats as durable authorization evidence.
+        definition = AgentDefinition.model_validate(
+            compilation.definition.model_dump(mode="python")
+        )
+        highest = max((grant.max_risk for grant in definition.tool_grants), default=0)
+        approvals = tuple(
+            sorted(
+                grant.tool_id
+                for grant in definition.tool_grants
+                if grant.max_risk == RiskTier.R4_HIGH_IMPACT
+            )
+        )
+        if (
+            not isinstance(compilation.highest_risk, RiskTier)
+            or compilation.highest_risk.value != highest
+            or compilation.required_human_approvals != approvals
+        ):
+            raise ValueError("compiled agent risk/approval evidence is inconsistent")
         now = datetime.now(UTC).isoformat()
         payload = definition.model_dump_json()
         approvals_json = json.dumps(
