@@ -156,10 +156,15 @@ def test_planner_and_caller_cannot_mutate_authoritative_tool_arguments() -> None
             return DeterministicPlan(steps=(PlanStep("read", "read.demo"),))
 
     class MutatingObserver:
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def observe(self) -> WorldState:
-            # Simulate another caller mutating its original action after planning.
+            # Mutate the caller input before dispatch; then observe the applied state.
+            self.calls += 1
             original_arguments["nested"]["mode"] = "caller-injected"
-            return WorldState()
+            facts = {"done"} if self.calls > 1 else set()
+            return WorldState(frozenset(facts))
 
     tools = RecordingReadOnlyTools()
     result = asyncio.run(
