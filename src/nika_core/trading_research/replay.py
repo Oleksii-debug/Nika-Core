@@ -379,7 +379,9 @@ class ReplayBook:
         self._last_slice = {}
         self._accepted_orders = {}
         self._approval_keys = {}
-        self._scope = None
+        # Preserve an already admitted ledger scope when attaching a new
+        # replay book to an existing paper portfolio.
+        self._scope = ledger._scope
 
     def _checked_replay_key(
         self, order: RiskApprovedOrder
@@ -389,7 +391,17 @@ class ReplayBook:
         # cannot be shared across workspaces or runs, even with distinct
         # approval IDs. The scope is bound only by a committed transition.
         requested_scope = (order.authority.workspace_id, order.authority.run_id)
-        if self._scope is not None and requested_scope != self._scope:
+        ledger_scope = self.ledger._scope
+        if (
+            self._scope is not None
+            and ledger_scope is not None
+            and self._scope != ledger_scope
+        ):
+            raise TradingResearchError("paper replay ledger scope drift")
+        if (
+            (self._scope is not None and requested_scope != self._scope)
+            or (ledger_scope is not None and requested_scope != ledger_scope)
+        ):
             raise TradingResearchError("paper replay ledger scope changed")
         # Fill IDs are approval-scoped, not run-scoped. Sharing an approval ID
         # with a different order/run/workspace can otherwise falsely dedupe
