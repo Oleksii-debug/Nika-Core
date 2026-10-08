@@ -443,3 +443,49 @@ def test_compiled_approval_metadata_must_be_inert_plain_values_before_save(tmp_p
     stored = restarted.get(definition.agent_id, definition.version)
     assert stored is not None
     assert stored.required_human_approvals == ("release.publish",)
+
+
+def test_activation_rejects_behavioral_approval_carriers_before_sqlite(tmp_path) -> None:
+    from nika_core.builder.repository import AgentDefinitionRepository
+    from nika_core.data.sqlite import SQLiteStore
+
+    class _ForgedApproval(str):
+        def __hash__(self) -> int:
+            return hash("release.publish")
+
+        def __eq__(self, other: object) -> bool:
+            del other
+            return True
+
+    path = tmp_path / "nika.db"
+    SQLiteStore(path).initialize()
+    repository = AgentDefinitionRepository(SQLiteStore(path))
+    definition = _definition().model_copy(
+        update={"tool_grants": (ToolGrant(tool_id="release.publish", max_risk=4),)}
+    )
+    compiled = _compiler(
+        ToolSpec("release.publish", "Publish", ToolRisk.HIGH_IMPACT)
+    ).compile(definition)
+    repository.save_draft(compiled)
+
+    with pytest.raises(TypeError, match="frozenset of plain strings"):
+        repository.activate(
+            definition,
+            approved_tool_ids=frozenset({_ForgedApproval("unapproved.tool")}),
+        )
+    with pytest.raises(TypeError, match="frozenset of plain strings"):
+        repository.activate(definition, approved_tool_ids={"release.publish"})
+    assert repository.active(definition.agent_id) is None
+
+    # A copied invalid boolean cannot exploit equality with the persisted True.
+    with pytest.raises(ValidationError):
+        repository.activate(
+            definition.model_copy(update={"enabled": 1}),
+            approved_tool_ids=frozenset({"release.publish"}),
+        )
+    assert repository.active(definition.agent_id) is None
+    repository.activate(
+        definition, approved_tool_ids=frozenset({"release.publish"})
+    )
+    restarted = AgentDefinitionRepository(SQLiteStore(path))
+    assert restarted.require_active(definition.agent_id, definition.version).status == "active"
