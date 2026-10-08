@@ -280,6 +280,18 @@ class FoundryLocalProvider:
         if not math.isfinite(seconds) or not 0 < seconds <= 86400:
             raise ValueError("timeout_seconds must be finite and between 0 and 86400")
         timeout_seconds = seconds
+        # The SDK cancellation signal must be the exact inert threading.Event.
+        # A behavioral __bool__ carrier must never disable caller cancellation.
+        if cancel_event is not None and type(cancel_event) is not Event:
+            raise ValueError("cancel_event must be an exact threading.Event")
+        effective_cancel_event = cancel_event if cancel_event is not None else Event()
+        if effective_cancel_event.is_set():
+            raise ModelGatewayError(
+                ModelErrorCode.CANCELLED,
+                "Foundry Local model acquisition was cancelled before admission",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
         if (
             self._expected_model_id is not None
             and authorization.expected_model_id is not None
@@ -297,13 +309,19 @@ class FoundryLocalProvider:
         management_acquired = False
         inference_acquired = False
         worker: asyncio.Task[None] | None = None
-        effective_cancel_event = cancel_event or Event()
         try:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError
             await asyncio.wait_for(self._model_management_lock.acquire(), timeout=remaining)
             management_acquired = True
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    "Foundry Local model acquisition was cancelled before SDK access",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
 
             model = self._get_model(authorization.model)
             expected_model_id = authorization.expected_model_id or self._expected_model_id
@@ -316,6 +334,13 @@ class FoundryLocalProvider:
                 raise TimeoutError
             await asyncio.wait_for(self._inference_lock.acquire(), timeout=remaining)
             inference_acquired = True
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    "Foundry Local model acquisition was cancelled before download",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
 
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -361,6 +386,13 @@ class FoundryLocalProvider:
 
             evidence = self._model_evidence(model)
             self._validate_model_identity(model, expected_model_id)
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    "Foundry Local model acquisition was cancelled",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
             if not evidence.cached:
                 if effective_cancel_event.is_set():
                     raise ModelGatewayError(
