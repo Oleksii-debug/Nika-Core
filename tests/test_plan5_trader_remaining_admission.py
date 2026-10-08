@@ -209,3 +209,40 @@ def test_failed_paper_accounting_does_not_bind_ledger_scope() -> None:
     )
     assert book._scope == ("another", "run")
     assert book.ledger.cash == Decimal("798")
+
+
+def test_new_replay_book_adopts_existing_canonical_ledger_scope() -> None:
+    from nika_core.trading_research.accounting import PortfolioLedger
+    from nika_core.trading_research.replay import ReplayBook
+
+    ledger = PortfolioLedger(Decimal("1000"))
+    assert ReplayBook(ledger).process_existing_order(
+        _approved_order(), _market_slice(),
+    ).state is OrderState.FILLED
+    recovered_book = ReplayBook(ledger)
+    assert recovered_book._scope == ("trader", "run")
+    with pytest.raises(TradingResearchError, match="ledger scope changed"):
+        recovered_book.cancel(_unrelated_order(workspace="unrelated"))
+    assert ledger.cash == Decimal("798")
+
+
+def test_replacing_ledger_from_another_scope_fails_before_any_effect() -> None:
+    from nika_core.trading_research.accounting import PortfolioLedger
+    from nika_core.trading_research.replay import ReplayBook
+
+    first_book = ReplayBook(PortfolioLedger(Decimal("1000")))
+    assert first_book.cancel(_approved_order()).state is OrderState.CANCELLED
+    foreign_ledger = PortfolioLedger(Decimal("1000"))
+    foreign_book = ReplayBook(foreign_ledger)
+    assert foreign_book.process_existing_order(
+        _unrelated_order(workspace="other"), _market_slice(),
+    ).state is OrderState.FILLED
+
+    first_book.ledger = foreign_ledger
+    with pytest.raises(TradingResearchError, match="ledger scope drift"):
+        first_book.cancel(_unrelated_order())
+    with pytest.raises(TradingResearchError, match="ledger scope drift"):
+        first_book.process_existing_order(
+            _approved_order(), _market_slice(),
+        )
+    assert foreign_ledger.cash == Decimal("798")
