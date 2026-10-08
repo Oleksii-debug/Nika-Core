@@ -22,7 +22,7 @@ async function run(source) {
   const factory = new Function("ctx",
     "const {globalThis,document,keymapBody,keymapAccessibleActionLabel,"
     + "keymapControlId,mutateKeymap}=ctx;"
-    + "let actions=[{action_id:'previous'}], actionsReady=true;"
+    + "let actions=[{action_id:'previous'}], actionsReady=true, keymapReadGeneration=0;"
     + source.slice(start, end)
     + "return {refreshKeymap, snapshot:()=>({actions,actionsReady})};"
   );
