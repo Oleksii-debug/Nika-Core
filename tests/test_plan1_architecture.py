@@ -754,9 +754,9 @@ def test_architecture_guard_rejects_hoisted_function_authorities(
 @pytest.mark.parametrize(
     "source",
     [
-        "__builtins__['__import__']('mcp')\\n",
-        "loader = __builtins__.__import__\\nloader('langgraph')\\n",
-        "authority = __builtins__\\n",
+        "__builtins__['__import__']('mcp')\n",
+        "loader = __builtins__.__import__\nloader('langgraph')\n",
+        "authority = __builtins__\n",
     ],
 )
 def test_architecture_guard_blocks_implicit_builtin_authority(source: str) -> None:
@@ -764,4 +764,4 @@ def test_architecture_guard_blocks_implicit_builtin_authority(source: str) -> No
 
 
 def test_architecture_guard_ignores_quoted_implicit_builtin_name() -> None:
-    assert direct_engine_imports('label = "__builtins__"\\n') == ()
+    assert direct_engine_imports('label = "__builtins__"\n') == ()
