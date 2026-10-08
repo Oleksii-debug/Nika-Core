@@ -19,6 +19,8 @@
   const autostartStatus = document.getElementById("autostart-status");
   let autostartDirty = false;
   let autostartPending = false;
+  // An unconfirmed OS setting write must never be repeated blindly in this window.
+  let autostartEffectUncertain = false;
   let autostartGeneration = 0;
   const tasksList = document.getElementById("tasks-list");
   const taskTarget = document.getElementById("task-target");
@@ -509,13 +511,15 @@
       && Object.hasOwn(messages, snapshot.state)
       && snapshot.can_change === ["enabled", "disabled", "stale"].includes(snapshot.state);
     const current = valid ? snapshot.state : "error";
-    const canChange = valid && snapshot.can_change;
+    const canChange = valid && snapshot.can_change && !autostartEffectUncertain;
     autostartInput.disabled = !canChange;
     autostartSave.disabled = !canChange;
     if (!canChange) autostartDirty = false;
     if (!autostartDirty) autostartInput.checked = current === "enabled";
-    autostartStatus.textContent = messages[current]
-      + (autostartDirty ? " Позначку змінено, але ще не збережено." : "");
+    autostartStatus.textContent = autostartEffectUncertain
+      ? "Зміна автозапуску не підтверджена. Повторне збереження заблоковано до перезапуску вікна; перевірте стан Windows."
+      : messages[current]
+        + (autostartDirty ? " Позначку змінено, але ще не збережено." : "");
   }
 
   autostartInput?.addEventListener("change", () => {
@@ -526,6 +530,10 @@
   async function dispatchAutostart(actionId, trigger) {
     if (autostartPending) return;
     const save = actionId === "settings.autostart.configure";
+    if (save && autostartEffectUncertain) {
+      announce("Повторне збереження автозапуску заблоковано: попередня дія не підтверджена.", true);
+      return;
+    }
     if (save && (!autostartInput || autostartInput.disabled)) return;
     const payload = save ? { enabled: autostartInput.checked } : {};
     autostartPending = true;
@@ -533,15 +541,32 @@
     autostartInput.disabled = true;
     autostartSave.disabled = true;
     try {
-      const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
-      if (!["completed", "failed", "rejected"].includes(result?.status)) throw new Error("Invalid acknowledgement");
+      const issuedRequestId = requestId();
+      const result = await globalThis.pywebview.api.dispatch({
+        request_id: issuedRequestId, action_id: actionId, payload,
+      });
+      // The response must belong to this exact command, including refreshes.
+      if (!result || result.request_id !== issuedRequestId
+          || !["completed", "failed", "rejected"].includes(result.status)) {
+        throw new Error("Unconfirmed autostart acknowledgement");
+      }
       const failed = result.status !== "completed";
-      if (!failed || !save) autostartDirty = false;
-      announce(result.message, failed);
-      appendLog(result.message);
+      // A handler may have changed Windows before reporting failure.
+      if (save && result.status === "failed") autostartEffectUncertain = true;
+      if (!failed) autostartDirty = false;
+      const message = typeof result.message === "string" && result.message.length <= 600
+        ? result.message : (failed ? "Зміну автозапуску відхилено." : "Автозапуск оновлено.");
+      announce(message, failed);
+      appendLog(message);
     } catch {
-      // The OS write may have completed before the bridge disconnected. No blind retry.
-      announce("Немає підтвердження зміни автозапуску. Перечитайте стан перед повтором.", true);
+      // Transport/mismatched ACK can follow a committed Windows OS write.
+      if (save) autostartEffectUncertain = true;
+      announce(
+        save
+          ? "Немає достовірного підтвердження зміни автозапуску. Повтор заблоковано до перезапуску вікна."
+          : "Немає підтвердження оновлення стану автозапуску. Перечитайте стан.",
+        true,
+      );
     } finally {
       autostartPending = false;
       autostartGeneration += 1;
