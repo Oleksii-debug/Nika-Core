@@ -15,6 +15,7 @@ from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
 from nika_core.ui.bridge import UIActionBridge
+from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 
 
@@ -416,3 +417,136 @@ def test_bridge_keeps_bounded_ukrainian_input_error_and_guards_keymap() -> None:
         "ok": False,
         "message": "Некоректний запит або стан операції.",
     }
+
+
+
+@pytest.mark.parametrize("unsafe_message", [
+    "accepted\\nforged log line".replace("\\n", "\n"),
+    "direction-\u202e-hidden",
+    "x" * 2049,
+    "é" * 1025,
+])
+def test_bridge_rejects_untrusted_handler_live_status(
+    unsafe_message: str,
+) -> None:
+    bridge = UIActionBridge(
+        SimpleNamespace(get=lambda _action_id: None),
+        SimpleNamespace(),
+        handlers={
+            "task.create": lambda _payload: UIResult(
+                request_id="desktop-handler",
+                status="accepted",
+                message=unsafe_message,
+                focus_id="tasks-heading",
+            )
+        },
+    )
+    result = bridge.dispatch({
+        "request_id": "s1-live",
+        "action_id": "task.create",
+        "payload": {},
+    })
+    assert result == {
+        "request_id": "s1-live",
+        "status": "failed",
+        "message": "Не вдалося виконати дію через некоректний текст стану.",
+        "focus_id": None,
+    }
+    assert unsafe_message not in result["message"]
+
+
+def test_bridge_rejects_untrusted_focus_target_and_plain_text_status() -> None:
+    bridge = UIActionBridge(
+        SimpleNamespace(get=lambda _action_id: None),
+        SimpleNamespace(),
+        handlers={
+            "task.create": lambda _payload: UIResult(
+                request_id="desktop-handler",
+                status="accepted",
+                message="Запит прийнято.",
+                focus_id="tasks-heading\\nforged".replace("\\n", "\n"),
+            )
+        },
+    )
+    result = bridge.dispatch({
+        "request_id": "s1-focus",
+        "action_id": "task.create",
+        "payload": {},
+    })
+    assert result["status"] == "failed"
+    assert result["focus_id"] is None
+    assert result["request_id"] == "s1-focus"
+
+    safe = UIActionBridge(
+        SimpleNamespace(get=lambda _action_id: None),
+        SimpleNamespace(),
+        handlers={
+            "task.create": lambda _payload: UIResult(
+                request_id="desktop-handler",
+                status="accepted",
+                message="Запит прийнято.",
+                focus_id="tasks-heading",
+            )
+        },
+    )
+    result = safe.dispatch({
+        "request_id": "s1-safe",
+        "action_id": "task.create",
+        "payload": {},
+    })
+    assert result == {
+        "request_id": "s1-safe",
+        "status": "accepted",
+        "message": "Запит прийнято.",
+        "focus_id": "tasks-heading",
+    }
+
+    unsafe_string = UIActionBridge(
+        SimpleNamespace(get=lambda _action_id: None),
+        SimpleNamespace(),
+        handlers={"task.create": lambda _payload: "spoofed\\ncompleted".replace("\\n", "\n")},
+    )
+    result = unsafe_string.dispatch({
+        "request_id": "s1-string",
+        "action_id": "task.create",
+        "payload": {},
+    })
+    assert result["status"] == "failed"
+    assert result["request_id"] == "s1-string"
+
+
+def test_unqualified_desktop_control_survives_deleted_task_readback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend, queue = _backend(tmp_path)
+    task = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "public work"},
+    )
+    queue.transition(task.task_id, TaskState.READY)
+    original_get = queue.get
+
+    def vanishing_get(task_id: str):
+        if task_id == task.task_id:
+            raise KeyError("secret-in-stale-task-identity")
+        return original_get(task_id)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(queue, "get", vanishing_get)
+            for operation in (backend.pause_task, backend.stop_agent):
+                with pytest.raises(ValueError) as error:
+                    operation({})
+                assert str(error.value) == (
+                    "Стан завдання змінився; оновіть список і повторіть дію."
+                )
+                assert "secret-in-stale-task-identity" not in str(error.value)
+        assert original_get(task.task_id).state is TaskState.READY
+        assert backend._active_futures == {}
+        assert backend._cancel_futures == {}
+        # After a competing read disappears, explicit durable authority remains usable.
+        assert backend.pause_task({}).status == "completed"
+        assert original_get(task.task_id).state is TaskState.PAUSED
+    finally:
+        backend.close()
