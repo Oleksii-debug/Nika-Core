@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from decimal import Decimal, InvalidOperation
 
 from ..data.sqlite import SQLiteStore
 from .accounting import AccountSnapshot
@@ -98,6 +99,7 @@ class TradingStateRepository:
 
     def commit_fill_and_account(self, fill: SimulatedFill, snapshot: AccountSnapshot) -> bool:
         payload = _snapshot_payload(snapshot)
+        _decode_account_payload(payload)
         workspace_id = fill.authority.workspace_id
         run_id = fill.authority.run_id
         evidence = _fill_evidence(fill)
@@ -116,12 +118,12 @@ class TradingStateRepository:
                     raise RuntimeError("conflicting durable fill identity")
                 account = _validated_account_row(conn, workspace_id, run_id)
                 assert account is not None
-                _decode_account_payload(str(account["payload"]))
                 if (
                     str(account["last_fill_id"]) == fill.fill_id
                     and str(account["payload"]) != payload
                 ):
                     raise RuntimeError("conflicting durable account state")
+                _decode_account_payload(str(account["payload"]))
                 return False
             conn.execute(
                 "INSERT INTO trading_research_run_fills("
@@ -204,10 +206,98 @@ def _validated_account_row(
     return row
 
 
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise RuntimeError("duplicate durable trading JSON field")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise RuntimeError("non-finite durable trading JSON constant")
+
+
+def _snapshot_decimal(value: object, name: str) -> Decimal:
+    if type(value) is not str:
+        raise RuntimeError(f"invalid durable trading decimal: {name}")
+    try:
+        result = Decimal(value)
+    except InvalidOperation as exc:
+        raise RuntimeError(f"invalid durable trading decimal: {name}") from exc
+    if not result.is_finite():
+        raise RuntimeError(f"non-finite durable trading decimal: {name}")
+    return result
+
+
 def _decode_account_payload(payload: str) -> dict[str, object]:
-    value = json.loads(payload)
-    if not isinstance(value, dict):
-        raise TypeError("invalid durable trading account payload")
+    """Reject corrupted paper state rather than rehydrate fabricated accounting truth."""
+    try:
+        value = json.loads(
+            payload,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+        )
+    except (ValueError, TypeError) as exc:
+        raise RuntimeError("invalid durable trading account JSON") from exc
+    required = {
+        "cash",
+        "fees",
+        "realized_pnl",
+        "unrealized_pnl",
+        "equity",
+        "gross_exposure",
+        "net_exposure",
+        "positions",
+    }
+    if type(value) is not dict or set(value) != required:
+        raise RuntimeError("invalid durable trading account fields")
+    amounts = {
+        key: _snapshot_decimal(value[key], key)
+        for key in required - {"positions"}
+    }
+    if amounts["fees"] < 0 or amounts["gross_exposure"] < 0:
+        raise RuntimeError("invalid durable trading account nonnegative totals")
+    if amounts["equity"] != amounts["cash"] + amounts["net_exposure"]:
+        raise RuntimeError("inconsistent durable trading account equity")
+    if amounts["gross_exposure"] < abs(amounts["net_exposure"]):
+        raise RuntimeError("inconsistent durable trading account exposure")
+    positions = value["positions"]
+    if type(positions) is not list:
+        raise RuntimeError("invalid durable trading account positions")
+    identities: set[tuple[str, str, str, str]] = set()
+    realized = Decimal(0)
+    expected_position_keys = {
+        "venue_id", "venue_timezone", "instrument_id", "currency",
+        "quantity", "average_price", "realized_pnl",
+    }
+    for position in positions:
+        if type(position) is not dict or set(position) != expected_position_keys:
+            raise RuntimeError("invalid durable trading position fields")
+        identity = tuple(
+            position[key] for key in
+            ("venue_id", "venue_timezone", "instrument_id", "currency")
+        )
+        if any(
+            type(part) is not str or not part.strip()
+            or any(ord(character) < 32 for character in part)
+            for part in identity
+        ):
+            raise RuntimeError("invalid durable trading position identity")
+        currency = identity[3]
+        if len(currency) != 3 or not currency.isalpha() or currency != currency.upper():
+            raise RuntimeError("invalid durable trading position currency")
+        if identity in identities:
+            raise RuntimeError("duplicate durable trading position identity")
+        identities.add(identity)
+        quantity = _snapshot_decimal(position["quantity"], "position quantity")
+        average = _snapshot_decimal(position["average_price"], "position average_price")
+        realized += _snapshot_decimal(position["realized_pnl"], "position realized_pnl")
+        if average < 0 or (quantity != 0 and average == 0):
+            raise RuntimeError("invalid durable trading position cost")
+    if realized != amounts["realized_pnl"]:
+        raise RuntimeError("inconsistent durable trading realized PnL")
     return value
 
 
