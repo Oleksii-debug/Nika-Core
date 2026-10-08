@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 from pydantic import ValidationError
@@ -189,3 +190,101 @@ def test_durable_duplicate_json_key_fails_closed_at_activation_and_restart(
     restarted = AgentDefinitionRepository(SQLiteStore(tmp_path / "nika.db"))
     with pytest.raises(ValueError, match="duplicate JSON object key"):
         restarted.require_active(definition.agent_id, definition.version)
+
+
+@pytest.mark.parametrize(
+    ("risk", "approvals"),
+    (
+        (RiskTier.R0_READ_ONLY, ("release.publish",)),
+        (RiskTier.R4_HIGH_IMPACT, ()),
+        (RiskTier.R4_HIGH_IMPACT, ("unregistered.tool",)),
+        ("4", ("release.publish",)),
+    ),
+)
+def test_durable_draft_rejects_forged_compilation_evidence(
+    tmp_path, risk: object, approvals: tuple[str, ...],
+) -> None:
+    from nika_core.builder.repository import AgentDefinitionRepository
+    from nika_core.data.sqlite import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    repository = AgentDefinitionRepository(store)
+    definition = _definition().model_copy(
+        update={"tool_grants": (ToolGrant(tool_id="release.publish", max_risk=4),)}
+    )
+    compiled = _compiler(
+        ToolSpec("release.publish", "Publish", ToolRisk.HIGH_IMPACT)
+    ).compile(definition)
+    forged = replace(
+        compiled,
+        highest_risk=risk,
+        required_human_approvals=approvals,
+    )
+    with pytest.raises(ValueError, match="compiled agent risk/approval"):
+        repository.save_draft(forged)
+    assert repository.get(definition.agent_id, definition.version) is None
+    assert repository.next_version(definition.agent_id) == 1
+
+    # The actual compiler output remains admissible and still needs human approval.
+    repository.save_draft(compiled)
+    with pytest.raises(PermissionError, match="explicit human approval"):
+        repository.activate(definition)
+    assert repository.active(definition.agent_id) is None
+
+
+@pytest.mark.parametrize(
+    ("column", "replacement"),
+    (
+        ("highest_risk", 0),
+        ("required_approvals_json", "[]"),
+        ("required_approvals_json", '["wrong.tool"]'),
+        ("required_approvals_json", '{"forged":true}'),
+    ),
+)
+def test_sqlite_restart_rejects_tampered_risk_evidence_before_activation(
+    tmp_path, column: str, replacement: object,
+) -> None:
+    from nika_core.builder.repository import AgentDefinitionRepository
+    from nika_core.data.sqlite import SQLiteStore
+
+    path = tmp_path / "nika.db"
+    sqlite = SQLiteStore(path)
+    sqlite.initialize()
+    repository = AgentDefinitionRepository(sqlite)
+    definition = _definition().model_copy(
+        update={"tool_grants": (ToolGrant(tool_id="release.publish", max_risk=4),)}
+    )
+    compiler = _compiler(ToolSpec("release.publish", "Publish", ToolRisk.HIGH_IMPACT))
+    repository.save_draft(compiler.compile(definition))
+    with sqlite.connection() as conn:
+        row = conn.execute(
+            f"SELECT {column} FROM agent_definitions WHERE agent_id = ?",
+            (definition.agent_id,),
+        ).fetchone()
+        assert row is not None
+        original = row[column]
+        conn.execute(
+            f"UPDATE agent_definitions SET {column} = ? WHERE agent_id = ?",
+            (replacement, definition.agent_id),
+        )
+
+    restarted = AgentDefinitionRepository(SQLiteStore(path))
+    with pytest.raises(ValueError, match="persisted agent risk/approval"):
+        restarted.activate(
+            definition, approved_tool_ids=frozenset({"release.publish"})
+        )
+    with pytest.raises(ValueError, match="persisted agent risk/approval"):
+        restarted.get(definition.agent_id, definition.version)
+    with sqlite.connection() as conn:
+        row = conn.execute(
+            "SELECT status FROM agent_definitions WHERE agent_id = ?",
+            (definition.agent_id,),
+        ).fetchone()
+        assert row["status"] == "draft"
+        conn.execute(
+            f"UPDATE agent_definitions SET {column} = ? WHERE agent_id = ?",
+            (original, definition.agent_id),
+        )
+    restarted.activate(definition, approved_tool_ids=frozenset({"release.publish"}))
+    assert restarted.require_active(definition.agent_id, definition.version).status == "active"
