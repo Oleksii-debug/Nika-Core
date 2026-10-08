@@ -409,6 +409,32 @@ def test_header_case_duplicate_host_and_injected_host_never_dispatch() -> None:
     assert handler.calls == 0
 
 
+@pytest.mark.parametrize("http_version", ["1.1", "2", "3"])
+def test_modern_http_without_host_is_rejected_before_receive_or_core_effect(
+    http_version: str,
+) -> None:
+    app, handler = _app()
+    scope = _scope(principal=_principal())
+    scope["http_version"] = http_version
+    output = _call(app, scope, events=[])
+    assert _status(output) == 403
+    assert _payload(output)["code"] == "host_required"
+    assert handler.calls == 0
+
+
+def test_http11_with_trusted_host_continues_to_core() -> None:
+    app, handler = _app()
+    scope = _scope(principal=_principal(), headers=[
+        (b"host", b"nika.example"),
+        (b"origin", b"https://nika.example"),
+        (b"content-type", b"application/json"),
+    ])
+    scope["http_version"] = "1.1"
+    output = _call(app, scope)
+    assert _status(output) == 200
+    assert handler.calls == 1
+
+
 def test_host_rejection_precedes_receive_even_for_unbounded_body() -> None:
     app, handler = _app()
     output = _call(app, _scope(principal=_principal(), headers=[
