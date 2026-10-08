@@ -138,6 +138,15 @@ class AgentDefinitionRepository:
         *,
         approved_tool_ids: frozenset[str] = frozenset(),
     ) -> None:
+        # Caller-owned approval carriers must not supply custom hash/equality hooks
+        # that can impersonate a distinct high-impact tool during set subtraction.
+        if type(approved_tool_ids) is not frozenset or any(
+            type(tool_id) is not str for tool_id in approved_tool_ids
+        ):
+            raise TypeError("approved tool IDs must be a frozenset of plain strings")
+        # A model_copy(update=...) or frozen-object mutation can bypass Pydantic
+        # until we re-admit the incoming definition before comparing it to SQLite.
+        definition = AgentDefinition.model_validate(definition.model_dump(mode="python"))
         if not definition.enabled:
             raise ValueError("disabled agent definition cannot be activated")
         now = datetime.now(UTC).isoformat()
