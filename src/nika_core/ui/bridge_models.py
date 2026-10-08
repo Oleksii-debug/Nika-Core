@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from nika_core.ui.payload_safety import validate_ui_payload
 
 
 class UICommand(BaseModel):
@@ -13,6 +15,11 @@ class UICommand(BaseModel):
     request_id: str = Field(min_length=1, max_length=120)
     action_id: str = Field(min_length=3, pattern=r"^[a-z0-9_.-]+$")
     payload: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("payload", mode="before")
+    @classmethod
+    def validate_payload(cls, value: object) -> dict[str, Any]:
+        return validate_ui_payload(value)
 
 
 class UIResult(BaseModel):
