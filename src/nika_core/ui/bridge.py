@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
+from unicodedata import category
 from typing import Any
 
 from pydantic import ValidationError
@@ -88,7 +89,7 @@ class UIActionBridge:
             return UIResult(
                 request_id=command.request_id,
                 status="rejected",
-                message=str(exc),
+                message=self._safe_input_error_message(exc),
             ).model_dump()
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             # This is the final pywebview boundary. Keep unexpected backend failures inside
@@ -205,7 +206,7 @@ class UIActionBridge:
         try:
             self._keymap.set_binding(action_id, binding)
         except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
+            return {"ok": False, "message": self._safe_input_error_message(exc)}
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             return self._unexpected_keymap_failure("set_binding", exc)
         return {"ok": True, "message": "Shortcut saved."}
@@ -216,7 +217,7 @@ class UIActionBridge:
         try:
             self._keymap.restore_default(action_id)
         except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
+            return {"ok": False, "message": self._safe_input_error_message(exc)}
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             return self._unexpected_keymap_failure("restore_default", exc)
         return {"ok": True, "message": "Default shortcut restored."}
@@ -234,10 +235,32 @@ class UIActionBridge:
         try:
             self._keymap.import_json(data)
         except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
+            return {"ok": False, "message": self._safe_input_error_message(exc)}
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             return self._unexpected_keymap_failure("import_keymap", exc)
         return {"ok": True, "message": "Shortcut map imported."}
+
+    @staticmethod
+    def _safe_input_error_message(exc: Exception) -> str:
+        """Project only bounded plain-text admission errors to assistive status.
+
+        A built-in ValueError can still carry an object in args whose __str__
+        invokes provider code or exposes secrets. Never stringify that object.
+        """
+        fallback = "Некоректний запит або стан операції."
+        if type(exc) not in (KeyError, TypeError, ValueError):
+            return fallback
+        if len(exc.args) != 1 or type(exc.args[0]) is not str:
+            return fallback
+        message = exc.args[0]
+        try:
+            if not message or len(message.encode("utf-8")) > 2048:
+                return fallback
+        except UnicodeEncodeError:
+            return fallback
+        if any(category(char) in {"Cc", "Cf", "Cs"} for char in message):
+            return fallback
+        return message
 
     @staticmethod
     def _unexpected_keymap_failure(operation: str, exc: Exception) -> dict[str, Any]:
