@@ -246,3 +246,57 @@ def test_task_view_does_not_coerce_behavioral_nontext_payload() -> None:
         state=TaskState.PAUSED, payload={"command": Dangerous()},
     )
     assert DesktopBackend._task_view(record)["command"] == ""
+
+
+def test_live_task_remains_keyboard_selectable_after_terminal_history_and_restart(
+    tmp_path: Path,
+) -> None:
+    backend, queue = _build(tmp_path)
+    live = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "resume-able older task"},
+    )
+    queue.transition(live.task_id, TaskState.READY)
+    for index in range(55):
+        terminal = queue.create(
+            workspace_id="default",
+            agent_id="nika.default",
+            payload={"command": f"completed-{index}"},
+        )
+        queue.transition(terminal.task_id, TaskState.READY)
+        queue.transition(terminal.task_id, TaskState.RUNNING)
+        queue.transition(terminal.task_id, TaskState.COMPLETED)
+    for index in range(55):
+        foreign = queue.create(
+            workspace_id="foreign",
+            agent_id="foreign-agent",
+            payload={"command": f"private-{index}"},
+        )
+        queue.transition(foreign.task_id, TaskState.READY)
+
+    try:
+        snapshot = backend.snapshot()
+        # A screen-reader task picker backed by these rows must retain the only
+        # live authorized target, even when >50 newer completed rows exist.
+        assert snapshot["tasks"][0]["task_id"] == live.task_id
+        assert snapshot["tasks"][0]["state"] == "READY"
+        assert len(snapshot["tasks"]) == 50
+        assert all(
+            item["workspace_id"] == "default" and item["agent_id"] == "nika.default"
+            for item in snapshot["tasks"]
+        )
+        assert backend.pause_task({"task_id": live.task_id}).status == "completed"
+        assert queue.get(live.task_id).state == TaskState.PAUSED
+        assert backend.snapshot()["tasks"][0]["state"] == "PAUSED"
+    finally:
+        backend.close()
+
+    reopened, recovered_queue = _build(tmp_path)
+    try:
+        recovered = reopened.snapshot()
+        assert recovered["tasks"][0]["task_id"] == live.task_id
+        assert recovered["tasks"][0]["state"] == "PAUSED"
+        assert recovered_queue.get(live.task_id).state == TaskState.PAUSED
+    finally:
+        reopened.close()
