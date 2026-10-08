@@ -41,6 +41,20 @@ def _validate_persisted_risk_evidence(
     return expected_approvals
 
 
+def _require_active_receipt(value: object) -> None:
+    """Admit only the canonical UTC receipt written by an approved activation."""
+    if type(value) is not str:
+        raise ValueError("active agent definition lacks valid activation evidence")
+    try:
+        instant = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError("active agent definition lacks valid activation evidence") from exc
+    # A nonempty but forged/legacy-garbled date, a naive local clock or a
+    # non-UTC offset cannot stand in for the durable UTC activation receipt.
+    if instant.tzinfo != UTC or instant.isoformat() != value:
+        raise ValueError("active agent definition lacks valid activation evidence")
+
+
 @dataclass(frozen=True, slots=True)
 class StoredAgentDefinition:
     definition: AgentDefinition
@@ -192,8 +206,7 @@ class AgentDefinitionRepository:
             if row["status"] == "active":
                 # An active marker without its durable activation receipt is not
                 # proof of a committed, approved transition after restart.
-                if not isinstance(row["activated_at"], str) or not row["activated_at"].strip():
-                    raise ValueError("active agent definition lacks activation evidence")
+                _require_active_receipt(row["activated_at"])
                 return
             missing = sorted(set(required) - set(approved_tool_ids))
             if missing:
@@ -267,10 +280,8 @@ class AgentDefinitionRepository:
             highest_risk=row["highest_risk"],
             approvals_json=row["required_approvals_json"],
         )
-        if row["status"] == "active" and (
-            not isinstance(row["activated_at"], str) or not row["activated_at"].strip()
-        ):
-            raise ValueError("active agent definition lacks activation evidence")
+        if row["status"] == "active":
+            _require_active_receipt(row["activated_at"])
         return StoredAgentDefinition(
             definition=payload,
             status=str(row["status"]),
