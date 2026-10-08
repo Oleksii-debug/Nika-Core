@@ -135,7 +135,8 @@ def test_restarted_sqlite_account_is_paper_only_and_has_text_first_projection(tm
     assert view["equity"] == "999"
     assert view["fees"] == "1"
     assert view["positions"] == [{
-        "venue": "SIM", "instrument": "TEST", "currency": "USD",
+        "venue": "SIM", "venue_timezone": "UTC",
+        "instrument": "TEST", "currency": "USD",
         "quantity": "2", "average_price": "100", "realized_pnl": "0",
     }]
 
