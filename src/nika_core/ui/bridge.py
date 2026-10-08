@@ -106,19 +106,25 @@ class UIActionBridge:
             ).model_dump()
 
         if isinstance(outcome, UIResult):
+            # Pydantic's frozen flag is not a trust boundary: a handler can
+            # mutate model attributes using object.__setattr__ after validation.
+            # Never forward its instance or behavioral subclass to pywebview.
             if (
-                not self._safe_accessible_status(outcome.message)
+                type(outcome) is not UIResult
+                or type(outcome.status) is not str
+                or outcome.status not in ("accepted", "completed", "rejected", "failed")
+                or not self._safe_accessible_status(outcome.message)
                 or not self._safe_focus_target(outcome.focus_id)
             ):
                 return self._unsafe_handler_status(command.action_id, command.request_id)
-            if outcome.request_id != command.request_id:
-                return UIResult(
-                    request_id=command.request_id,
-                    status=outcome.status,
-                    message=outcome.message,
-                    focus_id=outcome.focus_id,
-                ).model_dump()
-            return outcome.model_dump()
+            # Ignore the untrusted handler correlation ID entirely. Rebuild a
+            # fresh canonical result with the already-admitted request identity.
+            return UIResult(
+                request_id=command.request_id,
+                status=outcome.status,
+                message=outcome.message,
+                focus_id=outcome.focus_id,
+            ).model_dump()
         if outcome is None:
             message = ""
         elif type(outcome) is str:
