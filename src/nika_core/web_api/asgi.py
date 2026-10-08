@@ -143,6 +143,15 @@ class ASGICommandApplication:
         scope: Mapping[str, Any],
         receive: Receive,
     ) -> HttpCommandResponse | None:
+        # Reject explicitly malformed server protocol metadata before body I/O.
+        # A synthetic/incorrect HTTP version must not evade the HTTP/1.1+
+        # authority requirement or advertise an unsupported framing scheme.
+        http_version = scope.get("http_version")
+        if http_version is not None and (
+            type(http_version) is not str
+            or http_version not in ("1.0", "1.1", "2", "3")
+        ):
+            return self._error(400, "invalid_http_version")
         headers = scope.get("headers")
         if type(headers) not in {tuple, list}:
             return self._error(400, "invalid_headers")
@@ -172,6 +181,16 @@ class ASGICommandApplication:
                 selected[key] = value
         if b"content-length" in selected and b"transfer-encoding" in selected:
             return self._error(400, "conflicting_request_framing")
+        # ASGI delivers decoded request bodies. Admit at most one canonical
+        # HTTP/1.1 chunked transfer coding; ambiguous/unsupported codings and
+        # HTTP/1.0, HTTP/2 and HTTP/3 transfer-encoding headers fail closed.
+        # Never reinterpret the body or add a second HTTP framing parser.
+        transfer_encoding = selected.get(b"transfer-encoding")
+        if transfer_encoding is not None and (
+            transfer_encoding != b"chunked"
+            or http_version in ("1.0", "2", "3")
+        ):
+            return self._error(400, "invalid_transfer_encoding")
         declared_length: int | None = None
         if b"content-length" in selected:
             encoded = selected[b"content-length"]
@@ -204,7 +223,7 @@ class ASGICommandApplication:
         # HTTP/1.1+ requires an authority. ASGI servers supply http_version;
         # do not let an omitted Host bypass the configured origin inventory.
         # Retain HTTP/1.0 compatibility where Host is optional.
-        if scope.get("http_version") in ("1.1", "2", "3") and host_bytes is None:
+        if http_version in ("1.1", "2", "3") and host_bytes is None:
             return self._error(403, "host_required")
         if host_bytes is not None:
             try:
