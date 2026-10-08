@@ -156,6 +156,8 @@ class RuntimeRequest:
         _validate_runtime_identity(self.task_id, "task_id")
         _validate_runtime_identity(self.thread_id, "thread_id")
         _validate_limits(self.max_steps, self.timeout_seconds)
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("runtime request payload must be a mapping")
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +213,8 @@ class RuntimeEvent:
         if self.sequence < 0:
             raise ValueError("sequence must not be negative")
         _validate_runtime_identity(self.event_type, "event_type")
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("runtime event payload must be a mapping")
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +229,14 @@ class RuntimeResult:
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, RuntimeOutcome):
             raise TypeError("outcome must be a RuntimeOutcome")
+        # Dataclass type hints alone do not validate provider-supplied event or
+        # output containers. Reject malformed carriers before durable consumers.
+        if type(self.events) is not tuple or any(
+            type(event) is not RuntimeEvent for event in self.events
+        ):
+            raise TypeError("runtime events must be a tuple of RuntimeEvent")
+        if not isinstance(self.output, Mapping):
+            raise TypeError("runtime output must be a mapping")
         if self.resume_token is not None:
             _validate_runtime_identity(self.resume_token, "resume_token")
         if (
