@@ -128,17 +128,27 @@ def test_database_read_error_is_bounded_definite_failure_not_unknown_effect(
     assert b"private-token" not in response.body
 
 
-def test_read_only_failure_does_not_poison_recovery_after_sqlite_reopen(tmp_path) -> None:
+def test_read_only_failure_does_not_poison_recovery_after_sqlite_reopen(
+    tmp_path, monkeypatch,
+) -> None:
     path = tmp_path / "nika.db"
     store = SQLiteStore(path)
     store.initialize()
     queue = TaskQueue(store)
     record = queue.create(workspace_id="workspace-a", agent_id="agent-a")
-    result = _inspect(_adapter(queue), _principal(), record.task_id)
-    assert result.status_code == 200
-    assert json.loads(result.body)["data"]["state"] == "CREATED"
+
+    def fail_once(_task_id: str):
+        raise sqlite3.OperationalError("temporary read fault")
+
+    monkeypatch.setattr(queue, "get", fail_once)
+    failed = _inspect(_adapter(queue), _principal(), record.task_id)
+    assert failed.status_code == 200
+    assert json.loads(failed.body)["code"] == "storage_unavailable"
+
     second = SQLiteStore(path)
     second.initialize()
     recovered = _inspect(_adapter(TaskQueue(second)), _principal(), record.task_id)
     assert recovered.status_code == 200
-    assert json.loads(recovered.body)["data"]["task_id"] == record.task_id
+    assert json.loads(recovered.body)["data"] == {
+        "task_id": record.task_id, "state": "CREATED",
+    }
