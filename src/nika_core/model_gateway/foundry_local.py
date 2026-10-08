@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +59,36 @@ def _snapshot_download_authorization(
         or (expected_model_id is not None and type(expected_model_id) is not str)
     ):
         raise ValueError("download authorization must contain canonical plain text")
+    # A reviewed model/license identity is also evidence: bidi/control spoofing,
+    # non-normalized text, invalid UTF-8, and unbounded fields must never reach
+    # the native SDK, diagnostic text or a durable acquisition record.
+    for field, limit in (
+        (provider_id, 128),
+        (model, 512),
+        (license_reference, 4096),
+        (expected_model_id, 512),
+    ):
+        if field is None:
+            continue
+        if (
+            not field
+            or len(field) > limit
+            or field != field.strip()
+            or unicodedata.normalize("NFC", field) != field
+            or any(
+                unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+                for character in field
+            )
+        ):
+            raise ValueError("download authorization must contain canonical bounded text")
+        try:
+            encoded = field.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                "download authorization must contain canonical bounded text"
+            ) from exc
+        if len(encoded) > limit:
+            raise ValueError("download authorization must contain canonical bounded text")
     return ModelDownloadAuthorization(
         provider_id=provider_id,
         model=model,
