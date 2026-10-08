@@ -174,7 +174,10 @@ planning from the observed state. No planner or tool effect executes while the o
 is confirming an already-satisfied checkpoint.
 
 Run, optional task, and deterministic action/replay identities are admitted as exact,
-bounded canonical UTF-8 text before journal/planner/tool handling. Step/re-plan limits
+bounded canonical UTF-8 text before journal/planner/tool handling.
+The action catalog and recovered completed-action checkpoint must be immutable tuples.
+Consumable iterators and mutable sequences are rejected before inspection; they cannot
+evade cumulative step accounting by changing or exhausting during admission. Step/re-plan limits
 must be exact integer budgets, and planning/observation time budgets must be finite
 positive numbers; booleans, NaN, infinities and huge values are invalid.
 
