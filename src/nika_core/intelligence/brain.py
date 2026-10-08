@@ -102,6 +102,11 @@ def _require_plain_json_arguments(
     if value is None or kind is bool:
         return
     if kind is str:
+        # Every Unicode scalar encodes to at least one byte. Check codepoint
+        # length first so a multi-gigabyte input cannot force a huge temporary
+        # UTF-8 allocation merely to be refused at this admission fence.
+        if len(value) > size_budget[0]:
+            raise ValueError("deterministic run inputs cannot be detached safely")
         try:
             size_budget[0] -= len(value.encode("utf-8"))
         except UnicodeEncodeError as exc:
