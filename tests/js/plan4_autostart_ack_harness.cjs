@@ -129,6 +129,15 @@ async function run() {
   assert.equal(test.ui.dirty(), true, "transport uncertainty preserves edit");
   assert(!JSON.stringify(test.announced).includes("private operating-system detail"));
   console.log("PASS: transport failure is secret-free; read-only refresh preserves write lock");
+
+  test = caseWithBridge(completed);
+  test.ui.renderAutostart({schema_version: 1, state: "error", can_change: false});
+  assert.equal(test.ui.dirty(), true, "failed read must not erase a pending keyboard edit");
+  assert.equal(test.input.disabled, true);
+  test.ui.renderAutostart({schema_version: 1, state: "disabled", can_change: true});
+  assert.equal(test.input.checked, true, "recovered read must keep unsaved user intent");
+  assert.equal(test.input.disabled, false);
+  console.log("PASS: temporary OS read failure and recovery preserve unsaved keyboard choice");
 }
 
 if (require.main === module) {

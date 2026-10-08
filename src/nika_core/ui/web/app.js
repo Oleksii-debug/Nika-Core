@@ -514,8 +514,8 @@
     const canChange = valid && snapshot.can_change;
     autostartInput.disabled = !canChange || autostartUncertain;
     autostartSave.disabled = !canChange || autostartUncertain;
-    // An uncertain OS write must not be presented as a confirmed clean edit.
-    if (!canChange && !autostartUncertain) autostartDirty = false;
+    // Transient OS-read errors must not erase an unsaved keyboard edit.
+    // Only an exact matching configure ACK can confirm and clear this intent.
     if (!autostartDirty) autostartInput.checked = current === "enabled";
     autostartStatus.textContent = messages[current]
       + (autostartDirty ? " Позначку змінено, але ще не збережено." : "")
@@ -633,10 +633,21 @@
       reportStateUnavailable();
       return false;
     }
-    const state = response.state || {};
+    const state = response.state;
+    // A broken task-list projection is not an empty list: preserve the explicit
+    // keyboard target rather than silently selecting a different durable task.
+    if (!Array.isArray(state.tasks) || state.tasks.some(
+      (item) => !item || typeof item !== "object" || Array.isArray(item)
+        || typeof item.task_id !== "string" || !item.task_id
+        || (item.command != null && typeof item.command !== "string")
+    )) {
+      if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
+      reportStateUnavailable();
+      return false;
+    }
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     renderSourceSetup(state.v01_sources ?? null);
-    const taskItems = Array.isArray(state.tasks) ? state.tasks : [];
+    const taskItems = state.tasks;
     renderItems(tasksList, tasksEmpty, taskItems, (item) => `${item.command || "Без назви"} — ${item.state}`);
     renderTaskTargets(taskItems);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
