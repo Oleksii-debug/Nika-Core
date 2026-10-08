@@ -68,3 +68,17 @@ Section 2 (accessible browser product/account/tenant/entitlement layer) is
 not implemented by this infrastructure candidate; its own tests and
 integration cannot be inferred. Full real Web/Cloud deployment and human
 browser/NVDA evidence belong to Plan 7. Do not record terminal DONE prematurely.
+
+## Converged ingress framing invariants (Plan 6 §1, not terminal DONE)
+
+This successor combines the canonical Origin/header validation in PR #1751
+with the independent Content-Length and duplicate-sensitive-header repair in
+PR #1744. The server rejects duplicate Host/Authorization/Content-Length/
+Content-Type/Cookie/Origin/Transfer-Encoding headers case-insensitively;
+contradictory Content-Length and Transfer-Encoding; non-decimal, oversized or
+received-length-mismatched Content-Length. Reject these before command effects.
+Request bodies remain bounded to 256 KiB. Tests cover malformed and valid
+fragmented requests plus no-effect rejection.
+
+These controls do not establish server authentication, tenant ownership,
+durable cloud work, commercial entitlements or Section 1 terminal closure.
