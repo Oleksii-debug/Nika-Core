@@ -134,6 +134,16 @@ async function main() {
   assert.equal(displayed.length, 2, "bad team state must not partly publish tasks");
   console.log("PASS: malformed team sibling fails before task control DOM changes");
 
+  older = refreshState();
+  pending[13].resolve({ok: true, state: {
+    tasks: [{task_id: "safe-after-corruption"}], product_project: null, v01_team_task: null,
+  }});
+  assert.equal(await older, true);
+  assert.equal(outages, 8);
+  assert.equal(displayed.length, 3);
+  assert.equal(displayed[2][0].task_id, "safe-after-corruption");
+  console.log("PASS: clean snapshot recovers semantic task state after rejected siblings");
+
   const pollFactory = new Function("ctx",
     "const {window, document, refreshState, inFlightActions}=ctx;"
     + "let statePollHandle=null;"
