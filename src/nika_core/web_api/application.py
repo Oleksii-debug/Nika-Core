@@ -103,7 +103,10 @@ class WebApplicationBoundary:
                 message=result.message,
                 data=result.data,
             )
-        except WebCommandOutcomeUnknownError:
-            raise
+        except WebCommandOutcomeUnknownError as exc:
+            # A handler is not a correlation authority: it may have failed
+            # after an effect, but cannot replace the admitted request ID.
+            # Preserve the original exception only as the internal cause.
+            raise WebCommandOutcomeUnknownError(request_id) from exc
         except Exception as exc:
             raise WebCommandOutcomeUnknownError(request_id) from exc
