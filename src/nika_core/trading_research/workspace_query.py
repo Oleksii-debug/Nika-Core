@@ -7,6 +7,7 @@ never forward a browser/model-supplied "authorized" flag as this callback.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -17,6 +18,12 @@ from .contracts import TradingResearchError
 from .persistence import TradingStateRepository
 
 PaperState = Literal["NO_PAPER_DATA", "PAPER_DATA"]
+
+# ASCII-only financial text: decimal.Decimal also accepts digits from many
+# scripts, but UI/audit projections require an unambiguous numeric alphabet.
+_ASCII_PAPER_AMOUNT = re.compile(
+    r"-?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +104,8 @@ def _safe_amount(value: object) -> str:
         or value != value.strip()
         or len(value.encode("utf-8")) > 128
     ):
+        raise TradingResearchError("unsafe paper amount projection")
+    if _ASCII_PAPER_AMOUNT.fullmatch(value) is None:
         raise TradingResearchError("unsafe paper amount projection")
     try:
         parsed = Decimal(value)

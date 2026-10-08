@@ -205,3 +205,21 @@ host route, keyboard/NVDA-facing positions table, explicit account/operator
 workflow, durable session and order recovery, recurring observation,
 combination/time-wave work, parent-stack integration, exact-head dual-OS CI,
 and main readback remain outstanding.
+
+## ASCII-only PAPER numeric projection (Plan 5 §1 candidate)
+
+A replaced/corrupt account adapter must not inject cross-script, Unicode-decimal,
+fullwidth, or mixed-script digits into a screen-reader-visible PAPER balance or
+position. Python Decimal accepts some non-ASCII numeral characters, so a
+finite Decimal parse alone is not sufficient for an unambiguous audited text
+projection. The existing `_safe_amount` boundary now admits only bounded,
+printable, plain-string, ASCII Decimal text (including ordinary negative
+numbers and signed scientific exponents), followed by the existing finite
+Decimal check. This affects only read-only PAPER display; SQLite accounting,
+authorization and canonical runtime/permission/evidence ownership are unchanged.
+
+`tests/test_plan5_trader_ascii_amount_projection.py` covers account and
+position cross-script rejection, denial precedence on mid-read Core revocation,
+no leaked balances or positions, and positive ASCII/scientific fixtures.
+This is component-only source/test evidence; it is not exact-head CI, merged
+main, full legacy §37 acceptance, host UI, Windows NVDA, or terminal DONE.
