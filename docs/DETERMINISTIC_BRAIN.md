@@ -38,6 +38,14 @@ starting a planner process. Harder unsatisfiable cases remain the planner's resp
 No Unified Planning problem, fluent, action, plan, result, Aries, gRPC, SQLite or runtime-ledger
 type is exposed by the Nika deterministic planning contracts.
 
+Untrusted tool arguments are admitted before any planner/journal/tool call or caller-owned
+deep-copy. Nested carriers must be exact inert built-ins; nesting is limited to 32 levels
+and 10,000 counted elements including keys. Per-action UTF-8 text across keys and values
+must not exceed 256 KiB; malformed UTF-8 (including lone surrogates) is rejected.
+Individual integers are restricted to 4,096 bits to keep later fingerprint/JSON work
+bounded. These size gates grant no permissions and do not replace ToolExecutor's
+tool-schema and approval checks.
+
 ## Execution contract
 
 A deterministic run receives:
@@ -59,6 +67,18 @@ action/tool identifiers. An invalid planner payload is discarded before entering
 or `ToolExecutor`, with a typed `INVALID_PLAN` failure and no effect reservation. A provider
 cannot smuggle arbitrary objects or list-backed steps into the approved execution plan.
 
+Before either snapshot, deterministic action arguments must use plain JSON-like built-in
+carriers (dict with text keys, list/tuple, text, boolean, integer, finite float, or null).
+Custom object/dict/list subclasses, non-finite numbers, cycles, more than 32 levels of
+nesting or more than 10,000 nested elements per action are rejected before invoking
+any caller-defined `__deepcopy__`, planner, journal reservation, or tool handler.
+Mutable frozen-record internals are also re-admitted before snapshot: state/goal/action
+facts must be exact immutable frozensets of nonempty text, action/tool identities must
+be canonical text, and contradictory mutated preconditions/effects are rejected.
+A malformed planner result is inspected as exact built-in plan/step records *before*
+deepcopy and again afterward. No planner-defined copy method is invoked for a
+rejected carrier. This is an admission fence, not a second tool-schema or permission authority.
+
 Planner inputs are detached twice: the Brain snapshots caller-provided state, goal
 and action records at run admission, and each replaceable planner invocation receives
 its own detached copy. Frozen dataclasses can still contain mutable nested arguments
@@ -66,6 +86,10 @@ or be forcibly assigned by a hostile adapter; planner/caller mutations therefore
 cannot alter the Brain's authoritative validation state, goal, or dispatched tool
 arguments. Unsnapshotable run inputs fail before planner, effect journal or tools.
 The copies create no new storage, approval source, or runtime authority.
+
+An exact planner result with more steps than the remaining execution budget is
+rejected as `PLAN_TOO_LONG` before scanning or deep-copying the steps. This prevents an
+oversized untrusted plan from consuming snapshot memory before the bounded-plan gate.
 
 The planner's returned plan is also detached before plan validation, evidence/history,
 observer awaits, and tool dispatch. Retaining a frozen-but-forcibly-mutable PlanStep

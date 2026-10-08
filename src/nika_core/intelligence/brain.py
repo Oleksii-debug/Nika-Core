@@ -90,6 +90,84 @@ def _positive_finite_seconds(value: object, *, name: str) -> float:
     return seconds
 
 
+
+def _require_plain_json_arguments(
+    value: object, *, depth: int = 0, budget: list[int], size_budget: list[int]
+) -> None:
+    """Reject behavioral, malformed and oversized input before caller-owned deepcopy."""
+    budget[0] -= 1
+    if budget[0] < 0 or depth > 32:
+        raise ValueError("deterministic run inputs cannot be detached safely")
+    kind = type(value)
+    if value is None or kind is bool:
+        return
+    if kind is str:
+        # Every Unicode scalar encodes to at least one byte. Check codepoint
+        # length first so a multi-gigabyte input cannot force a huge temporary
+        # UTF-8 allocation merely to be refused at this admission fence.
+        if len(value) > size_budget[0]:
+            raise ValueError("deterministic run inputs cannot be detached safely")
+        try:
+            size_budget[0] -= len(value.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                "deterministic run inputs cannot be detached safely"
+            ) from exc
+        if size_budget[0] < 0:
+            raise ValueError("deterministic run inputs cannot be detached safely")
+        return
+    if kind is int:
+        # Huge integers can exhaust JSON fingerprinting/encoding even with a
+        # small element count. Bound each primitive before invoking the journal.
+        if value.bit_length() > 4096:
+            raise ValueError("deterministic run inputs cannot be detached safely")
+        return
+    if kind is float and math.isfinite(value):
+        return
+    if kind in (list, tuple):
+        for item in value:
+            _require_plain_json_arguments(
+                item, depth=depth + 1, budget=budget, size_budget=size_budget
+            )
+        return
+    if kind is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                break
+            _require_plain_json_arguments(
+                key, depth=depth + 1, budget=budget, size_budget=size_budget
+            )
+            _require_plain_json_arguments(
+                item, depth=depth + 1, budget=budget, size_budget=size_budget
+            )
+        else:
+            return
+    raise ValueError("deterministic run inputs cannot be detached safely")
+
+
+def _require_plain_facts(value: object) -> None:
+    """Validate immutable fact carriers before deepcopy can run foreign behavior."""
+    if (
+        type(value) is not frozenset
+        or any(type(fact) is not str or not fact.strip() for fact in value)
+    ):
+        raise ValueError("deterministic run inputs cannot be detached safely")
+
+
+def _require_plain_plan(value: object) -> bool:
+    """A replaceable planner cannot supply behavioral objects for snapshotting."""
+    return (
+        type(value) is DeterministicPlan
+        and type(value.steps) is tuple
+        and all(
+            type(step) is PlanStep
+            and type(step.action_id) is str
+            and (step.tool_id is None or type(step.tool_id) is str)
+            for step in value.steps
+        )
+    )
+
+
 class DeterministicBrain:
     """Plan, validate, re-plan and execute explicit workflows without a language model."""
 
@@ -157,6 +235,25 @@ class DeterministicBrain:
         if any(type(action) is not DeterministicAction for action in actions):
             raise ValueError("actions must be canonical deterministic action records")
         try:
+            # Only plain inert JSON-like values may be copied into authority-bearing
+            # actions. A foreign __deepcopy__ could return an alias or execute code.
+            # Validate before invoking deepcopy, and bound deeply nested payloads.
+            _require_plain_facts(state.facts)
+            _require_plain_facts(goal.required)
+            _require_plain_facts(goal.forbidden)
+            if goal.required & goal.forbidden:
+                raise ValueError("contradictory deterministic goal")
+            for action in actions:
+                _require_run_identity(action.action_id, name="action_id")
+                if action.tool_id is not None:
+                    _require_run_identity(action.tool_id, name="tool_id")
+                for facts in (action.requires, action.forbids, action.adds, action.removes):
+                    _require_plain_facts(facts)
+                if action.requires & action.forbids or action.adds & action.removes:
+                    raise ValueError("contradictory deterministic action")
+                _require_plain_json_arguments(
+                    action.arguments, budget=[10000], size_budget=[256 * 1024]
+                )
             state, goal, actions = deepcopy((state, goal, actions))
         except Exception as exc:
             raise ValueError("deterministic run inputs cannot be detached safely") from exc
@@ -303,6 +400,37 @@ class DeterministicBrain:
                 actions=available_actions,
                 planning_deadline=planning_deadline,
             )
+            # Reject oversized exact plans *before* scanning or copying their steps.
+            # The untrusted planner cannot force a large snapshot merely by
+            # returning a tuple larger than this run's remaining step allowance.
+            if (
+                type(plan) is DeterministicPlan
+                and type(plan.steps) is tuple
+                and len(plan.steps) > remaining_steps
+            ):
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.PLAN_TOO_LONG,
+                    message=(
+                        f"plan exceeds max_steps budget: {len(plan.steps)} > {remaining_steps}"
+                    ),
+                )
+            # Inspect the exact carrier *before* deepcopy: invalid planner objects
+            # may define behavioral __deepcopy__ hooks that must never run here.
+            if not _require_plain_plan(plan):
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                    message="planner returned a malformed deterministic plan",
+                )
             # A planner may retain its result and mutate frozen PlanStep objects
             # after returning. Own an independent plan snapshot before validation,
             # history, observer awaits, and ToolExecutor dispatch.
@@ -321,16 +449,7 @@ class DeterministicBrain:
             # The planner is a replaceable/untrusted adapter. Validate its carrier
             # before indexing a step or publishing it as durable plan evidence.
             # Malformed steps must never reach ToolExecutor or a journal reservation.
-            if (
-                type(plan) is not DeterministicPlan
-                or type(plan.steps) is not tuple
-                or any(
-                    type(step) is not PlanStep
-                    or type(step.action_id) is not str
-                    or (step.tool_id is not None and type(step.tool_id) is not str)
-                    for step in plan.steps
-                )
-            ):
+            if not _require_plain_plan(plan):
                 return self._failure(
                     plan=DeterministicPlan(steps=()),
                     completed=completed,
