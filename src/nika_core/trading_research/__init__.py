@@ -52,6 +52,9 @@ from .orders import (
 )
 from .paper_actions import (
     PAPER_ACCOUNT_INSPECT,
+    PAPER_POSITIONS_INSPECT,
+    paper_positions_definition,
+    paper_positions_handler,
     paper_inspect_definition,
     paper_inspect_handler,
 )
@@ -96,6 +99,7 @@ __all__ = [
     "OutcomeSettlement",
     "Partition",
     "PAPER_ACCOUNT_INSPECT",
+    "PAPER_POSITIONS_INSPECT",
     "PaperAccountView",
     "PaperPositionView",
     "PaperWorkspaceQuery",
@@ -137,6 +141,8 @@ __all__ = [
     "order_authority_sha256",
     "paper_inspect_definition",
     "paper_inspect_handler",
+    "paper_positions_definition",
+    "paper_positions_handler",
     "standing_paper_read_authorizer",
     "paper_state_provider",
     "trailing_mean",
