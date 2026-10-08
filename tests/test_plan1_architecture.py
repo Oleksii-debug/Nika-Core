@@ -205,17 +205,17 @@ def test_architecture_guard_rejects_nonliteral_builtins_import() -> None:
 
 def test_architecture_guard_rejects_getattr_dynamic_engine_imports() -> None:
     source = (
-        "import importlib as loader\\n"
-        "import builtins as standard\\n"
-        "getattr(loader, 'import_module')('langgraph.graph')\\n"
-        "getattr(standard, '__import__')('mcp')\\n"
+        "import importlib as loader\n"
+        "import builtins as standard\n"
+        "getattr(loader, 'import_module')('langgraph.graph')\n"
+        "getattr(standard, '__import__')('mcp')\n"
     )
     assert direct_engine_imports(source) == ("langgraph.graph", "mcp")
 
 
 def test_architecture_guard_rejects_getattr_nonliteral_provider_name() -> None:
     source = (
-        "import importlib\\n"
-        "getattr(importlib, 'import_module')(user_supplied_module)\\n"
+        "import importlib\n"
+        "getattr(importlib, 'import_module')(user_supplied_module)\n"
     )
     assert direct_engine_imports(source) == ("<nonliteral-dynamic-import>",)
