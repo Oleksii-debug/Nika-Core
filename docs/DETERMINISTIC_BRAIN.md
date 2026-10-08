@@ -160,6 +160,27 @@ The message remains human-readable while `error_code` is stable for programmatic
 
 ## Restart evidence
 
+The `max_steps` budget is cumulative across process restarts: the number of validated
+`previously_completed_action_ids` consumes the same step allowance, not a new quota.
+A recovered checkpoint with a satisfied goal returns terminal success without
+re-planning even when some of its task-wide step budget remains. An over-budget checkpoint
+cannot claim success, and an unmet goal at the step ceiling fails closed before a new
+tool effect. Existing task-level PENDING/UNCERTAIN journal reconciliation still precedes
+this terminal shortcut.
+When a WorldStateObserver is configured, every satisfied checkpoint is re-observed
+before accepting terminal success: observation failures fail closed; drift at the
+step ceiling blocks success; drift with remaining step budget resumes normal validated
+planning from the observed state. No planner or tool effect executes while the observer
+is confirming an already-satisfied checkpoint.
+
+Run, optional task, and deterministic action/replay identities are admitted as exact,
+bounded canonical UTF-8 text before journal/planner/tool handling.
+The action catalog and recovered completed-action checkpoint must be immutable tuples.
+Consumable iterators and mutable sequences are rejected before inspection; they cannot
+evade cumulative step accounting by changing or exhausting during admission. Step/re-plan limits
+must be exact integer budgets, and planning/observation time budgets must be finite
+positive numbers; booleans, NaN, infinities and huge values are invalid.
+
 For read-only/purely deterministic work, a caller persists the returned `final_state` plus ordered
 `completed_actions` in its normal durable task/checkpoint state. On restart those values are
 passed back as the initial state and `previously_completed_action_ids`. The brain excludes those
