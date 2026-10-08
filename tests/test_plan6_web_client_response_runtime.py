@@ -43,7 +43,9 @@ const assert = require("node:assert/strict");
     "inspect-form", "task-id", "inspect-submit", "app-status",
     "task-details", "result-id", "result-state"
   ]) nodes[id] = new Element();
-  nodes["task-id"].value = scenario === "bidi" ? "task-123\u202e" : "task-123";
+  nodes["task-id"].value = scenario === "bidi" ? "task-123\u202e" :
+    scenario === "lookalike" ? "t\u0430sk-123" :
+    scenario === "zero-width" ? "task-\u200b123" : "task-123";
 
   const result = {
     request_id: scenario === "mismatch" ? "other-request" : "fixed-request",
@@ -55,7 +57,8 @@ const assert = require("node:assert/strict");
   if (scenario === "oversize") responseBytes = Buffer.alloc(81921, 65);
   if (scenario === "invalid-utf8") responseBytes = Buffer.from([255]);
   const contentType = scenario === "wrong-mime" ? "text/html" : "application/json";
-  const lengthHeader = scenario === "declared-oversize" ? "999999" : null;
+  const lengthHeader = scenario === "declared-oversize" ? "999999" :
+    scenario === "length-mismatch" ? String(responseBytes.length + 1) : null;
   let readCalls = 0;
   const fetch = async (url, init) => {
     fetchCalls++;
@@ -83,13 +86,19 @@ const assert = require("node:assert/strict");
   vm.runInNewContext(script, {
     document: { getElementById: id => nodes[id] },
     crypto: { randomUUID: () => "fixed-request" },
-    fetch, Uint8Array, TextDecoder, AbortController, setTimeout, clearTimeout
+    fetch, Uint8Array, TextDecoder, AbortController,
+    setTimeout: callback => {
+      if (scenario === "timeout") callback();
+      return 1;
+    },
+    clearTimeout
   }, { filename: "packaged-client.js" });
   assert.equal(typeof submit, "function");
   await submit({ preventDefault() {} });
   const visible = !nodes["task-details"].hidden;
   assert.equal(visible, scenario === "ok");
-  assert.equal(fetchCalls, scenario === "bidi" ? 0 : 1);
+  assert.equal(fetchCalls,
+    ["bidi", "lookalike", "zero-width"].includes(scenario) ? 0 : 1);
   assert.equal(nodes["inspect-submit"].disabled, false);
   assert.ok(!("aria-busy" in nodes["inspect-form"].attrs));
   if (scenario === "ok") {
@@ -104,8 +113,14 @@ const assert = require("node:assert/strict");
     assert.equal(nodes["result-id"].textContent, "");
     assert.equal(nodes["result-state"].textContent, "");
   }
-  if (scenario === "bidi") {
+  if (["bidi", "lookalike", "zero-width"].includes(scenario)) {
     assert.match(nodes["app-status"].textContent, /ідентифікатор/u);
+  }
+  if (scenario === "timeout") {
+    assert.match(nodes["app-status"].textContent, /перервано/u);
+  }
+  if (scenario === "length-mismatch") {
+    assert.match(nodes["app-status"].textContent, /перервано/u);
   }
   if (scenario === "oversize") assert.equal(cancelCalls, 1);
   console.log("PASS", scenario);
@@ -116,7 +131,7 @@ const assert = require("node:assert/strict");
 @pytest.mark.parametrize(
     "scenario",
     ["ok", "mismatch", "oversize", "declared-oversize", "invalid-utf8", "wrong-mime",
-     "edited", "bidi"],
+     "edited", "bidi", "lookalike", "zero-width", "timeout", "length-mismatch"],
 )
 def test_packaged_web_client_bounds_and_correlates_response(scenario: str) -> None:
     node = shutil.which("node")
