@@ -74,6 +74,75 @@ def test_exact_budget_completed_checkpoint_is_terminal_without_replanning() -> N
     assert result.planning_history == ()
 
 
+def test_satisfied_recovered_goal_below_step_limit_skips_planner() -> None:
+    # Recovery must not invoke a planner (and thereby risk a new effect) merely
+    # because some of the original task-wide step allowance remains unused.
+    result, planner = _resume(max_steps=2, goal="prepared")
+    assert result.ok
+    assert result.completed_actions == ("prepare",)
+    assert result.final_state.facts == frozenset({"prepared"})
+    assert result.planning_history == ()
+    assert planner.calls == 0
+
+
+def test_satisfied_recovered_goal_with_spare_budget_requires_observer_confirmation() -> None:
+    class ConfirmingObserver:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def observe(self) -> WorldState:
+            self.calls += 1
+            return WorldState(facts=frozenset({"prepared", "finished"}))
+
+    observer = ConfirmingObserver()
+    planner = CountingPlanner()
+    result = asyncio.run(
+        DeterministicBrain(planner=planner, tools=ToolExecutor()).run(
+            run_id="spare-budget-confirmation",
+            state=WorldState(facts=frozenset({"prepared", "finished"})),
+            goal=DeterministicGoal(required=frozenset({"finished"})),
+            actions=_ACTIONS,
+            previously_completed_action_ids=("prepare",),
+            max_steps=2,
+            state_observer=observer,
+        )
+    )
+    assert result.ok
+    assert result.completed_actions == ("prepare",)
+    assert observer.calls == 1
+    assert planner.calls == 0
+
+
+def test_satisfied_recovered_goal_with_spare_budget_replans_from_observed_drift() -> None:
+    class DriftingObserver:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def observe(self) -> WorldState:
+            self.calls += 1
+            if self.calls < 3:
+                return WorldState(facts=frozenset({"prepared"}))
+            return WorldState(facts=frozenset({"prepared", "finished"}))
+
+    observer = DriftingObserver()
+    planner = CountingPlanner()
+    result = asyncio.run(
+        DeterministicBrain(planner=planner, tools=ToolExecutor()).run(
+            run_id="spare-budget-drift",
+            state=WorldState(facts=frozenset({"prepared", "finished"})),
+            goal=DeterministicGoal(required=frozenset({"finished"})),
+            actions=_ACTIONS,
+            previously_completed_action_ids=("prepare",),
+            max_steps=2,
+            state_observer=observer,
+        )
+    )
+    assert result.ok
+    assert result.completed_actions == ("prepare", "finish")
+    assert observer.calls == 3
+    assert planner.calls == 1
+
+
 def test_recovered_action_leaves_only_one_new_execution_slot() -> None:
     result, planner = _resume(max_steps=2, goal="finished")
     assert result.ok
