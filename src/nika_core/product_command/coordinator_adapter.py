@@ -15,6 +15,8 @@ _STATE_LABELS = {
     WorkState.ACCEPTED: "Прийнято",
     WorkState.REPAIR_REQUIRED: "Потрібне виправлення",
     WorkState.BLOCKED: "Заблоковано",
+    WorkState.DONE: "Завершено",
+    WorkState.CANCELLED: "Скасовано",
 }
 
 
