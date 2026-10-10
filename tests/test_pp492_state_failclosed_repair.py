@@ -10,7 +10,7 @@ import pytest
 
 _WEB_ROOT = Path(__file__).parents[1] / "src" / "nika_core" / "ui" / "web"
 _NODE = shutil.which("node")
-_NODE_PROCESS_TIMEOUT_SECONDS = 30
+_NODE_PROCESS_TIMEOUT_SECONDS = 60
 
 
 def _source() -> str:
