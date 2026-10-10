@@ -61,6 +61,17 @@ def require_aware_utc(value: datetime, field_name: str) -> datetime:
     return value.astimezone(UTC)
 
 
+def _finite_decimal(value: Decimal, field_name: str) -> Decimal:
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise TradingResearchError(f"{field_name} must be a finite Decimal")
+    return value
+
+
+def _validate_source_sequence(value: int) -> None:
+    if type(value) is not int or value < 0:
+        raise TradingResearchError("source_sequence must be a non-negative integer")
+
+
 @dataclass(frozen=True, slots=True)
 class EventTime:
     event_at: datetime
@@ -92,8 +103,9 @@ class Bar:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
-        if self.source_sequence < 0:
-            raise TradingResearchError("source_sequence must be non-negative")
+        _validate_source_sequence(self.source_sequence)
+        for field_name in ("open", "high", "low", "close", "volume"):
+            _finite_decimal(getattr(self, field_name), field_name)
         if min(self.open, self.high, self.low, self.close) <= 0:
             raise TradingResearchError("bar prices must be positive")
         if self.low > min(self.open, self.close) or self.high < max(self.open, self.close):
@@ -113,8 +125,9 @@ class Tick:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
-        if self.source_sequence < 0:
-            raise TradingResearchError("source_sequence must be non-negative")
+        _validate_source_sequence(self.source_sequence)
+        _finite_decimal(self.price, "price")
+        _finite_decimal(self.size, "size")
         if self.price <= 0 or self.size < 0:
             raise TradingResearchError("tick price must be positive and size non-negative")
 
@@ -130,8 +143,9 @@ class Quote:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
-        if self.source_sequence < 0:
-            raise TradingResearchError("source_sequence must be non-negative")
+        _validate_source_sequence(self.source_sequence)
+        for field_name in ("bid", "ask", "bid_size", "ask_size"):
+            _finite_decimal(getattr(self, field_name), field_name)
         if self.bid <= 0 or self.ask <= 0 or self.bid > self.ask:
             raise TradingResearchError("quote requires 0 < bid <= ask")
         if self.bid_size < 0 or self.ask_size < 0:
@@ -146,12 +160,16 @@ class OddsSnapshot:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
-        if self.source_sequence < 0:
-            raise TradingResearchError("source_sequence must be non-negative")
+        _validate_source_sequence(self.source_sequence)
         if not self.selections:
             raise TradingResearchError("odds snapshot must contain selections")
-        copied = {str(key): Decimal(value) for key, value in self.selections.items()}
-        if any(value <= 0 for value in copied.values()):
+        if any(type(key) is not str or not key.strip() for key in self.selections):
+            raise TradingResearchError("odds selection keys must be nonblank text")
+        try:
+            copied = {str(key): Decimal(value) for key, value in self.selections.items()}
+        except (ArithmeticError, TypeError, ValueError):
+            raise TradingResearchError("odds must contain valid finite Decimals") from None
+        if any(not value.is_finite() or value <= 0 for value in copied.values()):
             raise TradingResearchError("odds must be positive")
         object.__setattr__(self, "selections", MappingProxyType(copied))
 
@@ -165,10 +183,10 @@ class OutcomeSettlement:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
-        if self.source_sequence < 0:
-            raise TradingResearchError("source_sequence must be non-negative")
+        _validate_source_sequence(self.source_sequence)
         if not self.outcome.strip():
             raise TradingResearchError("outcome must not be empty")
+        _finite_decimal(self.value, "value")
 
 
 type MarketEvent = Bar | Tick | Quote | OddsSnapshot | OutcomeSettlement
