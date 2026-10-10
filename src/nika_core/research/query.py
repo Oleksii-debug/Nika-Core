@@ -38,9 +38,19 @@ class ResearchQuerySpec:
 
 
 @dataclass(frozen=True, slots=True)
+class ResearchResultBounds:
+    """Explicit evidence that one query stayed inside its requested result boundary."""
+
+    requested_limit: int
+    returned_count: int
+    truncated: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ResearchQueryExecution:
     spec: ResearchQuerySpec
     result_set: ResearchResultSet
+    bounds: ResearchResultBounds
 
 
 class DeterministicResearchQueryService:
@@ -66,7 +76,7 @@ class DeterministicResearchQueryService:
         result_set_id: str | None = None,
     ) -> ResearchQueryExecution:
         self._validate_spec(spec)
-        hits = self._search(spec, self._fts_query(spec.text, spec.mode))
+        hits, truncated = self._search(spec, self._fts_query(spec.text, spec.mode))
         match_reason = (
             f"Quoted phrase full-text match for: {spec.text}"
             if spec.mode is SearchMode.PHRASE
@@ -82,7 +92,12 @@ class DeterministicResearchQueryService:
             why_matched=match_reason,
             result_set_id=result_set_id,
         )
-        return ResearchQueryExecution(spec=spec, result_set=result_set)
+        bounds = ResearchResultBounds(
+            requested_limit=spec.limit,
+            returned_count=len(result_set.items),
+            truncated=truncated,
+        )
+        return ResearchQueryExecution(spec=spec, result_set=result_set, bounds=bounds)
 
     @staticmethod
     def render_text(execution: ResearchQueryExecution) -> str:
@@ -99,7 +114,14 @@ class DeterministicResearchQueryService:
         if filters.freshness:
             values = ", ".join(state.value for state in filters.freshness)
             lines.append(f"Freshness: {values}")
-        lines.extend((f"Results: {len(execution.result_set.items)}", ""))
+        lines.extend(
+            (
+                f"Limit: {execution.bounds.requested_limit}",
+                f"Results: {execution.bounds.returned_count}",
+                f"Truncated: {'yes' if execution.bounds.truncated else 'no'}",
+                "",
+            )
+        )
 
         for index, item in enumerate(execution.result_set.items, start=1):
             lines.extend(
@@ -120,6 +142,8 @@ class DeterministicResearchQueryService:
     def _validate_spec(self, spec: ResearchQuerySpec) -> None:
         if not spec.workspace_id.strip():
             raise ValueError("workspace_id is required")
+        if isinstance(spec.limit, bool) or not isinstance(spec.limit, int):
+            raise TypeError("limit must be an integer")
         if spec.limit < 1 or spec.limit > 100:
             raise ValueError("limit must be between 1 and 100")
         if (
@@ -170,7 +194,7 @@ class DeterministicResearchQueryService:
         terms = [term for term in normalized.split(" ") if term]
         return " AND ".join('"' + term.replace('"', '""') + '"' for term in terms)
 
-    def _search(self, spec: ResearchQuerySpec, fts_query: str) -> list[SearchHit]:
+    def _search(self, spec: ResearchQuerySpec, fts_query: str) -> tuple[list[SearchHit], bool]:
         filters = spec.filters
         clauses = ["corpus_fts MATCH ?", "corpus_fts.workspace_id=?"]
         params: list[object] = [fts_query, spec.workspace_id]
@@ -222,11 +246,11 @@ class DeterministicResearchQueryService:
 
         if source_ids or kinds or freshness:
             if not origin_clauses:
-                return []
+                return [], False
             clauses.append("(" + " OR ".join(origin_clauses) + ")")
             params.extend(origin_params)
 
-        params.append(spec.limit)
+        params.append(spec.limit + 1)
         sql = f"""SELECT corpus_fts.document_id, corpus_fts.title,
             snippet(corpus_fts, 3, '[', ']', ' … ', 24) AS snippet,
             bm25(corpus_fts) AS rank
@@ -237,12 +261,17 @@ class DeterministicResearchQueryService:
         LIMIT ?"""
         with self._store.connection() as conn:
             rows = conn.execute(sql, params).fetchall()
-        return [
-            SearchHit(
-                document_id=row["document_id"],
-                title=row["title"],
-                snippet=row["snippet"],
-                rank=float(row["rank"]),
-            )
-            for row in rows
-        ]
+        truncated = len(rows) > spec.limit
+        bounded_rows = rows[: spec.limit]
+        return (
+            [
+                SearchHit(
+                    document_id=row["document_id"],
+                    title=row["title"],
+                    snippet=row["snippet"],
+                    rank=float(row["rank"]),
+                )
+                for row in bounded_rows
+            ],
+            truncated,
+        )
