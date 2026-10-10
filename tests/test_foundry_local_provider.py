@@ -213,6 +213,54 @@ def test_download_authorization_rejects_missing_license_reference() -> None:
         authorization(license_reference=" ")
 
 
+def test_download_authorization_rejects_non_text_authority_carriers() -> None:
+    for field, value in (
+        ("provider_id", 7),
+        ("model", object()),
+        ("license_reference", b"license"),
+        ("expected_model_id", 9),
+    ):
+        with pytest.raises(TypeError, match=field):
+            authorization(**{field: value})
+
+
+def test_download_authorization_rejects_str_subclass_authority_carriers() -> None:
+    class Text(str):
+        pass
+
+    for field, value in (
+        ("provider_id", Text("foundry-local")),
+        ("model", Text("test-model")),
+        ("license_reference", Text("MODEL-LICENSE-REVIEW-123")),
+        ("expected_model_id", Text("test-model-id")),
+    ):
+        with pytest.raises(TypeError, match=field):
+            authorization(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("provider_id", "foundry-local\n"),
+        ("model", "test\tmodel"),
+        ("license_reference", "MODEL\x00LICENSE"),
+        ("expected_model_id", "model-id\rvalue"),
+    ],
+)
+def test_download_authorization_rejects_control_characters(
+    field: str,
+    value: str,
+) -> None:
+    with pytest.raises(ValueError, match="control characters|surrounding whitespace"):
+        authorization(**{field: value})
+
+
+def test_download_authorization_accepts_canonical_expected_model_id() -> None:
+    value = authorization(expected_model_id="test-model-id")
+
+    assert value.expected_model_id == "test-model-id"
+
+
 def test_foundry_download_rejects_authorization_for_other_provider() -> None:
     model = FakeFoundryModel(cached=False)
     provider = FoundryLocalProvider(
