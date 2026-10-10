@@ -344,12 +344,14 @@ def test_accessibility_repair_calls_semantics_before_visual_fallback() -> None:
                 target=target,
                 method=EvidenceMethod.VISION,
                 summary="Visual fallback candidate",
+                accessible_controls=("button:Open",),
                 confidence=0.7,
             )
 
     service = AccessibilityRepairService(Semantic(), Fallback())
     browser = asyncio.run(service.inspect_browser("page"))
     assert browser.method is EvidenceMethod.VISION
+    assert browser.accessible_controls == ("button:Open",)
     assert events == ["dom", "vision"]
 
     events.clear()
