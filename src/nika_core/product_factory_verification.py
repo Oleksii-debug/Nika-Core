@@ -38,15 +38,17 @@ class ExactShaCheckEvidence:
     required: bool = True
 
     def __post_init__(self) -> None:
-        if not isinstance(self.check_id, str) or not isinstance(self.evidence_ref, str):
+        if type(self.check_id) is not str or type(self.evidence_ref) is not str:
             raise VerificationError("verification evidence identity must be text")
         if not self.check_id.strip() or not self.evidence_ref.strip():
             raise VerificationError("verification evidence identity must not be empty")
+        _validate_utf8(self.check_id, "verification check id")
+        _validate_utf8(self.evidence_ref, "verification evidence ref")
         _validate_evidence_ref(self.evidence_ref)
         _validate_sha(self.candidate_sha)
-        if not isinstance(self.state, CheckState):
+        if type(self.state) is not CheckState:
             raise VerificationError("verification check state must be a CheckState")
-        if not isinstance(self.required, bool):
+        if type(self.required) is not bool:
             raise VerificationError("verification required flag must be a bool")
 
 
@@ -91,28 +93,27 @@ def classify_candidate_verification(
     """
 
     _validate_sha(candidate_sha)
-    if not isinstance(evidence, tuple):
-        raise VerificationError("verification evidence must be a tuple")
     _validate_required_check_ids(required_check_ids)
+    _validate_authoritative_required_profile(required_check_ids)
+    if type(evidence) is not tuple:
+        raise VerificationError("verification evidence must be a tuple")
 
-    if any(not isinstance(item, ExactShaCheckEvidence) for item in evidence):
-        raise VerificationError("verification evidence must be ExactShaCheckEvidence")
-
-    refs = tuple(item.evidence_ref for item in evidence)
+    canonical_evidence = tuple(_snapshot_evidence(item) for item in evidence)
+    refs = tuple(item.evidence_ref for item in canonical_evidence)
     if len(refs) != len(set(refs)):
         raise VerificationError("verification evidence refs must be unique")
-    if not evidence:
+    if not canonical_evidence:
         return CandidateVerification(candidate_sha, VerificationState.UNKNOWN, ())
 
-    observed_shas = {item.candidate_sha for item in evidence}
+    observed_shas = {item.candidate_sha for item in canonical_evidence}
     if candidate_sha not in observed_shas:
         state = VerificationState.STALE if len(observed_shas) == 1 else VerificationState.MISMATCH
         return CandidateVerification(candidate_sha, state, refs)
     if observed_shas != {candidate_sha}:
         return CandidateVerification(candidate_sha, VerificationState.MISMATCH, refs)
 
-    evidence_by_check = {item.check_id: item for item in evidence}
-    if len(evidence_by_check) != len(evidence):
+    evidence_by_check = {item.check_id: item for item in canonical_evidence}
+    if len(evidence_by_check) != len(canonical_evidence):
         raise VerificationError("verification check ids must be unique")
 
     missing_required = set(required_check_ids) - evidence_by_check.keys()
@@ -121,13 +122,12 @@ def classify_candidate_verification(
 
     unexpected_required = tuple(
         item.check_id
-        for item in evidence
+        for item in canonical_evidence
         if item.required and item.check_id not in required_check_ids
     )
     if unexpected_required:
         raise VerificationError("required verification check id is not authoritative")
 
-    _validate_authoritative_required_profile(required_check_ids)
     required = tuple(evidence_by_check[check_id] for check_id in required_check_ids)
     if any(item.state is CheckState.FAIL for item in required):
         return CandidateVerification(candidate_sha, VerificationState.FAIL, refs)
@@ -144,38 +144,63 @@ def classify_candidate_verification(
     return result
 
 
+def _snapshot_evidence(item: object) -> ExactShaCheckEvidence:
+    if type(item) is not ExactShaCheckEvidence:
+        raise VerificationError("verification evidence must be ExactShaCheckEvidence")
+    try:
+        check_id = item.check_id
+        candidate_sha = item.candidate_sha
+        state = item.state
+        evidence_ref = item.evidence_ref
+        required = item.required
+    except AttributeError as exc:
+        raise VerificationError("verification evidence is incomplete") from exc
+    return ExactShaCheckEvidence(
+        check_id=check_id,
+        candidate_sha=candidate_sha,
+        state=state,
+        evidence_ref=evidence_ref,
+        required=required,
+    )
+
+
 def _validate_candidate_verification(
     candidate_sha: str,
     state: VerificationState,
     evidence_refs: tuple[str, ...],
 ) -> None:
     _validate_sha(candidate_sha)
-    if not isinstance(state, VerificationState):
+    if type(state) is not VerificationState:
         raise VerificationError("verification state must be a VerificationState")
-    if not isinstance(evidence_refs, tuple):
+    if type(evidence_refs) is not tuple:
         raise VerificationError("verification evidence refs must be a tuple")
-    if any(not isinstance(ref, str) or not ref.strip() for ref in evidence_refs):
+    if any(type(ref) is not str or not ref.strip() for ref in evidence_refs):
         raise VerificationError("verification evidence refs must be non-empty text")
     for ref in evidence_refs:
+        _validate_utf8(ref, "verification evidence ref")
         _validate_evidence_ref(ref)
     if len(evidence_refs) != len(set(evidence_refs)):
         raise VerificationError("verification evidence refs must be unique")
 
 
 def _validate_required_check_ids(required_check_ids: tuple[str, ...]) -> None:
-    if not isinstance(required_check_ids, tuple):
+    if type(required_check_ids) is not tuple:
         raise VerificationError("required check ids must be a tuple")
     if not required_check_ids:
         raise VerificationError("required check ids must not be empty")
-    if any(not isinstance(check_id, str) or not check_id.strip() for check_id in required_check_ids):
+    if any(type(check_id) is not str or not check_id.strip() for check_id in required_check_ids):
         raise VerificationError("required check ids must be non-empty text")
+    for check_id in required_check_ids:
+        _validate_utf8(check_id, "required check id")
     if len(required_check_ids) != len(set(required_check_ids)):
         raise VerificationError("required check ids must be unique")
 
 
 def _validate_authoritative_required_profile(required_check_ids: tuple[str, ...]) -> None:
     if required_check_ids != PRODUCT_FACTORY_REQUIRED_CHECK_IDS:
-        raise VerificationError("required check ids must match authoritative Product Factory profile")
+        raise VerificationError(
+            "required check ids must match authoritative Product Factory profile"
+        )
 
 
 def _validate_evidence_ref(value: str) -> None:
@@ -183,8 +208,15 @@ def _validate_evidence_ref(value: str) -> None:
         raise VerificationError("verification evidence ref exceeds maximum length")
 
 
+def _validate_utf8(value: str, field: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise VerificationError(f"{field} must be valid UTF-8 text") from exc
+
+
 def _validate_sha(value: str) -> None:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise VerificationError("candidate SHA must be a lowercase 40-character hex digest")
     if len(value) != 40 or any(character not in "0123456789abcdef" for character in value):
         raise VerificationError("candidate SHA must be a lowercase 40-character hex digest")
