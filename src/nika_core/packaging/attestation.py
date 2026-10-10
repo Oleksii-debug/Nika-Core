@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
-from dataclasses import asdict, dataclass
+import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -158,8 +160,68 @@ def write_release_attestation_evidence(
     path: Path,
     evidence: ReleaseAttestationEvidence,
 ) -> None:
+    if type(evidence) is not ReleaseAttestationEvidence:
+        raise ValueError("attestation evidence has invalid provenance identity")
+    payload = {
+        name: getattr(evidence, name, None)
+        for name in ReleaseAttestationEvidence.__dataclass_fields__
+    }
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != 1
+        or payload["verification_result_bound"] is not True
+        or payload["source_ref"] != "refs/heads/main"
+        or payload["human_tested"] is not False
+        or payload["nvda_verified"] is not False
+        or payload["production_release_ready"] is not False
+    ):
+        raise ValueError("attestation evidence has invalid automated release gates")
+
+    repository = payload["repository"]
+    attestation_id = payload["attestation_id"]
+    artifact_reference = payload["artifact_reference"]
+    if (
+        not isinstance(payload["commit_sha"], str)
+        or not _SOURCE_SHA_RE.fullmatch(payload["commit_sha"])
+        or not isinstance(payload["artifact_sha256"], str)
+        or not _SHA256_RE.fullmatch(payload["artifact_sha256"])
+        or type(payload["artifact_size"]) is not int
+        or not 0 < payload["artifact_size"] <= 2**63 - 1
+        or not isinstance(artifact_reference, str)
+        or not artifact_reference
+        or artifact_reference != artifact_reference.strip()
+        or not artifact_reference.isprintable()
+        or len(artifact_reference.encode("utf-8")) > 2048
+        or not isinstance(repository, str)
+        or not _REPOSITORY_RE.fullmatch(repository)
+        or payload["signer_workflow"]
+        != f"{repository}/.github/workflows/m12-prehuman-release-gate.yml"
+        or payload["predicate_type"] != _SLSA_PROVENANCE_V1
+        or not isinstance(attestation_id, str)
+        or not _ATTESTATION_ID_RE.fullmatch(attestation_id)
+        or payload["attestation_url"]
+        != f"https://github.com/{repository}/attestations/{attestation_id}"
+    ):
+        raise ValueError("attestation evidence has invalid provenance identity")
+
+    serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(asdict(evidence), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=".m12-attestation-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
