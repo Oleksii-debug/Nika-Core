@@ -7,7 +7,7 @@ import json
 from html.parser import HTMLParser
 from pathlib import Path
 
-from nika_core.research.models import ExtractedDocument
+from nika_core.research.models import ExtractedDocument, ExtractionStatus
 
 
 class LocalIngestionError(RuntimeError):
@@ -42,6 +42,7 @@ _DOCUMENT_MEDIA_TYPES = {
 }
 _TEXT_MEDIA_TYPE_SET = frozenset(_TEXT_MEDIA_TYPES.values())
 _DOCUMENT_MEDIA_TYPE_SET = frozenset(_DOCUMENT_MEDIA_TYPES.values())
+_DEFAULT_MAX_LOGICAL_LINE_CHARS = 1_000_000
 
 
 class _VisibleTextParser(HTMLParser):
@@ -141,6 +142,26 @@ def _decode_utf8(data: bytes, name: str) -> str:
         raise LocalIngestionError(f"{name}: expected UTF-8 text") from exc
 
 
+def _ensure_bounded_logical_lines(
+    text: str,
+    *,
+    name: str,
+    max_logical_line_chars: int,
+) -> None:
+    if max_logical_line_chars < 1:
+        raise ValueError("max_logical_line_chars must be positive")
+    line_chars = 0
+    for character in text:
+        if character in "\r\n":
+            line_chars = 0
+            continue
+        line_chars += 1
+        if line_chars > max_logical_line_chars:
+            raise LocalIngestionError(
+                f"{name}: logical line exceeds {max_logical_line_chars} characters"
+            )
+
+
 def _extract_json(text: str) -> str:
     try:
         value = json.loads(text)
@@ -150,11 +171,15 @@ def _extract_json(text: str) -> str:
 
 
 def _extract_csv(text: str) -> str:
+    rendered = io.StringIO()
     try:
-        rows = list(csv.reader(io.StringIO(text), strict=True))
+        for index, row in enumerate(csv.reader(io.StringIO(text), strict=True)):
+            if index:
+                rendered.write("\n")
+            rendered.write("\t".join(cell.strip() for cell in row))
     except csv.Error as exc:
         raise LocalIngestionError(f"malformed CSV: {exc}") from exc
-    return "\n".join("\t".join(cell.strip() for cell in row) for row in rows)
+    return rendered.getvalue()
 
 
 def _extract_html(text: str) -> str:
@@ -172,21 +197,32 @@ def extract_text_payload(
     *,
     title: str,
     media_type: str,
+    max_logical_line_chars: int = _DEFAULT_MAX_LOGICAL_LINE_CHARS,
 ) -> ExtractedDocument:
     normalized_media_type = media_type.casefold()
     if normalized_media_type not in _TEXT_MEDIA_TYPE_SET:
         raise UnsupportedLocalFormatError(f"unsupported text media type: {media_type}")
     text = _decode_utf8(payload, title)
-    if normalized_media_type == "text/html":
-        text = _extract_html(text)
-    elif normalized_media_type == "text/csv":
-        text = _extract_csv(text)
-    elif normalized_media_type == "application/json":
-        text = _extract_json(text)
+    _ensure_bounded_logical_lines(
+        text,
+        name=title,
+        max_logical_line_chars=max_logical_line_chars,
+    )
+    if not text:
+        status = ExtractionStatus.EMPTY
+    else:
+        if normalized_media_type == "text/html":
+            text = _extract_html(text)
+        elif normalized_media_type == "text/csv":
+            text = _extract_csv(text)
+        elif normalized_media_type == "application/json":
+            text = _extract_json(text)
+        status = ExtractionStatus.EXTRACTED if text.strip() else ExtractionStatus.EMPTY
     return ExtractedDocument(
         title=title,
         text=text,
         media_type=normalized_media_type,
+        status=status,
         extractor="nika-stdlib",
         extractor_version="1",
     )
@@ -197,6 +233,7 @@ def extract_local_file(
     *,
     allowed_root: Path | str,
     max_bytes: int = 16 * 1024 * 1024,
+    max_logical_line_chars: int = _DEFAULT_MAX_LOGICAL_LINE_CHARS,
 ) -> ExtractedDocument:
     candidate = resolve_local_file(path, allowed_root=allowed_root, max_bytes=max_bytes)
     suffix = candidate.suffix.casefold()
@@ -207,4 +244,5 @@ def extract_local_file(
         candidate.read_bytes(),
         title=candidate.name,
         media_type=media_type,
+        max_logical_line_chars=max_logical_line_chars,
     )
