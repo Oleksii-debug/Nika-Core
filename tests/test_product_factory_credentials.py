@@ -115,10 +115,11 @@ def test_opaque_lease_and_audit_never_serialize_raw_secret() -> None:
     assert evidence.secret_ref == "secret-a"
 
 
-def test_project_cannot_use_or_enumerate_unrelated_secret() -> None:
+def test_project_cannot_use_or_resolve_unrelated_secret() -> None:
     broker, _store = broker_with_secret()
 
-    assert broker.list_project_secret_refs(PROJECT_B) == ()
+    with pytest.raises(CredentialBrokerError, match="unavailable for project"):
+        broker.get_secret_ref(project_id=PROJECT_B, secret_ref="secret-a")
     with pytest.raises(CredentialBrokerError, match="unavailable for project"):
         broker.issue_lease(
             project_id=PROJECT_B,
@@ -178,7 +179,10 @@ def test_revocation_invalidates_existing_lease_and_future_use() -> None:
     broker.revoke(project_id=PROJECT_A, secret_ref="secret-a", now=NOW + timedelta(seconds=1))
 
     assert lease.handle_ref not in store._handles
-    assert broker.list_project_secret_refs(PROJECT_A)[0].state is CredentialState.REVOKED
+    assert (
+        broker.get_secret_ref(project_id=PROJECT_A, secret_ref="secret-a").state
+        is CredentialState.REVOKED
+    )
     with pytest.raises(CredentialBrokerError, match="unknown or invalidated"):
         broker.authorize_use(
             lease_id=lease.lease_id,
@@ -293,7 +297,9 @@ def test_restart_snapshot_drops_leases_but_preserves_audit() -> None:
     restored.restore(snapshot)
 
     assert RAW_SECRET not in repr(snapshot)
-    assert restored.list_project_secret_refs(PROJECT_A) == broker.list_project_secret_refs(PROJECT_A)
+    assert restored.get_secret_ref(
+        project_id=PROJECT_A, secret_ref="secret-a"
+    ) == broker.get_secret_ref(project_id=PROJECT_A, secret_ref="secret-a")
     assert restored.audit_events(PROJECT_A) == broker.audit_events(PROJECT_A)
     with pytest.raises(CredentialBrokerError, match="unknown or invalidated"):
         restored.authorize_use(

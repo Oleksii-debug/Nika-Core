@@ -11,7 +11,7 @@ _AUDIT_EVENT_PREFIX = "credential-event-"
 
 
 class CredentialBrokerError(ValueError):
-    """Raised when PF3 credential/identity invariants are violated."""
+    """Raised when Product Factory credential/identity invariants are violated."""
 
 
 class CredentialState(StrEnum):
@@ -36,8 +36,9 @@ class SecretRef:
             for value in (self.secret_ref, self.project_id, self.provider, self.purpose)
         ):
             raise CredentialBrokerError("secret reference identity fields must not be empty")
-        if self.generation < 1:
-            raise CredentialBrokerError("secret generation must be positive")
+        _positive_int(self.generation, "secret generation")
+        if not isinstance(self.state, CredentialState):
+            raise CredentialBrokerError("secret state must be a CredentialState")
         if not self.scopes or not self.allowed_audiences:
             raise CredentialBrokerError("secret scopes and audiences must not be empty")
         if any(not value.strip() for value in self.scopes | self.allowed_audiences):
@@ -79,6 +80,7 @@ class CredentialLease:
     def __post_init__(self) -> None:
         _aware(self.issued_at)
         _aware(self.expires_at)
+        _positive_int(self.generation, "credential lease generation")
         if self.expires_at <= self.issued_at:
             raise CredentialBrokerError("credential lease must expire after issuance")
         if not all(
@@ -92,7 +94,7 @@ class CredentialLease:
             )
         ):
             raise CredentialBrokerError("credential lease identity fields must not be empty")
-        if not self.scopes:
+        if not self.scopes or any(not scope.strip() for scope in self.scopes):
             raise CredentialBrokerError("credential lease scopes must not be empty")
 
 
@@ -109,6 +111,7 @@ class CredentialUseEvidence:
 
     def __post_init__(self) -> None:
         _aware(self.used_at)
+        _positive_int(self.generation, "credential use generation")
         if not all(
             value.strip()
             for value in (
@@ -179,7 +182,7 @@ class ProtectedSecretStorePort(Protocol):
 
 @dataclass(slots=True)
 class CredentialBroker:
-    store: ProtectedSecretStorePort
+    store: ProtectedSecretStorePort = field(repr=False)
     _secrets: dict[str, SecretRef] = field(default_factory=dict, init=False, repr=False)
     _identities: dict[str, IdentityRef] = field(default_factory=dict, init=False, repr=False)
     _leases: dict[str, CredentialLease] = field(default_factory=dict, init=False, repr=False)
@@ -217,8 +220,7 @@ class CredentialBroker:
         now: datetime | None = None,
         ttl_seconds: int = 300,
     ) -> CredentialLease:
-        if ttl_seconds <= 0:
-            raise CredentialBrokerError("credential lease ttl must be positive")
+        _positive_int(ttl_seconds, "credential lease ttl")
         if ttl_seconds > _MAX_CREDENTIAL_LEASE_TTL_SECONDS:
             raise CredentialBrokerError("credential lease ttl exceeds maximum")
         instant = _aware(now or datetime.now(UTC))
@@ -347,14 +349,12 @@ class CredentialBroker:
         self._record("rotate", project_id, secret_ref, instant, "reference generation advanced")
         return rotated
 
-    def list_project_secret_refs(self, project_id: str) -> tuple[SecretRef, ...]:
-        if not project_id.strip():
-            raise CredentialBrokerError("project_id must not be empty")
-        return tuple(
-            self._secrets[key]
-            for key in sorted(self._secrets)
-            if self._secrets[key].project_id == project_id
-        )
+    def get_secret_ref(self, *, project_id: str, secret_ref: str) -> SecretRef:
+        """Resolve one already-known opaque reference without exposing an enumeration surface."""
+
+        if not project_id.strip() or not secret_ref.strip():
+            raise CredentialBrokerError("project_id and secret_ref must not be empty")
+        return self._authorized_secret(project_id, secret_ref)
 
     def get_identity(self, *, project_id: str, identity_ref: str) -> IdentityRef:
         identity = self._identities.get(identity_ref)
@@ -363,6 +363,8 @@ class CredentialBroker:
         return identity
 
     def audit_events(self, project_id: str) -> tuple[CredentialAuditEvent, ...]:
+        if not project_id.strip():
+            raise CredentialBrokerError("project_id must not be empty")
         return tuple(event for event in self._audit if event.project_id == project_id)
 
     def snapshot(self) -> CredentialBrokerSnapshot:
@@ -403,6 +405,13 @@ class CredentialBroker:
             secret = secrets.get(event.secret_ref)
             if secret is None or secret.project_id != event.project_id:
                 raise CredentialBrokerError("snapshot audit event crosses credential project boundary")
+        for secret in snapshot.secrets:
+            if secret.state is CredentialState.ACTIVE and not self.store.contains(
+                secret.secret_ref, secret.generation
+            ):
+                raise CredentialBrokerError(
+                    "protected store active secret generation is unavailable during restore"
+                )
         self._secrets = secrets
         self._identities = {identity.identity_ref: identity for identity in snapshot.identities}
         self._leases = {}
@@ -461,6 +470,12 @@ def _audit_event_sequence(event_id: str) -> int:
     if sequence < 1 or event_id != f"{_AUDIT_EVENT_PREFIX}{sequence:08d}":
         raise CredentialBrokerError("credential broker snapshot contains invalid audit event identity")
     return sequence
+
+
+def _positive_int(value: int, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise CredentialBrokerError(f"{label} must be a positive integer")
+    return value
 
 
 def _aware(value: datetime) -> datetime:
