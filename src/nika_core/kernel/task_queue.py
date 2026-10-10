@@ -10,6 +10,35 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_state import TaskState, require_transition
 
 
+class TaskPayloadCorruptionError(ValueError):
+    """Stored task payload cannot safely be interpreted as a command."""
+
+
+def _unique_payload_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate task payload JSON field")
+        result[key] = value
+    return result
+
+
+def _decode_task_payload(raw: object) -> dict[str, object]:
+    error = "Збережені дані завдання пошкоджені."
+    # SQLite TEXT affinity does not prevent external writes of BLOB values.
+    if type(raw) is not str:
+        raise TaskPayloadCorruptionError(error)
+    try:
+        payload = json.loads(raw, object_pairs_hook=_unique_payload_object)
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise TaskPayloadCorruptionError(error) from exc
+    # A list, null or string is valid JSON but not a TaskRecord payload. Never
+    # allow a downstream consumer to interpret it as missing legacy settings.
+    if type(payload) is not dict:
+        raise TaskPayloadCorruptionError(error)
+    return payload
+
+
 @dataclass(frozen=True, slots=True)
 class TaskRecord:
     task_id: str
@@ -136,5 +165,5 @@ class TaskQueue:
             workspace_id=row["workspace_id"],
             agent_id=row["agent_id"],
             state=TaskState(row["state"]),
-            payload=json.loads(row["payload_json"]),
+            payload=_decode_task_payload(row["payload_json"]),
         )
