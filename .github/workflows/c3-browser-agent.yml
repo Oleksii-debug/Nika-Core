@@ -1,0 +1,111 @@
+name: C3 Browser Agent Acceptance
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/c3-browser-agent.yml"
+      - "scripts/c3_browser_agent_factory_proof.py"
+      - "scripts/c3_browser_agent_factory_acceptance.py"
+      - "tests/test_c3_browser_agent_factory_proof.py"
+      - "tests/test_c3_browser_agent_factory_acceptance.py"
+      - "src/nika_core/interaction/**"
+      - "src/nika_core/product_factory_*.py"
+      - "src/nika_core/product_project.py"
+      - "src/nika_core/packaging/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/c3-browser-agent.yml"
+      - "scripts/c3_browser_agent_factory_proof.py"
+      - "scripts/c3_browser_agent_factory_acceptance.py"
+      - "tests/test_c3_browser_agent_factory_proof.py"
+      - "tests/test_c3_browser_agent_factory_acceptance.py"
+      - "src/nika_core/interaction/**"
+      - "src/nika_core/product_factory_*.py"
+      - "src/nika_core/product_project.py"
+      - "src/nika_core/packaging/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: c3-browser-agent-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  c3-browser-agent:
+    name: C3 Browser Agent Acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Resolve exact candidate SHA
+        id: candidate
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "sha=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ steps.candidate.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+
+      - name: Install project and browser acceptance dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,browser]"
+          python -m playwright install --with-deps chromium
+
+      - name: Verify exact checkout identity
+        env:
+          NIKA_CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+        run: python scripts/qa_assert_checkout_identity.py
+
+      - name: Lint C3 acceptance slice
+        run: |
+          python -m ruff check \
+            scripts/c3_browser_agent_factory_proof.py \
+            scripts/c3_browser_agent_factory_acceptance.py \
+            tests/test_c3_browser_agent_factory_proof.py \
+            tests/test_c3_browser_agent_factory_acceptance.py
+
+      - name: Compile C3 acceptance slice
+        run: |
+          python -m compileall -q \
+            scripts/c3_browser_agent_factory_proof.py \
+            scripts/c3_browser_agent_factory_acceptance.py \
+            tests/test_c3_browser_agent_factory_proof.py \
+            tests/test_c3_browser_agent_factory_acceptance.py
+
+      - name: Run deterministic C3 unit and restart tests
+        run: >-
+          python -m pytest
+          tests/test_c3_browser_agent_factory_proof.py
+          tests/test_c3_browser_agent_factory_acceptance.py
+
+      - name: Run real factory-generated local Playwright C3 proof
+        env:
+          NIKA_CANDIDATE_SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          python -m scripts.c3_browser_agent_factory_acceptance \
+            --output artifacts/c3-browser-agent
+
+      - name: Upload exact C3 product package and evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: c3-browser-agent-${{ steps.candidate.outputs.sha }}
+          path: artifacts/c3-browser-agent/
+          if-no-files-found: error
+          retention-days: 14
