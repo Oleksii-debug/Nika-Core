@@ -218,6 +218,8 @@ class ModelSelection(BaseModel):
     @classmethod
     def from_stored(cls, value: str) -> ModelSelection:
         try:
+            if type(value) is not str:
+                raise TypeError("stored model selection must be text")
             return cls.model_validate_json(value)
         except (TypeError, ValueError, ValidationError) as exc:
             raise ModelSetupError(
