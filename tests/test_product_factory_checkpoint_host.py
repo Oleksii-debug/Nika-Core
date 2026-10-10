@@ -32,6 +32,8 @@ from nika_core.toolsmith.contracts import (
     ChangedFile,
     CodingResult,
     RecoveryState,
+    WorkerFailure,
+    WorkerFailureKind,
 )
 from nika_core.toolsmith.contracts import TestEvidence as WorkerTestEvidence
 
@@ -41,6 +43,7 @@ DIGEST_D = "d" * 64
 DIGEST_E = "e" * 64
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
 LOCATOR = "org/repo"
+DURABLE_DIAGNOSTIC_OMITTED = "worker diagnostic omitted from durable checkpoint"
 
 
 def _spec(goal: str = "Build accessible product") -> ProductProjectSpec:
@@ -167,10 +170,81 @@ def test_worker_evidence_round_trips_without_self_promotion(tmp_path) -> None:
     assert core.result is not None
     assert core.result.result_sha == SHA_B
     assert core.result.coding_result.test_evidence[0].exit_code == 0
-    assert core.result.coding_result.recovery_state == RecoveryState(
-        "completed",
-        "opaque-worker-token",
+    assert core.result.coding_result.recovery_state == RecoveryState("completed", None)
+
+
+def test_checkpoint_minimizes_worker_diagnostics_without_mutating_runtime(tmp_path) -> None:
+    store, _, binding, task_id = _setup(tmp_path)
+    coordinator = _planned(binding)
+    request = coordinator.start("core")
+    failure_canary = "api_key=NIKA_CHECKPOINT_FAILURE_CANARY"
+    token_canary = "access_token=NIKA_CHECKPOINT_TOKEN_CANARY"
+    coordinator.record_result(
+        WorkerResultEnvelope(
+            work_id=request.work_id,
+            component_id="core",
+            repository_id="repo-1",
+            base_sha=SHA_A,
+            result_sha=SHA_B,
+            diff_digest=DIGEST_D,
+            coding_result=CodingResult(
+                job_id=request.work_id,
+                recovery_state=RecoveryState("failed", token_canary),
+                failure=WorkerFailure(
+                    WorkerFailureKind.PROCESS_FAILED,
+                    failure_canary,
+                    retryable=True,
+                ),
+            ),
+        )
     )
+
+    runtime_record = next(
+        item
+        for item in coordinator.snapshot().records
+        if item.request.component_id == "core"
+    )
+    assert runtime_record.result is not None
+    assert runtime_record.result.coding_result.failure is not None
+    assert runtime_record.result.coding_result.failure.message == failure_canary
+    assert runtime_record.result.coding_result.recovery_state == RecoveryState(
+        "failed", token_canary
+    )
+    assert runtime_record.blocker == failure_canary
+
+    checkpoint = binding.checkpoint(coordinator)
+    durable_record = next(
+        item
+        for item in checkpoint.coordinator.records
+        if item.request.component_id == "core"
+    )
+    assert durable_record.result is not None
+    assert durable_record.result.coding_result.failure is not None
+    assert durable_record.result.coding_result.failure.kind is WorkerFailureKind.PROCESS_FAILED
+    assert durable_record.result.coding_result.failure.retryable is True
+    assert durable_record.result.coding_result.failure.message == DURABLE_DIAGNOSTIC_OMITTED
+    assert durable_record.result.coding_result.recovery_state == RecoveryState("failed", None)
+    assert durable_record.blocker == DURABLE_DIAGNOSTIC_OMITTED
+
+    ProductFactoryCheckpointHost(store).save(
+        host_task_id=task_id,
+        checkpoint=checkpoint,
+    )
+    restored = ProductFactoryCheckpointHost(store).restore_latest(
+        host_task_id=task_id,
+        binding=binding,
+    )
+    restored_record = next(
+        item
+        for item in restored.snapshot().records
+        if item.request.component_id == "core"
+    )
+    assert restored_record.state is WorkState.REPAIR_REQUIRED
+    assert restored_record.result is not None
+    assert restored_record.result.coding_result.failure is not None
+    assert restored_record.result.coding_result.failure.message == DURABLE_DIAGNOSTIC_OMITTED
+    assert restored_record.result.coding_result.recovery_state == RecoveryState("failed", None)
+    assert restored_record.blocker == DURABLE_DIAGNOSTIC_OMITTED
 
 
 def test_repeated_save_is_idempotent_and_revision_regression_fails_closed(tmp_path) -> None:
