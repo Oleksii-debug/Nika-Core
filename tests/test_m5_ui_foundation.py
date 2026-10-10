@@ -38,9 +38,34 @@ def test_bridge_rejects_unknown_action_and_unconfigured_registered_action(tmp_pa
     unknown = bridge.dispatch({"request_id": "1", "action_id": "shell.exec", "payload": {}})
     unavailable = bridge.dispatch({"request_id": "2", "action_id": "agent.stop", "payload": {}})
     assert unknown["status"] == "rejected"
-    assert "Unknown action" in unknown["message"]
+    assert unknown["message"] == "Невідома дія інтерфейсу."
     assert unavailable["status"] == "rejected"
-    assert "not available" in unavailable["message"]
+    assert unavailable["message"] == "Ця дія недоступна в поточному контексті."
+
+
+def test_bridge_owned_failures_match_ukrainian_shell_language(tmp_path: Path) -> None:
+    bridge = build_bridge(tmp_path)
+
+    invalid = bridge.dispatch({"request_id": "invalid"})
+    assert invalid["status"] == "rejected"
+    assert invalid["message"] == "Некоректна команда інтерфейсу."
+
+    unknown = bridge.dispatch(
+        {"request_id": "unknown", "action_id": "shell.exec", "payload": {}}
+    )
+    assert unknown["status"] == "rejected"
+    assert unknown["message"] == "Невідома дія інтерфейсу."
+
+    unavailable = bridge.dispatch(
+        {"request_id": "unavailable", "action_id": "agent.stop", "payload": {}}
+    )
+    assert unavailable["status"] == "rejected"
+    assert unavailable["message"] == "Ця дія недоступна в поточному контексті."
+
+    assert bridge.get_state() == {
+        "ok": False,
+        "message": "Джерело стану програми недоступне.",
+    }
 
 
 def test_bridge_dispatch_and_keymap_conflict_are_fail_closed(tmp_path: Path) -> None:
@@ -52,6 +77,7 @@ def test_bridge_dispatch_and_keymap_conflict_are_fail_closed(tmp_path: Path) -> 
         {"request_id": "4", "action_id": "task.create", "payload": {"command": "  "}}
     )
     conflict = bridge.set_binding("nav.agents", "Alt+1")
+    saved = bridge.set_binding("nav.agents", "Alt+5")
     assert accepted == {
         "request_id": "3",
         "status": "completed",
@@ -59,22 +85,125 @@ def test_bridge_dispatch_and_keymap_conflict_are_fail_closed(tmp_path: Path) -> 
         "focus_id": None,
     }
     assert empty["status"] == "rejected"
-    assert conflict["ok"] is False
-    assert "conflict" in conflict["message"].lower()
+    assert conflict == {
+        "ok": False,
+        "message": (
+            "Не вдалося зберегти комбінацію: "
+            "перевірте дію, формат і конфлікти."
+        ),
+    }
+    assert saved == {"ok": True, "message": "Комбінацію клавіш збережено."}
 
 
 def test_keymap_export_import_and_clear_round_trip(tmp_path: Path) -> None:
     bridge = build_bridge(tmp_path)
     assert bridge.set_binding("nav.workspaces", None)["ok"] is True
     exported = bridge.export_keymap()
+    assert exported["message"] == "Карту клавіш експортовано."
     payload = json.loads(exported["data"])
     assert payload["bindings"]["nav.workspaces"] is None
     payload["bindings"]["nav.workspaces"] = "Alt+4"
     imported = bridge.import_keymap(json.dumps(payload))
-    assert imported["ok"] is True
+    assert imported == {"ok": True, "message": "Карту клавіш імпортовано."}
     actions = {item["action_id"]: item for item in bridge.list_actions()}
     assert actions["nav.workspaces"]["binding"] == "Alt+4"
-    assert bridge.import_keymap("not-json")["ok"] is False
+    assert bridge.import_keymap("not-json") == {
+        "ok": False,
+        "message": (
+            "Не вдалося імпортувати карту клавіш: "
+            "перевірте JSON, дії та конфлікти."
+        ),
+    }
+    assert bridge.import_keymap(None) == {
+        "ok": False,
+        "message": "Карта клавіш має бути текстом JSON.",
+    }
+    assert bridge.restore_default("nav.workspaces") == {
+        "ok": True,
+        "message": "Комбінацію за замовчуванням відновлено.",
+    }
+    assert bridge.restore_default("missing.action") == {
+        "ok": False,
+        "message": (
+            "Не вдалося відновити комбінацію за замовчуванням: "
+            "невідома дія."
+        ),
+    }
+
+
+def test_keymap_known_failures_remain_localized_and_serializable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bridge = build_bridge(tmp_path)
+
+    monkeypatch.setattr(
+        bridge._keymap,
+        "restore_default",
+        lambda _action_id: _raise("shortcut conflict with nav.tasks"),
+    )
+    assert bridge.restore_default("nav.workspaces") == {
+        "ok": False,
+        "message": (
+            "Не вдалося відновити комбінацію за замовчуванням: "
+            "перевірте конфлікти карти клавіш."
+        ),
+    }
+
+    monkeypatch.setattr(
+        bridge._keymap,
+        "export_json",
+        lambda: _raise("stored keymap binding must be text"),
+    )
+    assert bridge.export_keymap() == {
+        "ok": False,
+        "message": (
+            "Не вдалося експортувати карту клавіш: "
+            "перевірте збережені налаштування."
+        ),
+    }
+
+
+def test_strict_keymap_rejections_remain_localized_and_atomic(tmp_path: Path) -> None:
+    bridge = build_bridge(tmp_path)
+
+    assert bridge.set_binding("nav.agents", "Alt+5")["ok"] is True
+    assert bridge.set_binding("nav.tasks", "Alt+2")["ok"] is True
+
+    conflict = bridge.restore_default("nav.agents")
+    assert conflict == {
+        "ok": False,
+        "message": (
+            "Не вдалося відновити комбінацію за замовчуванням: "
+            "перевірте конфлікти карти клавіш."
+        ),
+    }
+    actions = {item["action_id"]: item for item in bridge.list_actions()}
+    assert actions["nav.agents"]["binding"] == "Alt+5"
+    assert actions["nav.tasks"]["binding"] == "Alt+2"
+
+    control_laden = bridge.set_binding("nav.logs", "Ctrl+\nK")
+    assert control_laden == {
+        "ok": False,
+        "message": (
+            "Не вдалося зберегти комбінацію: "
+            "перевірте дію, формат і конфлікти."
+        ),
+    }
+
+    duplicate = bridge.import_keymap(
+        '{"format_version":1,"bindings":{"nav.logs":"Alt+8","nav.logs":"Alt+9"}}'
+    )
+    assert duplicate == {
+        "ok": False,
+        "message": (
+            "Не вдалося імпортувати карту клавіш: "
+            "перевірте JSON, дії та конфлікти."
+        ),
+    }
+    actions = {item["action_id"]: item for item in bridge.list_actions()}
+    assert actions["nav.logs"]["binding"] == "Alt+3"
+    assert actions["nav.agents"]["binding"] == "Alt+5"
+    assert actions["nav.tasks"]["binding"] == "Alt+2"
 
 
 def test_list_actions_exposes_resolved_bindings_without_handlers(tmp_path: Path) -> None:
@@ -158,6 +287,52 @@ def test_javascript_preserves_edit_shortcuts_and_wires_keymap_transfer() -> None
     assert "globalThis.pywebview.api.set_binding" in script
     assert "globalThis.pywebview.api.export_keymap" in script
     assert "globalThis.pywebview.api.import_keymap" in script
+
+
+def test_keymap_bridge_messages_reach_live_status_region() -> None:
+    script = index_path().with_name("app.js").read_text(encoding="utf-8")
+    assert 'statusNode.setAttribute("aria-live", assertive ? "assertive" : "polite")' in script
+    assert 'statusNode.textContent = message || "Готово."' in script
+
+    for api_call in (
+        "globalThis.pywebview.api.set_binding",
+        "globalThis.pywebview.api.restore_default",
+        "globalThis.pywebview.api.export_keymap",
+        "globalThis.pywebview.api.import_keymap",
+    ):
+        call_index = script.index(api_call)
+        announce_index = script.index("announce(response.message, !response.ok);", call_index)
+        assert announce_index - call_index < 300
+
+
+def test_keymap_transport_failure_is_announced_and_disables_stale_hotkeys() -> None:
+    script = index_path().with_name("app.js").read_text(encoding="utf-8")
+    helper_start = script.index("function reportKeymapBridgeFailure(focusTarget)")
+    helper_end = script.index("function validKeymapResponse", helper_start)
+    helper = script[helper_start:helper_end]
+    assert "actionsReady = false;" in helper
+    assert (
+        "Немає підтвердження стану карти клавіш. "
+        "Комбінації тимчасово вимкнено до успішного перечитування."
+    ) in helper
+    assert "announce(message, true);" in helper
+    assert "appendLog(message);" in helper
+    assert "focusTarget?.focus?.();" in helper
+
+    for api_call in (
+        "globalThis.pywebview.api.set_binding",
+        "globalThis.pywebview.api.restore_default",
+        "globalThis.pywebview.api.export_keymap",
+        "globalThis.pywebview.api.import_keymap",
+    ):
+        call_index = script.index(api_call)
+        boundary = script[call_index - 220 : call_index + 850]
+        assert "try {" in boundary
+        assert "catch {" in boundary
+        assert "validKeymapResponse(response" in boundary
+        assert "reportKeymapBridgeFailure(" in boundary
+
+    assert script.count('throw new Error("Keymap refresh unavailable")') == 3
 
 
 def test_packaged_uia_gate_waits_for_bridge_readiness_before_hotkeys() -> None:
