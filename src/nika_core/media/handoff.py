@@ -113,15 +113,33 @@ def _latest_accepted_revision(revisions: tuple[TextRevision, ...]) -> TextRevisi
 def validate_artifact_for_handoff(artifact: StructuredMediaArtifact) -> None:
     if any(asset.version_id != artifact.version_id for asset in artifact.assets):
         raise ValueError("all media assets must belong to the artifact version")
-    if artifact.transcript is not None and artifact.transcript.version_id != artifact.version_id:
-        raise ValueError("transcript must belong to the artifact version")
-    if artifact.ocr_document is not None and artifact.ocr_document.version_id != artifact.version_id:
-        raise ValueError("OCR document must belong to the artifact version")
-
-    engine_ids = {engine.engine_id for engine in artifact.engines}
-    model_by_id = {model.model_id: model for model in artifact.models}
+    if artifact.transcript is not None:
+        if artifact.transcript.version_id != artifact.version_id:
+            raise ValueError("transcript must belong to the artifact version")
+        segment_ids = [segment.segment_id for segment in artifact.transcript.segments]
+        if len(segment_ids) != len(set(segment_ids)):
+            raise ValueError("transcript segment identities must be unique for Corpus handoff")
     if artifact.ocr_document is not None:
-        if artifact.ocr_document.engine_id not in engine_ids:
+        if artifact.ocr_document.version_id != artifact.version_id:
+            raise ValueError("OCR document must belong to the artifact version")
+        page_numbers = [page.page_number for page in artifact.ocr_document.pages]
+        if len(page_numbers) != len(set(page_numbers)):
+            raise ValueError("OCR page identities must be unique for Corpus handoff")
+
+    engine_by_id = {}
+    for engine in artifact.engines:
+        if engine.engine_id in engine_by_id:
+            raise ValueError(f"duplicate media engine identity: {engine.engine_id}")
+        engine_by_id[engine.engine_id] = engine
+
+    model_by_id = {}
+    for model in artifact.models:
+        if model.model_id in model_by_id:
+            raise ValueError(f"duplicate media model identity: {model.model_id}")
+        model_by_id[model.model_id] = model
+
+    if artifact.ocr_document is not None:
+        if artifact.ocr_document.engine_id not in engine_by_id:
             raise ValueError("OCR document references an engine missing from artifact evidence")
         if artifact.ocr_document.model_id is not None:
             model = model_by_id.get(artifact.ocr_document.model_id)
@@ -130,8 +148,18 @@ def validate_artifact_for_handoff(artifact: StructuredMediaArtifact) -> None:
             if model.engine_id != artifact.ocr_document.engine_id:
                 raise ValueError("OCR model and OCR engine identity mismatch")
 
+    for model in artifact.models:
+        if model.engine_id not in engine_by_id:
+            raise ValueError(
+                f"media model {model.model_id} references an engine missing from artifact evidence"
+            )
+
+    revision_ids: set[str] = set()
     previous_revision_id: str | None = None
     for ordinal, revision in enumerate(artifact.revisions):
+        if revision.revision_id in revision_ids:
+            raise ValueError("text revision identities must be unique for Corpus handoff")
+        revision_ids.add(revision.revision_id)
         if revision.artifact_id != artifact.artifact_id:
             raise ValueError("text revision belongs to a different artifact")
         if revision.ordinal != ordinal:
