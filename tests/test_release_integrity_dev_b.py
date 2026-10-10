@@ -29,6 +29,8 @@ REQUIRED_TRUE_FIELDS = (
     "manifest_verified",
     "third_party_notices_verified",
     "packaged_uia_keyboard_focus",
+    "machine_readable_sbom_verified",
+    "supply_chain_provenance_verified",
 )
 REQUIRED_FALSE_FIELDS = (
     "physical_windows_foundry_inference_proven",
@@ -48,7 +50,7 @@ def test_names_only_notices_fail_closed(tmp_path: Path) -> None:
 
 def _write_evidence(path: Path, artifact: Path, *, source_sha: str = SOURCE_SHA) -> None:
     payload = {
-        "schema_version": 3,
+        "schema_version": 4,
         "product_version": PRODUCT_VERSION,
         "commit_sha": source_sha,
         "distributable_zip_path": "./dist/NikaCore-1.0.0-windows-x64.zip",

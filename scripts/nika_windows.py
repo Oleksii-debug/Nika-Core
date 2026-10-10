@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from nika_core.activity_report import DailyActivityReportService
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import Keymap
@@ -15,6 +18,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.default_actions import build_default_action_registry
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
+from nika_core.packaging.pf11_evidence import require_packaged_pf11_evidence
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
@@ -29,10 +33,21 @@ from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.ui.shell import launch_windows_shell
+from nika_core.v01_cloud_model_permission import (
+    CloudModelGrantRequest,
+    CloudModelPermissionConfirm,
+    CloudModelPermissionDenied,
+    V01CloudModelPermissionService,
+)
+from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
 from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
 from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
 from nika_core.v01_source_settings import V01SourceSettings
 from nika_core.windows_autostart import WindowsAutostartService
+
+
+class _StartupRecoveryInventoryError(RuntimeError):
+    """Fail-closed packaged startup boundary; never exposes raw recovery diagnostics."""
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -44,33 +59,163 @@ def _focus(focus_id: str, message: str) -> UIResult:
     )
 
 
+def _confirm_cloud_model_on_windows(request: CloudModelGrantRequest) -> bool:
+    """Use a standard native Windows dialog for explicit task-scoped cloud consent."""
+
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        private_text = "так" if request.private_data_allowed else "ні"
+        message = (
+            "Це завдання надсилатиме дані до зовнішнього API.\n\n"
+            f"Постачальник: {request.provider_id}\n"
+            f"Модель: {request.model}\n"
+            f"Хост: {request.network_host}\n"
+            f"Приватні дані дозволено: {private_text}\n\n"
+            "Дозволити мережеві звернення цього завдання до цієї моделі? "
+            "Дозвіл прив'язаний лише до цього завдання і діє до 24 годин."
+        )
+        flags = 0x00000004 | 0x00000030 | 0x00000100 | 0x00010000
+        result = int(
+            user32.MessageBoxW(
+                None,
+                message,
+                "Nika Core — дозвіл зовнішньої моделі",
+                flags,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - native confirmation must fail closed
+        logging.getLogger(__name__).error(
+            "Cloud model confirmation failed: exception_type=%s",
+            type(exc).__name__,
+        )
+        return False
+    return result == 6
+
+
+def _daily_activity_report_result(
+    service: DailyActivityReportService,
+    *,
+    day_provider: Callable[[], date] | None = None,
+) -> UIResult:
+    try:
+        day = datetime.now(UTC).date() if day_provider is None else day_provider()
+        if type(day) is not date:
+            raise TypeError("activity report day must be an exact date")
+        report = service.build_utc_day(day)
+        message = report.render_text()
+    except Exception as exc:  # noqa: BLE001 - packaged boundary must fail closed
+        logging.getLogger(__name__).error(
+            "Daily activity report failed: exception_type=%s",
+            type(exc).__name__,
+        )
+        return UIResult(
+            request_id="desktop-handler",
+            status="failed",
+            message="Не вдалося сформувати щоденний звіт активності.",
+            focus_id="logs-heading",
+        )
+    return UIResult(
+        request_id="desktop-handler",
+        status="completed",
+        message=message,
+        focus_id="logs-heading",
+    )
+
+
 def build_windows_bridge(
     config: AppConfig,
+    *,
+    cloud_permission_confirm: CloudModelPermissionConfirm | None = None,
+    activity_report_day: Callable[[], date] | None = None,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
     store = SQLiteStore(config.database_path)
     store.initialize()
+    activity_reports = DailyActivityReportService(store)
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
+    model_settings = V01ModelSettings(store)
+    cloud_permissions = V01CloudModelPermissionService(
+        store=store,
+        settings=model_settings,
+        confirm=(
+            _confirm_cloud_model_on_windows
+            if cloud_permission_confirm is None
+            else cloud_permission_confirm
+        ),
+    )
+
+    def prepare_task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        source_bound = source_settings.prepare_task_payload(payload)
+        return model_settings.prepare_task_payload(source_bound)
+
+    runtime = V01PackagedThreeAgentRuntime(
+        store=store,
+        config=config,
+        source_settings=source_settings,
+        model_settings=model_settings,
+        cloud_effect_authorizer=cloud_permissions.cloud_effect_authorizer,
+        cloud_execution_authority_resolver=cloud_permissions.execution_authority_for_task,
+    )
     backend = DesktopBackend(
         queue=TaskQueue(store),
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
-        runtime=V01PackagedThreeAgentRuntime(
-            store=store, config=config, source_settings=source_settings
-        ),
-        prepare_task_payload=source_settings.prepare_task_payload,
+        runtime=runtime,
+        prepare_task_payload=prepare_task_payload,
+        admit_created_task=cloud_permissions.admit_created_task,
+        admit_resumed_task=cloud_permissions.admit_resumed_task,
+        admit_recovered_task=cloud_permissions.admit_recovered_task,
         autostart_service=(
             WindowsAutostartService(Path(sys.executable))
             if sys.platform == "win32" and getattr(sys, "frozen", False)
             else None
         ),
     )
+    try:
+        backend.start_startup_recovery()
+    except Exception as exc:
+        backend.close()
+        raise _StartupRecoveryInventoryError(
+            "packaged startup recovery inventory failed"
+        ) from exc
+
     products = ProductProjectCommandService(ProductProjectRepository(store))
+
+    def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
+        try:
+            return backend.create_task(payload)
+        except (ModelSetupError, CloudModelPermissionDenied) as exc:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=str(exc),
+                focus_id="model-route-kind",
+            )
+
+    def resume_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
+        try:
+            return backend.resume_task(payload)
+        except CloudModelPermissionDenied as exc:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=str(exc),
+                focus_id="model-route-kind",
+            )
+
     product_router = PackagedProductCommandRouter(
         products=products,
-        ordinary_handler=backend.create_task,
+        ordinary_handler=create_ordinary_task,
+        activity_report_handler=lambda: _daily_activity_report_result(
+            activity_reports,
+            day_provider=activity_report_day,
+        ),
         selection_store=PackagedProductSelectionStore(store),
     )
     command_center = ProductCommandCenter(products)
@@ -85,7 +230,32 @@ def build_windows_bridge(
     )
 
     def source_state() -> Mapping[str, Any]:
-        return {**packaged_state(), "v01_sources": source_settings.snapshot()}
+        state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
+        state["v01_model_settings"] = model_settings.snapshot()
+        return state
+
+    def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
+        if payload:
+            return UIResult(
+                request_id="model-settings",
+                status="rejected",
+                message="Перечитування моделі не приймає параметрів.",
+                focus_id="model-route-kind",
+            )
+        snapshot = model_settings.snapshot()
+        if snapshot.get("status") == "invalid":
+            return UIResult(
+                request_id="model-settings",
+                status="failed",
+                message="Не вдалося прочитати збережені налаштування моделі.",
+                focus_id="model-route-kind",
+            )
+        return UIResult(
+            request_id="model-settings",
+            status="completed",
+            message="Збережені налаштування моделі перечитано.",
+            focus_id="model-route-kind",
+        )
 
     bridge = UIActionBridge(
         actions,
@@ -93,11 +263,13 @@ def build_windows_bridge(
         handlers={
             "task.create": product_router.create,
             "task.pause": backend.pause_task,
-            "task.resume": backend.resume_task,
+            "task.resume": resume_ordinary_task,
             "agent.stop": backend.stop_agent,
             "team.sources.configure": source_settings.configure,
             "settings.autostart.configure": backend.autostart_settings.configure,
             "settings.autostart.refresh": backend.autostart_settings.refresh,
+            "settings.model.configure": model_settings.configure,
+            "settings.model.refresh": refresh_model_settings,
             "nav.tasks": lambda _payload: _focus("tasks-heading", "Завдання відкрито."),
             "nav.agents": lambda _payload: _focus("agents-heading", "Агенти відкрито."),
             "nav.logs": lambda _payload: _focus("logs-heading", "Журнал відкрито."),
@@ -228,6 +400,7 @@ def _run_pf11_proof(
         "nvda_verified": False,
         "production_release_ready": False,
     }
+    require_packaged_pf11_evidence(payload)
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     if output_path is None:
         print(serialized)
@@ -260,7 +433,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             command=args.pf11_proof_command,
             output_path=args.pf11_proof_output,
         )
-    bridge, _products = build_windows_bridge(config)
+    try:
+        bridge, _products = build_windows_bridge(config)
+    except _StartupRecoveryInventoryError:
+        show_recovery_error(
+            "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
+            "Запуск зупинено без автоматичного повторення дій."
+        )
+        return 1
     launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
     return 0
 
