@@ -134,8 +134,8 @@ jobs:
         id: release
         shell: pwsh
         run: |
-          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
-          if (-not $version) { throw 'Could not resolve [project].version from pyproject.toml' }
+          $version = python -c "from pathlib import Path; from scripts.m11_release import project_version; print(project_version(Path('.')))"
+          if (-not $version) { throw 'Could not resolve validated [project].version from pyproject.toml' }
           "version=$version" >> $env:GITHUB_OUTPUT
       - name: Build exact Windows release candidate, notices and manifest
         run: >-
@@ -280,8 +280,8 @@ jobs:
         id: release
         shell: pwsh
         run: |
-          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
-          if (-not $version) { throw 'Could not resolve [project].version from pyproject.toml' }
+          $version = python -c "from pathlib import Path; from scripts.m11_release import project_version; print(project_version(Path('.')))"
+          if (-not $version) { throw 'Could not resolve validated [project].version from pyproject.toml' }
           "version=$version" >> $env:GITHUB_OUTPUT
       - name: Download exact packaged evidence from this workflow run
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
