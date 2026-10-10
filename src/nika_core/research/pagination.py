@@ -62,13 +62,25 @@ def _same_origin(left: str, right: str) -> bool:
 
 
 def _normalize_candidate(page_url: str, candidate: str) -> str | None:
+    # Reject controls before stripping: URL parsers may silently discard CR/LF/TAB.
+    if any(ord(char) < 32 or ord(char) == 127 for char in candidate):
+        return None
     candidate = candidate.strip()
     if not candidate:
         return None
-    absolute = urljoin(page_url, candidate)
-    absolute, _fragment = urldefrag(absolute)
-    parts = urlsplit(absolute)
+    try:
+        absolute = urljoin(page_url, candidate)
+        absolute, _fragment = urldefrag(absolute)
+        parts = urlsplit(absolute)
+        # Accessing .port validates malformed and out-of-range authorities.
+        port = parts.port
+        if parts.username is not None or parts.password is not None:
+            return None
+    except ValueError:
+        return None
     if parts.scheme.casefold() not in {"http", "https"} or not parts.hostname:
+        return None
+    if port == 0:
         return None
     return absolute
 

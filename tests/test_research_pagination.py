@@ -88,3 +88,45 @@ def test_pagination_policy_rejects_unbounded_or_empty_configuration() -> None:
         PaginationPolicy(max_discovered_links_per_page=0)
     with pytest.raises(ValueError, match="json_next_fields"):
         PaginationPolicy(json_next_fields=())
+
+
+@pytest.mark.parametrize(
+    "untrusted_next",
+    [
+        "https://example.com:not-a-port/next",
+        "https://example.com:65536/next",
+        "https://example.com:0/next",
+        "https://[::1/next",
+        "https://user:password@example.com/next",
+        "//token@example.com/next",
+        "/next\nheader-injection",
+        "\t/next",
+    ],
+)
+def test_untrusted_next_is_skipped_without_losing_valid_html_pages(
+    untrusted_next: str,
+) -> None:
+    discovery = discover_html_pagination(
+        "https://example.com/page",
+        '<link rel="next" href="' + untrusted_next + '">'
+        '<link rel="next" href="/safe-next">',
+    )
+    assert discovery.next_urls == ("https://example.com/safe-next",)
+
+
+def test_json_discovery_rejects_credentials_even_when_cross_origin_is_allowed() -> None:
+    discovery = discover_json_pagination(
+        "https://example.com/api",
+        '{"next": "https://key:secret@other.example/page", '
+        '"next_url": "/safe-next"}',
+        policy=PaginationPolicy(same_origin_only=False),
+    )
+    assert discovery.next_urls == ("https://example.com/safe-next",)
+
+
+def test_json_discovery_skips_control_characters_in_url() -> None:
+    discovery = discover_json_pagination(
+        "https://example.com/api",
+        '{"next": "/unsafe\\nurl", "next_url": "/safe-next"}',
+    )
+    assert discovery.next_urls == ("https://example.com/safe-next",)
