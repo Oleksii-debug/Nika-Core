@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -11,6 +11,7 @@ from nika_core.product_factory_credentials import (
     CredentialBrokerError,
     CredentialBrokerSnapshot,
     SecretRef,
+    credential_authority_fingerprint,
 )
 
 NOW = datetime(2026, 8, 21, 13, 30, tzinfo=UTC)
@@ -21,13 +22,55 @@ SECRET_REF = "secret-a"
 @dataclass(slots=True)
 class _ProtectedStore:
     material: set[tuple[str, int]] = field(default_factory=set)
+    authorities: dict[tuple[str, int], str] = field(default_factory=dict)
+    operation_handles: dict[str, str] = field(default_factory=dict)
+    _snapshot_checkpoint: str | None = None
 
     def contains(self, secret_ref: str, generation: int) -> bool:
         return (secret_ref, generation) in self.material
 
+    def bind_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        existing = self.authorities.get(key)
+        if existing is not None and existing != authority_fingerprint:
+            raise AssertionError("authority conflict")
+        self.authorities[key] = authority_fingerprint
+
+    def authority_matches(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        authority_fingerprint: str,
+    ) -> bool:
+        return self.authorities.get((secret_ref, generation)) == authority_fingerprint
+
+    def retire_authority(
+        self,
+        *,
+        secret_ref: str,
+        generation: int,
+        current_authority_fingerprint: str,
+        retired_authority_fingerprint: str,
+    ) -> None:
+        key = (secret_ref, generation)
+        existing = self.authorities.get(key)
+        if existing == retired_authority_fingerprint:
+            return
+        if existing != current_authority_fingerprint:
+            raise AssertionError("authority retirement conflict")
+        self.authorities[key] = retired_authority_fingerprint
+
     def issue_handle(
         self,
         *,
+        operation_id: str,
         secret_ref: str,
         generation: int,
         project_id: str,
@@ -38,26 +81,62 @@ class _ProtectedStore:
         del project_id, audience, scopes, expires_at
         if not self.contains(secret_ref, generation):
             raise AssertionError("missing protected material")
-        return f"handle:{secret_ref}:{generation}"
+        return self.operation_handles.setdefault(
+            operation_id,
+            f"handle:{secret_ref}:{generation}:{operation_id}",
+        )
+
+    def reconcile_handle(
+        self,
+        *,
+        operation_id: str,
+        secret_ref: str,
+        generation: int,
+        project_id: str,
+        audience: str,
+        scopes: frozenset[str],
+        expires_at: datetime,
+    ) -> str | None:
+        del secret_ref, generation, project_id, audience, scopes, expires_at
+        return self.operation_handles.get(operation_id)
+
+    def snapshot_checkpoint_matches(self, *, checkpoint_fingerprint: str) -> bool:
+        return self._snapshot_checkpoint == checkpoint_fingerprint
+
+    def seal_snapshot_checkpoint(
+        self,
+        *,
+        expected_fingerprint: str | None,
+        checkpoint_fingerprint: str,
+    ) -> None:
+        if self._snapshot_checkpoint == checkpoint_fingerprint:
+            return
+        if self._snapshot_checkpoint != expected_fingerprint:
+            raise RuntimeError("snapshot checkpoint conflict")
+        self._snapshot_checkpoint = checkpoint_fingerprint
 
     def revoke_handles(self, secret_ref: str, generation: int) -> None:
         del secret_ref, generation
+        self.operation_handles.clear()
 
 
 def _broker() -> tuple[CredentialBroker, _ProtectedStore]:
     store = _ProtectedStore({(SECRET_REF, 1)})
-    broker = CredentialBroker(store)
-    broker.register_secret(
-        SecretRef(
-            SECRET_REF,
-            PROJECT_ID,
-            "github",
-            "repository automation",
-            frozenset({"repo:read"}),
-            frozenset({"github-api"}),
-        ),
-        now=NOW,
+    reference = SecretRef(
+        SECRET_REF,
+        PROJECT_ID,
+        "github",
+        "repository automation",
+        frozenset({"repo:read"}),
+        frozenset({"github-api"}),
     )
+    store.bind_authority(
+        secret_ref=reference.secret_ref,
+        generation=reference.generation,
+        authority_fingerprint=credential_authority_fingerprint(reference),
+    )
+    broker = CredentialBroker(store)
+    broker.register_secret(reference, now=NOW)
     return broker, store
 
 
@@ -193,36 +272,76 @@ def test_restore_preserves_monotonic_audit_identity_after_restart() -> None:
 
 def test_restore_accepts_canonical_audit_identity_beyond_eight_digits() -> None:
     broker, store = _broker()
+    broker._next_event = 100000000
+    broker.issue_lease(
+        project_id=PROJECT_ID,
+        secret_ref=SECRET_REF,
+        audience="github-api",
+        scopes=frozenset({"repo:read"}),
+        now=NOW + timedelta(seconds=1),
+    )
     snapshot = broker.snapshot()
-    first = snapshot.audit_events[0]
-    late = CredentialAuditEvent(
-        "credential-event-100000000",
-        first.action,
-        first.project_id,
-        first.secret_ref,
-        first.at,
-        first.detail,
-    )
-    stretched = CredentialBrokerSnapshot(
-        snapshot.secrets,
-        snapshot.identities,
-        (late,),
-        snapshot.next_lease,
-        100000001,
-    )
 
     restored = CredentialBroker(store)
-    restored.restore(stretched)
+    restored.restore(snapshot)
     restored.revoke(
         project_id=PROJECT_ID,
         secret_ref=SECRET_REF,
-        now=NOW + timedelta(seconds=1),
+        now=NOW + timedelta(seconds=2),
     )
 
     assert tuple(event.event_id for event in restored.audit_events(PROJECT_ID)) == (
+        "credential-event-00000001",
         "credential-event-100000000",
         "credential-event-100000001",
     )
+
+
+@pytest.mark.parametrize("mutation", ["append", "rewrite", "omit"])
+def test_restore_rejects_snapshot_history_not_sealed_by_protected_store(
+    mutation: str,
+) -> None:
+    broker, store = _broker()
+    snapshot = broker.snapshot()
+    first = snapshot.audit_events[0]
+
+    if mutation == "append":
+        events = snapshot.audit_events + (
+            CredentialAuditEvent(
+                "credential-event-00000002",
+                "use",
+                PROJECT_ID,
+                SECRET_REF,
+                NOW + timedelta(seconds=1),
+                "audience=github-api;scope=repo:admin",
+            ),
+        )
+        tampered = CredentialBrokerSnapshot(
+            snapshot.secrets,
+            snapshot.identities,
+            events,
+            snapshot.next_lease,
+            3,
+        )
+    elif mutation == "rewrite":
+        tampered = CredentialBrokerSnapshot(
+            snapshot.secrets,
+            snapshot.identities,
+            (replace(first, action="use", detail="forged durable use"),),
+            snapshot.next_lease,
+            snapshot.next_event,
+        )
+    else:
+        tampered = CredentialBrokerSnapshot(
+            snapshot.secrets,
+            snapshot.identities,
+            (),
+            snapshot.next_lease,
+            snapshot.next_event,
+        )
+
+    with pytest.raises(CredentialBrokerError, match="protected checkpoint"):
+        CredentialBroker(store).restore(tampered)
 
 
 def test_restore_rejects_noncanonical_or_nonmonotonic_audit_identities() -> None:
