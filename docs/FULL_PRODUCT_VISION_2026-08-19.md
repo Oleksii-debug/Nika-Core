@@ -1,6 +1,6 @@
 # Nika Core — Full Product Vision
 
-Updated: 2026-08-20.
+Updated: 2026-09-14.
 Status: binding end-state product scope. This document expands the Core milestone roadmap; it does not retroactively award implementation credit.
 
 ## 1. Product truth
@@ -14,6 +14,8 @@ Nika Core is the reusable Windows/NVDA-first control plane for a much larger end
 The previous 98% number is historical Core-gate evidence. It must never be described as 98% completion of the expanded Full Product Vision.
 
 The 2026-08-20 binding clarification is equally important: Nika is **not** supposed to prebuild every possible future vertical into Core. The end-state platform must become an autonomous digital product factory able to research, design, implement, test, deploy and maintain new products/workspaces when the user requests them. Binding details are in `docs/AUTONOMOUS_PRODUCT_FACTORY.md`, `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md` and `docs/AUTONOMOUS_BUSINESS_FACTORY.md`.
+
+The 2026-09-14 whole-product clarification is also binding: performance, genuine concurrent local/API model execution and Nika↔Autopilot interoperability are end-state product requirements, not optional post-release enhancements. Detailed acceptance consequences are in `docs/PRODUCT_COMPLETION_PARALLELISM_AUTOPILOT.md`.
 
 ## 2. End-state intelligence modes
 
@@ -68,6 +70,24 @@ Ollama and compatible local servers remain supported through ModelGateway. They 
 ### 2.4 Cloud/API intelligence
 
 Cloud providers remain optional through the provider-neutral ModelGateway/OpenAI-compatible/provider-SDK layer. Nika may route a task to cloud only when policy/privacy/budget allow it. Provider choice must not rewrite the rest of the agent/runtime/tool system.
+
+### 2.5 Parallel multi-model intelligence — binding
+
+The four intelligence modes are not a global choose-one-at-a-time switch. Independent model-backed work must be able to overlap in real time when provider and machine limits permit it.
+
+The final product must support, at the same time:
+
+- several local models/runtimes where their concrete backends and available RAM/VRAM/CPU permit concurrent execution;
+- several API/cloud model calls, including calls to different providers;
+- mixed local + API/cloud execution;
+- multiple agents/tasks using distinct models concurrently;
+- one intentional fan-out request to several models followed by explicit fan-in/aggregation, comparison, consensus or independent review.
+
+There must be no architecture-wide FIFO, mutex or single-model worker that serializes unrelated ModelGateway calls. Ordering is introduced only by a real dependency, provider limitation, resource conflict, permission boundary or configured budget/rate limit.
+
+Parallelism is bounded, not unlimited. Nika must preserve exact request/provider/model identity, timeout/cancellation, cost/resource budget, result provenance and partial-failure truth for every child request. Failure or rate limiting of one provider may not be silently presented as full multi-model success and must not unnecessarily block independent providers.
+
+A backend whose upstream runtime genuinely requires serialization may keep that provider-specific safety boundary. For example, a constrained in-process provider may serialize its own calls while another local server and cloud/API work continue independently. Nika must not weaken an upstream safety boundary merely to claim parallelism.
 
 ## 3. Capability Escalation / Toolsmith loop
 
@@ -176,7 +196,7 @@ Financial autonomy is governed by explicit user-configured authorization profile
 
 ## 9. Resource-aware local operation
 
-Nika targets ordinary Windows hardware, including the user's Ryzen/16-GB integrated-GPU laptop. Heavy capabilities must be optional and coordinated.
+Nika targets ordinary Windows hardware, including integrated-GPU and memory-constrained laptops. Heavy capabilities must be optional, concurrent where useful, and resource coordinated.
 
 Resource Manager should evolve beyond concurrency counts to profiles such as:
 
@@ -186,7 +206,9 @@ Resource Manager should evolve beyond concurrency counts to profiles such as:
 - low-memory;
 - model-active / transcription-active mutual exclusion where benchmarks justify it.
 
-Nika should unload idle heavy models when useful, avoid unnecessary simultaneous Chromium/model/transcription jobs, and keep model/component caches separate from program updates.
+Resource awareness must not become global serial-by-default execution. Nika should allow several local/API models and independent workers to run concurrently when measured RAM/VRAM/CPU/GPU/provider capacity permits it, while admitting, deferring, reducing or cancelling work before the machine becomes unresponsive. Local-model admission should eventually account for model/runtime identity, active sessions and available RAM/VRAM/CPU/GPU capacity rather than relying only on a raw task count.
+
+Nika should unload idle heavy models when useful, avoid **unnecessary** simultaneous Chromium/model/transcription jobs, and keep model/component caches separate from program updates. Deliberate parallel work that fits the configured resource budget is a required capability, not something this guidance forbids.
 
 Product Factory may also schedule authorized remote/platform-specific execution nodes when the target cannot reasonably be built on the local Windows machine.
 
@@ -220,9 +242,27 @@ Examples of intended behavior:
 - inspect ProductProject milestones, repositories, tests, builds and blockers;
 - request an approved staging deployment/release;
 - ask Business Factory to research a lawful business opportunity and convert an approved opportunity into a WorkOrder/ProductProject;
-- choose or constrain the intelligence mode.
+- choose or constrain the intelligence mode;
+- explicitly ask several local/API models to work on one goal in parallel and have Nika compare, aggregate or independently review their source-bound results.
 
 Ambiguous or unsafe commands are clarified or blocked before external side effects.
+
+### 11.1 Autopilot/browser interoperability — binding
+
+The final product must be able to compose with the owner's browser Autopilot instead of forcing manual copy/paste between Nika and authenticated browser chats.
+
+The default architecture is separation of authority with tight interoperability:
+
+`Nika Core (orchestration, models, Product Factory, durable state, policy, analysis)`
+`<-> authenticated local typed bridge`
+`<-> Autopilot browser extension (browser DOM/session execution)`
+`<-> authenticated browser applications`.
+
+Nika may ask Autopilot to navigate allowed authenticated web applications, send bounded jobs to selected browser chat targets, wait for and collect results, and return exact target-bound responses. Autopilot may submit browser results/events to Nika and request analysis, aggregation or the next bounded instruction. Job identity, target/session identity, idempotency, authority, timeout/cancellation and structured result/error truth must cross the bridge; raw secrets must not.
+
+Independent browser targets may run concurrently with one another and with direct local/API ModelGateway requests when browser/site/provider/resource limits permit it. A representative final packaged acceptance journey must prove one user goal fan-outs across several browser-chat targets and direct model targets, then fan-ins to one coherent Nika result without duplicate effects after restart.
+
+Do not collapse the entire extension into Nika merely to reduce executable count. Browser-specific DOM/session execution should remain on the browser side unless a later measured, bounded migration is clearly better. Browser-agnostic orchestration, policy, state, analysis and result aggregation belong in Nika.
 
 ## 12. Autonomous Product Factory — binding end-state capability
 
