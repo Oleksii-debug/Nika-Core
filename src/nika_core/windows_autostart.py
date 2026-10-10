@@ -19,6 +19,12 @@ def _windows_utf16_code_units(value: str) -> int:
         raise ValueError("Autostart command is not valid Windows UTF-16 text") from None
 
 
+def _exact_registered_command(value: object) -> str:
+    if type(value) is not str or not value:
+        raise RuntimeError("Nika autostart registration is malformed")
+    return value
+
+
 class AutostartState(StrEnum):
     DISABLED = "disabled"
     ENABLED = "enabled"
@@ -39,6 +45,12 @@ class AutostartBackend(Protocol):
     def delete(self) -> None: ...
 
 
+class _StaleAutostartRegistration(RuntimeError):
+    def __init__(self, registered_command: str) -> None:
+        super().__init__("Nika autostart registration uses a noncanonical string type")
+        self.registered_command = registered_command
+
+
 class WindowsRunKeyBackend:
     """Per-user Windows Run-key storage. Never requests elevation."""
 
@@ -56,11 +68,14 @@ class WindowsRunKeyBackend:
                 value, value_type = winreg.QueryValueEx(key, _VALUE_NAME)
         except FileNotFoundError:
             return None
-        if value_type not in {winreg.REG_SZ, winreg.REG_EXPAND_SZ}:
+        if type(value_type) is not int:
             raise RuntimeError("Nika autostart registration has an unsupported value type")
-        if not isinstance(value, str) or not value:
-            raise RuntimeError("Nika autostart registration is malformed")
-        return value
+        registered = _exact_registered_command(value)
+        if value_type == winreg.REG_EXPAND_SZ:
+            raise _StaleAutostartRegistration(registered)
+        if value_type != winreg.REG_SZ:
+            raise RuntimeError("Nika autostart registration has an unsupported value type")
+        return registered
 
     def write(self, command: str) -> None:
         winreg = self._winreg()
@@ -100,7 +115,7 @@ class WindowsAutostartService:
         if not PureWindowsPath(executable_text).is_absolute():
             raise ValueError("Autostart executable path must be absolute")
         self._executable = executable_text
-        self._backend = backend or WindowsRunKeyBackend()
+        self._backend = backend if backend is not None else WindowsRunKeyBackend()
 
     @property
     def expected_command(self) -> str:
@@ -115,9 +130,16 @@ class WindowsAutostartService:
         return command
 
     def status(self) -> AutostartStatus:
-        registered = self._backend.read()
+        try:
+            registered = self._backend.read()
+        except _StaleAutostartRegistration as exc:
+            return AutostartStatus(
+                AutostartState.STALE,
+                _exact_registered_command(exc.registered_command),
+            )
         if registered is None:
             return AutostartStatus(AutostartState.DISABLED, None)
+        registered = _exact_registered_command(registered)
         try:
             registered_units = _windows_utf16_code_units(registered)
         except ValueError:
