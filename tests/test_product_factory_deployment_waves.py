@@ -15,6 +15,7 @@ from nika_core.product_factory_deployment import (
     ResourceEnvelope,
 )
 from nika_core.product_factory_deployment_execution import (
+    DeploymentExecutionError,
     DeploymentExecutionRecord,
     DeploymentExecutionSnapshot,
     DeploymentExecutionSpec,
@@ -70,13 +71,22 @@ class _FakeExecutions:
         self.complete_calls: list[str] = []
 
     def submit(self, spec: DeploymentExecutionSpec) -> DeploymentExecutionRecord:
-        return self.records.setdefault(
-            spec.operation_id,
-            DeploymentExecutionRecord(spec, OperationState.PENDING),
-        )
+        existing = self.records.get(spec.operation_id)
+        if existing is not None:
+            if existing.spec != spec:
+                raise DeploymentExecutionError(
+                    "operation id conflicts with prior deployment payload"
+                )
+            return existing
+        record = DeploymentExecutionRecord(spec, OperationState.PENDING)
+        self.records[spec.operation_id] = record
+        return record
 
     def get(self, operation_id: str) -> DeploymentExecutionRecord:
-        return self.records[operation_id]
+        record = self.records.get(operation_id)
+        if record is None:
+            raise DeploymentExecutionError("unknown deployment execution operation")
+        return record
 
     def prepare(self, operation_id: str) -> DeploymentExecutionRecord:
         record = self.records[operation_id]
@@ -274,3 +284,266 @@ def test_sixty_service_three_wave_restart_scale_is_deterministic() -> None:
     assert sum(item.state is OperationState.SUCCEEDED for item in second.services) == 40
     assert third.state is RolloutState.SUCCEEDED
     assert all(item.state is OperationState.SUCCEEDED for item in third.services)
+
+
+@pytest.mark.parametrize("wave", [True, False, 1.5, float("nan"), float("inf"), "1"])
+def test_plan_rejects_ambiguous_wave_index(wave: object) -> None:
+    with pytest.raises(DeploymentWaveError, match="nonnegative integer"):
+        replace(_execution("api"), wave=wave)
+
+
+def test_restore_rejects_swapped_service_ids_before_mutating_execution() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"), _execution("db")))
+    source, _ = _coordinator()
+    source.submit(plan)
+    snapshot = source.snapshot()
+    original = snapshot.plans[0]
+    first, second = original.services
+    swapped = (
+        replace(first, service_id=second.service_id),
+        replace(second, service_id=first.service_id),
+    )
+    corrupted = replace(snapshot, plans=(replace(original, services=swapped),))
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+    with pytest.raises(DeploymentWaveError, match="service identity"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert all(record.state is OperationState.PENDING for record in executions.records.values())
+
+
+def test_restore_rejects_changed_wave_for_correct_operation() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    coordinator, _ = _coordinator()
+    coordinator.submit(plan)
+    snapshot = coordinator.snapshot()
+    record = snapshot.plans[0]
+    bad = replace(record.services[0], wave=1)
+    corrupted = replace(snapshot, plans=(replace(record, services=(bad,)),))
+
+    target, _ = _coordinator()
+    with pytest.raises(DeploymentWaveError, match="service identity"):
+        target.restore(corrupted)
+
+
+def test_restore_rejects_changed_execution_spec_with_same_operation_id() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    coordinator, _ = _coordinator()
+    coordinator.submit(plan)
+    snapshot = coordinator.snapshot()
+    execution = snapshot.execution.records[0]
+    corrupted_spec = replace(execution.spec, credential_scope="unapproved:scope")
+    corrupted_execution = replace(execution, spec=corrupted_spec)
+    corrupted = replace(
+        snapshot,
+        execution=replace(snapshot.execution, records=(corrupted_execution,)),
+    )
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+    with pytest.raises(DeploymentWaveError, match="execution specification"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert all(record.state is OperationState.PENDING for record in executions.records.values())
+
+
+def test_restore_rejects_forged_successful_summary_with_pending_service() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    coordinator, _ = _coordinator()
+    coordinator.submit(plan)
+    snapshot = coordinator.snapshot()
+    forged = replace(snapshot.plans[0], state=RolloutState.SUCCEEDED)
+    corrupted = replace(snapshot, plans=(forged,))
+
+    target, _ = _coordinator()
+    with pytest.raises(DeploymentWaveError, match="summary"):
+        target.restore(corrupted)
+
+
+def test_restore_rejects_ambiguous_attempt_even_when_python_equality_matches() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    coordinator, _ = _coordinator()
+    coordinator.submit(plan)
+    snapshot = coordinator.snapshot()
+    record = snapshot.plans[0]
+    forged = replace(record.services[0], attempt=False)
+    corrupted = replace(snapshot, plans=(replace(record, services=(forged,)),))
+
+    target, _ = _coordinator()
+    with pytest.raises(DeploymentWaveError, match="execution snapshot"):
+        target.restore(corrupted)
+
+
+@pytest.mark.parametrize("value", [None, 3, b"api", "", "  "])
+def test_plan_rejects_noncanonical_identity_carriers(value: object) -> None:
+    with pytest.raises(DeploymentWaveError, match="service identity"):
+        replace(_execution("api"), service_id=value)
+    with pytest.raises(DeploymentWaveError, match="rollout identity"):
+        DeploymentWavePlan(value, "social", (_execution("api"),))
+    with pytest.raises(DeploymentWaveError, match="rollout identity"):
+        DeploymentWavePlan("plan", value, (_execution("api"),))
+
+
+@pytest.mark.parametrize(
+    "dependencies",
+    [None, ["db"], ("",), (3,), (object(),), "db"],
+)
+def test_service_rejects_noncanonical_dependency_carriers(dependencies: object) -> None:
+    with pytest.raises(DeploymentWaveError, match="dependencies"):
+        replace(_execution("api"), depends_on=dependencies)
+
+
+@pytest.mark.parametrize("services", [None, [], [_execution("api")], ("api",)])
+def test_plan_rejects_noncanonical_service_collections(services: object) -> None:
+    with pytest.raises(DeploymentWaveError, match="services|at least one"):
+        DeploymentWavePlan("plan", "social", services)
+
+
+def test_service_rejects_noncanonical_execution_before_plan_dispatch() -> None:
+    with pytest.raises(DeploymentWaveError, match="execution spec"):
+        replace(_execution("api"), execution=object())
+
+
+
+def test_restore_rejects_missing_plan_before_identity_traversal() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    source, _ = _coordinator()
+    source.submit(plan)
+    snapshot = source.snapshot()
+    corrupted_plan = replace(snapshot.plans[0], plan=None)
+    corrupted = replace(snapshot, plans=(corrupted_plan,))
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentWaveError, match="plan structure"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert executions.records["operation-api"].state is OperationState.PENDING
+
+
+def test_restore_rejects_malformed_service_record_before_field_traversal() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    source, _ = _coordinator()
+    source.submit(plan)
+    snapshot = source.snapshot()
+    corrupted_plan = replace(snapshot.plans[0], services=(object(),))
+    corrupted = replace(snapshot, plans=(corrupted_plan,))
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentWaveError, match="plan structure"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert executions.records["operation-api"].state is OperationState.PENDING
+
+
+@pytest.mark.parametrize("records", [[], (object(),)])
+def test_restore_rejects_malformed_execution_collection_before_traversal(
+    records: object,
+) -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    source, _ = _coordinator()
+    source.submit(plan)
+    snapshot = source.snapshot()
+    corrupted_execution = replace(snapshot.execution, records=records)
+    corrupted = replace(snapshot, execution=corrupted_execution)
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentWaveError, match="execution snapshot structure"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert executions.records["operation-api"].state is OperationState.PENDING
+
+
+def test_restore_rejects_execution_record_with_missing_spec_before_traversal() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    source, _ = _coordinator()
+    source.submit(plan)
+    snapshot = source.snapshot()
+    execution_record = replace(snapshot.execution.records[0], spec=None)
+    corrupted_execution = replace(snapshot.execution, records=(execution_record,))
+    corrupted = replace(snapshot, execution=corrupted_execution)
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentWaveError, match="execution snapshot structure"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert executions.records["operation-api"].state is OperationState.PENDING
+
+
+def test_submit_revalidates_full_service_collection_before_nested_publication() -> None:
+    coordinator, executions = _coordinator()
+    first = _execution("api")
+    second = _execution("worker")
+    plan = DeploymentWavePlan("plan", "social", (first, second))
+    object.__setattr__(plan, "services", (first, object()))
+
+    with pytest.raises(DeploymentWaveError, match="invalid rollout plan"):
+        coordinator.submit(plan)
+
+    assert executions.records == {}
+    assert coordinator.snapshot().plans == ()
+
+
+def test_submit_revalidates_nested_execution_before_any_service_publication() -> None:
+    coordinator, executions = _coordinator()
+    first = _execution("api")
+    second = _execution("worker")
+    plan = DeploymentWavePlan("plan", "social", (first, second))
+    object.__setattr__(second.execution, "request", object())
+
+    with pytest.raises(DeploymentWaveError, match="invalid rollout plan"):
+        coordinator.submit(plan)
+
+    assert executions.records == {}
+    assert coordinator.snapshot().plans == ()
+
+
+def test_submit_revalidates_postconstruction_wave_before_publication() -> None:
+    coordinator, executions = _coordinator()
+    first = _execution("api")
+    second = _execution("worker", wave=1)
+    plan = DeploymentWavePlan("plan", "social", (first, second))
+    object.__setattr__(second, "wave", True)
+
+    with pytest.raises(DeploymentWaveError, match="invalid rollout plan"):
+        coordinator.submit(plan)
+
+    assert executions.records == {}
+    assert coordinator.snapshot().plans == ()
+
+
+def test_submit_preflights_late_execution_conflict_before_any_publication() -> None:
+    coordinator, executions = _coordinator()
+    incumbent = _execution("worker")
+    conflicting = replace(
+        incumbent.execution,
+        credential_scope="different-scope",
+    )
+    executions.submit(conflicting)
+    before = coordinator.snapshot()
+
+    plan = DeploymentWavePlan(
+        "plan",
+        "social",
+        (_execution("api"), incumbent),
+    )
+
+    with pytest.raises(DeploymentWaveError, match="conflicts with prior payload"):
+        coordinator.submit(plan)
+
+    assert coordinator.snapshot() == before
+    assert "operation-api" not in executions.records
