@@ -18,6 +18,10 @@ from nika_core.research.models import (
 
 _ASSIGNMENT_SCHEMA = "nika.multi_agent.source-inspection-assignment:v2"
 _RESULT_SCHEMA = "nika.multi_agent.source-inspection-result:v2"
+_MAX_RESULT_JSON_BYTES = 1_048_576
+_MAX_RESULT_JSON_NODES = 10_000
+_MAX_RESULT_JSON_DEPTH = 32
+_MAX_RESULT_INTEGER_BITS = 4_096
 
 
 class SourceResultBindingError(ValueError):
@@ -187,7 +191,21 @@ def decode_source_result(
         if actual != expected_value:
             raise SourceResultBindingError(f"{key} does not match declared assignment")
 
+    # Check the item count before hashing worker-controlled evidence. A forged
+    # result cannot demand unbounded serialization work to reach this limit.
+    raw_result = _mapping(data["result_set"], "result_set")
+    _require_exact_keys(
+        raw_result, {"result_set_id", "workspace_id", "query", "created_at", "items"}, "result_set"
+    )
+    raw_items = raw_result["items"]
+    if not isinstance(raw_items, list):
+        raise SourceResultBindingError("result_set items must be a list")
+    if len(raw_items) > assignment.max_items:
+        raise SourceResultBindingError("result exceeds assignment max_items")
+
     claimed_digest = _text(data["result_digest"], "result_digest")
+    if len(claimed_digest) != 64 or any(ch not in "0123456789abcdef" for ch in claimed_digest):
+        raise SourceResultBindingError("invalid result_digest")
     unsigned = {key: data[key] for key in data if key != "result_digest"}
     actual_digest = _payload_digest(unsigned)
     if not hmac.compare_digest(claimed_digest, actual_digest):
@@ -219,6 +237,7 @@ def _unsigned_result_payload(
 
 
 def _payload_digest(payload: Mapping[str, object]) -> str:
+    _validate_json_budget(payload)
     try:
         encoded = json.dumps(
             payload,
@@ -226,10 +245,84 @@ def _payload_digest(payload: Mapping[str, object]) -> str:
             allow_nan=False,
             sort_keys=True,
             separators=(",", ":"),
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+        ).encode("utf-8", errors="strict")
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError, OverflowError) as exc:
         raise SourceResultBindingError("result evidence must be canonical JSON") from exc
+    if len(encoded) > _MAX_RESULT_JSON_BYTES:
+        raise SourceResultBindingError("result evidence exceeds bounded JSON admission")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_json_budget(
+    value: object,
+    *,
+    active_containers: set[int] | None = None,
+    budget: dict[str, int] | None = None,
+    depth: int = 0,
+) -> None:
+    budget = budget if budget is not None else {"nodes": 0, "text_bytes": 0}
+    budget["nodes"] += 1
+    if budget["nodes"] > _MAX_RESULT_JSON_NODES or depth > _MAX_RESULT_JSON_DEPTH:
+        raise SourceResultBindingError("result evidence exceeds bounded JSON admission")
+
+    value_type = type(value)
+    if value is None or value_type is bool:
+        return
+    if value_type is int:
+        if value.bit_length() > _MAX_RESULT_INTEGER_BITS:
+            raise SourceResultBindingError("result evidence exceeds bounded JSON admission")
+        return
+    if value_type is float:
+        if not math.isfinite(value):
+            raise SourceResultBindingError("result evidence must be canonical JSON")
+        return
+    if value_type is str:
+        _account_json_text(value, budget)
+        return
+    if value_type not in {list, dict}:
+        raise SourceResultBindingError("result evidence must be canonical JSON")
+
+    active = active_containers if active_containers is not None else set()
+    identity = id(value)
+    if identity in active:
+        raise SourceResultBindingError("result evidence must be canonical JSON")
+    active.add(identity)
+    try:
+        if value_type is list:
+            for item in value:
+                _validate_json_budget(
+                    item,
+                    active_containers=active,
+                    budget=budget,
+                    depth=depth + 1,
+                )
+            return
+        for key, item in value.items():
+            if type(key) is not str:
+                raise SourceResultBindingError("result evidence must be canonical JSON")
+            _account_json_text(key, budget)
+            _validate_json_budget(
+                item,
+                active_containers=active,
+                budget=budget,
+                depth=depth + 1,
+            )
+    except RecursionError as exc:
+        raise SourceResultBindingError("result evidence exceeds bounded JSON admission") from exc
+    finally:
+        active.remove(identity)
+
+
+def _account_json_text(value: str, budget: dict[str, int]) -> None:
+    if len(value) > _MAX_RESULT_JSON_BYTES:
+        raise SourceResultBindingError("result evidence exceeds bounded JSON admission")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise SourceResultBindingError("result evidence must be valid UTF-8 JSON") from exc
+    budget["text_bytes"] += len(encoded)
+    if budget["text_bytes"] > _MAX_RESULT_JSON_BYTES:
+        raise SourceResultBindingError("result evidence exceeds bounded JSON admission")
 
 
 def _validate_result_set(
@@ -252,6 +345,7 @@ def _validate_result_set(
 
     ordinals: set[int] = set()
     document_ids: set[str] = set()
+    evidence_count = 0
     for item in result_set.items:
         if not isinstance(item, ResearchResultItem):
             raise TypeError("result items must be ResearchResultItem values")
@@ -267,12 +361,15 @@ def _validate_result_set(
         _require_text(item.title, "title")
         _string(item.snippet, "snippet")
         _require_text(item.why_matched, "why_matched")
-        if isinstance(item.rank, bool) or not isinstance(item.rank, (int, float)):
-            raise SourceResultBindingError("result rank must be numeric")
-        if not math.isfinite(float(item.rank)):
-            raise SourceResultBindingError("result rank must be finite")
+        _finite_rank(item.rank)
         if not item.evidence:
             raise SourceResultBindingError("result item has no provenance evidence")
+        try:
+            evidence_count += len(item.evidence)
+        except TypeError as exc:
+            raise SourceResultBindingError("result evidence must be a bounded sequence") from exc
+        if evidence_count > _MAX_RESULT_JSON_NODES:
+            raise SourceResultBindingError("result evidence exceeds bounded JSON admission")
         for evidence in item.evidence:
             _validate_evidence(assignment.source, evidence)
 
@@ -352,18 +449,28 @@ def _decode_item(value: object) -> ResearchResultItem:
     raw_evidence = data["evidence"]
     if not isinstance(raw_evidence, list):
         raise SourceResultBindingError("result evidence must be a list")
-    rank = data["rank"]
-    if isinstance(rank, bool) or not isinstance(rank, (int, float)):
-        raise SourceResultBindingError("result rank must be numeric")
+    rank = _finite_rank(data["rank"])
     return ResearchResultItem(
         ordinal=_integer(data["ordinal"], "ordinal"),
         document_id=_text(data["document_id"], "document_id"),
         title=_text(data["title"], "title"),
         snippet=_string(data["snippet"], "snippet"),
-        rank=float(rank),
+        rank=rank,
         why_matched=_text(data["why_matched"], "why_matched"),
         evidence=tuple(_decode_evidence(item) for item in raw_evidence),
     )
+
+
+def _finite_rank(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SourceResultBindingError("result rank must be numeric")
+    try:
+        rank = float(value)
+    except OverflowError as exc:
+        raise SourceResultBindingError("result rank must be finite") from exc
+    if not math.isfinite(rank):
+        raise SourceResultBindingError("result rank must be finite")
+    return rank
 
 
 def _decode_evidence(value: object) -> ResearchEvidence:
@@ -412,17 +519,30 @@ def _integer(value: object, label: str) -> int:
 def _string(value: object, label: str) -> str:
     if not isinstance(value, str):
         raise SourceResultBindingError(f"{label} must be text")
+    if len(value) > _MAX_RESULT_JSON_BYTES:
+        raise SourceResultBindingError("result evidence exceeds bounded JSON admission")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise SourceResultBindingError(f"{label} must be valid UTF-8 text") from exc
+    if len(encoded) > _MAX_RESULT_JSON_BYTES:
+        raise SourceResultBindingError("result evidence exceeds bounded JSON admission")
     return value
 
 
 def _text(value: object, label: str) -> str:
     text = _string(value, label)
-    _require_text(text, label)
+    _require_canonical_text(text, label)
     return text
 
 
 def _require_text(value: object, label: str) -> None:
-    if not isinstance(value, str) or not value.strip():
+    text = _string(value, label)
+    _require_canonical_text(text, label)
+
+
+def _require_canonical_text(value: str, label: str) -> None:
+    if not value or not value.strip():
         raise SourceResultBindingError(f"{label} must be non-empty text")
     if value != value.strip():
         raise SourceResultBindingError(f"{label} must not contain surrounding whitespace")
