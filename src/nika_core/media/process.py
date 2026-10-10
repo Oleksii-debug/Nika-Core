@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import signal
+import stat
 import subprocess
 import threading
 import time
@@ -73,12 +74,23 @@ class SafeProcessRunner:
             raise ValueError("max_watched_file_bytes must be positive")
         if watched_paths and max_watched_file_bytes is None:
             raise ValueError("watched_paths require max_watched_file_bytes")
+        if cancel_event is not None and cancel_event.is_set():
+            raise MediaError(
+                MediaErrorCode.PROCESS_CANCELLED,
+                "media subprocess was cancelled",
+            )
         resolved_cwd = cwd.resolve(strict=True)
         if not resolved_cwd.is_dir():
             raise ValueError("cwd must be a directory")
         bounded_paths = tuple(
             self._bounded_watch_path(path, cwd=resolved_cwd) for path in watched_paths
         )
+        # Refuse unsafe pre-existing output before starting an external process.
+        preflight_failure = self._watched_file_failure(
+            bounded_paths, max_bytes=max_watched_file_bytes
+        )
+        if preflight_failure is not None:
+            raise preflight_failure
 
         creationflags = 0
         start_new_session = os.name != "nt"
@@ -86,6 +98,12 @@ class SafeProcessRunner:
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
 
         started = time.monotonic()
+        # Preflight may itself request cancellation; do not spawn an abandoned child.
+        if cancel_event is not None and cancel_event.is_set():
+            raise MediaError(
+                MediaErrorCode.PROCESS_CANCELLED,
+                "media subprocess was cancelled",
+            )
         process = subprocess.Popen(
             normalized,
             cwd=resolved_cwd,
@@ -193,20 +211,28 @@ class SafeProcessRunner:
         if max_bytes is None:
             return None
         for path in paths:
-            if not path.exists():
+            # One no-follow observation avoids exists/resolve/stat races and
+            # detects a dangling link as a link, not as an absent output.
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError:
                 continue
-            if path.is_symlink():
+            except (OSError, RuntimeError):
+                return MediaError(
+                    MediaErrorCode.PATH_ESCAPE,
+                    "watched media output cannot be inspected safely",
+                )
+            if stat.S_ISLNK(metadata.st_mode):
                 return MediaError(
                     MediaErrorCode.PATH_ESCAPE,
                     "watched media output must not be a symbolic link",
                 )
-            resolved = path.resolve(strict=True)
-            if not resolved.is_file():
+            if not stat.S_ISREG(metadata.st_mode):
                 return MediaError(
                     MediaErrorCode.INVALID_SOURCE,
                     "watched media output must be a regular file",
                 )
-            if resolved.stat().st_size > max_bytes:
+            if metadata.st_size > max_bytes:
                 return MediaError(
                     MediaErrorCode.SOURCE_TOO_LARGE,
                     "media subprocess output exceeded the configured byte limit",
