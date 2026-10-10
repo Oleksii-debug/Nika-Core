@@ -148,7 +148,13 @@ class FakeWorker:
         return CodingResult(
             job_id=job.job_id,
             changed_files=(ChangedFile("src/core/item.py", DIGEST, 10),),
-            test_evidence=(WorkerTestEvidence(("python", "-m", "pytest"), 0, "tests-ok"),),
+            test_evidence=(
+                WorkerTestEvidence(
+                    ("python", "-m", "pytest", "tests/core"),
+                    0,
+                    "tests-ok",
+                ),
+            ),
         )
 
 

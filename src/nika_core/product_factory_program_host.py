@@ -384,23 +384,16 @@ class ProductFactoryProgramHost:
                 )
             if state is None:
                 self._mark_uncertain(operation_key)
-                before = coordinator.snapshot()
-                blocked = coordinator.block(
-                    request.component_id,
-                    "worker recovery state is unavailable; explicit reconciliation required",
-                )
-                try:
-                    self._save(host_task_id, binding, coordinator)
-                except Exception:
-                    coordinator.restore(before)
-                    raise
                 return ProgramWorkOutcome(
                     component_id=request.component_id,
                     work_id=request.work_id,
                     disposition=ProgramWorkDisposition.BLOCKED_MISSING_WORKER_STATE,
-                    state=blocked.state,
+                    state=record.state,
                     operation_status=IdempotencyStatus.UNCERTAIN,
-                    detail="worker state is missing; duplicate execution is forbidden",
+                    detail=(
+                        "worker state is missing; RUNNING authority is retained "
+                        "and duplicate execution is forbidden"
+                    ),
                 )
             try:
                 envelope = await self.worker.recover(request, state)

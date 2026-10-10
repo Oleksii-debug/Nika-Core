@@ -313,7 +313,7 @@ def test_restore_rejects_ready_dependency_before_parent_acceptance() -> None:
         _restore(coordinator, forged)
 
 
-def test_single_declared_pytest_accepts_equivalent_full_suite_evidence() -> None:
+def test_single_declared_pytest_rejects_unscoped_full_suite_evidence() -> None:
     graph = ProductRepositoryGraph(
         project_id="single-product",
         repositories=(RepositoryRef("repo", "github", "owner/single", "main"),),
@@ -345,10 +345,12 @@ def test_single_declared_pytest_accepts_equivalent_full_suite_evidence() -> None
             test_evidence=(TestEvidence(("pytest",), 0, "full-suite"),),
         ),
     )
+    before = coordinator.snapshot()
 
-    record = coordinator.record_result(envelope)
+    with pytest.raises(CoordinatorError, match="every declared acceptance command"):
+        coordinator.record_result(envelope)
 
-    assert record.state is WorkState.REVIEW_REQUIRED
+    assert coordinator.snapshot() == before
 
 
 def test_one_full_suite_evidence_cannot_cover_two_declared_commands() -> None:
