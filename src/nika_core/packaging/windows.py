@@ -43,6 +43,10 @@ class WindowsBuildPlan:
             "--add-data",
             f"{self.web_assets}:nika_core/ui/web",
         ]
+        for module_name in ("numpy", "sounddevice"):
+            args.extend(("--hidden-import", module_name))
+        for package_name in ("sherpa_onnx", "_sounddevice_data"):
+            args.extend(("--collect-all", package_name))
         if self.windowed:
             args.append("--windowed")
         if self.clean:
