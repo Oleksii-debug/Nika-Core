@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "dataset_id": "nika-deterministic-brain-baseline",
+  "dataset_version": "1.0.0",
+  "description": "Small deterministic contract baseline for Nika's model-free Deterministic Brain.",
+  "cases": [
+    {
+      "id": "simple-planning",
+      "category": "simple_planning",
+      "mode": "single_run",
+      "state": ["ready"],
+      "goal": {"required": ["done"], "forbidden": []},
+      "actions": [
+        {"action_id": "prepare", "requires": ["ready"], "adds": ["prepared"]},
+        {"action_id": "finish", "requires": ["prepared"], "adds": ["done"]}
+      ],
+      "expected": {
+        "result": {
+          "ok": true,
+          "completed_actions": ["prepare", "finish"],
+          "final_facts": ["done", "prepared", "ready"],
+          "error_code": null,
+          "plan_steps": ["prepare", "finish"]
+        }
+      }
+    },
+    {
+      "id": "constraint-handling",
+      "category": "constraint_handling",
+      "mode": "single_run",
+      "state": ["blocked", "ready"],
+      "goal": {"required": ["done"], "forbidden": ["blocked"]},
+      "actions": [
+        {"action_id": "unblock", "requires": ["ready"], "removes": ["blocked"]},
+        {
+          "action_id": "finish",
+          "requires": ["ready"],
+          "forbids": ["blocked"],
+          "adds": ["done"]
+        }
+      ],
+      "expected": {
+        "result": {
+          "ok": true,
+          "completed_actions": ["unblock", "finish"],
+          "final_facts": ["done", "ready"],
+          "error_code": null,
+          "plan_steps": ["unblock", "finish"]
+        }
+      }
+    },
+    {
+      "id": "missing-capability",
+      "category": "missing_capability",
+      "mode": "single_run",
+      "state": ["ready"],
+      "goal": {"required": ["complete"], "forbidden": []},
+      "actions": [
+        {
+          "action_id": "invoke-missing-capability",
+          "requires": ["ready"],
+          "adds": ["complete"],
+          "tool_id": "capability.missing"
+        }
+      ],
+      "tools": [],
+      "expected": {
+        "result": {
+          "ok": false,
+          "completed_actions": [],
+          "final_facts": ["ready"],
+          "error_code": "tool_execution_failed",
+          "error": "unknown tool",
+          "plan_steps": ["invoke-missing-capability"]
+        },
+        "handler_calls": {}
+      }
+    },
+    {
+      "id": "policy-denial",
+      "category": "policy_denial",
+      "mode": "single_run",
+      "state": ["draft-ready"],
+      "goal": {"required": ["published"], "forbidden": []},
+      "actions": [
+        {
+          "action_id": "publish",
+          "requires": ["draft-ready"],
+          "adds": ["published"],
+          "tool_id": "publish"
+        }
+      ],
+      "tools": [
+        {"tool_id": "publish", "risk": "high_impact", "behavior": "success"}
+      ],
+      "effect_journal": "empty",
+      "task_id": "eval-policy-denial",
+      "expected": {
+        "result": {
+          "ok": false,
+          "completed_actions": [],
+          "final_facts": ["draft-ready"],
+          "error_code": "tool_execution_failed",
+          "error": "approval required",
+          "plan_steps": ["publish"]
+        },
+        "handler_calls": {"publish": 0}
+      }
+    },
+    {
+      "id": "restart-replay",
+      "category": "restart_replay",
+      "mode": "restart_replay",
+      "state": ["source-ready"],
+      "goal": {"required": ["indexed"], "forbidden": []},
+      "actions": [
+        {
+          "action_id": "download",
+          "requires": ["source-ready"],
+          "adds": ["downloaded"],
+          "tool_id": "download"
+        },
+        {
+          "action_id": "index",
+          "requires": ["downloaded"],
+          "adds": ["indexed"],
+          "tool_id": "index"
+        }
+      ],
+      "tools": [
+        {"tool_id": "download", "risk": "read_only", "behavior": "success"},
+        {"tool_id": "index", "risk": "read_only", "behavior": "fail_once"}
+      ],
+      "expected": {
+        "first_result": {
+          "ok": false,
+          "completed_actions": ["download"],
+          "final_facts": ["downloaded", "source-ready"],
+          "error_code": "tool_execution_failed",
+          "error": "tool failed",
+          "plan_steps": ["download", "index"]
+        },
+        "second_result": {
+          "ok": true,
+          "completed_actions": ["download", "index"],
+          "final_facts": ["downloaded", "indexed", "source-ready"],
+          "error_code": null,
+          "plan_steps": ["index"]
+        },
+        "handler_calls": {"download": 1, "index": 2}
+      }
+    },
+    {
+      "id": "repeatability",
+      "category": "repeatability",
+      "mode": "repeatability",
+      "runs": 8,
+      "state": ["ready"],
+      "goal": {"required": ["done"], "forbidden": []},
+      "actions": [
+        {"action_id": "prepare", "requires": ["ready"], "adds": ["prepared"]},
+        {"action_id": "finish", "requires": ["prepared"], "adds": ["done"]}
+      ],
+      "expected": {
+        "result": {
+          "ok": true,
+          "completed_actions": ["prepare", "finish"],
+          "final_facts": ["done", "prepared", "ready"],
+          "error_code": null,
+          "plan_steps": ["prepare", "finish"]
+        },
+        "runs": 8,
+        "unique_result_fingerprints": 1,
+        "mismatches": 0
+      }
+    }
+  ]
+}
