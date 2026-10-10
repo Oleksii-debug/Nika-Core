@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from math import isfinite
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -87,14 +88,18 @@ class FFprobeAdapter:
             raise MediaError(MediaErrorCode.PROBE_FAILED, "ffprobe returned invalid JSON") from exc
         if not isinstance(payload, dict):
             raise MediaError(MediaErrorCode.PROBE_FAILED, "ffprobe response must be an object")
-        format_info = payload.get("format") or {}
-        streams = payload.get("streams") or []
+        format_info = payload.get("format", {})
+        streams = payload.get("streams", [])
+        if not isinstance(format_info, dict):
+            raise MediaError(MediaErrorCode.PROBE_FAILED, "ffprobe format must be an object")
+        if not isinstance(streams, list) or any(
+            not isinstance(item, dict) for item in streams
+        ):
+            raise MediaError(MediaErrorCode.PROBE_FAILED, "ffprobe streams must be objects")
         duration = _optional_nonnegative_float(format_info.get("duration"), "duration")
         bit_rate = _optional_nonnegative_int(format_info.get("bit_rate"), "bit_rate")
         format_name = format_info.get("format_name")
-        normalized_streams = tuple(
-            _normalize_stream(item) for item in streams if isinstance(item, dict)
-        )
+        normalized_streams = tuple(_normalize_stream(item) for item in streams)
         return Probe(
             asset_id=asset_id,
             container=str(format_name) if format_name is not None else None,
@@ -134,6 +139,11 @@ def _normalize_stream(item: dict[str, Any]) -> dict[str, Any]:
         "bit_rate",
     )
     result = {key: item.get(key) for key in allowed if key in item}
+    if "duration" in result:
+        _optional_nonnegative_float(result["duration"], "stream duration")
+    for key in ("index", "sample_rate", "channels", "width", "height", "bit_rate"):
+        if key in result:
+            _optional_nonnegative_int(result[key], f"stream {key}")
     tags = item.get("tags")
     if isinstance(tags, dict):
         safe_tags = {}
@@ -148,21 +158,29 @@ def _normalize_stream(item: dict[str, Any]) -> dict[str, Any]:
 def _optional_nonnegative_float(value: Any, name: str) -> float | None:
     if value in (None, "", "N/A"):
         return None
+    if isinstance(value, bool):
+        raise MediaError(MediaErrorCode.PROBE_FAILED, f"invalid ffprobe {name}")
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
         raise MediaError(MediaErrorCode.PROBE_FAILED, f"invalid ffprobe {name}") from exc
-    if number < 0:
-        raise MediaError(MediaErrorCode.PROBE_FAILED, f"ffprobe {name} must be nonnegative")
+    if not isfinite(number) or number < 0:
+        raise MediaError(
+            MediaErrorCode.PROBE_FAILED, f"ffprobe {name} must be finite and nonnegative"
+        )
     return number
 
 
 def _optional_nonnegative_int(value: Any, name: str) -> int | None:
     if value in (None, "", "N/A"):
         return None
+    if isinstance(value, bool) or (
+        isinstance(value, float) and not value.is_integer()
+    ):
+        raise MediaError(MediaErrorCode.PROBE_FAILED, f"invalid ffprobe {name}")
     try:
         number = int(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise MediaError(MediaErrorCode.PROBE_FAILED, f"invalid ffprobe {name}") from exc
     if number < 0:
         raise MediaError(MediaErrorCode.PROBE_FAILED, f"ffprobe {name} must be nonnegative")
