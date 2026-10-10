@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -45,6 +45,8 @@ class FakeDeploymentProvider(DeploymentProviderPort):
 
     def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
         self.deploy_calls += 1
+        if self.deploy_result.applied and self.deploy_result.release is None:
+            return replace(self.deploy_result, release=intent.release)
         return self.deploy_result
 
     def health(self, intent: DeploymentIntent) -> HealthEvidence:
@@ -54,25 +56,33 @@ class FakeDeploymentProvider(DeploymentProviderPort):
             self.healthy,
             ("health://fake",),
             NOW,
+            release=intent.release,
         )
 
     def rollback(
         self,
         intent: DeploymentIntent,
-        previous_release_sha: str | None,
+        previous_release: ReleaseRef | None,
     ) -> RollbackEvidence:
         self.rollback_calls += 1
         return RollbackEvidence(
             intent.environment.environment_id,
             intent.release.source_sha,
-            previous_release_sha,
+            previous_release.source_sha if previous_release is not None else None,
             True,
             ("rollback://fake",),
+            failed_release=intent.release,
+            restored_release=previous_release,
         )
 
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
         if self.inspection is None:
-            return ProviderInspection(intent.release.source_sha, True, ("inspect://fake",))
+            return ProviderInspection(
+                intent.release.source_sha,
+                True,
+                ("inspect://fake",),
+                release=intent.release,
+            )
         return self.inspection
 
 
@@ -273,7 +283,12 @@ def test_uncertain_deployment_reconciles_to_healthy() -> None:
         ProviderDeploymentResult(
             applied=False, uncertain=True, evidence_refs=("deploy://timeout",)
         ),
-        inspection=ProviderInspection(SHA_A, True, ("inspect://healthy",)),
+        inspection=ProviderInspection(
+            SHA_A,
+            True,
+            ("inspect://healthy",),
+            release=_release(SHA_A),
+        ),
     )
     fabric = DeploymentFabric(provider)
     intent = _intent(EnvironmentTier.STAGING, intent_id="stage-uncertain")

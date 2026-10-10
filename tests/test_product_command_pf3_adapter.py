@@ -61,13 +61,14 @@ def _healthy_record(
     sha: str = SHA_A,
     digest: str = DIGEST_A,
 ) -> DeploymentRecord:
+    intent = _intent(
+        project_id=project_id,
+        intent_id=intent_id,
+        sha=sha,
+        digest=digest,
+    )
     return DeploymentRecord(
-        _intent(
-            project_id=project_id,
-            intent_id=intent_id,
-            sha=sha,
-            digest=digest,
-        ),
+        intent,
         DeploymentState.HEALTHY,
         (f"deploy://{project_id}/{intent_id}",),
         health=HealthEvidence(
@@ -76,6 +77,7 @@ def _healthy_record(
             True,
             (f"health://{project_id}/{intent_id}",),
             NOW,
+            release=intent.release,
         ),
     )
 
@@ -111,8 +113,8 @@ def test_healthy_staging_exposes_release_health_and_exact_evidence_without_provi
     record = _healthy_record(intent_id="stage-1")
     snapshot = DeploymentFabricSnapshot(
         (record,),
-        (("project-1", SHA_A),),
-        (("env-stage", SHA_A),),
+        (("project-1", "1.0.0", SHA_A, DIGEST_A),),
+        (("project-1", "env-stage", "1.0.0", SHA_A, DIGEST_A),),
     )
 
     entries = deployment_status_entries(snapshot)
@@ -122,6 +124,7 @@ def test_healthy_staging_exposes_release_health_and_exact_evidence_without_provi
     deployment = next(item for item in entries if item.kind is ProductStatusKind.DEPLOYMENT)
     assert release.state == "candidate"
     assert SHA_A in release.detail
+    assert DIGEST_A in release.detail
     assert {item.kind for item in release.evidence} == {"git_commit", "artifact_digest"}
     assert deployment.state == "healthy"
     assert "Health: healthy" in deployment.detail
@@ -129,11 +132,11 @@ def test_healthy_staging_exposes_release_health_and_exact_evidence_without_provi
     assert "credential://provider/project-1/SHOULD-NOT-LEAK" not in serialized
 
 
-def test_uncertain_deployment_creates_explicit_blocker() -> None:
+def test_uncertain_deployment_creates_explicit_blocker_without_provider_evidence() -> None:
     record = DeploymentRecord(
         _intent(),
         DeploymentState.UNCERTAIN,
-        ("deploy://timeout",),
+        (),
     )
     snapshot = DeploymentFabricSnapshot((record,), (), ())
 
@@ -142,23 +145,32 @@ def test_uncertain_deployment_creates_explicit_blocker() -> None:
     blocker = next(item for item in entries if item.kind is ProductStatusKind.BLOCKER)
     assert blocker.state == "active"
     assert "requires reconciliation" in blocker.detail
-    assert blocker.evidence[0].reference == "deploy://timeout"
+    assert blocker.evidence == ()
 
 
-def test_rollback_state_preserves_failure_and_restore_evidence() -> None:
+def test_rollback_state_preserves_exact_failure_and_restore_evidence() -> None:
     previous = _healthy_record(
         intent_id="stage-previous",
         sha=SHA_B,
         digest=DIGEST_B,
     )
     intent = _intent()
-    health = HealthEvidence("env-stage", SHA_A, False, ("health://bad",), NOW)
+    health = HealthEvidence(
+        "env-stage",
+        SHA_A,
+        False,
+        ("health://bad",),
+        NOW,
+        release=intent.release,
+    )
     rollback = RollbackEvidence(
         "env-stage",
         SHA_A,
         SHA_B,
         True,
         ("rollback://ok",),
+        failed_release=intent.release,
+        restored_release=previous.intent.release,
     )
     record = DeploymentRecord(
         intent,
@@ -167,11 +179,12 @@ def test_rollback_state_preserves_failure_and_restore_evidence() -> None:
         health=health,
         rollback=rollback,
         previous_release_sha=SHA_B,
+        previous_release=previous.intent.release,
     )
     snapshot = DeploymentFabricSnapshot(
         (previous, record),
-        (("project-1", SHA_B),),
-        (("project-1", "env-stage", SHA_B),),
+        (("project-1", "1.0.0", SHA_B, DIGEST_B),),
+        (("project-1", "env-stage", "1.0.0", SHA_B, DIGEST_B),),
     )
 
     entries = deployment_status_entries(snapshot)
@@ -192,29 +205,40 @@ def test_rollback_state_preserves_failure_and_restore_evidence() -> None:
 
 def test_direct_adapter_rejects_rollback_only_current_release_marker() -> None:
     intent = _intent()
+    previous = ReleaseRef("project-1", "1.0.0", SHA_B, DIGEST_B)
     record = DeploymentRecord(
         intent,
         DeploymentState.ROLLED_BACK,
         ("deploy://ok",),
-        health=HealthEvidence("env-stage", SHA_A, False, ("health://bad",), NOW),
+        health=HealthEvidence(
+            "env-stage",
+            SHA_A,
+            False,
+            ("health://bad",),
+            NOW,
+            release=intent.release,
+        ),
         rollback=RollbackEvidence(
             "env-stage",
             SHA_A,
             SHA_B,
             True,
             ("rollback://ok",),
+            failed_release=intent.release,
+            restored_release=previous,
         ),
         previous_release_sha=SHA_B,
+        previous_release=previous,
     )
     snapshot = DeploymentFabricSnapshot(
         (record,),
         (),
-        (("project-1", "env-stage", SHA_B),),
+        (("project-1", "env-stage", "1.0.0", SHA_B, DIGEST_B),),
     )
 
     with pytest.raises(
         DeploymentPresentationIntegrityError,
-        match="not backed by a healthy deployment record",
+        match="not backed by a healthy exact deployment record",
     ):
         deployment_status_entries(snapshot)
 
@@ -239,7 +263,7 @@ def test_direct_adapter_rejects_health_check_as_durable_snapshot() -> None:
         deployment_status_entries(snapshot)
 
 
-def test_direct_adapter_rejects_record_without_provider_evidence() -> None:
+def test_direct_adapter_rejects_terminal_record_without_provider_evidence() -> None:
     intent = _intent()
     snapshot = DeploymentFabricSnapshot(
         (
@@ -253,6 +277,7 @@ def test_direct_adapter_rejects_record_without_provider_evidence() -> None:
                     True,
                     ("health://ok",),
                     NOW,
+                    release=intent.release,
                 ),
             ),
         ),
@@ -262,12 +287,12 @@ def test_direct_adapter_rejects_record_without_provider_evidence() -> None:
 
     with pytest.raises(
         DeploymentPresentationIntegrityError,
-        match="requires provider evidence",
+        match="terminal record requires provider evidence",
     ):
         deployment_status_entries(snapshot)
 
 
-def test_direct_adapter_legacy_release_uses_exact_healthy_sha_disambiguation() -> None:
+def test_direct_adapter_legacy_release_uses_unique_exact_healthy_disambiguation() -> None:
     first = _healthy_record(
         project_id="project-1",
         intent_id="stage-p1",
