@@ -49,6 +49,11 @@ function snapshot(state = current) {
   return { ok: true, state: { tasks: [], agents: [], workspaces: [],
     autostart: badSnapshot ?? { schema_version: 1, state,
       can_change: ["enabled", "disabled", "stale"].includes(state), message: "PRIVATE_REGISTRY_CANARY" },
+    startup_recovery: {
+      schema_version: 1, status: "ready",
+      auto_resume_count: 0, manual_resume_count: 0, approval_count: 0,
+      uncertain_count: 0, blocked_count: 0, resume_failed_count: 0,
+    },
   } };
 }
 global.pywebview = { api: {
