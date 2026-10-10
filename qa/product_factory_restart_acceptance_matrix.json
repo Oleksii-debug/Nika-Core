@@ -1,0 +1,328 @@
+{
+  "schema_version": 1,
+  "matrix_id": "NIKA-PF-CRASH-RESTART-CONCURRENCY-V1",
+  "qa_only": true,
+  "production_source_edits_forbidden": true,
+  "acceptance_credit_rule": "PASS requires terminal exact-head executable evidence on the candidate being classified; an open owner PR, historical green SHA, self-authored owner test, or model-only oracle is not PASS.",
+  "global_invariants": [
+    "NO_DUPLICATE_EFFECT",
+    "NO_LOST_STATE",
+    "NO_STALE_AUTHORITY",
+    "NO_CROSS_PROJECT_DATA",
+    "ONE_CANONICAL_OWNER"
+  ],
+  "fault_modes": [
+    {
+      "id": "effect_before_state",
+      "inject": "Force the externally visible effect to occur, then terminate before durable state/result publication.",
+      "must_assert": [
+        "restart classifies the effect as completed or uncertain from canonical evidence",
+        "recovery does not blindly repeat the effect",
+        "canonical owner retains project and operation identity"
+      ],
+      "required_invariants": [
+        "NO_DUPLICATE_EFFECT",
+        "NO_LOST_STATE",
+        "NO_STALE_AUTHORITY",
+        "NO_CROSS_PROJECT_DATA",
+        "ONE_CANONICAL_OWNER"
+      ]
+    },
+    {
+      "id": "state_before_effect",
+      "inject": "Commit durable intent/state, then terminate before the externally visible effect starts.",
+      "must_assert": [
+        "restart observes the committed intent",
+        "effect executes at most once from the same operation identity",
+        "state cannot falsely claim a terminal external result"
+      ],
+      "required_invariants": [
+        "NO_DUPLICATE_EFFECT",
+        "NO_LOST_STATE",
+        "NO_STALE_AUTHORITY",
+        "NO_CROSS_PROJECT_DATA",
+        "ONE_CANONICAL_OWNER"
+      ]
+    },
+    {
+      "id": "lost_acknowledgement",
+      "inject": "Complete the effect but lose the acknowledgement/result before the caller can persist or receive it.",
+      "must_assert": [
+        "retry reconciles or replays by exact idempotency identity",
+        "no second externally visible effect is produced",
+        "the recovered result is bound to the original project and authority"
+      ],
+      "required_invariants": [
+        "NO_DUPLICATE_EFFECT",
+        "NO_LOST_STATE",
+        "NO_STALE_AUTHORITY",
+        "NO_CROSS_PROJECT_DATA",
+        "ONE_CANONICAL_OWNER"
+      ]
+    },
+    {
+      "id": "duplicate_retry",
+      "inject": "Submit the same logical operation twice with the same canonical identity.",
+      "must_assert": [
+        "both calls converge on one canonical receipt/result",
+        "duplicate execution is prevented",
+        "conflicting reuse of the same identity fails closed"
+      ],
+      "required_invariants": [
+        "NO_DUPLICATE_EFFECT",
+        "NO_LOST_STATE",
+        "NO_STALE_AUTHORITY",
+        "NO_CROSS_PROJECT_DATA",
+        "ONE_CANONICAL_OWNER"
+      ]
+    },
+    {
+      "id": "concurrent_writer",
+      "inject": "Release two same-scope writers/recoverers at the same deterministic synchronization barrier.",
+      "must_assert": [
+        "one serialization order or one deterministic conflict is observed",
+        "no lost update occurs",
+        "both outcomes remain attributable to the canonical owner"
+      ],
+      "required_invariants": [
+        "NO_DUPLICATE_EFFECT",
+        "NO_LOST_STATE",
+        "NO_STALE_AUTHORITY",
+        "NO_CROSS_PROJECT_DATA",
+        "ONE_CANONICAL_OWNER"
+      ]
+    },
+    {
+      "id": "stale_checkpoint",
+      "inject": "Persist a newer authoritative revision, then restart or retry from an older checkpoint/snapshot.",
+      "must_assert": [
+        "older authority cannot overwrite or regain current authority",
+        "stale lineage is rejected or classified explicitly",
+        "newer durable state remains unchanged"
+      ],
+      "required_invariants": [
+        "NO_DUPLICATE_EFFECT",
+        "NO_LOST_STATE",
+        "NO_STALE_AUTHORITY",
+        "NO_CROSS_PROJECT_DATA",
+        "ONE_CANONICAL_OWNER"
+      ]
+    },
+    {
+      "id": "corrupt_type_or_version",
+      "inject": "Corrupt a durable type, schema version, row version, revision, or encoded authority field before restart.",
+      "must_assert": [
+        "restore fails closed without permissive coercion",
+        "no external effect executes from corrupt state",
+        "corruption cannot cross project or owner boundaries"
+      ],
+      "required_invariants": [
+        "NO_DUPLICATE_EFFECT",
+        "NO_LOST_STATE",
+        "NO_STALE_AUTHORITY",
+        "NO_CROSS_PROJECT_DATA",
+        "ONE_CANONICAL_OWNER"
+      ]
+    },
+    {
+      "id": "two_process_like_recoverers",
+      "inject": "Start two independent recovery hosts against the same durable authority and release them together.",
+      "must_assert": [
+        "only one recovery owner may mutate or dispatch the protected effect",
+        "the loser observes deterministic conflict/reconciliation",
+        "no second authority store or process-local winner claim is accepted"
+      ],
+      "required_invariants": [
+        "NO_DUPLICATE_EFFECT",
+        "NO_LOST_STATE",
+        "NO_STALE_AUTHORITY",
+        "NO_CROSS_PROJECT_DATA",
+        "ONE_CANONICAL_OWNER"
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "product_project_spec_write",
+      "canonical_owner": "ProductProjectRepository.update_spec",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 296,
+      "owner_lane": "ONE-SHOT-03 PF0/PF12 ProductProject durability convergence",
+      "evidence_refs": ["pr:296", "qa-pr:299"],
+      "baseline_disposition": "BLOCKED_ON_OPEN_OWNER",
+      "blocker": "Current main does not contain the open durability convergence candidate."
+    },
+    {
+      "id": "research_handoff",
+      "canonical_owner": "ResearchProductHandoffService + ProductProjectRepository",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 179,
+      "owner_lane": "PF1 Research to Product evidence lineage",
+      "evidence_refs": ["pr:179", "qa-pr:275"],
+      "baseline_disposition": "BLOCKED_ON_OPEN_OWNER",
+      "blocker": "Formal sealed research handoff remains on an open owner PR."
+    },
+    {
+      "id": "team_creation_replacement",
+      "canonical_owner": "ProductFactory team lifecycle over canonical ProductProject/checkpoint authority",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 163,
+      "owner_lane": "PF2 deterministic dynamic team lifecycle",
+      "evidence_refs": [
+        "pr:163",
+        "qa-pr:360",
+        "tests/test_product_factory_team_lifecycle.py",
+        "tests/test_product_factory_team_lifecycle_audit.py"
+      ],
+      "baseline_disposition": "KNOWN_GAP",
+      "blocker_code": "canonical_snapshot_persistence_not_integrated",
+      "blocker": "PR #163 explicitly leaves full durable TeamLifecycleSnapshot wiring to the canonical ProductProject/checkpoint authority."
+    },
+    {
+      "id": "repository_lease",
+      "canonical_owner": "ProductRepositoryGraph ownership/lease authority",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 310,
+      "owner_lane": "ONE-SHOT-18 durable multi-repository ProductProject execution",
+      "secondary_prs": [335],
+      "evidence_refs": [
+        "pr:310",
+        "pr:335",
+        "tests/test_product_factory_multi_repository_execution.py"
+      ],
+      "baseline_disposition": "BLOCKED_ON_OPEN_OWNER",
+      "blocker": "Durable graph/lease reconstruction and current-main graph hardening are not integrated."
+    },
+    {
+      "id": "checkpoint",
+      "canonical_owner": "ProductFactoryCheckpointHost over canonical SQLite tasks/checkpoints/audit",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 340,
+      "owner_lane": "ONE-SHOT-04 trusted checkpoint authority",
+      "evidence_refs": [
+        "pr:340",
+        "qa-pr:341",
+        "tests/test_product_factory_checkpoint_anchor_atomicity.py",
+        "tests/test_product_factory_checkpoint_transition_lineage.py"
+      ],
+      "baseline_disposition": "BLOCKED_ON_OPEN_OWNER",
+      "blocker": "Current trusted-plan/checkpoint authority successor remains open and independently uncleared."
+    },
+    {
+      "id": "worker_dispatch_result",
+      "canonical_owner": "ProductFactory ProgramHost/CodingWorker durable dispatch and resume authority",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 347,
+      "owner_lane": "MANUAL-DEV06 Toolsmith component resume durability",
+      "evidence_refs": ["pr:347"],
+      "baseline_disposition": "BLOCKED_ON_OPEN_OWNER",
+      "blocker": "Durable RESERVED/BEGUN/RESUME_PREPARED/CONSUMED resume binding remains open."
+    },
+    {
+      "id": "build_dispatch",
+      "canonical_owner": "DurableBuildExecutionHost + canonical SQLite checkpoint store",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 295,
+      "owner_lane": "PF5 durable build execution",
+      "evidence_refs": ["pr:295", "qa-pr:327"],
+      "baseline_disposition": "BLOCKED_ON_OPEN_OWNER",
+      "blocker": "Pre-effect durable build execution host is not integrated on current main."
+    },
+    {
+      "id": "credential_handle",
+      "canonical_owner": "CredentialBroker protected credential/lease authority",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 162,
+      "owner_lane": "PF7 credential broker project boundary",
+      "evidence_refs": ["pr:162"],
+      "baseline_disposition": "KNOWN_GAP",
+      "blocker_code": "cross_process_atomicity_unproven",
+      "blocker": "Owner evidence explicitly limits writer serialization to the existing single credential-authority host; two process-like recoverers are not proven."
+    },
+    {
+      "id": "deployment",
+      "canonical_owner": "DeploymentFabric with canonical ProductFactory task/checkpoint authority",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 280,
+      "owner_lane": "PF6 exact-release deployment convergence",
+      "evidence_refs": ["pr:280", "qa-pr:268"],
+      "baseline_disposition": "KNOWN_GAP",
+      "blocker_code": "pre_dispatch_durable_uncertainty_marker_missing",
+      "blocker": "PR #280 explicitly states the pre-dispatch UNCERTAIN marker is not synchronously committed to canonical SQLite before the provider mutation."
+    },
+    {
+      "id": "health",
+      "canonical_owner": "ProductOperations canonical service-health authority",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 286,
+      "owner_lane": "PF8 Product Operations lifecycle convergence",
+      "secondary_prs": [200],
+      "evidence_refs": ["pr:286", "pr:200"],
+      "baseline_disposition": "KNOWN_GAP",
+      "blocker_code": "pf8_pre_effect_checkpoint_missing",
+      "blocker": "PR #286 explicitly does not claim OS/process-crash safety for the provider-effect-before-durable-host-save window."
+    },
+    {
+      "id": "incident_repair",
+      "canonical_owner": "Product Operations incident lifecycle + canonical Toolsmith/TaskQueue repair lineage",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 289,
+      "owner_lane": "PF8 deterministic Product Operations repair loop",
+      "secondary_prs": [286],
+      "evidence_refs": [
+        "pr:289",
+        "pr:286",
+        "docs/PRODUCT_FACTORY_PF8_REPAIR_LOOP_ACCEPTANCE_2026-08-23.md"
+      ],
+      "baseline_disposition": "BLOCKED_ON_OPEN_OWNER",
+      "blocker": "Repair-loop acceptance remains open and inherits unresolved PF8 effect-journal authority."
+    },
+    {
+      "id": "business_factory_handoff",
+      "canonical_owner": "BusinessFactory WorkOrder/ProductProject handoff authority",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 349,
+      "owner_lane": "PF9/PF10 exact ProductProject WorkOrder authority",
+      "secondary_prs": [195],
+      "evidence_refs": ["pr:349", "pr:195"],
+      "baseline_disposition": "BLOCKED_ON_OPEN_OWNER",
+      "blocker": "Exact WorkOrder-to-ProductProject restart authority remains on open PF9/PF10 owner lineage."
+    },
+    {
+      "id": "delivery_state",
+      "canonical_owner": "BusinessFactory delivery lifecycle consuming ReleaseComplianceGrant",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 195,
+      "owner_lane": "PF9/PF10 Business Factory and compliance gate",
+      "superseded_prs": [336],
+      "evidence_refs": ["pr:195", "historical-superseded-pr:336"],
+      "baseline_disposition": "BLOCKED_ON_OPEN_OWNER",
+      "blocker": "Canonical owner #195 has absorbed the exact release-grant delivery boundary but is not integrated."
+    },
+    {
+      "id": "backup_update",
+      "canonical_owner": "SQLiteRecoveryManager",
+      "owner_account": "Oleksii-debug",
+      "primary_pr": 311,
+      "owner_lane": "ONE-SHOT-47 canonical SQLite recovery ownership/lease",
+      "adapter_prs": [218],
+      "evidence_refs": [
+        "pr:311",
+        "pr:218",
+        "tests/test_backup_restore_recovery_lease.py",
+        "tests/test_packaging_recovery.py"
+      ],
+      "baseline_disposition": "BLOCKED_ON_OPEN_OWNER",
+      "blocker": "Canonical recovery lease/WAL closure and thin release adapter are still open; the adapter must not become a second recovery owner."
+    }
+  ],
+  "baseline_assessment": {
+    "repository": "Oleksii-debug/Nika-Core",
+    "starting_main_sha": "23c7c1ce97b263b4aafa61bdcbace207b4476a3d",
+    "last_proven_full_green_main_sha": "e8743566ffc673d6f8d272e88de0e027c23ab277",
+    "exact_current_main_green": false,
+    "exact_current_main_green_reason": "At audit read, exact current main Core/M11/M12 commit-bound runs were non-terminal; no historical green is transferred.",
+    "human_tested": false,
+    "nvda_verified": false
+  }
+}
