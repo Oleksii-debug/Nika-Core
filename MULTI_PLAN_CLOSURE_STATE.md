@@ -1,5 +1,9 @@
 # Nika Core — Multi-Plan Closure State
 
+## Worker status precedence — 2026-10-10
+
+For Section selection, read the latest independently evidenced integrated terminal DONE state for the assigned plan, never infer a current OPEN or DONE from historical checkpoint headings, first-migration snapshots, stale branches or queued/failed jobs on old SHAs. Skip terminal DONE unless a new specific regression, invalid evidence, materially changed contract or breaking integration is logged first. Existing `AUDIT_REQUIRED / PARTIAL_EXISTING` entries are not terminal and must not be promoted without live integration/test/readback evidence. Preserve accepted code and evidence; REUSE -> REPAIR -> CONVERGE.
+
 ## Rules
 - PROJECT_PLAN_INDEX.md + MULTI_PLAN_PARALLELISM_CONTRACT.md + this file + the assigned Drive plan are the live work-selection authority.
 - Plans 1–6 have no global earliest Section.
