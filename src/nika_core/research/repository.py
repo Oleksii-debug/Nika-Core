@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -60,19 +61,42 @@ class ResearchRepository:
             )
 
     def upsert_source(self, source: SourceSpec) -> None:
-        if source.kind is not SourceKind.LOCAL_FILE:
-            raise ValueError("use the HTTP source repository for non-local sources")
+        if type(source) is not SourceSpec or source.kind is not SourceKind.LOCAL_FILE:
+            raise ValueError("use a canonical local_file SourceSpec")
+        for label, value in (
+            ("source_id", source.source_id),
+            ("workspace_id", source.workspace_id),
+            ("locator", source.locator),
+        ):
+            if type(value) is not str or not value.strip():
+                raise ValueError(f"{label} must be nonempty text")
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError(f"{label} must be valid UTF-8 text") from exc
+        if any(unicodedata.category(character) == "Cc" for character in source.locator):
+            raise ValueError("locator must not contain control characters")
         now = _now()
         with self._store.connection() as conn:
-            conn.execute(
+            # Serialize the cross-table ownership read with this local-source write.
+            # The canonical HTTP writer must use the same write reservation so that
+            # exactly one source kind can claim a source_id under concurrency.
+            conn.execute("BEGIN IMMEDIATE")
+            http_collision = conn.execute(
+                "SELECT 1 FROM research_http_sources WHERE source_id=?",
+                (source.source_id,),
+            ).fetchone()
+            if http_collision is not None:
+                raise ValueError("source_id belongs to another workspace or source kind")
+            result = conn.execute(
                 """INSERT INTO research_sources(
                     source_id, workspace_id, kind, locator, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(source_id) DO UPDATE SET
-                    workspace_id=excluded.workspace_id,
-                    kind=excluded.kind,
                     locator=excluded.locator,
-                    updated_at=excluded.updated_at""",
+                    updated_at=excluded.updated_at
+                WHERE research_sources.workspace_id=excluded.workspace_id
+                  AND research_sources.kind=excluded.kind""",
                 (
                     source.source_id,
                     source.workspace_id,
@@ -82,6 +106,8 @@ class ResearchRepository:
                     now,
                 ),
             )
+            if result.rowcount != 1:
+                raise ValueError("source_id belongs to another workspace or source kind")
 
     def record_artifact(
         self,
