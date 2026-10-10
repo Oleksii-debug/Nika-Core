@@ -25,7 +25,7 @@ _SECRET_CONTENT_SUFFIXES = frozenset(
 )
 _SECRET_SCAN_CHUNK_BYTES = 64 * 1024
 _SECRET_SCAN_OVERLAP_BYTES = 8 * 1024
-_PREHUMAN_EVIDENCE_SCHEMA_VERSION = 3
+_PREHUMAN_EVIDENCE_SCHEMA_VERSION = 4
 _PREHUMAN_REQUIRED_TRUE_FIELDS = (
     "release_manifest_source_sha_bound",
     "exact_checkout_sha_verified",
@@ -45,6 +45,8 @@ _PREHUMAN_REQUIRED_TRUE_FIELDS = (
     "windows_package_built",
     "manifest_verified",
     "third_party_notices_verified",
+    "machine_readable_sbom_verified",
+    "supply_chain_provenance_verified",
     "packaged_uia_keyboard_focus",
 )
 _PREHUMAN_REQUIRED_FALSE_FIELDS = (
@@ -212,8 +214,6 @@ def _stream_contains_secret_assignment(handle: Any) -> bool:
         if not chunk:
             return False
         raw_window = overlap + chunk
-        # Only the real file start receives a synthetic line boundary. Subsequent
-        # streaming windows must inherit their boundary from actual file bytes.
         window = b"\n" + raw_window if first_window else raw_window
         first_window = False
         for match in _SECRET_ASSIGNMENT_RE.finditer(window):
