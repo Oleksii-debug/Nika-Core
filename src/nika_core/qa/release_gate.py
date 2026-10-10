@@ -34,31 +34,47 @@ _AUTOMATED_REQUIREMENTS = (
     ("packaged_uia_passed", "Packaged UI Automation proof is missing"),
 )
 
+_EVIDENCE_FIELDS = tuple(field for field, _ in _AUTOMATED_REQUIREMENTS) + (
+    "human_tested",
+    "nvda_verified",
+)
+
 
 def evaluate_release_gate(evidence: ReleaseGateEvidence) -> ReleaseGateResult:
-    automated_blockers = tuple(
-        message for field, message in _AUTOMATED_REQUIREMENTS if not getattr(evidence, field)
-    )
-    release_candidate_ready = not automated_blockers
+    # Dataclass annotations do not enforce runtime types. Never let truthy strings,
+    # integers or corrupted/missing attributes certify an acceptance gate.
+    values = {field: getattr(evidence, field, None) for field in _EVIDENCE_FIELDS}
+    invalid_fields = tuple(field for field, value in values.items() if type(value) is not bool)
 
-    blockers = list(automated_blockers)
-    if not evidence.human_tested:
+    def proven(field: str) -> bool:
+        return values[field] is True and type(values[field]) is bool
+
+    automated_blockers = tuple(
+        message for field, message in _AUTOMATED_REQUIREMENTS if not proven(field)
+    )
+    release_candidate_ready = not automated_blockers and not invalid_fields
+
+    blockers = [f"Invalid release evidence type: {field}" for field in invalid_fields]
+    blockers.extend(automated_blockers)
+    human_tested = proven("human_tested")
+    nvda_verified = proven("nvda_verified")
+    if not human_tested:
         blockers.append("Human accessibility/functional acceptance is missing")
-    if not evidence.nvda_verified:
+    if not nvda_verified:
         blockers.append("NVDA verification by a human tester is missing")
 
-    if evidence.nvda_verified and not evidence.human_tested:
+    if nvda_verified and not human_tested:
         blockers.append("NVDA_VERIFIED cannot precede HUMAN_TESTED")
 
-    production_release_ready = release_candidate_ready and evidence.human_tested and evidence.nvda_verified
+    production_release_ready = release_candidate_ready and human_tested and nvda_verified
 
     if production_release_ready:
         stage = "NVDA_VERIFIED"
-    elif evidence.human_tested:
+    elif human_tested:
         stage = "HUMAN_TESTED"
-    elif evidence.windows_package_built:
+    elif proven("windows_package_built"):
         stage = "PACKAGED"
-    elif evidence.core_ci_green:
+    elif proven("core_ci_green"):
         stage = "INTEGRATED"
     else:
         stage = "IMPLEMENTED"
