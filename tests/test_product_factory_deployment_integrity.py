@@ -77,6 +77,7 @@ class FakeProvider:
             intent.release.source_sha not in self.unhealthy,
             (f"health:{intent.intent_id}",),
             NOW,
+            release=intent.release,
         )
 
     def rollback(
@@ -93,6 +94,25 @@ class FakeProvider:
             (f"rollback:{intent.intent_id}",),
         )
 
+    def rollback_exact(
+        self,
+        intent: DeploymentIntent,
+        previous_release: ReleaseRef | None,
+    ) -> RollbackEvidence:
+        previous_release_sha = (
+            None if previous_release is None else previous_release.source_sha
+        )
+        self.rollback_previous.append((intent.project_id, previous_release_sha))
+        return RollbackEvidence(
+            intent.environment.environment_id,
+            intent.release.source_sha,
+            previous_release_sha,
+            True,
+            (f"rollback:{intent.intent_id}",),
+            failed_release=intent.release,
+            restored_release=previous_release,
+        )
+
     def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
         return self.inspections.get(
             intent.intent_id,
@@ -100,6 +120,7 @@ class FakeProvider:
                 intent.release.source_sha,
                 True,
                 (f"inspect:{intent.intent_id}",),
+                release=intent.release,
             ),
         )
 
@@ -301,3 +322,253 @@ def test_environment_identity_rejects_empty_scope(
             EnvironmentTier.STAGING,
             provider_ref,
         )
+
+
+class _MutatedDeployResultProvider(FakeProvider):
+    def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
+        result = ProviderDeploymentResult(
+            True,
+            False,
+            (f"deploy:{intent.intent_id}",),
+        )
+        object.__setattr__(result, "applied", 1)
+        return result
+
+
+class _MutatedHealthEvidenceProvider(FakeProvider):
+    def health(self, intent: DeploymentIntent) -> HealthEvidence:
+        evidence = super().health(intent)
+        object.__setattr__(evidence, "healthy", 1)
+        return evidence
+
+
+class _MutatedInspectionProvider(FakeProvider):
+    def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
+        inspection = super().inspect(intent)
+        object.__setattr__(inspection, "healthy", 1)
+        return inspection
+
+
+class _MutatedRollbackEvidenceProvider(FakeProvider):
+    def rollback_exact(
+        self,
+        intent: DeploymentIntent,
+        previous_release: ReleaseRef | None,
+    ) -> RollbackEvidence:
+        evidence = super().rollback_exact(intent, previous_release)
+        object.__setattr__(evidence, "succeeded", 1)
+        return evidence
+
+
+def test_deploy_result_post_construction_mutation_fails_uncertain() -> None:
+    provider = _MutatedDeployResultProvider()
+    fabric = DeploymentFabric(provider)
+
+    record = fabric.deploy(_intent("project-a", "mutated-deploy", 1))
+
+    assert record.state is DeploymentState.UNCERTAIN
+
+
+def test_health_evidence_post_construction_mutation_fails_uncertain() -> None:
+    provider = _MutatedHealthEvidenceProvider()
+    fabric = DeploymentFabric(provider)
+
+    record = fabric.deploy(_intent("project-a", "mutated-health", 1))
+
+    assert record.state is DeploymentState.UNCERTAIN
+
+
+def test_inspection_post_construction_mutation_cannot_authorize_health() -> None:
+    provider = _MutatedInspectionProvider(uncertain={"mutated-inspection"})
+    fabric = DeploymentFabric(provider)
+    intent = _intent("project-a", "mutated-inspection", 1)
+    first = fabric.deploy(intent)
+
+    assert first.state is DeploymentState.UNCERTAIN
+    with pytest.raises(DeploymentFabricError, match="inspection healthy"):
+        fabric.reconcile(intent.intent_id)
+    assert fabric.snapshot().records[0].state is DeploymentState.UNCERTAIN
+
+
+def test_rollback_post_construction_mutation_cannot_authorize_success() -> None:
+    provider = _MutatedRollbackEvidenceProvider(unhealthy={_sha(2)})
+    fabric = DeploymentFabric(provider)
+    first = fabric.deploy(_intent("project-a", "healthy-first", 1))
+    second = fabric.deploy(_intent("project-a", "mutated-rollback", 2))
+
+    assert first.state is DeploymentState.HEALTHY
+    assert second.state is DeploymentState.UNCERTAIN
+
+
+@dataclass
+class _CountingIntentProvider(FakeProvider):
+    deploy_calls: int = 0
+
+    def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
+        self.deploy_calls += 1
+        return super().deploy(intent)
+
+
+def test_mutated_environment_tier_is_rejected_before_provider_effect() -> None:
+    provider = _CountingIntentProvider()
+    fabric = DeploymentFabric(provider)
+    intent = _intent("project-a", "mutated-tier", 1)
+    object.__setattr__(intent.environment, "tier", "production")
+
+    with pytest.raises(DeploymentFabricError, match="tier carrier is invalid"):
+        fabric.deploy(intent)
+
+    assert provider.deploy_calls == 0
+    assert fabric.snapshot().records == ()
+
+
+def test_deploy_detaches_caller_owned_intent_graph() -> None:
+    provider = FakeProvider()
+    fabric = DeploymentFabric(provider)
+    intent = _intent("project-a", "detached-intent", 1)
+
+    accepted = fabric.deploy(intent)
+    object.__setattr__(intent.release, "version", "tampered-after-deploy")
+
+    assert accepted.intent.release.version == "release-1"
+    stored = fabric.snapshot().records[0]
+    assert stored.intent.release.version == "release-1"
+
+
+def test_snapshot_is_detached_from_internal_deployment_authority() -> None:
+    provider = FakeProvider()
+    fabric = DeploymentFabric(provider)
+    fabric.deploy(_intent("project-a", "detached-snapshot", 1))
+
+    snapshot = fabric.snapshot()
+    object.__setattr__(
+        snapshot.records[0].intent.release,
+        "version",
+        "tampered-snapshot-view",
+    )
+
+    fresh = fabric.snapshot()
+    assert fresh.records[0].intent.release.version == "release-1"
+
+
+def test_restore_detaches_caller_owned_snapshot_graph() -> None:
+    provider = FakeProvider()
+    original = DeploymentFabric(provider)
+    original.deploy(_intent("project-a", "detached-restore", 1))
+    snapshot = original.snapshot()
+
+    restored = DeploymentFabric(provider)
+    restored.restore(snapshot)
+    object.__setattr__(
+        snapshot.records[0].intent.release,
+        "version",
+        "tampered-after-restore",
+    )
+
+    fresh = restored.snapshot()
+    assert fresh.records[0].intent.release.version == "release-1"
+
+
+@dataclass
+class _MutatingOutboundDeployProvider(FakeProvider):
+    health_seen_version: str | None = None
+
+    def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
+        object.__setattr__(intent.release, "version", "provider-mutated")
+        return super().deploy(intent)
+
+    def health(self, intent: DeploymentIntent) -> HealthEvidence:
+        self.health_seen_version = intent.release.version
+        return super().health(intent)
+
+
+@dataclass
+class _MutatingOutboundInspectProvider(FakeProvider):
+    def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
+        object.__setattr__(intent.release, "version", "provider-mutated")
+        return ProviderInspection(
+            intent.release.source_sha,
+            True,
+            ("inspect:mutated-input",),
+            release=intent.release,
+        )
+
+
+@dataclass
+class _MutatingRollbackTargetProvider(FakeProvider):
+    def rollback_exact(
+        self,
+        intent: DeploymentIntent,
+        previous_release: ReleaseRef | None,
+    ) -> RollbackEvidence:
+        assert previous_release is not None
+        object.__setattr__(previous_release, "version", "provider-mutated")
+        return super().rollback_exact(intent, previous_release)
+
+
+def test_provider_deploy_mutation_cannot_drift_internal_intent() -> None:
+    provider = _MutatingOutboundDeployProvider()
+    fabric = DeploymentFabric(provider)
+
+    record = fabric.deploy(_intent("project-a", "provider-mutates-deploy", 1))
+
+    assert record.state is DeploymentState.HEALTHY
+    assert provider.health_seen_version == "release-1"
+    assert record.intent.release.version == "release-1"
+    assert fabric.snapshot().records[0].intent.release.version == "release-1"
+
+
+def test_provider_inspection_mutation_cannot_rebind_uncertain_intent() -> None:
+    provider = _MutatingOutboundInspectProvider(
+        uncertain={"provider-mutates-inspection"},
+    )
+    fabric = DeploymentFabric(provider)
+    intent = _intent("project-a", "provider-mutates-inspection", 1)
+
+    first = fabric.deploy(intent)
+    assert first.state is DeploymentState.UNCERTAIN
+
+    with pytest.raises(DeploymentFabricError, match="different exact release"):
+        fabric.reconcile(intent.intent_id)
+
+    stored = fabric.snapshot().records[0]
+    assert stored.state is DeploymentState.UNCERTAIN
+    assert stored.intent.release.version == "release-1"
+
+
+def test_provider_rollback_cannot_mutate_internal_previous_release() -> None:
+    provider = _MutatingRollbackTargetProvider(unhealthy={_sha(2)})
+    fabric = DeploymentFabric(provider)
+
+    first = fabric.deploy(_intent("project-a", "provider-target-v1", 1))
+    failed = fabric.deploy(_intent("project-a", "provider-target-v2", 2))
+
+    assert first.state is DeploymentState.HEALTHY
+    assert failed.state is DeploymentState.UNCERTAIN
+    stored_first = next(
+        record
+        for record in fabric.snapshot().records
+        if record.intent.intent_id == "provider-target-v1"
+    )
+    assert stored_first.intent.release.version == "release-1"
+
+
+class _BehavioralIntentId(str):
+    def __hash__(self) -> int:
+        raise AssertionError("behavioral intent id hash must not execute")
+
+    def strip(self, chars=None):
+        raise AssertionError("behavioral intent id strip must not execute")
+
+
+def test_reconcile_rejects_behavioral_intent_id_before_hash() -> None:
+    provider = FakeProvider(uncertain={"safe-intent"})
+    fabric = DeploymentFabric(provider)
+    record = fabric.deploy(_intent("project-a", "safe-intent", 1))
+    assert record.state is DeploymentState.UNCERTAIN
+
+    with pytest.raises(DeploymentFabricError, match="intent id carrier"):
+        fabric.reconcile(_BehavioralIntentId("safe-intent"))
+
+    assert fabric.snapshot().records[0].state is DeploymentState.UNCERTAIN
+
