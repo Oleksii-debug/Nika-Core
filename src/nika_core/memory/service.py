@@ -7,6 +7,7 @@ from typing import Any
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.memory.contracts import MemoryRecord, MemoryScope
+from nika_core.memory.minimization import minimize_for_persistence
 
 
 class MemoryService:
@@ -33,7 +34,12 @@ class MemoryService:
         if expires_at is not None:
             expires_at = _as_utc(expires_at)
         now = datetime.now(UTC)
-        body = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        body = json.dumps(
+            minimize_for_persistence(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         with self._store.connection() as conn:
             existing = conn.execute(
                 "SELECT created_at FROM memory_records WHERE scope = ? AND owner_id = ? "
