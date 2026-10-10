@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import Keymap
@@ -15,6 +16,10 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.default_actions import build_default_action_registry
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
+from nika_core.packaged_agent_builder import (
+    PackagedAgentBuilderDraftHandler,
+    PackagedAgentBuilderStateProjector,
+)
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
@@ -68,11 +73,14 @@ def build_windows_bridge(
         ),
     )
     products = ProductProjectCommandService(ProductProjectRepository(store))
+    agent_definitions = AgentDefinitionRepository(store)
     product_router = PackagedProductCommandRouter(
         products=products,
         ordinary_handler=backend.create_task,
+        agent_builder_handler=PackagedAgentBuilderDraftHandler(agent_definitions),
         selection_store=PackagedProductSelectionStore(store),
     )
+    agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
     command_center = ProductCommandCenter(products)
     product_state = PackagedProductStateProvider(
         base_state=backend.snapshot,
@@ -85,7 +93,8 @@ def build_windows_bridge(
     )
 
     def source_state() -> Mapping[str, Any]:
-        return {**packaged_state(), "v01_sources": source_settings.snapshot()}
+        state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
+        return agent_builder_state.decorate(state)
 
     bridge = UIActionBridge(
         actions,

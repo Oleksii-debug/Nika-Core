@@ -18,6 +18,7 @@ from nika_core.product_project import ProductProjectSpec
 from nika_core.ui.bridge_models import UIResult
 
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
+AgentBuilderCommandHandler = Callable[[Mapping[str, Any]], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
 _PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
 _REOPEN_PREFIXES = (
@@ -38,7 +39,7 @@ _CURRENT_PROJECT_COMMANDS = frozenset(
 
 
 class PackagedProductJourneyError(ValueError):
-    """Raised when the packaged command cannot safely enter Product Factory routing."""
+    """Raised when the packaged command cannot safely enter a specialized route."""
 
 
 def product_project_identity(normalized_goal: str) -> str:
@@ -118,11 +119,13 @@ class PackagedProductSelectionStore:
 
 
 class PackagedProductCommandRouter:
-    """Route packaged command input to durable ProductProject or ordinary task handling.
+    """Route packaged command input without stealing specialized subsystem authority.
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
-    This boundary deliberately does not dispatch workers, deploy providers, Toolsmith, or any
-    high-impact external action. Those remain downstream explicit factory/security boundaries.
+    Explicit Agent Builder intent is delegated only to an injected Agent Builder handler; if the
+    composition root has not supplied one, the command fails closed instead of becoming an
+    ordinary AgentTask. Toolsmith remains a separate specialized route and also fails closed here.
+    No high-impact external action is launched merely by command classification.
     """
 
     def __init__(
@@ -130,10 +133,12 @@ class PackagedProductCommandRouter:
         *,
         products: ProductProjectCommandService,
         ordinary_handler: OrdinaryCommandHandler,
+        agent_builder_handler: AgentBuilderCommandHandler | None = None,
         selection_store: PackagedProductSelectionStore | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
+        self._agent_builder_handler = agent_builder_handler
         self._selection_store = selection_store
         self._active_project_id = selection_store.load() if selection_store is not None else None
 
@@ -218,10 +223,17 @@ class PackagedProductCommandRouter:
             return self._ordinary_handler(payload)
         if decision.route is CommandRouteKind.AMBIGUOUS:
             raise PackagedProductJourneyError(
-                "Команда одночасно схожа на ProductProject і Toolsmith. "
-                "Уточніть, чи це довготривалий продукт, "
-                "чи створення інструмента."
+                "Команда одночасно відповідає кільком спеціалізованим маршрутам. "
+                "Уточніть, чи потрібно створити ProductProject, агента через Agent Builder, "
+                "чи нову можливість Toolsmith."
             )
+        if decision.route is CommandRouteKind.AGENT_BUILDER:
+            if self._agent_builder_handler is None:
+                raise PackagedProductJourneyError(
+                    "Команда визначена як запит Agent Builder. Поточна packaged-композиція "
+                    "ще не підключила Agent Builder handler; звичайне завдання не створено."
+                )
+            return self._agent_builder_handler(payload)
         if decision.route is CommandRouteKind.TOOLSMITH:
             raise PackagedProductJourneyError(
                 "Команда визначена як запит на нову "
