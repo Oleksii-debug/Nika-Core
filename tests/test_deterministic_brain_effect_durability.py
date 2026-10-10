@@ -300,7 +300,7 @@ def test_approval_denial_releases_unused_effect_reservation(tmp_path) -> None:
         action,
         task_id=task_id,
     )
-    assert denied.error_code == DeterministicErrorCode.TOOL_EXECUTION_FAILED
+    assert denied.error_code == DeterministicErrorCode.POLICY_DENIED_CAPABILITY
     assert denied.error == "approval required"
     assert ledger.list_for_task(task_id) == ()
     assert calls == 0
