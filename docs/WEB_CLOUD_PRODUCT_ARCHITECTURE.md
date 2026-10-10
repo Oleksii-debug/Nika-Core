@@ -199,3 +199,25 @@ Track separately:
 - WEB_PRODUCTION_READY.
 
 No percentage or release claim follows merely from creating this architecture document.
+
+## 13. Application-boundary candidate — 2026-10-05
+
+The `feature/web-application-boundary-20261005` candidate implements the first
+framework-neutral boundary for migration step 3 without changing the Windows/NVDA path:
+
+- server-established `WebPrincipal` authority is passed separately from untrusted client JSON;
+- command and result carriers are detached, exact-type admitted, UTF-8/JSON resource-bounded and
+  canonicalized before crossing presentation boundaries;
+- server authorization runs before command-handler effects and must return an exact Boolean;
+- the boundary calls the handler at most once; any exception/invalid result after handler entry
+  becomes a typed `WebCommandOutcomeUnknownError` requiring reconciliation rather than blind retry;
+  state-changing handlers must reuse Nika's canonical durable idempotency/reconciliation authority
+  before external effects, and `request_id` alone is not completion evidence;
+- client-supplied tenant/user/workspace/session fields cannot become authority through the command;
+- the candidate adds no HTTP framework, account/session provider, entitlement service, secret store
+  or parallel task/runtime semantics.
+
+This candidate does **not** mark `WEB_API_CONTRACT_READY`,
+`MULTI_TENANT_SECURITY_READY`, `WEB_UI_FOUNDATION_READY` or
+`WEB_PRODUCTION_READY`. A later HTTP/SSE/WebSocket adapter must reuse this application boundary
+and canonical Nika application/domain services rather than copy Windows business logic.
