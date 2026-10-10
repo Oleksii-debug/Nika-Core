@@ -2,6 +2,8 @@
 
 Status: architecture/adoption control document.  This catalog does **not** grant milestone credit by itself.
 
+> **2026-08-27 deep supplement:** `docs/REUSE_CATALOG_2026-08-27_DEEP_AUDIT.md` extends this catalog with newly researched ready-made components for the final Nika product. The supplement does not supersede integrated choices and does not authorize future-version implementation while `V0.1_ONLY_UNTIL_RELEASE` is active. Candidate listing is not dependency/adoption/acceptance credit.
+
 ## Non-negotiable rule
 Before writing a subsystem, search maintained upstream implementations and current official documentation.  Prefer, in order:
 
@@ -148,7 +150,7 @@ Policy: do not make vision clicking the default when DOM/accessibility semantics
 
 ### OCR / document vision
 - **Tesseract OCR** (Apache-2.0) — lightweight mature OCR fallback.
-- **PaddleOCR** (Apache-2.0) — heavier multilingual OCR/document parsing option.
+- **PaddleOCR** (Apache-2.0) — heavier multilingual/document parsing option.
 - **OpenCV** (Apache-2.0) — preprocessing/vision primitives, not a general reasoning engine.
 - Vision-language models are optional model workers through Model Gateway, never mandatory kernel dependencies.
 
