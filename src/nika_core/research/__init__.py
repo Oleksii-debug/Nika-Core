@@ -72,6 +72,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "RefreshJobSummary": ("nika_core.research.models", "RefreshJobSummary"),
     "RefreshResult": ("nika_core.research.models", "RefreshResult"),
     "ResearchEvidence": ("nika_core.research.models", "ResearchEvidence"),
+    "ResearchFetchFailureClass": (
+        "nika_core.research.models",
+        "ResearchFetchFailureClass",
+    ),
     "ResearchProfile": ("nika_core.research.profiles", "ResearchProfile"),
     "ResearchProfileExecution": (
         "nika_core.research.profiles",
@@ -101,6 +105,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "ResearchResultService": ("nika_core.research.results", "ResearchResultService"),
     "ResearchResultSet": ("nika_core.research.models", "ResearchResultSet"),
     "ResearchSearchFilters": ("nika_core.research.query", "ResearchSearchFilters"),
+    "ResearchSourceIdentityError": (
+        "nika_core.research.source_identity",
+        "ResearchSourceIdentityError",
+    ),
     "ResearchSourceRef": ("nika_core.research.profiles", "ResearchSourceRef"),
     "ResearchSourceSet": ("nika_core.research.profiles", "ResearchSourceSet"),
     "ResearchWorkspace": ("nika_core.research.models", "ResearchWorkspace"),
@@ -115,6 +123,10 @@ _EXPORTS: dict[str, tuple[str, str]] = {
     "UnsupportedLocalFormatError": (
         "nika_core.research.local",
         "UnsupportedLocalFormatError",
+    ),
+    "canonical_http_locator": (
+        "nika_core.research.source_identity",
+        "canonical_http_locator",
     ),
     "chunk_text": ("nika_core.research.chunking", "chunk_text"),
     "discover_html_pagination": (
@@ -180,6 +192,7 @@ __all__ = [
     "RefreshJobSummary",
     "RefreshResult",
     "ResearchEvidence",
+    "ResearchFetchFailureClass",
     "ResearchProfile",
     "ResearchProfileExecution",
     "ResearchProfileRepository",
@@ -194,6 +207,7 @@ __all__ = [
     "ResearchResultService",
     "ResearchResultSet",
     "ResearchSearchFilters",
+    "ResearchSourceIdentityError",
     "ResearchSourceRef",
     "ResearchSourceSet",
     "ResearchWorkspace",
@@ -203,6 +217,7 @@ __all__ = [
     "SourceKind",
     "SourceSpec",
     "UnsupportedLocalFormatError",
+    "canonical_http_locator",
     "chunk_text",
     "discover_html_pagination",
     "discover_json_pagination",
