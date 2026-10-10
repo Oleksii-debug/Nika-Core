@@ -5,8 +5,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from nika_core.config import AppConfig
+from nika_core.data.experience_ledger_schema import EXPERIENCE_LEDGER_SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.diagnostics import HealthService, HealthStatus
+from nika_core.model_artifact_schema import MODEL_ARTIFACT_SCHEMA_VERSION
 from nika_core.resources.contracts import ResourceSnapshot
 
 _FIXED_NOW = datetime(2026, 9, 14, 15, 0, tzinfo=UTC)
@@ -27,6 +29,58 @@ def _run(database: Path):
 
 def _check_map(report) -> dict[str, HealthStatus]:
     return {check.check_id: check.status for check in report.checks}
+
+
+def test_experience_ledger_schema_marker_is_reported_by_health(tmp_path: Path) -> None:
+    database = tmp_path / "Ніка дані" / "nika.db"
+    SQLiteStore(database).initialize()
+
+    current = _run(database)
+    current_checks = _check_map(current)
+    assert current_checks["database.schema.experience-ledger"] is HealthStatus.PASS
+
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO experience_ledger_schema_migrations(version, applied_at) "
+            "VALUES (?, ?)",
+            (
+                EXPERIENCE_LEDGER_SCHEMA_VERSION + 1,
+                "2026-10-05T12:00:00+00:00",
+            ),
+        )
+
+    incompatible = _run(database)
+    incompatible_checks = _check_map(incompatible)
+    assert incompatible_checks["database.integrity"] is HealthStatus.PASS
+    assert incompatible_checks["database.schema.shape"] is HealthStatus.PASS
+    assert incompatible_checks["database.schema.experience-ledger"] is HealthStatus.FAIL
+    assert incompatible.overall is HealthStatus.FAIL
+
+
+def test_model_artifact_schema_marker_is_reported_by_health(tmp_path: Path) -> None:
+    database = tmp_path / "Ніка дані" / "nika.db"
+    SQLiteStore(database).initialize()
+
+    current = _run(database)
+    current_checks = _check_map(current)
+    assert current_checks["database.schema.model-artifact"] is HealthStatus.PASS
+
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO model_artifact_schema_migrations(version, applied_at) "
+            "VALUES (?, ?)",
+            (
+                MODEL_ARTIFACT_SCHEMA_VERSION + 1,
+                "2026-10-05T13:00:00+00:00",
+            ),
+        )
+
+    incompatible = _run(database)
+    incompatible_checks = _check_map(incompatible)
+    assert incompatible_checks["database.integrity"] is HealthStatus.PASS
+    assert incompatible_checks["database.schema.shape"] is HealthStatus.PASS
+    assert incompatible_checks["database.schema.model-artifact"] is HealthStatus.FAIL
+    assert incompatible.overall is HealthStatus.FAIL
 
 
 def test_current_markers_with_missing_canonical_unique_index_fail_schema_shape(

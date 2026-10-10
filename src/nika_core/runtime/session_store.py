@@ -15,6 +15,66 @@ _RESUMABLE_OUTCOMES = frozenset(
         RuntimeOutcome.FAILED,
     }
 )
+_STORED_OUTCOMES = frozenset(item.value for item in _RESUMABLE_OUTCOMES)
+
+
+def _require_exact_text(
+    value: object,
+    *,
+    field_name: str,
+    non_empty: bool,
+) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be exact text")
+    if non_empty and not value.strip():
+        raise ValueError(f"{field_name} must not be empty")
+    return value
+
+
+def _resume_token_for_storage(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("runtime resume token must be text")
+    snapshot = str.__str__(value)
+    if not snapshot.strip():
+        return None
+    return snapshot
+
+
+def _result_for_storage(result: object) -> tuple[RuntimeOutcome, object]:
+    if type(result) is not RuntimeResult:
+        raise TypeError("runtime result must be an exact RuntimeResult value")
+    outcome = result.outcome
+    if type(outcome) is not RuntimeOutcome:
+        raise TypeError("runtime result outcome must be an exact RuntimeOutcome value")
+    return outcome, result.resume_token
+
+
+def _stored_text(row: sqlite3.Row, field_name: str, *, non_empty: bool = True) -> str:
+    value = row[field_name]
+    if type(value) is not str:
+        raise RuntimeError(
+            f"persisted runtime session field {field_name} has invalid SQLite storage class"
+        )
+    if non_empty and not value.strip():
+        raise RuntimeError(f"persisted runtime session field {field_name} is empty")
+    return value
+
+
+def _stored_updated_at(row: sqlite3.Row) -> str:
+    value = _stored_text(row, "updated_at")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise RuntimeError("persisted runtime session updated_at is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RuntimeError("persisted runtime session updated_at must be timezone-aware")
+    if parsed.utcoffset() != timedelta(0):
+        raise RuntimeError("persisted runtime session updated_at must be UTC")
+    if parsed.astimezone(UTC).isoformat() != value:
+        raise RuntimeError("persisted runtime session updated_at is not canonical")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,15 +98,40 @@ class RuntimeSessionStore:
         self._store = store
 
     @staticmethod
-    def _record_from_row(row) -> RuntimeSessionRecord:
-        raw_outcome = row["outcome"]
+    def _record_from_row(
+        row: sqlite3.Row,
+        *,
+        recovery_inventory: bool = False,
+    ) -> RuntimeSessionRecord:
+        task_id = _stored_text(row, "task_id")
+        runtime_id = _stored_text(row, "runtime_id")
+        thread_id = _stored_text(row, "thread_id")
+        if recovery_inventory:
+            # Startup inventory must isolate an unusable/corrupt resume token as a
+            # non-resumable candidate instead of aborting classification for every
+            # persisted session. Never coerce BLOB/blank storage into usable authority.
+            raw_resume_token = row["resume_token"]
+            resume_token = (
+                raw_resume_token
+                if type(raw_resume_token) is str and raw_resume_token.strip()
+                else ""
+            )
+        else:
+            resume_token = _stored_text(row, "resume_token")
+        raw_outcome = _stored_text(row, "outcome")
+        if raw_outcome == _ACTIVE_MARKER:
+            outcome = None
+        elif raw_outcome in _STORED_OUTCOMES:
+            outcome = RuntimeOutcome(raw_outcome)
+        else:
+            raise RuntimeError("persisted runtime session outcome is not resumable")
         return RuntimeSessionRecord(
-            task_id=row["task_id"],
-            runtime_id=row["runtime_id"],
-            thread_id=row["thread_id"],
-            resume_token=row["resume_token"],
-            outcome=None if raw_outcome == _ACTIVE_MARKER else RuntimeOutcome(raw_outcome),
-            updated_at=row["updated_at"],
+            task_id=task_id,
+            runtime_id=runtime_id,
+            thread_id=thread_id,
+            resume_token=resume_token,
+            outcome=outcome,
+            updated_at=_stored_updated_at(row),
         )
 
     @staticmethod
@@ -61,9 +146,20 @@ class RuntimeSessionStore:
         """
         now = datetime.now(UTC)
         if previous is not None:
-            previous_value = datetime.fromisoformat(previous)
-            if previous_value.tzinfo is None:
-                previous_value = previous_value.replace(tzinfo=UTC)
+            if type(previous) is not str:
+                raise RuntimeError(
+                    "persisted runtime session updated_at has invalid SQLite storage class"
+                )
+            try:
+                previous_value = datetime.fromisoformat(previous)
+            except ValueError as exc:
+                raise RuntimeError("persisted runtime session updated_at is invalid") from exc
+            if previous_value.tzinfo is None or previous_value.utcoffset() is None:
+                raise RuntimeError("persisted runtime session updated_at must be timezone-aware")
+            if previous_value.utcoffset() != timedelta(0):
+                raise RuntimeError("persisted runtime session updated_at must be UTC")
+            if previous_value.astimezone(UTC).isoformat() != previous:
+                raise RuntimeError("persisted runtime session updated_at is not canonical")
             if now <= previous_value:
                 now = previous_value + timedelta(microseconds=1)
         return now.isoformat()
@@ -78,13 +174,18 @@ class RuntimeSessionStore:
         task_id: str,
     ) -> RuntimeSessionRecord | None:
         """Read one session inside a caller-owned transaction/CAS boundary."""
+        lookup_task_id = _require_exact_text(
+            task_id,
+            field_name="task_id",
+            non_empty=False,
+        )
         row = conn.execute(
             """
             SELECT task_id, runtime_id, thread_id, resume_token, outcome, updated_at
             FROM runtime_sessions
             WHERE task_id = ?
             """,
-            (task_id,),
+            (lookup_task_id,),
         ).fetchone()
         if row is None:
             return None
@@ -99,7 +200,9 @@ class RuntimeSessionStore:
                 ORDER BY updated_at, task_id
                 """
             ).fetchall()
-        return tuple(self._record_from_row(row) for row in rows)
+        return tuple(
+            self._record_from_row(row, recovery_inventory=True) for row in rows
+        )
 
     def record_active(
         self,
@@ -133,7 +236,11 @@ class RuntimeSessionStore:
         A duplicate task/session is a recovery fact, not something a fresh start may replace.
         SQLite uniqueness therefore deliberately raises instead of using an UPSERT.
         """
-        if not resume_token.strip():
+        task_id = _require_exact_text(task_id, field_name="task_id", non_empty=True)
+        runtime_id = _require_exact_text(runtime_id, field_name="runtime_id", non_empty=True)
+        thread_id = _require_exact_text(thread_id, field_name="thread_id", non_empty=True)
+        resume_token_snapshot = _resume_token_for_storage(resume_token)
+        if resume_token_snapshot is None:
             raise ValueError("active runtime resume token must not be empty")
         now = self._next_updated_at(None)
         try:
@@ -143,7 +250,14 @@ class RuntimeSessionStore:
                     task_id, runtime_id, thread_id, resume_token, outcome, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (task_id, runtime_id, thread_id, resume_token, _ACTIVE_MARKER, now),
+                (
+                    task_id,
+                    runtime_id,
+                    thread_id,
+                    resume_token_snapshot,
+                    _ACTIVE_MARKER,
+                    now,
+                ),
             )
         except sqlite3.IntegrityError as exc:
             raise ValueError(
@@ -177,15 +291,41 @@ class RuntimeSessionStore:
         result: RuntimeResult,
     ) -> None:
         """Persist the resumable result cursor in a caller-owned transaction."""
-        if result.outcome not in _RESUMABLE_OUTCOMES or not result.resume_token:
+        task_id = _require_exact_text(task_id, field_name="task_id", non_empty=True)
+        runtime_id = _require_exact_text(runtime_id, field_name="runtime_id", non_empty=True)
+        thread_id = _require_exact_text(thread_id, field_name="thread_id", non_empty=True)
+        outcome, resume_token = _result_for_storage(result)
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        existing_row = conn.execute(
+            """
+            SELECT task_id, runtime_id, thread_id, resume_token, outcome, updated_at
+            FROM runtime_sessions
+            WHERE task_id = ?
+            """,
+            (task_id,),
+        ).fetchone()
+        existing = self._record_from_row(existing_row) if existing_row is not None else None
+        if existing is not None:
+            if existing.runtime_id != runtime_id:
+                raise ValueError("runtime result does not match persisted runtime session")
+            if existing.thread_id != thread_id:
+                raise ValueError("runtime result thread does not match persisted runtime session")
+
+        if outcome not in _RESUMABLE_OUTCOMES:
+            self.delete_with_connection(conn, task_id)
+            return
+        resume_token_snapshot = _resume_token_for_storage(resume_token)
+        if resume_token_snapshot is None:
+            if outcome in {
+                RuntimeOutcome.WAITING_APPROVAL,
+                RuntimeOutcome.PAUSED,
+            }:
+                raise ValueError("resumable runtime outcome requires a usable resume token")
             self.delete_with_connection(conn, task_id)
             return
 
-        previous_row = conn.execute(
-            "SELECT updated_at FROM runtime_sessions WHERE task_id = ?",
-            (task_id,),
-        ).fetchone()
-        previous = previous_row["updated_at"] if previous_row is not None else None
+        previous = existing.updated_at if existing is not None else None
         now = self._next_updated_at(previous)
         conn.execute(
             """
@@ -204,8 +344,8 @@ class RuntimeSessionStore:
                 task_id,
                 runtime_id,
                 thread_id,
-                result.resume_token,
-                result.outcome.value,
+                resume_token_snapshot,
+                outcome.value,
                 now,
             ),
         )
@@ -216,4 +356,9 @@ class RuntimeSessionStore:
 
     def delete_with_connection(self, conn: sqlite3.Connection, task_id: str) -> None:
         """Delete a recovery cursor inside a caller-owned transaction."""
-        conn.execute("DELETE FROM runtime_sessions WHERE task_id = ?", (task_id,))
+        lookup_task_id = _require_exact_text(
+            task_id,
+            field_name="task_id",
+            non_empty=False,
+        )
+        conn.execute("DELETE FROM runtime_sessions WHERE task_id = ?", (lookup_task_id,))

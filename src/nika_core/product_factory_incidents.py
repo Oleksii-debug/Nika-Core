@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from threading import RLock
 
 from .product_factory_coordinator import (
     CoordinatorError,
@@ -29,9 +30,12 @@ from .product_factory_incident_contracts import (
     RepairCandidateEvidence,
     RepairWorkOrder,
     ServiceRecordView,
+    SupplyChainAdvisory,
     validate_digest,
 )
 from .toolsmith.contracts import AllowedPathPolicy
+
+_TERMINAL_INCIDENT_STATES = frozenset({IncidentState.RESOLVED, IncidentState.ROLLED_BACK})
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,10 +54,10 @@ class IncidentRepairReleaseCoordinator:
     project_id: str
     _incidents: dict[str, IncidentRecord] = field(default_factory=dict, init=False, repr=False)
     _fingerprints: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _incident_open_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if not self.project_id.strip():
-            raise ProductIncidentError("project_id must not be empty")
+        _exact_incident_text(self.project_id, "project_id")
 
     def open_incident(
         self,
@@ -61,8 +65,8 @@ class IncidentRepairReleaseCoordinator:
         trigger: IncidentTrigger,
         operations: OperationsSnapshotView,
     ) -> IncidentRecord:
-        if not incident_id.strip():
-            raise ProductIncidentError("incident_id must not be empty")
+        _exact_incident_text(incident_id, "incident_id")
+        trigger = _private_trigger(trigger)
         if trigger.project_id != self.project_id or operations.project_id != self.project_id:
             raise ProductIncidentError("incident/operations belongs to another project")
         service = _service_from_operations(operations, trigger.service_id)
@@ -82,22 +86,28 @@ class IncidentRepairReleaseCoordinator:
                     "incident evidence is not present in approved operations evidence"
                 )
 
-        existing = self._incidents.get(incident_id)
-        if existing is not None:
-            if existing.trigger.fingerprint != trigger.fingerprint:
-                raise ProductIncidentError("incident id conflicts with prior trigger")
-            return existing
+        with self._incident_open_lock:
+            existing = self._incidents.get(incident_id)
+            if existing is not None:
+                if existing.trigger.fingerprint != trigger.fingerprint:
+                    raise ProductIncidentError("incident id conflicts with prior trigger")
+                return _private_incident_record(existing)
 
-        duplicate_id = self._fingerprints.get(trigger.fingerprint)
-        if duplicate_id is not None:
-            return self._incidents[duplicate_id]
+            duplicate_id = self._fingerprints.get(trigger.fingerprint)
+            if duplicate_id is not None:
+                duplicate = self._incidents[duplicate_id]
+                if duplicate.state not in _TERMINAL_INCIDENT_STATES:
+                    return _private_incident_record(duplicate)
+                if trigger.observed_at <= self._terminal_observed_at(duplicate):
+                    return _private_incident_record(duplicate)
 
-        record = IncidentRecord(incident_id, trigger, IncidentState.OPEN)
-        self._incidents[incident_id] = record
-        self._fingerprints[trigger.fingerprint] = incident_id
-        return record
+            record = IncidentRecord(incident_id, trigger, IncidentState.OPEN)
+            self._incidents[incident_id] = record
+            self._fingerprints[trigger.fingerprint] = incident_id
+            return _private_incident_record(record)
 
     def create_repair_work_order(self, work_order: RepairWorkOrder) -> IncidentRecord:
+        work_order = _private_work_order(work_order)
         record = self._require(work_order.incident_id)
         if work_order.project_id != self.project_id:
             raise ProductIncidentError("repair work order belongs to another project")
@@ -137,7 +147,7 @@ class IncidentRepairReleaseCoordinator:
         if record.work_order is not None:
             if record.work_order != work_order:
                 raise ProductIncidentError("incident already has a different repair work order")
-            return record
+            return _private_incident_record(record)
         if record.state not in {IncidentState.OPEN, IncidentState.PLANNED}:
             raise ProductIncidentError("incident state does not allow repair planning")
 
@@ -150,19 +160,20 @@ class IncidentRepairReleaseCoordinator:
             record.release_events,
         )
         self._incidents[record.incident_id] = updated
-        return updated
+        return _private_incident_record(updated)
 
     def record_candidate(
         self,
         candidate: RepairCandidateEvidence,
         review_authority: TrustedReviewAuthority,
     ) -> IncidentRecord:
+        candidate = _private_candidate(candidate)
         record = self._require(candidate.incident_id)
         prior = {item.candidate_id: item for item in record.candidates}
         if candidate.candidate_id in prior:
             if prior[candidate.candidate_id] != candidate:
                 raise ProductIncidentError("candidate id conflicts with prior evidence")
-            return record
+            return _private_incident_record(record)
         if record.state not in {IncidentState.PLANNED, IncidentState.REVIEW_REQUIRED}:
             raise ProductIncidentError("incident state does not allow repair candidate evidence")
         if record.work_order is None:
@@ -204,13 +215,14 @@ class IncidentRepairReleaseCoordinator:
             record.release_events,
         )
         self._incidents[record.incident_id] = updated
-        return updated
+        return _private_incident_record(updated)
 
     def record_release(
         self,
         evidence: ReleaseEvidence,
         deployments: DeploymentFabricSnapshot,
     ) -> IncidentRecord:
+        evidence = _private_release(evidence)
         record = self._require(evidence.incident_id)
         candidate = self._candidate(record, evidence.candidate_id)
         if not candidate.review_accepted:
@@ -228,7 +240,7 @@ class IncidentRepairReleaseCoordinator:
         if evidence.release_event_id in prior:
             if prior[evidence.release_event_id] != evidence:
                 raise ProductIncidentError("release event id conflicts with prior evidence")
-            return record
+            return _private_incident_record(record)
         for other in self._incidents.values():
             if other.incident_id == record.incident_id:
                 continue
@@ -260,7 +272,7 @@ class IncidentRepairReleaseCoordinator:
             record.release_events + (evidence,),
         )
         self._incidents[record.incident_id] = updated
-        return updated
+        return _private_incident_record(updated)
 
     def reconcile_release(
         self,
@@ -273,6 +285,7 @@ class IncidentRepairReleaseCoordinator:
         observed_at: datetime,
         deployments: DeploymentFabricSnapshot,
     ) -> IncidentRecord:
+        _exact_incident_text(incident_id, "incident_id")
         record = self._require(incident_id)
         if record.state is not IncidentState.RECONCILE_REQUIRED or not record.release_events:
             raise ProductIncidentError("incident has no uncertain release to reconcile")
@@ -316,13 +329,16 @@ class IncidentRepairReleaseCoordinator:
             record.release_events[:-1] + (reconciled,),
         )
         self._incidents[incident_id] = updated
-        return updated
+        return _private_incident_record(updated)
 
     def get(self, incident_id: str) -> IncidentRecord:
-        return self._require(incident_id)
+        return _private_incident_record(self._require(incident_id))
 
     def list_incidents(self) -> tuple[IncidentRecord, ...]:
-        return tuple(self._incidents[key] for key in sorted(self._incidents))
+        return tuple(
+            _private_incident_record(self._incidents[key])
+            for key in sorted(self._incidents)
+        )
 
     def snapshot(self) -> IncidentLifecycleSnapshot:
         return IncidentLifecycleSnapshot(
@@ -338,6 +354,7 @@ class IncidentRepairReleaseCoordinator:
         deployments: DeploymentFabricSnapshot | None = None,
         review_authorities: tuple[TrustedReviewAuthority, ...] = (),
     ) -> None:
+        snapshot = _private_snapshot(snapshot)
         if snapshot.project_id != self.project_id:
             raise ProductIncidentError("incident snapshot belongs to another project")
         incident_ids = [record.incident_id for record in snapshot.incidents]
@@ -352,10 +369,18 @@ class IncidentRepairReleaseCoordinator:
             raise ProductIncidentError("incident snapshot fingerprint aliases incident ids")
         for fingerprint in fingerprints:
             validate_digest(fingerprint, "incident fingerprint")
-        if set(mapped_ids) != set(incident_ids):
-            raise ProductIncidentError("incident snapshot fingerprint index is incomplete")
 
         incidents = {record.incident_id: record for record in snapshot.incidents}
+        if any(incident_id not in incidents for incident_id in mapped_ids):
+            raise ProductIncidentError("incident snapshot fingerprint maps unknown incident")
+        if snapshot.schema != INCIDENT_LIFECYCLE_SCHEMA:
+            if set(mapped_ids) != set(incident_ids):
+                raise ProductIncidentError("incident snapshot fingerprint index is incomplete")
+        else:
+            trigger_fingerprints = {record.trigger.fingerprint for record in snapshot.incidents}
+            if set(fingerprints) != trigger_fingerprints:
+                raise ProductIncidentError("incident snapshot fingerprint index is incomplete")
+
         work_ids = [
             record.work_order.work_order_id
             for record in snapshot.incidents
@@ -391,6 +416,7 @@ class IncidentRepairReleaseCoordinator:
             raise ProductIncidentError(
                 "release-bearing incident snapshot requires deployment authority"
             )
+        fingerprint_index = dict(fingerprint_pairs)
         for record in snapshot.incidents:
             self._validate_record(record)
             for candidate in record.candidates:
@@ -406,15 +432,19 @@ class IncidentRepairReleaseCoordinator:
                 self._validate_candidate_authority(record, candidate, matches[0])
             if record.trigger.project_id != self.project_id:
                 raise ProductIncidentError("incident snapshot crosses project boundary")
-            expected = record.trigger.fingerprint
-            if dict(fingerprint_pairs).get(expected) != record.incident_id:
-                raise ProductIncidentError("incident snapshot fingerprint mapping is corrupt")
+            if snapshot.schema != INCIDENT_LIFECYCLE_SCHEMA:
+                expected = record.trigger.fingerprint
+                if fingerprint_index.get(expected) != record.incident_id:
+                    raise ProductIncidentError("incident snapshot fingerprint mapping is corrupt")
             if deployments is not None:
                 for release in record.release_events:
                     self._validate_release_authority(record, release, deployments)
 
+        if snapshot.schema == INCIDENT_LIFECYCLE_SCHEMA:
+            self._validate_occurrence_families(snapshot.incidents, fingerprint_index)
+
         self._incidents = incidents
-        self._fingerprints = dict(fingerprint_pairs)
+        self._fingerprints = fingerprint_index
 
     def _validate_record(self, record: IncidentRecord) -> None:
         if record.work_order is not None:
@@ -502,6 +532,47 @@ class IncidentRepairReleaseCoordinator:
         expected_state = self._derived_state(record)
         if record.state is not expected_state:
             raise ProductIncidentError("snapshot incident state is not derivable from evidence")
+
+    def _validate_occurrence_families(
+        self,
+        records: tuple[IncidentRecord, ...],
+        fingerprint_index: dict[str, str],
+    ) -> None:
+        families: dict[str, list[IncidentRecord]] = {}
+        for record in records:
+            families.setdefault(record.trigger.fingerprint, []).append(record)
+
+        for fingerprint, family in families.items():
+            ordered = sorted(family, key=lambda item: (item.trigger.observed_at, item.incident_id))
+            observed_times = [item.trigger.observed_at for item in ordered]
+            if len(observed_times) != len(set(observed_times)):
+                raise ProductIncidentError(
+                    "repeat incident occurrences require unique observation times"
+                )
+            for index in range(1, len(ordered)):
+                previous = ordered[index - 1]
+                current = ordered[index]
+                if previous.state not in _TERMINAL_INCIDENT_STATES:
+                    raise ProductIncidentError(
+                        "repeat incident cannot follow a non-terminal predecessor"
+                    )
+                if current.trigger.observed_at <= self._terminal_observed_at(previous):
+                    raise ProductIncidentError(
+                        "repeat incident must be observed after prior terminal release"
+                    )
+            if fingerprint_index.get(fingerprint) != ordered[-1].incident_id:
+                raise ProductIncidentError(
+                    "incident fingerprint index must point to latest occurrence"
+                )
+
+    @staticmethod
+    def _terminal_observed_at(record: IncidentRecord) -> datetime:
+        if record.state not in _TERMINAL_INCIDENT_STATES or not record.release_events:
+            raise ProductIncidentError("terminal incident lacks terminal release evidence")
+        release = record.release_events[-1]
+        if release.disposition is ReleaseDisposition.UNCERTAIN:
+            raise ProductIncidentError("terminal incident cannot carry uncertain release evidence")
+        return release.observed_at
 
     def _authority_matches_candidate(
         self,
@@ -740,6 +811,7 @@ class IncidentRepairReleaseCoordinator:
         return IncidentState.OPEN
 
     def _require(self, incident_id: str) -> IncidentRecord:
+        _exact_incident_text(incident_id, "incident_id")
         try:
             return self._incidents[incident_id]
         except KeyError as exc:
@@ -751,6 +823,139 @@ class IncidentRepairReleaseCoordinator:
             if candidate.candidate_id == candidate_id:
                 return candidate
         raise ProductIncidentError("unknown repair candidate")
+
+
+def _exact_incident_text(value: object, label: str) -> str:
+    if type(value) is not str or not value.strip():
+        raise ProductIncidentError(f"{label} must be non-empty exact text")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ProductIncidentError(f"{label} must be valid UTF-8 text") from exc
+    return value
+
+
+def _private_advisory(value: object) -> SupplyChainAdvisory:
+    if type(value) is not SupplyChainAdvisory:
+        raise ProductIncidentError("incident advisory carrier must be exact")
+    return SupplyChainAdvisory(
+        value.advisory_id,
+        value.ecosystem,
+        value.package_name,
+        value.affected_version,
+        value.fixed_version,
+        value.provenance_ref,
+    )
+
+
+def _private_trigger(value: object) -> IncidentTrigger:
+    if type(value) is not IncidentTrigger:
+        raise ProductIncidentError("incident trigger carrier must be exact")
+    return IncidentTrigger(
+        value.project_id,
+        value.service_id,
+        value.environment_id,
+        value.release_sha,
+        value.kind,
+        value.severity,
+        value.evidence_refs,
+        value.approval_ref,
+        value.observed_at,
+        None if value.advisory is None else _private_advisory(value.advisory),
+    )
+
+
+def _private_work_order(value: object) -> RepairWorkOrder:
+    if type(value) is not RepairWorkOrder:
+        raise ProductIncidentError("repair work-order carrier must be exact")
+    return RepairWorkOrder(
+        value.work_order_id,
+        value.incident_id,
+        value.project_id,
+        value.service_id,
+        value.repository_id,
+        value.component_id,
+        value.base_release_sha,
+        value.goal,
+        value.allowed_paths,
+        value.permission_ceiling,
+        value.acceptance_commands,
+        value.evidence_refs,
+        value.created_at,
+        value.advisory_id,
+        value.target_fixed_version,
+    )
+
+
+def _private_candidate(value: object) -> RepairCandidateEvidence:
+    if type(value) is not RepairCandidateEvidence:
+        raise ProductIncidentError("repair candidate carrier must be exact")
+    return RepairCandidateEvidence(
+        value.candidate_id,
+        value.incident_id,
+        value.work_order_id,
+        value.base_release_sha,
+        value.result_sha,
+        value.artifact_digest,
+        value.diff_digest,
+        value.regression_evidence_refs,
+        value.provenance_evidence_refs,
+        value.review_ref,
+        value.review_accepted,
+        value.recorded_at,
+    )
+
+
+def _private_release(value: object) -> ReleaseEvidence:
+    if type(value) is not ReleaseEvidence:
+        raise ProductIncidentError("release evidence carrier must be exact")
+    return ReleaseEvidence(
+        value.release_event_id,
+        value.incident_id,
+        value.candidate_id,
+        value.previous_release_sha,
+        value.candidate_release_sha,
+        value.artifact_digest,
+        value.staging_intent_id,
+        value.production_intent_id,
+        value.disposition,
+        value.deployment_evidence_refs,
+        value.health_evidence_refs,
+        value.restored_release_sha,
+        value.reconciliation_ref,
+        value.observed_at,
+    )
+
+
+def _private_incident_record(value: object) -> IncidentRecord:
+    if type(value) is not IncidentRecord:
+        raise ProductIncidentError("incident record carrier must be exact")
+    if type(value.candidates) is not tuple or type(value.release_events) is not tuple:
+        raise ProductIncidentError("incident record collections must be exact tuples")
+    return IncidentRecord(
+        value.incident_id,
+        _private_trigger(value.trigger),
+        value.state,
+        None if value.work_order is None else _private_work_order(value.work_order),
+        tuple(_private_candidate(item) for item in value.candidates),
+        tuple(_private_release(item) for item in value.release_events),
+    )
+
+
+def _private_snapshot(value: object) -> IncidentLifecycleSnapshot:
+    if type(value) is not IncidentLifecycleSnapshot:
+        raise ProductIncidentError("incident lifecycle snapshot carrier must be exact")
+    if type(value.incidents) is not tuple or type(value.fingerprint_index) is not tuple:
+        raise ProductIncidentError("incident lifecycle snapshot collections must be exact tuples")
+    for pair in value.fingerprint_index:
+        if type(pair) is not tuple or len(pair) != 2:
+            raise ProductIncidentError("incident fingerprint mapping carrier must be exact")
+    return IncidentLifecycleSnapshot(
+        value.schema,
+        value.project_id,
+        tuple(_private_incident_record(item) for item in value.incidents),
+        tuple((item[0], item[1]) for item in value.fingerprint_index),
+    )
 
 
 def _deployment_by_intent(
