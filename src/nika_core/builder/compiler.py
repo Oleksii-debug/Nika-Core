@@ -45,12 +45,24 @@ class AgentCompiler:
         schedule_ids: set[str] | frozenset[str] = frozenset(),
         resource_budget_refs: set[str] | frozenset[str] = frozenset(),
     ) -> None:
-        self._tools = {tool.tool_id: tool for tool in tools}
+        # The registry is permission authority: never silently overwrite a duplicate.
+        # Snapshot classifications so later caller mutations cannot change this compiler.
+        self._tools: dict[str, RiskTier] = {}
+        for tool in tools:
+            if tool.tool_id in self._tools:
+                raise ValueError("duplicate registered tool identity")
+            self._tools[tool.tool_id] = _TOOL_RISK_TO_TIER[tool.risk]
         self._model_profiles = frozenset(model_profiles)
         self._schedule_ids = frozenset(schedule_ids)
         self._resource_budget_refs = frozenset(resource_budget_refs)
 
     def compile(self, definition: AgentDefinition) -> CompilationResult:
+        # Pydantic's model_copy(update=...) and frozen-object mutation bypass validators.
+        # Re-admit the full document before reviewing any tool or budget authority.
+        # model_validate(existing_instance) alone would not revalidate by default.
+        if type(definition) is not AgentDefinition:
+            raise TypeError("compiler definition must be a plain AgentDefinition")
+        definition = AgentDefinition.model_validate(definition.model_dump(mode="python"))
         if definition.model_profile not in self._model_profiles:
             raise ValueError(f"unknown model profile: {definition.model_profile}")
         if definition.schedule_id is not None and definition.schedule_id not in self._schedule_ids:
@@ -64,10 +76,9 @@ class AgentCompiler:
         approvals: list[str] = []
         highest = RiskTier.R0_READ_ONLY
         for grant in definition.tool_grants:
-            spec = self._tools.get(grant.tool_id)
-            if spec is None:
+            actual = self._tools.get(grant.tool_id)
+            if actual is None:
                 raise ValueError(f"unknown tool: {grant.tool_id}")
-            actual = _TOOL_RISK_TO_TIER[spec.risk]
             declared = RiskTier(grant.max_risk)
             if declared < actual:
                 raise ValueError(
@@ -82,7 +93,7 @@ class AgentCompiler:
                 approvals.append(grant.tool_id)
 
         return CompilationResult(
-            definition=definition,
+            definition=definition.model_copy(deep=True),
             required_human_approvals=tuple(sorted(approvals)),
             highest_risk=highest,
         )
