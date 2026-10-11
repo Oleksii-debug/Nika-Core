@@ -1,3 +1,16 @@
+# 2026-10-11 Closure-first recovery directive — binding worker selection
+
+This is a narrow work-selection and convergence clarification. It does not bypass CI, licensing, security, release, owner/NVDA, or repository protection requirements. Existing accepted code/PR/evidence remains authoritative.
+
+1. For the assigned plan, read the LIVE `MULTI_PLAN_CLOSURE_STATE.md`, not just migrated Drive lines. Identify first ACTIONABLE, NOT-DONE section and its canonical PR lineage; do not start another whole-section implementation or duplicate authority while a repairable canonical candidate exists.
+2. Classify exact-head gates as **PASS / PROVEN_FAILURE / PENDING / SKIPPED / EXTERNAL** from completed run/job logs. On PROVEN_FAILURE, fix the *first causal code/test/lint issue* on the existing finisher, without downgrading checks. After each repair, refreeze a SHA, use new CI, and do not report PASS from a prior SHA.
+3. In particular, Plan 1 §§1–2 have a converged child PR #1871. Resolve actual Core/M12 Ubuntu+Windows failures there first. Other plan stacks must similarly reuse their existing PRs rather than creating another nested duplicate. Recover dependent parents in topological order before any terminal integration.
+4. Immediately after applicable exact-head gates pass: reconcile unique work with current main once, perform permitted integration, verify post-merge source/tests/status, then set **only the proved section** DONE in GitHub and its assigned Drive plan. A green isolated test, draft PR, or passing fixture alone is not DONE.
+5. External physical Windows/NVDA/Web/Cloud product acceptance remains Plan 7. Do not let this final external scope block independently qualified intermediate components, and do not invent physical PASS from mocks. If any real failure remains, record precisely and continue a nonconflicting acceptance-critical task, not speculative polish.
+6. Report each plan as `terminal_done/total`, first actionable section, exact PR/SHA, and a single independently evidenced blocker. No percentage without evidence. Never silently rewrite older DONE or create a second coordination authority.
+
+This directive takes precedence over any suggestion in older docs to maximize PR count or perform optional hardening instead of closing the currently qualified section.
+
 # Multi-Plan Parallel Closure Protocol v4 — owner directive 2026-10-08
 
 This directive overrides conflicting global-sequential work-selection rules for the new project-plan architecture.
