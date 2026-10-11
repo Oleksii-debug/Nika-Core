@@ -8,10 +8,10 @@ from nika_core.runtime.contracts import (
     RuntimeEvent,
     RuntimeOutcome,
     RuntimeRequest,
+    RuntimeResult,
     RuntimeResumeProbe,
     RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
-    RuntimeResult,
 )
 
 
