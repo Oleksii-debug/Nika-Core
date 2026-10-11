@@ -34,7 +34,7 @@ def test_runtime_result_rejects_malformed_resumable_authority(
     outcome: RuntimeOutcome,
     resume_token: object,
 ) -> None:
-    with pytest.raises(ValueError, match="usable resume token"):
+    with pytest.raises((ValueError, TypeError), match="resume_token|usable resume token"):
         RuntimeResult(
             outcome=outcome,
             resume_token=resume_token,  # type: ignore[arg-type]
@@ -73,14 +73,14 @@ def test_retry_policy_rejects_malformed_resume_authority(resume_token: object) -
         max_retries=1,
         retryable_error_codes=frozenset({RuntimeErrorCode.TRANSIENT}),
     )
-    result = RuntimeResult(
-        outcome=RuntimeOutcome.FAILED,
-        error="temporary provider failure",
-        error_code=RuntimeErrorCode.TRANSIENT,
-        resume_token=resume_token,  # type: ignore[arg-type]
-    )
-
-    assert policy.should_retry(result, retries_used=0) is False
+    # Reject invalid provider cursor at the DTO boundary, before retry policy.
+    with pytest.raises((ValueError, TypeError), match="resume_token"):
+        RuntimeResult(
+            outcome=RuntimeOutcome.FAILED,
+            error="temporary provider failure",
+            error_code=RuntimeErrorCode.TRANSIENT,
+            resume_token=resume_token,  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize("resume_token", ["", "   ", 7])
@@ -92,11 +92,19 @@ def test_retry_policy_preserves_explicit_fresh_retry_for_malformed_resume_token(
         retryable_error_codes=frozenset({RuntimeErrorCode.TRANSIENT}),
         allow_fresh_retry=True,
     )
-    result = RuntimeResult(
+    # allow_fresh_retry never turns a malformed *present* cursor into authority.
+    with pytest.raises((ValueError, TypeError), match="resume_token"):
+        RuntimeResult(
+            outcome=RuntimeOutcome.FAILED,
+            error="temporary provider failure",
+            error_code=RuntimeErrorCode.TRANSIENT,
+            resume_token=resume_token,  # type: ignore[arg-type]
+        )
+    # A genuinely absent cursor is the separately authorized fresh-retry case.
+    valid = RuntimeResult(
         outcome=RuntimeOutcome.FAILED,
         error="temporary provider failure",
         error_code=RuntimeErrorCode.TRANSIENT,
-        resume_token=resume_token,  # type: ignore[arg-type]
+        resume_token=None,
     )
-
-    assert policy.should_retry(result, retries_used=0) is True
+    assert policy.should_retry(valid, retries_used=0) is True
