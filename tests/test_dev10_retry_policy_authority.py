@@ -81,6 +81,13 @@ def test_retry_policy_rejects_malformed_resume_authority(resume_token: object) -
             error_code=RuntimeErrorCode.TRANSIENT,
             resume_token=resume_token,  # type: ignore[arg-type]
         )
+    # With no cursor, the default policy still refuses an unsafe fresh replay.
+    absent = RuntimeResult(
+        outcome=RuntimeOutcome.FAILED,
+        error="temporary provider failure",
+        error_code=RuntimeErrorCode.TRANSIENT,
+    )
+    assert policy.should_retry(absent, retries_used=0) is False
 
 
 @pytest.mark.parametrize("resume_token", ["", "   ", 7])
