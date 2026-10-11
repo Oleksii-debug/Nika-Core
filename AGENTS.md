@@ -1,3 +1,9 @@
+# 2026-10-11 OWNER MICRO-CLOSURE RULE — no prompt changes
+
+Existing 7 Google Drive plans and their numbered Sections remain canonical, no historical records or terminal DONE are deleted. To prevent repeated multi-day stalls, all Plans 1–7 now explicitly partition their first actionable original Section into three **bounded independently verifiable** checkpoints inside that same Section: A=REUSE exact code/PR/SHA and positive tests, B=repair one *proven* failed CI job plus negative/recovery tests using the existing owner PR, C=qualify the full inherited acceptance, ordered integration and post-merge exact readback. Record A_VERIFIED, B_VERIFIED, C_VERIFIED separately in Drive/GitHub after actual evidence, but do not mark Section DONE before C, and don't extend the scope with speculative hardening.
+
+Priority for Plan1 is existing PR #1871 (Sections 1–2 implementation); previous head `56de6201062f07f815310f9c1630fd6e55edbbc7`: Core Ubuntu SUCCESS and M12 Ubuntu SUCCESS, Windows pending at last verified checkpoint. This is historical SHA-bound observation, not a statement that latest exact-head Windows or full release already passed. First fix current proven blocker rather than create a new nested PR. Every worker keeps its existing prompt and plan ownership. Preserve law/licensing, security, runtime no-replay and any required real Windows/NVDA final Plan7 acceptance. Plan2 Agent Builder/teams and Plan3 model/brain work are independent plan lanes; source scope is not contingent on extension/other product version.
+
 # 2026-10-11 Closure-first recovery directive — binding worker selection
 
 This is a narrow work-selection and convergence clarification. It does not bypass CI, licensing, security, release, owner/NVDA, or repository protection requirements. Existing accepted code/PR/evidence remains authoritative.
