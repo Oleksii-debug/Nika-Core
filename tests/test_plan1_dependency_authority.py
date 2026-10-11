@@ -13,7 +13,6 @@ from pathlib import Path
 
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "docs" / "PLAN1_DEPENDENCY_AUTHORITY.json"
 PROJECT = ROOT / "pyproject.toml"
