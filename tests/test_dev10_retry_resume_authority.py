@@ -162,17 +162,21 @@ def test_retry_dispatch_uses_one_usable_token_decision(
         )
     )
 
+    malformed_present = resume_token is not None and not usable
     if usable:
         assert result.outcome == RuntimeOutcome.COMPLETED
         assert runtime.run_calls == 1
         assert runtime.resume_calls == 1
         assert _task_state(store, task_id) == TaskState.COMPLETED
-    elif allow_fresh_retry:
+    elif allow_fresh_retry and not malformed_present:
+        # No cursor was supplied, so explicitly authorized fresh retry is safe.
         assert result.outcome == RuntimeOutcome.COMPLETED
         assert runtime.run_calls == 2
         assert runtime.resume_calls == 0
         assert _task_state(store, task_id) == TaskState.COMPLETED
     else:
+        # A malformed present cursor is rejected at the runtime DTO boundary:
+        # it must never be silently reinterpreted as absent retry authority.
         assert result.outcome == RuntimeOutcome.FAILED
         assert runtime.run_calls == 1
         assert runtime.resume_calls == 0
@@ -180,7 +184,7 @@ def test_retry_dispatch_uses_one_usable_token_decision(
 
     events = audit.list_for(entity_type="task", entity_id=task_id)
     retry_started = [event for event in events if event.event_type == "runtime.retry_started"]
-    expected_retry = usable or allow_fresh_retry
+    expected_retry = usable or (allow_fresh_retry and not malformed_present)
     assert bool(retry_started) is expected_retry
     if retry_started:
         assert retry_started[0].payload["resume"] is usable
