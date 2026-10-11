@@ -1,3 +1,6 @@
+## 2026-10-11 Owner work decomposition (no renumbering)
+Each of the seven numbered Drive plans now contains A/B/C micro-closure checkpoints inside its first Section. A = reuse audited existing implementation + exact SHA/scoped tests; B = first provable failed CI job repaired with negative/recovery tests; C = full inherited acceptance, ordered integration and postmerge main SHA readback. Independently record A/Б/В status, but original Section DONE only when all required evidence exists. Do not create a separate new PR or reimplement old code to satisfy the checkpoints; they are acceptance bookkeeping, not expanded feature scope. No prompt/session changes. Terminal total section counts remain unchanged.
+
 # Nika Core — Canonical Multi-Plan Index
 
 ## Authority
