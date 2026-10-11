@@ -189,13 +189,13 @@ def test_resume_rejects_excessive_step_budget(budget: int) -> None:
 
 
 @pytest.mark.parametrize("budget", [86_400.001, 100_000, 10**80])
-def test_new_run_rejects_excessive_time_budget(budget: float | int) -> None:
+def test_new_run_rejects_excessive_time_budget(budget: float) -> None:
     with pytest.raises(ValueError, match="timeout_seconds must not exceed"):
         RuntimeRequest("task", "thread", timeout_seconds=budget)
 
 
 @pytest.mark.parametrize("budget", [86_400.001, 100_000, 10**80])
-def test_resume_rejects_excessive_time_budget(budget: float | int) -> None:
+def test_resume_rejects_excessive_time_budget(budget: float) -> None:
     with pytest.raises(ValueError, match="timeout_seconds must not exceed"):
         RuntimeResumeRequest("task", "thread", "checkpoint", timeout_seconds=budget)
 
