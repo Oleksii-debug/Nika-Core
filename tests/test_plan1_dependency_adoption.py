@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-
 PROJECT_TOML = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 # Nika contracts may name adapter capabilities without requiring their hosts.
