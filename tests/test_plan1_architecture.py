@@ -685,12 +685,16 @@ def test_architecture_guard_allows_safe_builtins_getattr_on_inert_objects() -> N
 @pytest.mark.parametrize(
     "source",
     [
-        "from builtins import __dict__ as exported\n"
-        "loader = exported['__import__']\n"
-        "loader('langgraph')\n",
-        "from importlib import __dict__ as exported\n"
-        "loader = exported['import_module']\n"
-        "loader('mcp')\n",
+        (
+            "from builtins import __dict__ as exported\n"
+            "loader = exported['__import__']\n"
+            "loader('langgraph')\n"
+        ),
+        (
+            "from importlib import __dict__ as exported\n"
+            "loader = exported['import_module']\n"
+            "loader('mcp')\n"
+        ),
     ],
 )
 def test_architecture_guard_rejects_exported_authority_namespaces(source: str) -> None:
