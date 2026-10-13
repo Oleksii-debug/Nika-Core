@@ -1,3 +1,7 @@
+## Перебудова незакритих розділів — 2026-10-13
+
+Власник замінив незакриті розділи в Google Docs на окремі верхньорівневі NА/NБ/NВ (NГ, якщо було 4 завдання). Карта: [ATOMIC_OPEN_SECTIONS_2026-10-13.md](ATOMIC_OPEN_SECTIONS_2026-10-13.md). Старий розділ N тепер агрегат нових; DONE лише після приймання кожного нового розділу та спільної інтеграції. Статуси WAITING/PARKED, чинні PR та історичні DONE збережені. Воркери зобов’язані виконувати нові самостійні одиниці, не починати старий код заново й не підміняти реальні підтвердження тестовими.
+
 # 2026-10-11 OWNER COORDINATION — first actionable Sections now A/B/C bounded closures
 
 Canonical 7 Drive plans retain original number and all historic source/commit evidence. Work Selection rule: use existing owner PR and first unfinished original Section; checkpoint A=REUSE+source/tests, B=one real failure+negative/recovery tests, C=full qualification+ordered integration+readback. Record verified checkpoints immediately, without claiming original terminal DONE prematurely. This refines worker scheduling; previous 0/N terminal counts remain until proof. In Plan1 PR #1871 prior Ubuntu Core/M12 SUCCESS at exact head `56de6201062f07f815310f9c1630fd6e55edbbc7`, Windows pending at that check; verify current head again before declaring. Avoid stacked PR proliferation, do not reset Section1 work to zero, do not block intermediate source work on unrelated Plan7 physical Windows/NVDA verification, and never bypass safety or license controls.
