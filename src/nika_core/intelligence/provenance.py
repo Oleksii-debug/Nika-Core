@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -143,8 +144,14 @@ def _validate_identifier(value: str, *, field: str) -> None:
         raise TypeError(f"{field} must be text")
     if not value or value != value.strip() or len(value) > _MAX_ID_LENGTH:
         raise ValueError(f"{field} must be canonical bounded text")
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+    if any(unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} for char in value):
         raise ValueError(f"{field} must not contain control characters")
+    try:
+        size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError(f"{field} must be valid UTF-8 text") from None
+    if size > _MAX_ID_LENGTH:
+        raise ValueError(f"{field} must be canonical bounded text")
 
 
 def _required_text(payload: Mapping[str, object], key: str) -> str:
