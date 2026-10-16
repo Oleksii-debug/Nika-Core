@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
@@ -155,3 +157,66 @@ def test_project_identity_mismatch_fails_before_orchestration(tmp_path) -> None:
 
     with pytest.raises(ProductProjectBindingError, match="project_id"):
         ProductProjectCoordinatorBinding(project, _graph(project_id="p2"))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid"),
+    [
+        ("spec_version", True),
+        ("spec_version", 1.0),
+        ("spec_version", "1"),
+        ("row_version", False),
+        ("row_version", 1.0),
+        ("row_version", "1"),
+    ],
+)
+def test_checkpoint_rejects_noninteger_version_aliases_before_restore(
+    tmp_path, field_name: str, invalid: object
+) -> None:
+    _, binding = _binding(tmp_path)
+    coordinator = binding.plan(
+        base_shas={"repo-1": SHA_A},
+        component_goals={"core": "build core", "docs": "write docs"},
+        permission_ceiling=PERMISSIONS,
+    )
+    checkpoint = binding.checkpoint(coordinator)
+    malformed = replace(checkpoint, **{field_name: invalid})
+    with pytest.raises(ProductProjectBindingError, match="versions must be exact integers"):
+        binding.restore(
+            malformed,
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+        )
+
+
+def test_checkpoint_rejects_invalid_outer_and_nested_snapshot_types(tmp_path) -> None:
+    _, binding = _binding(tmp_path)
+    coordinator = binding.plan(
+        base_shas={"repo-1": SHA_A},
+        component_goals={"core": "build core", "docs": "write docs"},
+        permission_ceiling=PERMISSIONS,
+    )
+    checkpoint = binding.checkpoint(coordinator)
+    with pytest.raises(ProductProjectBindingError, match="valid binding type"):
+        binding.restore(object())  # type: ignore[arg-type]
+    with pytest.raises(ProductProjectBindingError, match="coordinator must be a snapshot"):
+        binding.restore(
+            replace(checkpoint, coordinator=object()),  # type: ignore[arg-type]
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+        )
+
+
+def test_checkpoint_valid_integer_versions_preserve_normal_restore(tmp_path) -> None:
+    _, binding = _binding(tmp_path)
+    coordinator = binding.plan(
+        base_shas={"repo-1": SHA_A},
+        component_goals={"core": "build core", "docs": "write docs"},
+        permission_ceiling=PERMISSIONS,
+    )
+    checkpoint = binding.checkpoint(coordinator)
+    assert type(checkpoint.spec_version) is int
+    assert type(checkpoint.row_version) is int
+    restored = binding.restore(
+        checkpoint,
+        trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+    )
+    assert restored.snapshot() == coordinator.snapshot()

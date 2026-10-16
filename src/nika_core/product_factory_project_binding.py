@@ -111,6 +111,13 @@ class ProductProjectCoordinatorBinding:
         self,
         checkpoint: ProductProjectCoordinatorCheckpoint,
     ) -> None:
+        if not isinstance(checkpoint, ProductProjectCoordinatorCheckpoint):
+            raise ProductProjectBindingError("checkpoint must have a valid binding type")
+        # Python aliases True == 1 and 1.0 == 1. Durable version identities must not.
+        if type(checkpoint.spec_version) is not int or type(checkpoint.row_version) is not int:
+            raise ProductProjectBindingError("checkpoint versions must be exact integers")
+        if not isinstance(checkpoint.coordinator, CoordinatorSnapshot):
+            raise ProductProjectBindingError("checkpoint coordinator must be a snapshot")
         if checkpoint.project_id != self.project.project_id:
             raise ProductProjectBindingError(
                 "checkpoint project_id does not match current ProductProject"
