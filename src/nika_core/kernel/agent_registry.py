@@ -36,13 +36,25 @@ class AgentRegistry:
         return int(row["count"])
 
     def register(self, definition: AgentDefinition) -> None:
-        current = self._latest(definition.agent_id)
-        if current is not None and definition.version <= current.version:
-            raise ValueError("agent version must increase")
         if self._store is None:
+            current = self._latest(definition.agent_id)
+            if current is not None and definition.version <= current.version:
+                raise ValueError("agent version must increase")
             self._agents[definition.agent_id] = definition
             return
+
         with self._store.connection() as conn:
+            # Serialize the version check and insert across independent registry instances.
+            # A deferred transaction would still allow multiple writers to observe the same
+            # previous version before one of them commits.
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT version FROM agents WHERE agent_id = ? "
+                "ORDER BY version DESC LIMIT 1",
+                (definition.agent_id,),
+            ).fetchone()
+            if row is not None and definition.version <= int(row["version"]):
+                raise ValueError("agent version must increase")
             conn.execute(
                 "INSERT INTO agents(agent_id, version, name, goal, created_at) VALUES (?, ?, ?, ?, ?)",
                 (
