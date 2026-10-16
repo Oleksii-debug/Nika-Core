@@ -219,3 +219,12 @@ Update this registry whenever a new-plan Section reaches DONE/REOPENED or when a
 - **Section 1:** ACTIONABLE / IN_PROGRESS / **NOT DONE**. Draft child [#1871](https://github.com/Oleksii-debug/Nika-Core/pull/1871) on #1865 adds a dependency environment observation CLI, source-input SHA evidence and negative tests for out-of-range/missing packages and manifest drift. License metadata are unreviewed; no resolved lock, independent license proof, or exact-head dual-OS PASS.
 - **Section 2:** ACTIONABLE / IN_PROGRESS / **NOT DONE**. The same child #1871 repairs nested key-collision admission in the existing RuntimeRequest/Event/Result mapping validator, rejects cyclic/over-budget carriers and preserves shared DAG/MappingProxyType positives. Negative/compatibility tests added; isolated copied-function smoke 6/6 PASS, **not** checked-in complete pytest/CI.
 - **Branch evidence:** #1871 head `6ce354fa02c6a838e0a2467a536d581731971bad`; six scoped paths read back; exact-head Core CI `37853575848` and M12 `37853575907` QUEUED, NOT PASS. Ancestor ordering, version-specific dependency provenance, legacy §§1–2 acceptance and postmerge main readback remain OPEN. `PLAN1_S1_DONE=false; PLAN1_S2_DONE=false; MAIN_INTEGRATED=false; DRIVE_DONE=false`.
+
+## 2026-10-16 — Separate Plan 8 Cinema & Voice Factory
+A new last **Plan 8** in the canonical NikaCore Drive plan folder is a **separate future product extension**, not a migrated legacy Section, not a second Plan7 final integration, and not a reason to alter the proven status, total Section counts, owners or existing 1–7 PR lineage.
+- Canonical plan: https://docs.google.com/document/d/1Cp-_1qfA69D0cZv1SAsVvkcAegA7CLnnsxJ8AkeEWqw/edit
+- Owner narrative: https://docs.google.com/document/d/1ukvWtRV2jAny0_rxeBUqKEETwEqtgddETkGw94MixFM/edit
+- External code/model/license gate: https://docs.google.com/document/d/1rg50_KJULpTAIbLasucj4kCuBiApCraBzVS4yU4bs5g/edit
+- Initial observed status: **0 / 27 Sections DONE**, all 27 OPEN (new requirements/documentation only; implementation and actual Windows/NVDA/HIL/film-creation evidence NOT VERIFIED).
+- Ordinary active Plans 1–7 workers should NOT select Plan8 without an explicit owner/worker assignment. Future code scopes must reuse platform services and pass commercial-license/rights gates; sections cannot be closed by this documentation update.
+
