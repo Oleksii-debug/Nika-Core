@@ -17,7 +17,10 @@ def _pass(check_id: str) -> verification.ExactShaCheckEvidence:
 
 
 def test_caller_cannot_omit_authoritative_required_gate_and_mint_clearance() -> None:
-    with pytest.raises(verification.VerificationError, match="authoritative Product Factory profile"):
+    with pytest.raises(
+        verification.VerificationError,
+        match="authoritative Product Factory profile",
+    ):
         verification.classify_candidate_verification(
             SHA,
             (_pass("core"),),
@@ -26,7 +29,10 @@ def test_caller_cannot_omit_authoritative_required_gate_and_mint_clearance() -> 
 
 
 def test_caller_cannot_substitute_authoritative_required_gate_and_mint_clearance() -> None:
-    with pytest.raises(verification.VerificationError, match="authoritative Product Factory profile"):
+    with pytest.raises(
+        verification.VerificationError,
+        match="authoritative Product Factory profile",
+    ):
         verification.classify_candidate_verification(
             SHA,
             (_pass("core"), _pass("replacement")),
@@ -43,3 +49,15 @@ def test_canonical_profile_still_requires_every_exact_head_gate_to_pass() -> Non
 
     assert result.state is verification.VerificationState.PASS
     assert result.merge_clearance is True
+
+
+def test_noncanonical_profile_is_rejected_even_before_evidence_arrives() -> None:
+    with pytest.raises(
+        verification.VerificationError,
+        match="authoritative Product Factory profile",
+    ):
+        verification.classify_candidate_verification(
+            SHA,
+            (),
+            ("core",),
+        )
