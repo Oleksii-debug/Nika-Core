@@ -188,3 +188,55 @@ def test_stream_window_boundary_is_not_treated_as_a_new_key_boundary(tmp_path: P
     content = b"x" * second_window_start + b"api_key=public\n"
     bundle = _bundle(tmp_path, "settings.conf", content)
     assert verify_release_manifest(bundle, _manifest(bundle)) == ()
+
+
+@pytest.mark.parametrize("relative_path", [".env.example", "docs/.ENV.EXAMPLE"])
+def test_permitted_env_example_still_rejects_accidental_secret_values(
+    tmp_path: Path, relative_path: str
+) -> None:
+    bundle = _bundle(tmp_path, relative_path, f"api_key={CANARY}\n".encode())
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        f"secret-content:{relative_path}",
+    )
+
+
+@pytest.mark.parametrize("relative_path", [".env.example", "docs/.ENV.EXAMPLE"])
+def test_archive_rejects_manifest_bound_secret_in_env_example(
+    tmp_path: Path, relative_path: str
+) -> None:
+    bundle = _bundle(tmp_path, relative_path, f"access_token={CANARY}\n".encode())
+    artifact = _archive_bundle(tmp_path, bundle)
+    findings = verify_release_archive(artifact, source_sha=SOURCE_SHA)
+    assert findings == (f"archive:secret-content:{relative_path}",)
+    assert CANARY not in "\n".join(findings)
+
+
+def test_env_example_reference_remains_publishable(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path, ".env.example", b"api_key=${NIKA_API_KEY}\n")
+    manifest = _manifest(bundle)
+    assert verify_release_manifest(bundle, manifest) == ()
+    artifact = _archive_bundle(tmp_path, bundle)
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == ()
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("settings.conf", b"api_key=${NIKA_API_KEY}\n"),
+        (".env.example", b"api_key=${NIKA_API_KEY} # inherited from environment\n"),
+    ],
+)
+def test_complete_unquoted_environment_reference_is_not_a_packaged_secret(
+    tmp_path: Path, filename: str, content: bytes
+) -> None:
+    bundle = _bundle(tmp_path, filename, content)
+    assert verify_release_manifest(bundle, _manifest(bundle)) == ()
+
+
+def test_unquoted_environment_reference_with_appended_value_is_rejected(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(tmp_path, ".env.example", b"api_key=${NIKA_API_KEY}live-key\n")
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        "secret-content:.env.example",
+    )

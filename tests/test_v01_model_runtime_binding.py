@@ -198,6 +198,7 @@ def test_bound_api_route_drives_all_three_members_and_survives_settings_change_r
                 json={
                     "model": payload["model"],
                     "message": {"role": "assistant", "content": "local result"},
+                    "done": True,
                 },
             )
         raise AssertionError(f"unexpected model endpoint: {request.url.path}")
@@ -304,6 +305,7 @@ def test_bound_local_route_only_calls_ollama_chat_and_never_acquires_model(tmp_p
             json={
                 "model": "qwen3:8b",
                 "message": {"role": "assistant", "content": "local result"},
+                "done": True,
             },
         )
 
