@@ -322,3 +322,39 @@ The implementation team should evaluate rather than hard-code one vendor for:
 Selection should prioritize low latency, Windows/mobile practicality, reproducibility, privacy/control, Ukrainian quality, accessibility and replaceability.
 
 This vision is additive. Current Nika V0.1 release work remains the immediate priority; the living-agent/voice architecture should be introduced in staged increments without destabilizing the first usable release.
+
+## Owner clarification 2026-10-16 — standby voice, autonomy, realtime embodied Nika
+
+Canonical delivery ownership: Google Drive NikaCore Plan 5 Section 2A–2C (Personal Nika), Plan 4 Sections 3A–3C (browser) and 4A–4C (Windows UIA); 12-6 AI Plan 10 Section 1A–1C owns compatibility, not a duplicate Windows implementation. This is a binding product target only; no implementation/section DONE status is implied.
+
+### Always-available, credit-free *standby*
+
+- Nika starts with Windows when explicitly enabled, remains as a small local process and monitors the microphone with a **local wake-word engine** (e.g. “Ніка”) without invoking paid LLM/ASR/TTS/API services, uploading raw ambient audio or charging tokens while untriggered. CPU/energy use is not literally zero.
+- User-selectable modes: **wake-name required** (default), continuous conversation *after* an authorized wake event with explicit session timeout, and hard microphone disable; visible/audible status, revocable permission and hardware/software mute. Other voices and the NVDA/system speaker output must not silently invoke owner-privileged actions.
+- Separate local wake detection, speech activity, optional speaker confidence, active speech recognition and model/inference. Owner-away background jobs retain independent task budgets; a scheduled model call may cost resources even if wake detection is idle.
+
+### Natural two-way conversation
+
+- Full-duplex/low-latency streaming voice, barge-in while Nika speaks, echo suppression, non-speech/backchannel false-interruption handling and optional agent-initiated conversational interruptions.
+- Distinguish **stop speaking**, **pause/cancel an in-flight tool effect**, **change current conversational request** and **stop a durable background job**. Never confuse cancelling audio with cancelling a task; report whether an external side effect was already committed. Preserve memory, interrupted turn context and task receipts.
+- Support context-driven expressive voice/prosody (smile, laughter, natural hesitation, emotion-like tones), with no deceptive assertion of literal sentience or human emotion.
+
+### Continuous owner-away tasks and self-operation
+
+- Voice can open/use active Chrome tabs, applications, files, media and NikaCore's own agent/research/model-provider/task configuration by using existing typed browser/UIA/action/model/credential authorities.
+- Support durable multi-step and recurring goals (“check authorized email/messaging sources every two minutes while I am at classes; process according to the approved policy”), explicit user-selected cadence, quotas, long-running state, idempotent side effects, evidence/reporting, owner return downshift, restart recovery and restrictions for permissions/credentials. Do not promise a two-minute cadence when offline, suspended or rate-limited.
+- No unrestricted administrator rights or silent irreversible external sends/deletes, regardless of spoken phrasing; keep canonical approval and tool permissions.
+
+### Optional photorealistic embodiment and personal digital twin
+
+Two distinct modes share the same Nika identity and cognition, but NOT the same latency or rendering acceptance criteria:
+
+1. **Interactive Live Video Nika**: a consenting fictional adult avatar with natural speech lip sync, eye/head/gaze/blinks, smiles, gesture and situational expression; optional hair/upper/full-body animation, background and sitting/standing/reclining scenes, with realistic expectations of renderer capabilities. Render as a replaceable local GPU or paid cloud adapter; never assume speaking-head animation gives arbitrary cinematic full-body behavior.
+2. **Scripted content producer**: the owner's consented face/voice likeness as a digital twin for recorded videos, with user-specified clothes/background (e.g. office presenter), gesture and facial dynamics, script-driven revisions, video/audio export and provenance/disclosure for distribution. Keep source biometric assets controlled and do not permit unauthorized third-party identity cloning.
+
+Audio-only must remain fully usable with NVDA; avatar video must not be required for any core command. Resource/budget profiles, provider switching, speaker/face consent records and user-visible live/video indicators are required.
+
+### Acceptance and release truth
+
+Demonstrate physical Windows 11/Chrome/NVDA scenarios: wake-only standby with zero paid idle calls, correct mic privacy behavior, owner vs stranger voice, interrupt TTS and recover same task, mutate only selected browser/app target, durable 2-minute owner-away task with failure/restart/idempotent action receipts, change Nika's own approved config, expressive speech, measured live AV latency/sync and separate scripted digital-twin export/consent. Hosted mocks/plan prose are not human/physical proof; map each gap to existing owners/PRs, preserve section numbering and completion records.
+
