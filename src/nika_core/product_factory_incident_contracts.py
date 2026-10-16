@@ -9,7 +9,12 @@ from typing import Protocol
 
 from .toolsmith.contracts import AcceptanceCommand, normalize_relative_path
 
-INCIDENT_LIFECYCLE_SCHEMA = "nika-pf3-incident-repair-release-v1"
+INCIDENT_LIFECYCLE_SCHEMA_V1 = "nika-pf3-incident-repair-release-v1"
+INCIDENT_LIFECYCLE_SCHEMA = "nika-pf3-incident-repair-release-v2"
+INCIDENT_TRIGGER_FINGERPRINT_SCHEMA = INCIDENT_LIFECYCLE_SCHEMA_V1
+SUPPORTED_INCIDENT_LIFECYCLE_SCHEMAS = frozenset(
+    {INCIDENT_LIFECYCLE_SCHEMA_V1, INCIDENT_LIFECYCLE_SCHEMA}
+)
 
 
 class ProductIncidentError(ValueError):
@@ -160,7 +165,7 @@ class IncidentTrigger:
                 "provenance_ref": self.advisory.provenance_ref,
             }
         payload = {
-            "schema": INCIDENT_LIFECYCLE_SCHEMA,
+            "schema": INCIDENT_TRIGGER_FINGERPRINT_SCHEMA,
             "project_id": self.project_id,
             "service_id": self.service_id,
             "environment_id": self.environment_id,
@@ -339,7 +344,7 @@ class IncidentLifecycleSnapshot:
     fingerprint_index: tuple[tuple[str, str], ...]
 
     def __post_init__(self) -> None:
-        if self.schema != INCIDENT_LIFECYCLE_SCHEMA:
+        if self.schema not in SUPPORTED_INCIDENT_LIFECYCLE_SCHEMAS:
             raise ProductIncidentError("unsupported incident lifecycle snapshot schema")
         if not self.project_id.strip():
             raise ProductIncidentError("incident lifecycle snapshot project must not be empty")
