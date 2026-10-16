@@ -143,7 +143,7 @@ class ScheduledJobStore:
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = self.get_with_connection(conn, expected.job_id)
-            if current != expected:
+            if not _same_job_snapshot(current, expected):
                 return False
             return self.set_enabled_with_connection(conn, expected.job_id, False)
 
@@ -192,7 +192,7 @@ class ScheduledJobStore:
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             current = self.get_with_connection(conn, expected.job_id)
-            if current is None or not current.enabled or current != expected:
+            if current is None or not current.enabled or not _same_job_snapshot(current, expected):
                 return None
             if not self._task_authority_allows_with_connection(conn, current):
                 return None
@@ -210,6 +210,34 @@ class ScheduledJobStore:
             return False
         task_state = self.task_state_with_connection(conn, task_id)
         return task_state is not None and task_state not in _TERMINAL_TASK_STATES
+
+
+
+def _same_job_snapshot(
+    left: ScheduledJob | None,
+    right: ScheduledJob | None,
+) -> bool:
+    """Compare durable job definitions without Python bool/int/float equality aliases.
+
+    JSON is already the storage authority for nested trigger and payload values.
+    Canonical, bounded JSON also prevents a stale occurrence or conditional disable
+    from treating a type-changed definition as the previously installed one.
+    """
+    if left is None or right is None:
+        return left is right
+    left = _canonical_job(left)
+    right = _canonical_job(right)
+    return (
+        left.job_id == right.job_id
+        and left.action_id == right.action_id
+        and left.trigger_kind is right.trigger_kind
+        and left.enabled is right.enabled
+        and left.coalesce is right.coalesce
+        and left.max_instances == right.max_instances
+        and left.misfire_grace_seconds == right.misfire_grace_seconds
+        and _encode_json(left.trigger, "trigger") == _encode_json(right.trigger, "trigger")
+        and _encode_json(left.payload, "payload") == _encode_json(right.payload, "payload")
+    )
 
 
 def _canonical_job(job: ScheduledJob) -> ScheduledJob:
