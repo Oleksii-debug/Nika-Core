@@ -116,41 +116,93 @@ class CredentialRefOpenAICompatibleProvider:
         credential_resolver: CredentialResolverPort,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     ) -> None:
-        self._config = config
+        # ApiModelRouteConfig is caller-owned even though it is frozen: callers
+        # retaining the object can still use object.__setattr__. Cross that
+        # boundary once and retain only exact built-in authority/effect scalars.
+        provider_id = config.provider_id
+        base_url = config.base_url
+        default_model = config.default_model
+        credential_ref = config.credential_ref
+        supports_private_data = config.supports_private_data
+        supports_hard_cancellation = config.supports_hard_cancellation
+        for name, value in (
+            ("provider_id", provider_id),
+            ("base_url", base_url),
+            ("default_model", default_model),
+            ("credential_ref", credential_ref),
+        ):
+            if type(value) is not str:
+                raise TypeError(f"{name} must be exact text")
+        if type(supports_private_data) is not bool:
+            raise TypeError("supports_private_data must be an exact boolean")
+        if type(supports_hard_cancellation) is not bool:
+            raise TypeError("supports_hard_cancellation must be an exact boolean")
+
+        # Revalidate the captured route rather than trusting a caller-owned
+        # config that may already have been mutated after construction.
+        snapshot = ApiModelRouteConfig(
+            provider_id=provider_id,
+            base_url=base_url,
+            default_model=default_model,
+            credential_ref=credential_ref,
+            supports_private_data=supports_private_data,
+            supports_hard_cancellation=supports_hard_cancellation,
+        )
+        parsed = urlsplit(snapshot.base_url)
+        effect_network_host = parsed.hostname
+        if effect_network_host is None:
+            raise ValueError("API model route base_url requires a host")
+
+        self._provider_id = snapshot.provider_id
+        self._base_url = snapshot.base_url
+        self._default_model = snapshot.default_model
+        self._credential_ref = snapshot.credential_ref
+        self._supports_private_data = snapshot.supports_private_data
+        self._supports_hard_cancellation = snapshot.supports_hard_cancellation
+        self._effect_network_host = effect_network_host.lower().rstrip(".")
         self._credential_resolver = credential_resolver
         self._client_factory = client_factory
         self._prototype = OpenAICompatibleProvider(
-            provider_id=config.provider_id,
-            base_url=config.base_url,
+            provider_id=self._provider_id,
+            base_url=self._base_url,
             kind=ProviderKind.CLOUD,
-            default_model=config.default_model,
-            supports_private_data=config.supports_private_data,
-            supports_hard_cancellation=config.supports_hard_cancellation,
+            default_model=self._default_model,
+            supports_private_data=self._supports_private_data,
+            supports_hard_cancellation=self._supports_hard_cancellation,
             client_factory=client_factory,
         )
 
     @property
     def capabilities(self) -> ProviderCapabilities:
-        return self._prototype.capabilities
+        prototype = self._prototype.capabilities
+        return ProviderCapabilities(
+            provider_id=prototype.provider_id,
+            kind=prototype.kind,
+            supports_private_data=prototype.supports_private_data,
+            supports_tools=prototype.supports_tools,
+            supports_streaming=prototype.supports_streaming,
+            supports_hard_cancellation=prototype.supports_hard_cancellation,
+            effect_network_host=self._effect_network_host,
+        )
 
     @property
     def credential_ref(self) -> str:
         """Opaque reference for host configuration/persistence; never raw material."""
 
-        return self._config.credential_ref
+        return self._credential_ref
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         material = self._resolve_material()
         provider: OpenAICompatibleProvider | None = None
         try:
             provider = OpenAICompatibleProvider(
-                provider_id=self._config.provider_id,
-                base_url=self._config.base_url,
+                provider_id=self._provider_id,
+                base_url=self._base_url,
                 kind=ProviderKind.CLOUD,
-                default_model=self._config.default_model,
+                default_model=self._default_model,
                 api_key=material,
-                supports_private_data=self._config.supports_private_data,
-                supports_hard_cancellation=self._config.supports_hard_cancellation,
+                supports_private_data=self._supports_private_data,
+                supports_hard_cancellation=self._supports_hard_cancellation,
                 client_factory=self._client_factory,
             )
             try:
@@ -159,7 +211,7 @@ class CredentialRefOpenAICompatibleProvider:
                 raise ModelGatewayError(
                     error.code,
                     str(error),
-                    provider_id=error.provider_id or self._config.provider_id,
+                    provider_id=error.provider_id or self._provider_id,
                     retryable=error.retryable,
                     failure_effect=error.failure_effect,
                 ) from None
@@ -169,20 +221,20 @@ class CredentialRefOpenAICompatibleProvider:
 
     def _resolve_material(self) -> str:
         try:
-            material = self._credential_resolver.resolve(self._config.credential_ref)
+            material = self._credential_resolver.resolve(self._credential_ref)
         except Exception:  # noqa: BLE001 - untrusted resolvers may fail with arbitrary exception types
             raise ModelGatewayError(
                 ModelErrorCode.AUTHENTICATION,
                 "model credential could not be resolved",
-                provider_id=self._config.provider_id,
+                provider_id=self._provider_id,
                 retryable=False,
                 failure_effect=ModelFailureEffect.NO_EFFECT,
             ) from None
-        if not isinstance(material, str) or not material or "\x00" in material:
+        if type(material) is not str or not material or "\x00" in material:
             raise ModelGatewayError(
                 ModelErrorCode.AUTHENTICATION,
                 "model credential could not be resolved",
-                provider_id=self._config.provider_id,
+                provider_id=self._provider_id,
                 retryable=False,
                 failure_effect=ModelFailureEffect.NO_EFFECT,
             )
