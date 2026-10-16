@@ -44,3 +44,17 @@ For Plans 1–6:
 Plan 7 is dependency-bound and receives no ordinary parallel worker prompt until Plans 1–6 are sufficiently terminal for convergence.
 
 Detailed mapping: LEGACY_50_TO_MULTIPLAN_COVERAGE.md.
+
+## Owner extension 2026-10-16 — new canonical Plan 8 (separate Cinema & Voice Factory product)
+**The seven historical plans above remain intact and their numbering, section statuses, active lanes, existing ownership, and original Plan 7 convergence gates are unchanged.** This is an eighth, last numbered Drive plan, NOT a replacement for Plan 7 and NOT a reason to delay existing 1–7 completion.
+- Plan 8 — «8. Восьмий план — Nika Cinema & Voice Factory», 27 new numbered sections, all OPEN / NOT DONE:
+  https://docs.google.com/document/d/1Cp-_1qfA69D0cZv1SAsVvkcAegA7CLnnsxJ8AkeEWqw/edit
+- Owner narrative «Cinema & Voice Factory — Моя рефлексія та бачення автора»:
+  https://docs.google.com/document/d/1ukvWtRV2jAny0_rxeBUqKEETwEqtgddETkGw94MixFM/edit
+- Technology, forbidden/conditional/research-only code & model-license register:
+  https://docs.google.com/document/d/1rg50_KJULpTAIbLasucj4kCuBiApCraBzVS4yU4bs5g/edit
+- Theme: standalone-capable professional Voice Factory, offline NVDA TTS, multimodal Live Nika/video persona, consented digital twins, multi-character stage, cinema/animation production, storyboards, rendering, Foley/music, editing, export, licensing, monetizable optional API.
+- Existing plans still own shared canonical NikaCore contracts/runtime/security/agents/model/scheduler/Windows/media/packaging. Plan 8 owns only new product-specific project schemas, voice/style/character/shot/timeline/renders, media engine adapters and tests. Reuse shared authorities via typed ports; do not fork them.
+- A separate new Plan-8 owner must be explicitly assigned; ordinary Plan1–6 worker selection and Plan7 dependent release must not drift into Plan8, and the Plan8 documentation must not be counted as code or DONE.
+- Plan8 has its own staged product acceptance and source/rights/HIL gates. Existing 50 legacy sections and old completion metrics stay scoped to original plans.
+
