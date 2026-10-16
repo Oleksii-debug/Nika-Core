@@ -25,6 +25,12 @@ class FeatureLineage:
     available_at: datetime
 
     def __post_init__(self) -> None:
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise CausalityViolation("derived feature requires a nonempty name")
+        if any(not isinstance(name, str) or not name.strip() for name in self.input_names):
+            raise CausalityViolation("derived feature input names must be nonempty text")
+        if len(self.input_names) != len(self.input_available_at):
+            raise CausalityViolation("feature lineage must record availability for every input")
         inputs = tuple(
             require_aware_utc(value, "input_available_at") for value in self.input_available_at
         )
@@ -35,9 +41,18 @@ class FeatureLineage:
         object.__setattr__(self, "available_at", available_at)
 
 
+def _require_chronological(points: Sequence[FeaturePoint]) -> None:
+    previous: datetime | None = None
+    for point in points:
+        if previous is not None and point.available_at < previous:
+            raise CausalityViolation("feature sequence is not ordered by availability time")
+        previous = point.available_at
+
+
 def causal_shift(points: Sequence[FeaturePoint], periods: int) -> tuple[FeaturePoint, ...]:
     if periods < 0:
         raise CausalityViolation("negative shift leaks future values")
+    _require_chronological(points)
     if periods == 0:
         return tuple(points)
     result: list[FeaturePoint] = []
@@ -57,6 +72,7 @@ def trailing_mean(
         raise CausalityViolation("centered rolling windows use future observations")
     if window <= 0:
         raise ValueError("window must be positive")
+    _require_chronological(points)
     result: list[FeaturePoint] = []
     for index, point in enumerate(points):
         start = max(0, index - window + 1)
@@ -75,6 +91,7 @@ def fill_missing(
 ) -> tuple[FeaturePoint, ...]:
     if method != "forward":
         raise CausalityViolation("only forward fill is causal; backward fill is forbidden")
+    _require_chronological(points)
     last: Decimal | None = None
     result: list[FeaturePoint] = []
     for point in points:
