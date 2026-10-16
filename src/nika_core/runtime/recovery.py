@@ -12,6 +12,7 @@ from nika_core.runtime.contracts import (
     RuntimeResumeProbe,
     RuntimeResumeProbePort,
     RuntimeResumeProbeStatus,
+    canonical_resume_probe,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
@@ -266,10 +267,12 @@ class RuntimeRecoveryService:
             )
 
         try:
-            probe = await runtime.probe_resume(
-                task_id=record.task_id,
-                thread_id=record.thread_id,
-                resume_token=record.resume_token,
+            probe = canonical_resume_probe(
+                await runtime.probe_resume(
+                    task_id=record.task_id,
+                    thread_id=record.thread_id,
+                    resume_token=record.resume_token,
+                )
             )
         except Exception:  # noqa: BLE001 - provider diagnostics are untrusted at this boundary
             probe = RuntimeResumeProbe(

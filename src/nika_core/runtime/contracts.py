@@ -85,12 +85,22 @@ class RuntimeResumeRequest:
     timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
+        if (
+            type(self.task_id) is not str
+            or type(self.thread_id) is not str
+            or type(self.resume_token) is not str
+        ):
+            raise TypeError("resume identifiers must be exact strings")
         if not self.task_id.strip() or not self.thread_id.strip() or not self.resume_token.strip():
             raise ValueError("resume identifiers must not be empty")
         if self.max_steps < 1:
             raise ValueError("max_steps must be positive")
         if self.timeout_seconds is not None and self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive when provided")
+
+
+_MAX_RESUME_PROBE_REASON_CHARS = 1024
+_MAX_RESUME_CHECKPOINT_ID_CHARS = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,21 +112,49 @@ class RuntimeResumeProbe:
     checkpoint_id: str | None = None
 
     def __post_init__(self) -> None:
+        if type(self.status) is not RuntimeResumeProbeStatus:
+            raise TypeError("resume probe status must be an exact RuntimeResumeProbeStatus")
+        if type(self.reason) is not str:
+            raise TypeError("resume probe reason must be an exact string")
         if not self.reason.strip():
             raise ValueError("resume probe reason must not be empty")
+        if len(self.reason) > _MAX_RESUME_PROBE_REASON_CHARS:
+            raise ValueError("resume probe reason is too long")
         if self.checkpoint_id is not None:
-            if not isinstance(self.checkpoint_id, str):
-                raise TypeError("checkpoint_id must be a string when provided")
+            if type(self.checkpoint_id) is not str:
+                raise TypeError("checkpoint_id must be an exact string when provided")
             if not self.checkpoint_id.strip():
                 raise ValueError("checkpoint_id must not be empty")
             if self.checkpoint_id != self.checkpoint_id.strip():
                 raise ValueError("checkpoint_id must not have surrounding whitespace")
-        if self.status == RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
+            if len(self.checkpoint_id) > _MAX_RESUME_CHECKPOINT_ID_CHARS:
+                raise ValueError("checkpoint_id is too long")
+            if any(ord(char) < 32 or ord(char) == 127 for char in self.checkpoint_id):
+                raise ValueError("checkpoint_id must not contain control characters")
+        if self.status is RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
             raise ValueError("ready resume probe requires checkpoint_id")
 
     @property
     def can_resume(self) -> bool:
-        return self.status == RuntimeResumeProbeStatus.READY
+        return self.status is RuntimeResumeProbeStatus.READY
+
+
+def canonical_resume_probe(value: object) -> RuntimeResumeProbe:
+    """Snapshot untrusted adapter probe evidence through Nika's canonical constructor."""
+
+    if type(value) is not RuntimeResumeProbe:
+        raise TypeError("runtime resume probe must be an exact RuntimeResumeProbe")
+    try:
+        status = object.__getattribute__(value, "status")
+        reason = object.__getattribute__(value, "reason")
+        checkpoint_id = object.__getattribute__(value, "checkpoint_id")
+    except AttributeError as exc:
+        raise ValueError("runtime resume probe is incomplete") from exc
+    return RuntimeResumeProbe(
+        status=status,
+        reason=reason,
+        checkpoint_id=checkpoint_id,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,9 +182,11 @@ class RuntimeResult:
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, RuntimeOutcome):
             raise TypeError("outcome must be a RuntimeOutcome")
+        if isinstance(self.resume_token, str) and type(self.resume_token) is not str:
+            raise TypeError("resume_token must be an exact string when provided")
         if (
             self.outcome in {RuntimeOutcome.WAITING_APPROVAL, RuntimeOutcome.PAUSED}
-            and (not isinstance(self.resume_token, str) or not self.resume_token.strip())
+            and (type(self.resume_token) is not str or not self.resume_token.strip())
         ):
             raise ValueError("resumable outcome requires a usable resume token")
         if self.outcome == RuntimeOutcome.FAILED and not self.error:
