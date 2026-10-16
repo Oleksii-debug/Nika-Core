@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _product_decision_test_support import ApprovedProductDecisionRepository
+
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
@@ -53,7 +55,7 @@ def _repos(tmp_path) -> tuple[SQLiteStore, ProductProjectRepository, ProductDeci
         spec=_spec(),
         idempotency_key="create:p1",
     )
-    return store, projects, ProductDecisionRepository(store)
+    return store, projects, ApprovedProductDecisionRepository(store)
 
 
 def _handoff(
@@ -101,7 +103,7 @@ def test_decision_is_durable_idempotent_and_restart_safe(tmp_path) -> None:
     assert projects.get("p1").row_version == 1
     restarted_store = SQLiteStore(store.path)
     restarted_store.initialize()
-    restarted = ProductDecisionRepository(restarted_store)
+    restarted = ApprovedProductDecisionRepository(restarted_store)
     assert restarted.get("p1", "decision-1") == stored
     assert restarted.list("p1") == (stored,)
 
@@ -255,7 +257,7 @@ def test_concurrent_identical_decision_write_replays_one_canonical_result(tmp_pa
     barrier = Barrier(2)
 
     def write() -> tuple[int, str, tuple[str, ...]]:
-        repository = ProductDecisionRepository(store)
+        repository = ApprovedProductDecisionRepository(store)
         barrier.wait()
         stored = repository.record(
             "p1",
@@ -276,7 +278,7 @@ def test_concurrent_identical_decision_write_replays_one_canonical_result(tmp_pa
     assert results[0][0] == 1
     assert results[0][2] == ("research-1",)
     assert projects.get("p1").row_version == 1
-    assert len(ProductDecisionRepository(store).history("p1", "decision-1")) == 1
+    assert len(ApprovedProductDecisionRepository(store).history("p1", "decision-1")) == 1
 
 
 def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) -> None:
@@ -285,7 +287,7 @@ def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) 
     barrier = Barrier(2)
 
     def write(rationale: str) -> str:
-        repository = ProductDecisionRepository(store)
+        repository = ApprovedProductDecisionRepository(store)
         barrier.wait()
         try:
             repository.record(
@@ -304,7 +306,7 @@ def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) 
 
     assert sorted(results) == ["conflict", "recorded"]
     assert projects.get("p1").row_version == 1
-    assert len(ProductDecisionRepository(store).history("p1", "decision-1")) == 1
+    assert len(ApprovedProductDecisionRepository(store).history("p1", "decision-1")) == 1
 
 
 def test_writer_lock_contention_is_normalized_without_partial_mutation(
@@ -324,7 +326,7 @@ def test_writer_lock_contention_is_normalized_without_partial_mutation(
     monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", short_timeout_connect)
     try:
         with pytest.raises(ProductProjectError, match="temporarily busy"):
-            ProductDecisionRepository(store).record(
+            ApprovedProductDecisionRepository(store).record(
                 "p1",
                 _decision(),
                 expected_row_version=0,
@@ -378,7 +380,7 @@ def test_reader_lock_commit_contention_is_normalized_without_partial_mutation(
     monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", short_timeout_connect)
     try:
         with pytest.raises(ProductProjectError, match="temporarily busy"):
-            ProductDecisionRepository(store).record(
+            ApprovedProductDecisionRepository(store).record(
                 "p1",
                 _decision(),
                 expected_row_version=0,
@@ -448,7 +450,7 @@ def test_non_lock_commit_operational_error_is_not_reclassified(
 
     monkeypatch.setattr(store, "connection", failing_connection)
     with pytest.raises(sqlite3.OperationalError, match="synthetic non-lock commit failure"):
-        ProductDecisionRepository(store).record(
+        ApprovedProductDecisionRepository(store).record(
             "p1",
             _decision(),
             expected_row_version=0,

@@ -13,6 +13,7 @@ from nika_core.product_command.contracts import (
     ProductUserDecision,
 )
 from nika_core.product_decisions import ProductDecisionRepository, StoredProductDecision
+from nika_core.security import ActionIntent, ApprovalEvidence, ApprovalVerifier
 from nika_core.product_project import (
     ProductDecision,
     ProductDecisionState,
@@ -43,9 +44,17 @@ class ProductProjectPresentationConsistencyError(RuntimeError):
 class ProductProjectCommandService:
     """PF5 adapter over the integrated durable PF1 repositories and lifecycle."""
 
-    def __init__(self, repository: ProductProjectRepository) -> None:
+    def __init__(
+        self,
+        repository: ProductProjectRepository,
+        *,
+        approval_verifier: ApprovalVerifier | None = None,
+    ) -> None:
         self._repository = repository
-        self._decisions = ProductDecisionRepository(repository.store)
+        self._decisions = ProductDecisionRepository(
+            repository.store,
+            approval_verifier=approval_verifier,
+        )
         self._lifecycle = ProductProjectLifecycleService(repository.store)
 
     def create_project(
@@ -125,6 +134,21 @@ class ProductProjectCommandService:
         )
         return self.inspect_project(project_id)
 
+    def decision_approval_intent(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        idempotency_key: str,
+    ) -> ActionIntent:
+        return self._decisions.approval_intent(
+            project_id,
+            decision,
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
+        )
+
     def record_decision(
         self,
         project_id: str,
@@ -132,12 +156,16 @@ class ProductProjectCommandService:
         *,
         expected_row_version: int,
         idempotency_key: str,
+        approval: ApprovalEvidence | None = None,
+        now: datetime | None = None,
     ) -> ProductProjectDetail:
         self._decisions.record(
             project_id,
             decision,
             expected_row_version=expected_row_version,
             idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
         )
         return self.inspect_project(project_id)
 
@@ -148,6 +176,8 @@ class ProductProjectCommandService:
         *,
         expected_row_version: int,
         idempotency_key: str,
+        approval: ApprovalEvidence | None = None,
+        now: datetime | None = None,
     ) -> ProductProjectDetail:
         """Compatibility name for the now-real durable ProductDecision write path."""
         return self.record_decision(
@@ -155,6 +185,8 @@ class ProductProjectCommandService:
             decision,
             expected_row_version=expected_row_version,
             idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
         )
 
     def link_decision_requirement(
