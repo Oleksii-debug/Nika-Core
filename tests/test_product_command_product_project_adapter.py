@@ -284,6 +284,123 @@ def test_stale_visible_spec_version_still_fails_closed(tmp_path) -> None:
         service.update_project("p1", expected_spec_version=1, goal="stale")
 
 
+@pytest.mark.parametrize(
+    "invalid_version",
+    [True, False, 1.0, "1", 0, -1],
+)
+def test_update_project_requires_exact_positive_spec_version_without_mutation(
+    tmp_path,
+    invalid_version,
+) -> None:
+    service, projects, _store = _service(tmp_path)
+    _create(service)
+    before = projects.get("p1")
+
+    with pytest.raises(
+        ValueError,
+        match="expected_spec_version must be a positive integer",
+    ):
+        service.update_project(
+            "p1",
+            expected_spec_version=invalid_version,
+            goal="must not persist",
+        )
+
+    assert projects.get("p1") == before
+    assert len(projects.spec_history("p1")) == 1
+
+
+@pytest.mark.parametrize(
+    "invalid_version",
+    [True, False, 0.0, 1.0, "0", "1", -1],
+)
+def test_record_decision_requires_exact_nonnegative_row_version_without_mutation(
+    tmp_path,
+    invalid_version,
+) -> None:
+    service, projects, _store = _service(tmp_path)
+    _create(service)
+    _handoff(projects)
+    before = projects.get("p1")
+
+    with pytest.raises(
+        ValueError,
+        match="expected_row_version must be a non-negative integer",
+    ):
+        service.record_decision(
+            "p1",
+            _decision(ProductDecisionState.PROPOSED),
+            expected_row_version=invalid_version,
+            idempotency_key="invalid-row-version",
+        )
+
+    assert projects.get("p1") == before
+    assert not service.inspect_project("p1").decisions
+
+
+@pytest.mark.parametrize(
+    "invalid_version",
+    [True, False, 0.0, 1.0, "0", "1", -1],
+)
+def test_requirement_link_requires_exact_nonnegative_row_version_without_mutation(
+    tmp_path,
+    invalid_version,
+) -> None:
+    service, projects, _store = _service(tmp_path)
+    _create(service)
+    _handoff(projects)
+    service.record_decision(
+        "p1",
+        _decision(ProductDecisionState.APPROVED),
+        expected_row_version=0,
+        idempotency_key="decision:approved-for-invalid-link-version",
+    )
+    before = projects.get("p1")
+
+    with pytest.raises(
+        ValueError,
+        match="expected_row_version must be a non-negative integer",
+    ):
+        service.link_decision_requirement(
+            "p1",
+            requirement_id="req-keyboard",
+            decision_id="decision-ui",
+            expected_row_version=invalid_version,
+        )
+
+    assert projects.get("p1") == before
+
+
+@pytest.mark.parametrize(
+    "invalid_version",
+    [True, False, 0.0, 1.0, "0", "1", -1],
+)
+def test_transition_requires_exact_nonnegative_row_version_without_mutation(
+    tmp_path,
+    invalid_version,
+) -> None:
+    service, projects, _store = _service(tmp_path)
+    _create(service)
+    before = projects.get("p1")
+    before_history = service.lifecycle_history("p1")
+
+    with pytest.raises(
+        ValueError,
+        match="expected_row_version must be a non-negative integer",
+    ):
+        service.transition_project(
+            "p1",
+            ProductProjectState.PAUSED,
+            expected_row_version=invalid_version,
+            idempotency_key="state:invalid-row-version",
+            reason="Must not persist",
+            changed_by_ref="user://owner",
+        )
+
+    assert projects.get("p1") == before
+    assert service.lifecycle_history("p1") == before_history
+
+
 def test_full_spec_replacement_cannot_mix_with_partial_update(tmp_path) -> None:
     service, _projects, _store = _service(tmp_path)
     _create(service)
