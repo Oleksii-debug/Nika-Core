@@ -45,10 +45,20 @@ let releaseWrite;
 let delayedRead;
 let failRead = false;
 const calls = [];
+const ack = (command, response) => ({
+  request_id: command.request_id,
+  focus_id: null,
+  ...response,
+});
 function snapshot(state = current) {
   return { ok: true, state: { tasks: [], agents: [], workspaces: [],
     autostart: badSnapshot ?? { schema_version: 1, state,
       can_change: ["enabled", "disabled", "stale"].includes(state), message: "PRIVATE_REGISTRY_CANARY" },
+    startup_recovery: {
+      schema_version: 1, status: "ready",
+      auto_resume_count: 0, manual_resume_count: 0, approval_count: 0,
+      uncertain_count: 0, blocked_count: 0, resume_failed_count: 0,
+    },
   } };
 }
 global.pywebview = { api: {
@@ -60,12 +70,22 @@ global.pywebview = { api: {
   },
   dispatch: async (command) => {
     calls.push(command);
-    if (command.action_id.endsWith("refresh")) return { status: "completed", message: "Перечитано." };
-    if (dispatchMode === "reject") return { status: "failed", message: "Зміну не підтверджено." };
+    if (command.action_id.endsWith("refresh")) {
+      return ack(command, { status: "completed", message: "Перечитано." });
+    }
+    if (dispatchMode === "reject") {
+      return ack(command, { status: "failed", message: "Зміну не підтверджено." });
+    }
     if (dispatchMode === "disconnect") throw new Error("PRIVATE_REGISTRY_CANARY");
     if (dispatchMode === "pending") await new Promise((resolve) => { releaseWrite = resolve; });
     current = command.payload.enabled ? "enabled" : "disabled";
-    return { status: "completed", message: "Налаштування автозапуску збережено." };
+    const response = ack(
+      command, { status: "completed", message: "Налаштування автозапуску збережено." },
+    );
+    if (dispatchMode === "wrong-request-id") {
+      return {...response, request_id: "wrong-autostart-request"};
+    }
+    return response;
   },
 } };
 eval(fs.readFileSync(process.argv[2], "utf8"));
@@ -114,6 +134,12 @@ const stateText = () => element("autostart-status").textContent;
   assert.equal(calls.length, beforeDisconnect + 1, "No blind retry after unknown write outcome");
   assert.match(element("app-status").textContent, /Немає підтвердження/);
   assert.match(stateText(), /Автозапуск увімкнено/);
+  dispatchMode = "wrong-request-id";
+  const beforeWrongRequest = calls.length;
+  click(save); await tick(); await tick();
+  assert.equal(calls.length, beforeWrongRequest + 1, "Wrong autostart ACK identity must not retry");
+  assert.match(element("app-status").textContent, /Немає підтвердження/);
+  assert.equal(input.checked, false, "State reread must expose the committed uncertain write");
   dispatchMode = "success";
   click(save); await tick(); await tick();
   assert.equal(input.checked, false);
@@ -141,5 +167,5 @@ const stateText = () => element("autostart-status").textContent;
   assert.equal(input.disabled, true);
   assert.equal(document.activeElement, priorFocus, "Polling must never move focus");
   assert.equal(JSON.stringify(Object.values(elements).map((e) => e.textContent)).includes("PRIVATE_REGISTRY_CANARY"), false);
-  console.log("PASS: autostart renderer, native Space, draft, acknowledgement, failure, read race, focus, no retry");
+  console.log("PASS: autostart renderer, native Space, draft, acknowledgement, failure, read race, focus, no retry, exact ACK identity");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

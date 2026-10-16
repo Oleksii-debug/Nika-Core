@@ -13,6 +13,7 @@ from nika_core.product_command.contracts import (
     ProductUserDecision,
 )
 from nika_core.product_decisions import ProductDecisionRepository, StoredProductDecision
+from nika_core.security import ActionIntent, ApprovalEvidence, ApprovalVerifier
 from nika_core.product_project import (
     ProductDecision,
     ProductDecisionState,
@@ -43,10 +44,24 @@ class ProductProjectPresentationConsistencyError(RuntimeError):
 class ProductProjectCommandService:
     """PF5 adapter over the integrated durable PF1 repositories and lifecycle."""
 
-    def __init__(self, repository: ProductProjectRepository) -> None:
+    def __init__(
+        self,
+        repository: ProductProjectRepository,
+        *,
+        approval_verifier: ApprovalVerifier | None = None,
+    ) -> None:
         self._repository = repository
-        self._decisions = ProductDecisionRepository(repository.store)
+        self._decisions = ProductDecisionRepository(
+            repository.store,
+            approval_verifier=approval_verifier,
+        )
         self._lifecycle = ProductProjectLifecycleService(repository.store)
+
+    @staticmethod
+    def _require_expected_row_version(value: object) -> int:
+        if type(value) is not int or value < 0:
+            raise ValueError("expected_row_version must be a non-negative integer")
+        return value
 
     def create_project(
         self,
@@ -98,6 +113,8 @@ class ProductProjectCommandService:
         desired_outcome: str | None = None,
         hypothesis: str | None = None,
     ) -> ProductProjectDetail:
+        if type(expected_spec_version) is not int or expected_spec_version < 1:
+            raise ValueError("expected_spec_version must be a positive integer")
         current = self._repository.get(project_id)
         if current.spec_version != expected_spec_version:
             raise StaleProjectVersionError(
@@ -125,6 +142,21 @@ class ProductProjectCommandService:
         )
         return self.inspect_project(project_id)
 
+    def decision_approval_intent(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        idempotency_key: str,
+    ) -> ActionIntent:
+        return self._decisions.approval_intent(
+            project_id,
+            decision,
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
+        )
+
     def record_decision(
         self,
         project_id: str,
@@ -132,12 +164,17 @@ class ProductProjectCommandService:
         *,
         expected_row_version: int,
         idempotency_key: str,
+        approval: ApprovalEvidence | None = None,
+        now: datetime | None = None,
     ) -> ProductProjectDetail:
+        expected_row_version = self._require_expected_row_version(expected_row_version)
         self._decisions.record(
             project_id,
             decision,
             expected_row_version=expected_row_version,
             idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
         )
         return self.inspect_project(project_id)
 
@@ -148,6 +185,8 @@ class ProductProjectCommandService:
         *,
         expected_row_version: int,
         idempotency_key: str,
+        approval: ApprovalEvidence | None = None,
+        now: datetime | None = None,
     ) -> ProductProjectDetail:
         """Compatibility name for the now-real durable ProductDecision write path."""
         return self.record_decision(
@@ -155,6 +194,8 @@ class ProductProjectCommandService:
             decision,
             expected_row_version=expected_row_version,
             idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
         )
 
     def link_decision_requirement(
@@ -165,6 +206,7 @@ class ProductProjectCommandService:
         decision_id: str,
         expected_row_version: int,
     ) -> ProductProjectDetail:
+        expected_row_version = self._require_expected_row_version(expected_row_version)
         self._decisions.link_requirement(
             project_id,
             requirement_id=requirement_id,
@@ -194,6 +236,7 @@ class ProductProjectCommandService:
         reason: str,
         changed_by_ref: str,
     ) -> ProductProjectDetail:
+        expected_row_version = self._require_expected_row_version(expected_row_version)
         self._lifecycle.transition(
             project_id,
             new_state,
