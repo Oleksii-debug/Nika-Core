@@ -98,6 +98,54 @@ def _running_task(queue: TaskQueue) -> str:
     return task.task_id
 
 
+def _retrying_task_without_session(
+    queue: TaskQueue,
+    audit: AuditLog,
+    *,
+    thread_id: str = "thread-fresh-retry",
+) -> str:
+    task_id = _running_task(queue)
+    queue.transition(task_id, TaskState.RETRYING)
+    audit.append(
+        event_type="runtime.retry_scheduled",
+        entity_type="task",
+        entity_id=task_id,
+        payload={
+            "runtime_id": "recoverable",
+            "thread_id": thread_id,
+            "retry_number": 1,
+            "delay_seconds": 1.0,
+            "error": "temporary failure",
+            "error_code": "transient",
+            "resume_token": None,
+        },
+    )
+    return task_id
+
+
+def _started_retry_without_session(
+    queue: TaskQueue,
+    audit: AuditLog,
+    *,
+    thread_id: str = "thread-fresh-retry",
+) -> str:
+    task_id = _retrying_task_without_session(queue, audit, thread_id=thread_id)
+    queue.transition(task_id, TaskState.RUNNING)
+    audit.append(
+        event_type="runtime.retry_started",
+        entity_type="task",
+        entity_id=task_id,
+        payload={
+            "runtime_id": "recoverable",
+            "thread_id": thread_id,
+            "retry_number": 1,
+            "resume": False,
+            "remaining_timeout_seconds": 5.0,
+        },
+    )
+    return task_id
+
+
 def test_startup_inventory_classifies_clean_crash_as_auto_resume(tmp_path: Path):
     _store, queue, _audit, sessions, _ledger, _runtimes, recovery = _services(tmp_path)
     task_id = _running_task(queue)
@@ -115,6 +163,97 @@ def test_startup_inventory_classifies_clean_crash_as_auto_resume(tmp_path: Path)
     assert candidates[0].disposition == RecoveryDisposition.AUTO_RESUME_CRASH
     assert candidates[0].task_state == TaskState.RUNNING
     assert candidates[0].unresolved_operation_keys == ()
+
+
+def test_startup_inventory_surfaces_crash_left_fresh_retry_without_session(
+    tmp_path: Path,
+):
+    _store, queue, audit, _sessions, _ledger, _runtimes, recovery = _services(tmp_path)
+    task_id = _retrying_task_without_session(queue, audit)
+
+    candidates = recovery.inspect()
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.task_id == task_id
+    assert candidate.runtime_id == "recoverable"
+    assert candidate.thread_id == "thread-fresh-retry"
+    assert candidate.task_state is TaskState.RETRYING
+    assert candidate.stored_outcome is None
+    assert candidate.disposition is RecoveryDisposition.INCONSISTENT_STATE
+    assert "automatic replay is unsafe" in candidate.reason
+    inventory = audit.list_for(entity_type="runtime_recovery", entity_id="startup")
+    assert inventory[-1].payload["orphan_retry_count"] == 1
+    assert inventory[-1].payload["blocked_count"] == 1
+
+
+def test_startup_inventory_surfaces_crash_left_fresh_retry_after_attempt_started(
+    tmp_path: Path,
+):
+    _store, queue, audit, _sessions, _ledger, _runtimes, recovery = _services(tmp_path)
+    task_id = _started_retry_without_session(queue, audit)
+
+    candidates = recovery.inspect()
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    assert candidate.task_id == task_id
+    assert candidate.runtime_id == "recoverable"
+    assert candidate.thread_id == "thread-fresh-retry"
+    assert candidate.task_state is TaskState.RUNNING
+    assert candidate.stored_outcome is None
+    assert candidate.disposition is RecoveryDisposition.INCONSISTENT_STATE
+    assert "automatic replay is unsafe" in candidate.reason
+    inventory = audit.list_for(entity_type="runtime_recovery", entity_id="startup")
+    assert inventory[-1].payload["orphan_retry_count"] == 1
+    assert inventory[-1].payload["blocked_count"] == 1
+
+
+def test_started_orphan_retry_is_never_automatically_replayed(tmp_path: Path):
+    _store, queue, audit, _sessions, _ledger, _runtimes, recovery = _services(tmp_path)
+    task_id = _started_retry_without_session(queue, audit)
+
+    executions = asyncio.run(recovery.resume_safe_crash_sessions(max_count=8))
+
+    assert executions == ()
+    assert queue.get(task_id).state is TaskState.RUNNING
+    task_events = audit.list_for(entity_type="task", entity_id=task_id)
+    assert "runtime.recovery_auto_resume_requested" not in {
+        event.event_type for event in task_events
+    }
+
+
+def test_orphan_retry_pending_effect_is_promoted_and_requires_reconciliation(
+    tmp_path: Path,
+):
+    _store, queue, audit, _sessions, ledger, _runtimes, recovery = _services(tmp_path)
+    task_id = _retrying_task_without_session(queue, audit)
+    ledger.reserve(
+        operation_key="publish:orphan-retry",
+        task_id=task_id,
+        operation_type="publish",
+        input_fingerprint="sha256:orphan-retry",
+    )
+
+    candidate = recovery.inspect()[0]
+
+    assert candidate.disposition is RecoveryDisposition.RECONCILE_SIDE_EFFECTS
+    assert candidate.unresolved_operation_keys == ("publish:orphan-retry",)
+    assert ledger.require("publish:orphan-retry").status is IdempotencyStatus.UNCERTAIN
+
+
+def test_orphan_retry_is_never_automatically_replayed(tmp_path: Path):
+    _store, queue, audit, _sessions, _ledger, _runtimes, recovery = _services(tmp_path)
+    task_id = _retrying_task_without_session(queue, audit)
+
+    executions = asyncio.run(recovery.resume_safe_crash_sessions(max_count=8))
+
+    assert executions == ()
+    assert queue.get(task_id).state is TaskState.RETRYING
+    task_events = audit.list_for(entity_type="task", entity_id=task_id)
+    assert "runtime.recovery_auto_resume_requested" not in {
+        event.event_type for event in task_events
+    }
 
 
 def test_pending_external_side_effect_blocks_automatic_crash_resume(tmp_path: Path):

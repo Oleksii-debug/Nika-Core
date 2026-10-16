@@ -16,8 +16,10 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.research.local import local_media_type, resolve_local_file
 from nika_core.ui.bridge_models import UIResult
+from nika_core.v01_settings_json import bounded_stored_utf8, load_persisted_json_object
 
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
+_MAX_STORED_SOURCE_JSON_BYTES = 1024 * 1024
 MAX_SETUP_REVISION = (1 << 53) - 1
 _SCHEMA_VERSION = 1
 _MIGRATIONS = {
@@ -63,6 +65,10 @@ class SourceSelection(BaseModel):
     def path_text(cls, value: str) -> str:
         if not value.strip() or any(ord(char) < 32 for char in value):
             raise ValueError("invalid source path")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("source path contains invalid Unicode") from exc
         return value
 
     def resolve(self) -> SourceSelection:
@@ -91,7 +97,12 @@ class SourceSelection(BaseModel):
     @classmethod
     def from_stored(cls, value: str) -> SourceSelection:
         try:
-            selection = cls.model_validate_json(value)
+            if type(value) is not str:
+                raise ValueError("stored source selection must be text")
+            decoded = load_persisted_json_object(
+                value, max_bytes=_MAX_STORED_SOURCE_JSON_BYTES
+            )
+            selection = cls.model_validate(decoded)
             root = Path(selection.root)
             paths = (Path(selection.source_a), Path(selection.source_b))
             if not root.is_absolute() or ".." in root.parts or paths[0] == paths[1]:
@@ -101,7 +112,7 @@ class SourceSelection(BaseModel):
                     raise ValueError("invalid stored source")
                 local_media_type(path)
             return selection
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        except (OSError, RuntimeError, TypeError, ValueError, RecursionError) as exc:
             raise SourceSetupError(
                 "Збережені налаштування джерел пошкоджені або несумісні."
             ) from exc
@@ -186,12 +197,18 @@ class V01SourceSettings:
             "SELECT selection_json FROM v01_source_selections WHERE selection_id = ?",
             (selection_id,),
         ).fetchone()
-        if (
-            row is None
-            or hashlib.sha256(row["selection_json"].encode("utf-8")).hexdigest() != selection_id
-        ):
+        if row is None or type(row["selection_json"]) is not str:
             raise SourceSetupError("Збережену конфігурацію завдання не вдалося перевірити.")
-        return SourceSelection.from_stored(row["selection_json"])
+        body = row["selection_json"]
+        try:
+            raw = bounded_stored_utf8(body, max_bytes=_MAX_STORED_SOURCE_JSON_BYTES)
+        except (TypeError, ValueError) as exc:
+            raise SourceSetupError(
+                "Збережену конфігурацію завдання не вдалося перевірити."
+            ) from exc
+        if hashlib.sha256(raw).hexdigest() != selection_id:
+            raise SourceSetupError("Збережену конфігурацію завдання не вдалося перевірити.")
+        return SourceSelection.from_stored(body)
 
     def _default_selection(self) -> SourceSelection | None:
         values = (

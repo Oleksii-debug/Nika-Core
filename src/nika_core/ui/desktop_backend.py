@@ -6,6 +6,7 @@ import threading
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from typing import Any
+from uuid import UUID
 
 from nika_core.kernel.agent_registry import AgentDefinition, AgentRegistry
 from nika_core.kernel.audit import AuditLog
@@ -18,7 +19,13 @@ from nika_core.runtime.contracts import (
     RuntimeRequest,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
+from nika_core.runtime.recovery import (
+    RecoveryCandidate,
+    RecoveryDisposition,
+    RuntimeRecoveryService,
+)
 from nika_core.runtime.reference import ReferenceRuntime
+from nika_core.runtime.registry import RuntimeRegistry
 from nika_core.ui.autostart_settings import AutostartSettings
 from nika_core.ui.bridge_models import UIResult
 from nika_core.windows_autostart import WindowsAutostartService
@@ -29,9 +36,11 @@ _DEFAULT_WORKSPACE_ID = "default"
 _TERMINAL_STATES = frozenset(
     {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED, TaskState.ARCHIVED}
 )
+_NONTERMINAL_STATES = tuple(state for state in TaskState if state not in _TERMINAL_STATES)
 _LOCAL_CANCEL_STATES = frozenset(
     {TaskState.CREATED, TaskState.READY, TaskState.PAUSED, TaskState.BLOCKED}
 )
+_TASK_PAGE_SIZE = 50
 
 
 class _DesktopRuntimeLoop:
@@ -92,6 +101,9 @@ class DesktopBackend:
         audit: AuditLog,
         runtime: AgentRuntimePort | None = None,
         prepare_task_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        admit_created_task: Callable[[TaskRecord], None] | None = None,
+        admit_resumed_task: Callable[[TaskRecord], None] | None = None,
+        admit_recovered_task: Callable[[TaskRecord], None] | None = None,
         autostart_service: WindowsAutostartService | None = None,
     ) -> None:
         self._queue = queue
@@ -101,12 +113,31 @@ class DesktopBackend:
         self._coordinator = TaskRuntimeCoordinator(queue, audit)
         self._runtime = runtime or ReferenceRuntime()
         self._prepare_task_payload = prepare_task_payload
+        self._admit_created_task = admit_created_task
+        self._admit_resumed_task = admit_resumed_task
+        self._admit_recovered_task = admit_recovered_task
         self.autostart_settings = AutostartSettings(autostart_service, audit)
         self._runtime_loop: _DesktopRuntimeLoop | None = None
         self._active_lock = threading.Lock()
         self._active_threads: dict[str, str] = {}
         self._active_futures: dict[str, Future[Any]] = {}
         self._cancel_futures: dict[str, Future[bool]] = {}
+        self._packaged_futures: set[Future[Any]] = set()
+        self._task_page_lock = threading.Lock()
+        self._task_page_offset = 0
+        self._startup_recovery_lock = threading.Lock()
+        self._startup_recovery_started = False
+        self._startup_recovery_future: Future[Any] | None = None
+        self._startup_recovery_state: dict[str, Any] = {
+            "schema_version": 1,
+            "status": "not_started",
+            "auto_resume_count": 0,
+            "manual_resume_count": 0,
+            "approval_count": 0,
+            "uncertain_count": 0,
+            "blocked_count": 0,
+            "resume_failed_count": 0,
+        }
         self._ensure_defaults()
 
     def create_task(self, payload: Mapping[str, Any]) -> UIResult:
@@ -123,7 +154,16 @@ class DesktopBackend:
             agent_id=_DEFAULT_AGENT_ID,
             payload=task_payload,
         )
+        try:
+            if self._admit_created_task is not None:
+                self._admit_created_task(record)
+            if self._queue.get(record.task_id).state is not TaskState.CREATED:
+                raise RuntimeError("task admission changed task state before READY")
+        except BaseException:
+            self._cancel_rejected_admission(record.task_id)
+            raise
         self._queue.transition(record.task_id, TaskState.READY)
+        self._reset_task_page()
         self._schedule_start(record.task_id, command)
         return UIResult(
             request_id="desktop-handler",
@@ -132,8 +172,10 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def pause_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_controllable(action="призупинення")
+    def pause_task(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._explicit_task(payload)
+        if record is None:
+            record = self._only_controllable(action="призупинення")
         if record is None:
             raise ValueError("Немає активного завдання, яке можна призупинити.")
         if record.state == TaskState.RUNNING:
@@ -159,10 +201,21 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def resume_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_with_state(TaskState.PAUSED, action="продовження")
+    def resume_task(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._explicit_task(payload)
+        if record is None:
+            record = self._only_with_state(TaskState.PAUSED, action="продовження")
         if record is None:
             raise ValueError("Немає призупиненого завдання для продовження.")
+        if record.state is not TaskState.PAUSED:
+            raise ValueError(
+                f"Завдання у стані {record.state.value} не можна продовжити."
+            )
+
+        if self._admit_resumed_task is not None:
+            self._admit_resumed_task(record)
+        if self._queue.get(record.task_id).state is not TaskState.PAUSED:
+            raise RuntimeError("task resume admission changed task state before submission")
 
         session = self._coordinator.sessions.get(record.task_id)
         if session is not None:
@@ -201,21 +254,34 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def stop_agent(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_controllable(action="зупинки")
+    def stop_agent(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._explicit_task(payload)
         if record is None:
-            cancelled = self._only_with_state(
-                TaskState.CANCELLED,
-                action="повторної зупинки",
-            )
-            if cancelled is not None:
-                return UIResult(
-                    request_id="desktop-handler",
-                    status="completed",
-                    message="Завдання вже скасовано; додаткових дій не виконано.",
-                    focus_id="tasks-heading",
+            record = self._only_controllable(action="зупинки")
+            if record is None:
+                cancelled = self._only_with_state(
+                    TaskState.CANCELLED,
+                    action="повторної зупинки",
                 )
-            raise ValueError("Немає активного завдання агента для зупинки.")
+                if cancelled is not None:
+                    return UIResult(
+                        request_id="desktop-handler",
+                        status="completed",
+                        message="Завдання вже скасовано; додаткових дій не виконано.",
+                        focus_id="tasks-heading",
+                    )
+                raise ValueError("Немає активного завдання агента для зупинки.")
+        if record.state is TaskState.CANCELLED:
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message="Завдання вже скасовано; додаткових дій не виконано.",
+                focus_id="tasks-heading",
+            )
+        if record.state in _TERMINAL_STATES:
+            raise ValueError(
+                f"Завдання у стані {record.state.value} не можна зупинити."
+            )
 
         cancel_future: Future[bool] | None = None
         with self._active_lock:
@@ -260,10 +326,102 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
+    def start_startup_recovery(self, *, startup_wait_seconds: float = 2.0) -> dict[str, Any]:
+        """Inventory crash-left runtime state before shell exposure and resume only safe work.
+
+        The canonical recovery service remains the only classifier/recovery authority. This
+        packaged facade only registers its already-owned runtime, runs the synchronous inventory
+        before the shell can expose stale state, and schedules eligible continuation on the same
+        desktop asyncio host used by ordinary Start/Resume/Cancel calls.
+
+        A short bounded wait lets immediately recoverable checkpoints settle before first paint.
+        Longer recovery continues in the background and is projected truthfully by snapshot().
+        """
+
+        if startup_wait_seconds < 0:
+            raise ValueError("startup_wait_seconds must be non-negative")
+        with self._startup_recovery_lock:
+            if self._startup_recovery_started:
+                return dict(self._startup_recovery_state)
+            self._startup_recovery_started = True
+            self._startup_recovery_state = {
+                **self._startup_recovery_state,
+                "status": "inventory",
+            }
+
+        runtimes = RuntimeRegistry()
+        runtimes.register(self._runtime)
+        recovery = RuntimeRecoveryService(
+            queue=self._queue,
+            audit=self._audit,
+            runtimes=runtimes,
+            coordinator=self._coordinator,
+            sessions=self._coordinator.sessions,
+        )
+        try:
+            candidates = recovery.inspect()
+        except Exception:
+            self._set_startup_recovery_state(
+                {
+                    **self.startup_recovery_snapshot(),
+                    "status": "failed",
+                    "blocked_count": 1,
+                }
+            )
+            raise
+
+        self._set_startup_recovery_state(self._recovery_projection(candidates))
+        auto_resume = tuple(
+            item
+            for item in candidates
+            if item.disposition is RecoveryDisposition.AUTO_RESUME_CRASH
+        )
+        if not auto_resume:
+            return self.startup_recovery_snapshot()
+
+        if self._admit_recovered_task is not None:
+            self._admit_startup_recovery(auto_resume)
+            candidates = recovery.inspect()
+            self._set_startup_recovery_state(self._recovery_projection(candidates))
+            auto_resume = tuple(
+                item
+                for item in candidates
+                if item.disposition is RecoveryDisposition.AUTO_RESUME_CRASH
+            )
+            if not auto_resume:
+                return self.startup_recovery_snapshot()
+
+        future = self._host().submit(recovery.resume_safe_crash_sessions())
+        with self._startup_recovery_lock:
+            self._startup_recovery_future = future
+        future.add_done_callback(lambda done: self._startup_recovery_done(recovery, done))
+
+        if startup_wait_seconds:
+            try:
+                future.result(timeout=startup_wait_seconds)
+            except TimeoutError:
+                pass
+            except Exception as exc:  # noqa: BLE001 - runtime/provider boundary
+                # Completion callback converts background diagnostics to bounded state.
+                # Log only the exception type; provider/runtime text may contain private data.
+                _LOGGER.warning(
+                    "Startup recovery did not settle before first shell paint; "
+                    "exception_type=%s",
+                    type(exc).__name__,
+                )
+        return self.startup_recovery_snapshot()
+
+    def startup_recovery_snapshot(self) -> dict[str, Any]:
+        with self._startup_recovery_lock:
+            return dict(self._startup_recovery_state)
+
     def snapshot(self) -> dict[str, Any]:
+        task_records, task_page = self._snapshot_task_records()
         return {
             "autostart": self.autostart_settings.snapshot(),
-            "tasks": [self._task_view(record) for record in self._queue.list_recent(limit=50)],
+            "startup_recovery": self.startup_recovery_snapshot(),
+            "tasks": [self._task_view(record) for record in task_records],
+            "task_page": task_page,
             "agents": [
                 {
                     "agent_id": item.agent_id,
@@ -285,13 +443,32 @@ class DesktopBackend:
             ],
         }
 
+    def submit_packaged_coroutine(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+    ) -> Future[Any]:
+        """Run and track internal packaged async work on the canonical desktop host."""
+
+        with self._active_lock:
+            future = self._host().submit(coroutine)
+            self._packaged_futures.add(future)
+        future.add_done_callback(self._packaged_done)
+        return future
+
     def close(self) -> None:
         """Stop the private bridge event loop after all submitted runtime work has settled."""
         with self._active_lock:
-            futures = (
+            futures = [
                 *self._active_futures.values(),
                 *self._cancel_futures.values(),
-            )
+                *self._packaged_futures,
+            ]
+        with self._startup_recovery_lock:
+            if (
+                self._startup_recovery_future is not None
+                and self._startup_recovery_future not in futures
+            ):
+                futures.append(self._startup_recovery_future)
         for future in futures:
             try:
                 future.result(timeout=2)
@@ -308,14 +485,160 @@ class DesktopBackend:
             self._active_threads.clear()
             self._active_futures.clear()
             self._cancel_futures.clear()
+            self._packaged_futures.clear()
         if self._runtime_loop is not None:
             self._runtime_loop.close()
             self._runtime_loop = None
+
+    def _admit_startup_recovery(
+        self,
+        candidates: tuple[RecoveryCandidate, ...],
+    ) -> None:
+        """Apply host-specific authority admission before canonical crash auto-resume."""
+
+        admit = self._admit_recovered_task
+        if admit is None:
+            return
+        for candidate in candidates:
+            try:
+                record = self._queue.get(candidate.task_id)
+                if record.state is not TaskState.RUNNING:
+                    raise RuntimeError("startup recovery task is no longer crash-left RUNNING")
+                admit(record)
+                if self._queue.get(candidate.task_id) != record:
+                    raise RuntimeError("startup recovery admission changed the task record")
+            except Exception as exc:  # noqa: BLE001 - host admission must fail closed per task
+                current = self._queue.get(candidate.task_id)
+                if current.state is TaskState.RUNNING:
+                    self._queue.transition(candidate.task_id, TaskState.PAUSED)
+                self._audit.append(
+                    event_type="desktop.startup_recovery_admission_rejected",
+                    entity_type="task",
+                    entity_id=candidate.task_id,
+                    payload={
+                        "runtime_id": candidate.runtime_id,
+                        "exception_type": type(exc).__name__,
+                    },
+                )
+
+    def _set_startup_recovery_state(self, state: Mapping[str, Any]) -> None:
+        with self._startup_recovery_lock:
+            self._startup_recovery_state = dict(state)
+
+    @staticmethod
+    def _recovery_projection(
+        candidates: tuple[RecoveryCandidate, ...],
+        *,
+        resume_failed_count: int = 0,
+    ) -> dict[str, Any]:
+        auto_resume_count = sum(
+            item.disposition is RecoveryDisposition.AUTO_RESUME_CRASH for item in candidates
+        )
+        manual_resume_count = sum(
+            item.disposition is RecoveryDisposition.MANUAL_RESUME for item in candidates
+        )
+        approval_count = sum(
+            item.disposition is RecoveryDisposition.WAITING_APPROVAL for item in candidates
+        )
+        uncertain_count = sum(
+            item.disposition is RecoveryDisposition.RECONCILE_SIDE_EFFECTS for item in candidates
+        )
+        blocked_count = sum(
+            item.disposition
+            in {
+                RecoveryDisposition.CHECKPOINT_UNAVAILABLE,
+                RecoveryDisposition.MISSING_RUNTIME,
+                RecoveryDisposition.INCONSISTENT_STATE,
+            }
+            for item in candidates
+        )
+        if resume_failed_count or uncertain_count or blocked_count:
+            status = "attention"
+        elif auto_resume_count:
+            status = "recovering"
+        elif manual_resume_count or approval_count:
+            status = "manual"
+        else:
+            status = "ready"
+        return {
+            "schema_version": 1,
+            "status": status,
+            "auto_resume_count": auto_resume_count,
+            "manual_resume_count": manual_resume_count,
+            "approval_count": approval_count,
+            "uncertain_count": uncertain_count,
+            "blocked_count": blocked_count,
+            "resume_failed_count": resume_failed_count,
+        }
+
+    def _startup_recovery_done(
+        self,
+        recovery: RuntimeRecoveryService,
+        future: Future[Any],
+    ) -> None:
+        if future.cancelled():
+            self._set_startup_recovery_state(
+                {
+                    **self.startup_recovery_snapshot(),
+                    "status": "attention",
+                    "resume_failed_count": 1,
+                }
+            )
+            return
+        try:
+            executions = future.result()
+        except Exception:  # noqa: BLE001 - future may carry any runtime/provider failure
+            self._set_startup_recovery_state(
+                {
+                    **self.startup_recovery_snapshot(),
+                    "status": "attention",
+                    "resume_failed_count": 1,
+                }
+            )
+            return
+
+        failed_count = sum(not item.succeeded for item in executions)
+        try:
+            candidates = recovery.inspect()
+        except Exception:  # noqa: BLE001 - post-recovery inventory fails closed to attention
+            self._set_startup_recovery_state(
+                {
+                    **self.startup_recovery_snapshot(),
+                    "status": "attention",
+                    "blocked_count": 1,
+                    "resume_failed_count": max(1, failed_count),
+                }
+            )
+            return
+        self._set_startup_recovery_state(
+            self._recovery_projection(
+                candidates,
+                resume_failed_count=failed_count,
+            )
+        )
 
     def _host(self) -> _DesktopRuntimeLoop:
         if self._runtime_loop is None:
             self._runtime_loop = _DesktopRuntimeLoop()
         return self._runtime_loop
+
+    def _cancel_rejected_admission(self, task_id: str) -> None:
+        """Fail closed before runtime dispatch when created-task admission is rejected."""
+
+        try:
+            if self._queue.get(task_id).state is TaskState.CREATED:
+                self._queue.transition(task_id, TaskState.CANCELLED)
+            self._audit.append(
+                event_type="desktop.task_admission_rejected",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"runtime_id": self._runtime.runtime_id},
+            )
+        except BaseException as exc:  # noqa: BLE001
+            _LOGGER.error(
+                "Desktop task-admission reconciliation failed; exception_type=%s",
+                type(exc).__name__,
+            )
 
     def _schedule_start(self, task_id: str, command: str) -> None:
         thread_id = f"desktop-{task_id}"
@@ -372,6 +695,10 @@ class DesktopBackend:
             future = self._host().submit(coroutine)
             self._active_futures[task_id] = future
         future.add_done_callback(lambda done: self._runtime_done(task_id, done))
+
+    def _packaged_done(self, future: Future[Any]) -> None:
+        with self._active_lock:
+            self._packaged_futures.discard(future)
 
     def _cancel_done(self, task_id: str, future: Future[bool]) -> None:
         with self._active_lock:
@@ -441,19 +768,132 @@ class DesktopBackend:
                 )
             )
 
+    def _explicit_task(self, payload: Mapping[str, Any]) -> TaskRecord | None:
+        if "task_id" not in payload:
+            return None
+        task_id = payload["task_id"]
+        if type(task_id) is not str or not task_id or task_id != task_id.strip():
+            raise ValueError("task_id має бути канонічним UUID.")
+        try:
+            parsed = UUID(task_id)
+        except (ValueError, AttributeError) as exc:
+            raise ValueError("task_id має бути канонічним UUID.") from exc
+        if str(parsed) != task_id:
+            raise ValueError("task_id має бути канонічним UUID.")
+        try:
+            return self._queue.get(task_id)
+        except KeyError as exc:
+            raise ValueError(f"Завдання не знайдено: {task_id}.") from exc
+
     def _only_controllable(self, *, action: str) -> TaskRecord | None:
-        records = [
-            record
-            for record in self._queue.list_recent(limit=50)
-            if record.state not in _TERMINAL_STATES
-        ]
+        records = list(self._queue.list_by_states(_NONTERMINAL_STATES, limit=2))
         return self._require_unambiguous(records, action=action)
 
     def _only_with_state(self, state: TaskState, *, action: str) -> TaskRecord | None:
-        records = [
-            record for record in self._queue.list_recent(limit=50) if record.state == state
-        ]
+        records = list(self._queue.list_by_states((state,), limit=2))
         return self._require_unambiguous(records, action=action)
+
+    def next_task_page(self, payload: Mapping[str, Any]) -> UIResult:
+        self._require_empty_task_page_payload(payload)
+        with self._task_page_lock:
+            next_offset = self._task_page_offset + _TASK_PAGE_SIZE
+            next_page = self._queue.list_by_states(
+                _NONTERMINAL_STATES,
+                limit=1,
+                offset=next_offset,
+            )
+            if not next_page:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="completed",
+                    message="Це остання сторінка незавершених завдань.",
+                    focus_id="tasks-heading",
+                )
+            self._task_page_offset = next_offset
+            page_number = next_offset // _TASK_PAGE_SIZE + 1
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=f"Відкрито сторінку {page_number} незавершених завдань.",
+            focus_id="tasks-heading",
+        )
+
+    def previous_task_page(self, payload: Mapping[str, Any]) -> UIResult:
+        self._require_empty_task_page_payload(payload)
+        with self._task_page_lock:
+            if self._task_page_offset == 0:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="completed",
+                    message="Це перша сторінка завдань.",
+                    focus_id="tasks-heading",
+                )
+            self._task_page_offset = max(0, self._task_page_offset - _TASK_PAGE_SIZE)
+            page_number = self._task_page_offset // _TASK_PAGE_SIZE + 1
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=f"Відкрито сторінку {page_number} завдань.",
+            focus_id="tasks-heading",
+        )
+
+    def _reset_task_page(self) -> None:
+        with self._task_page_lock:
+            self._task_page_offset = 0
+
+    def _snapshot_task_records(
+        self,
+    ) -> tuple[tuple[TaskRecord, ...], dict[str, object]]:
+        with self._task_page_lock:
+            offset = self._task_page_offset
+
+        window = self._queue.list_by_states(
+            _NONTERMINAL_STATES,
+            limit=_TASK_PAGE_SIZE + 1,
+            offset=offset,
+        )
+        if offset and not window:
+            with self._task_page_lock:
+                if self._task_page_offset == offset:
+                    self._task_page_offset = 0
+                offset = self._task_page_offset
+            window = self._queue.list_by_states(
+                _NONTERMINAL_STATES,
+                limit=_TASK_PAGE_SIZE + 1,
+                offset=offset,
+            )
+
+        unfinished = tuple(window[:_TASK_PAGE_SIZE])
+        has_next = len(window) > _TASK_PAGE_SIZE
+        has_previous = offset > 0
+        unfinished_only = has_previous or has_next
+        records: tuple[TaskRecord, ...] = unfinished
+        if not unfinished_only:
+            terminal = tuple(
+                record
+                for record in self._queue.list_recent(limit=_TASK_PAGE_SIZE)
+                if record.state in _TERMINAL_STATES
+            )
+            remaining = _TASK_PAGE_SIZE - len(unfinished)
+            records = (*unfinished, *terminal[:remaining])
+
+        page = {
+            "schema": "nika.task-page:v1",
+            "page_size": _TASK_PAGE_SIZE,
+            "offset": offset,
+            "page_number": offset // _TASK_PAGE_SIZE + 1,
+            "has_previous": has_previous,
+            "has_next": has_next,
+            "unfinished_only": unfinished_only,
+        }
+        return records, page
+
+    @staticmethod
+    def _require_empty_task_page_payload(payload: Mapping[str, Any]) -> None:
+        if type(payload) is not dict:
+            raise TypeError("task page action payload must be an exact dict")
+        if payload:
+            raise ValueError("task page action does not accept payload authority")
 
     @staticmethod
     def _require_unambiguous(

@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +41,57 @@ _FORM_ROLES: Final = frozenset(
 )
 _NON_CONTROL_SNAPSHOT_ROLES: Final = frozenset({"text"})
 _MAX_ACTION_DOWNLOADS: Final = 100
+_WINDOWS_FORBIDDEN_FILENAME_CHARS: Final = frozenset('<>:"/\\|?*')
+_WINDOWS_RESERVED_FILENAMES: Final = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        "conin$",
+        "conout$",
+        "com¹",
+        "com²",
+        "com³",
+        "lpt¹",
+        "lpt²",
+        "lpt³",
+        *(f"com{number}" for number in range(1, 10)),
+        *(f"lpt{number}" for number in range(1, 10)),
+    }
+)
+
+
+def _safe_download_filename(value: object) -> str:
+    if type(value) is not str:
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    # A suggested filename is untrusted data and must already be one ordinary
+    # Windows path component. Never normalize a supplied path into a different
+    # basename because that changes the browser-provided artifact identity.
+    filename = value
+    if not filename or filename in {".", ".."}:
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    if filename.endswith((" ", ".")):
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    if any(
+        ord(char) < 32
+        or ord(char) == 127
+        or char in _WINDOWS_FORBIDDEN_FILENAME_CHARS
+        for char in filename
+    ):
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    try:
+        utf16_units = len(filename.encode("utf-16-le")) // 2
+    except UnicodeEncodeError:
+        raise UnsupportedInteractionError(
+            "download did not provide a safe filename"
+        ) from None
+    if utf16_units > 255:
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    device_stem = filename.split(".", 1)[0].casefold()
+    if device_stem in _WINDOWS_RESERVED_FILENAMES:
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    return filename
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +157,10 @@ class _DownloadRecord:
     failed: bool = False
 
 
+class _DownloadDestinationExistsError(UnsupportedInteractionError):
+    """Known safe, actionable destination collision; never contains a filename."""
+
+
 @dataclass(slots=True)
 class DownloadBroker:
     """Persist browser downloads only beneath an explicitly approved artifact root."""
@@ -110,10 +168,26 @@ class DownloadBroker:
     approved_root: Path
     saved: list[Path] = field(default_factory=list)
     _captured: list[_DownloadRecord] = field(default_factory=list, init=False, repr=False)
+    _root_identity: tuple[int, int] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.approved_root = self.approved_root.expanduser().resolve()
         self.approved_root.mkdir(parents=True, exist_ok=True)
+        root_info = self.approved_root.lstat()
+        if not stat.S_ISDIR(root_info.st_mode):
+            raise UnsupportedInteractionError("download root is not a directory")
+        self._root_identity = (root_info.st_dev, root_info.st_ino)
+
+    def _assert_root_identity(self) -> None:
+        try:
+            root_info = self.approved_root.lstat()
+        except OSError as exc:
+            raise UnsupportedInteractionError("download root is unavailable") from exc
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or (root_info.st_dev, root_info.st_ino) != self._root_identity
+        ):
+            raise UnsupportedInteractionError("download root identity changed")
 
     @property
     def checkpoint(self) -> int:
@@ -144,6 +218,11 @@ class DownloadBroker:
             if not record.saved:
                 try:
                     self.handle(record.download)
+                except _DownloadDestinationExistsError as exc:
+                    record.failed = True
+                    raise UnsupportedInteractionError(
+                        "download destination already exists"
+                    ) from exc
                 except Exception as exc:
                     record.failed = True
                     raise UnsupportedInteractionError("download could not be saved") from exc
@@ -152,14 +231,72 @@ class DownloadBroker:
         return completed
 
     def handle(self, download: Any) -> None:
-        filename = Path(str(download.suggested_filename)).name
-        if not filename or filename in {".", ".."}:
-            raise UnsupportedInteractionError("download did not provide a safe filename")
-        destination = (self.approved_root / filename).resolve()
+        self._assert_root_identity()
+        filename = _safe_download_filename(download.suggested_filename)
+        raw_destination = self.approved_root / filename
+        # A pre-existing file (including a link) is never an implicit overwrite grant.
+        if raw_destination.is_symlink() or raw_destination.exists():
+            raise _DownloadDestinationExistsError("download destination already exists")
+        destination = raw_destination.resolve()
         if destination.parent != self.approved_root:
             raise UnsupportedInteractionError("download path escaped approved root")
-        download.save_as(str(destination))
-        self.saved.append(destination)
+
+        # Stage outside the approved artifact root so a less-trusted writer that
+        # can replace entries only inside that root cannot redirect save_as().
+        # A sibling private directory keeps staging on the same filesystem for
+        # the final atomic, no-clobber hard-link publication.
+        with tempfile.TemporaryDirectory(
+            prefix=".nika-download-stage-",
+            dir=self.approved_root.parent,
+        ) as staging_dir:
+            staging = Path(staging_dir) / "payload.part"
+            download.save_as(str(staging))
+            try:
+                staging_info = staging.lstat()
+            except OSError as exc:
+                raise UnsupportedInteractionError(
+                    "download staging artifact is unavailable"
+                ) from exc
+            if not stat.S_ISREG(staging_info.st_mode):
+                raise UnsupportedInteractionError("download staging artifact is unsafe")
+            try:
+                self._assert_root_identity()
+                if os.link in os.supports_dir_fd:
+                    flags = os.O_RDONLY
+                    flags |= getattr(os, "O_DIRECTORY", 0)
+                    flags |= getattr(os, "O_NOFOLLOW", 0)
+                    root_fd = os.open(self.approved_root, flags)
+                    try:
+                        root_info = os.fstat(root_fd)
+                        if (
+                            not stat.S_ISDIR(root_info.st_mode)
+                            or (root_info.st_dev, root_info.st_ino)
+                            != self._root_identity
+                        ):
+                            raise UnsupportedInteractionError(
+                                "download root identity changed"
+                            )
+                        os.link(
+                            staging,
+                            filename,
+                            dst_dir_fd=root_fd,
+                            follow_symlinks=False,
+                        )
+                        try:
+                            self._assert_root_identity()
+                        except UnsupportedInteractionError:
+                            os.unlink(filename, dir_fd=root_fd)
+                            raise
+                    finally:
+                        os.close(root_fd)
+                else:
+                    os.link(staging, destination)
+                    self._assert_root_identity()
+            except FileExistsError as exc:
+                raise _DownloadDestinationExistsError(
+                    "download destination already exists"
+                ) from exc
+            self.saved.append(destination)
 
 
 @dataclass(slots=True)

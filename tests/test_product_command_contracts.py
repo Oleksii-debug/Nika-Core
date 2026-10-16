@@ -90,6 +90,25 @@ def test_ambiguous_contract_cannot_hide_required_user_decision() -> None:
         CommandRouteDecision(route=CommandRouteKind.AMBIGUOUS, reason="mixed")
 
 
+class _HostileCommand(str):
+    def split(self, *args, **kwargs):
+        del args, kwargs
+        raise AssertionError("hostile split must not run")
+
+
+def test_direct_router_rejects_noncanonical_text_before_string_behavior() -> None:
+    with pytest.raises(TypeError, match="plain string"):
+        route_command(_HostileCommand("Create product application"))
+
+
+def test_direct_router_rejects_noncanonical_active_project_identity() -> None:
+    with pytest.raises(TypeError, match="active ProductProject id"):
+        route_command(
+            "Create product application",
+            active_project_id=_HostileCommand("project-1"),
+        )
+
+
 def test_command_bounds_are_fail_closed() -> None:
     with pytest.raises(ValueError, match="must not be empty"):
         route_command("   ")

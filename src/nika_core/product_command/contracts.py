@@ -10,6 +10,7 @@ from nika_core.product_command.reference_safety import safe_evidence_reference
 
 class CommandRouteKind(StrEnum):
     AGENT_TASK = "agent_task"
+    AGENT_BUILDER = "agent_builder"
     TOOLSMITH = "toolsmith"
     PRODUCT_PROJECT = "product_project"
     AMBIGUOUS = "ambiguous"

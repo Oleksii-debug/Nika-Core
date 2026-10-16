@@ -183,9 +183,12 @@ def test_download_arriving_during_save_is_joined_before_success(browser: Any, ch
     first.on_save = lambda: browser.context.emit_download(second)
     browser.state.on_click = lambda: browser.context.emit_download(first)
     _invoke(browser)
-    with pytest.raises(UnsupportedInteractionError, match="download could not be saved"):
+    with pytest.raises(UnsupportedInteractionError, match="destination already exists"):
         _verify(browser, changed=changed)
-    assert (first.attempts, second.attempts) == (1, 1)
+    assert (first.attempts, second.attempts) == (1, 0)
+    assert browser.session.downloads.saved == [
+        browser.session.downloads.approved_root / "доказ.txt"
+    ]
 
 
 def test_continuous_download_stream_fails_closed_at_a_finite_limit(browser: Any) -> None:
@@ -193,6 +196,8 @@ def test_continuous_download_stream_fails_closed_at_a_finite_limit(browser: Any)
 
     def emit_next() -> None:
         download = _Download(browser.context, browser.page)
+        # Exercise the cardinality limit independently of the no-clobber filename gate.
+        download.suggested_filename = f"evidence-{len(emitted)}.txt"
         download.on_save = emit_next
         emitted.append(download)
         browser.context.emit_download(download)
@@ -207,3 +212,22 @@ def test_continuous_download_stream_fails_closed_at_a_finite_limit(browser: Any)
     with pytest.raises(UnsupportedInteractionError, match="download limit"):
         _verify(browser)
     assert sum(download.attempts for download in emitted) == attempts
+
+
+def test_existing_download_name_reports_safe_collision_and_never_retries(
+    browser: Any,
+) -> None:
+    existing = browser.session.downloads.approved_root / "доказ.txt"
+    existing.write_text("previous artifact", encoding="utf-8")
+    download = _Download(browser.context, browser.page)
+    browser.state.on_click = lambda: browser.context.emit_download(download)
+    _invoke(browser)
+    with pytest.raises(UnsupportedInteractionError, match="destination already exists") as error:
+        _verify(browser)
+    assert "доказ.txt" not in str(error.value)
+    assert existing.read_text(encoding="utf-8") == "previous artifact"
+    assert download.attempts == 0
+    assert browser.session.downloads.saved == []
+    with pytest.raises(UnsupportedInteractionError, match="download could not be saved"):
+        _verify(browser)
+    assert download.attempts == 0

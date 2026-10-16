@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from nika_core.builder.spec import ToolGrant
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
+from nika_core.kernel.task_queue import decode_task_payload
 from nika_core.multi_agent.contracts import (
     AgentHandoff,
     HandoffKind,
@@ -219,10 +220,7 @@ class MultiAgentStore:
             raise KeyError(f"no persisted task handoff for {team_id}/{member_id}")
         if len(rows) > 1:
             raise RuntimeError(f"ambiguous task handoff for {team_id}/{member_id}")
-        payload = json.loads(rows[0]["payload_json"])
-        if not isinstance(payload, dict):
-            raise TypeError("persisted task handoff payload must be an object")
-        return payload
+        return decode_task_payload(rows[0]["payload_json"])
 
     def inbound_result_handoffs(
         self,
@@ -246,9 +244,7 @@ class MultiAgentStore:
             ).fetchall()
         handoffs: list[AgentHandoff] = []
         for row in rows:
-            payload = json.loads(row["payload_json"])
-            if not isinstance(payload, dict):
-                raise TypeError("persisted result handoff payload must be an object")
+            payload = decode_task_payload(row["payload_json"])
             handoffs.append(
                 AgentHandoff(
                     handoff_id=row["handoff_id"],
@@ -274,9 +270,7 @@ class MultiAgentStore:
             raise KeyError(f"no persisted result for {team_id}/{member_id}")
         if len(rows) > 1:
             raise RuntimeError(f"ambiguous persisted result for {team_id}/{member_id}")
-        payload = json.loads(rows[0]["payload_json"])
-        if not isinstance(payload, dict):
-            raise TypeError("persisted member result payload must be an object")
+        payload = decode_task_payload(rows[0]["payload_json"])
         error = rows[0]["error"]
         if error is not None and not isinstance(error, str):
             raise TypeError("persisted member result error must be text")

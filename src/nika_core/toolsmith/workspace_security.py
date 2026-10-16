@@ -4,6 +4,7 @@ import hashlib
 import os
 import pathlib
 import stat
+from types import MappingProxyType
 
 from nika_core.toolsmith import contracts as toolsmith_contracts
 
@@ -33,6 +34,7 @@ _SHELL_EXECUTABLES = frozenset(
         "wsl.exe",
     }
 )
+_WINDOWS_BATCH_SUFFIXES = frozenset({".bat", ".cmd"})
 _GIT_CREDENTIAL_VARIABLES = frozenset(
     {
         "GIT_ASKPASS",
@@ -56,10 +58,103 @@ _ALLOWED_ENVIRONMENT_VARIABLES = frozenset(
         "TMPDIR",
     }
 )
+_CONTROL_PLANE_PREFIXES = (
+    (".github", "workflows"),
+    (".github", "actions"),
+)
 
 
 class WorkspaceSecurityError(ValueError):
     """Raised when a workspace or process request cannot be proven policy-safe."""
+
+
+def validate_git_branch_name(branch_name: object) -> str:
+    if type(branch_name) is not str:
+        raise WorkspaceSecurityError("branch name is empty, ambiguous or contains control data")
+    if (
+        not branch_name
+        or branch_name != branch_name.strip()
+        or branch_name.startswith("-")
+        or "\x00" in branch_name
+        or any(
+            ord(character) < 32
+            or ord(character) == 127
+            or character in "\u0085\u2028\u2029"
+            for character in branch_name
+        )
+    ):
+        raise WorkspaceSecurityError("branch name is empty, ambiguous or contains control data")
+    return branch_name
+
+
+def validate_git_commit_sha(value: object, *, label: str = "base_sha") -> str:
+    if (
+        type(value) is not str
+        or len(value) != 40
+        or any(character not in "0123456789abcdef" for character in value.lower())
+    ):
+        raise WorkspaceSecurityError(f"{label} must be a 40-character hexadecimal SHA")
+    return value
+
+
+def validate_sha256_digest(value: object, *, label: str = "sha256") -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value.lower())
+    ):
+        raise WorkspaceSecurityError(f"{label} must be a hexadecimal sha256")
+    return value
+
+
+def _sterile_git_config_args() -> tuple[str, ...]:
+    null_hooks = "NUL" if os.name == "nt" else "/dev/null"
+    return (
+        "-c",
+        "credential.helper=",
+        "-c",
+        f"core.hooksPath={null_hooks}",
+        "-c",
+        "protocol.file.allow=never",
+        "-c",
+        "protocol.ext.allow=never",
+    )
+
+
+def validate_sterile_git_environment(
+    environment: object,
+) -> collections.abc.Mapping[str, str]:
+    if not isinstance(environment, collections.abc.Mapping):
+        raise WorkspaceSecurityError("sterile Git environment must be a string mapping")
+    try:
+        items = tuple(environment.items())
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise WorkspaceSecurityError("sterile Git environment could not be snapshotted") from exc
+
+    snapshot: dict[str, str] = {}
+    for key, value in items:
+        if type(key) is not str or type(value) is not str:
+            raise WorkspaceSecurityError("sterile Git environment must contain exact strings")
+        if "\x00" in key or "\x00" in value:
+            raise WorkspaceSecurityError("sterile Git environment must be NUL-free")
+        if key in snapshot:
+            raise WorkspaceSecurityError("sterile Git environment contains duplicate keys")
+        snapshot[key] = value
+    canonical = sterile_git_environment(snapshot)
+    if snapshot != canonical:
+        raise WorkspaceSecurityError("sterile Git environment is not canonical")
+    return MappingProxyType(dict(canonical))
+
+
+def validate_sterile_git_config_args(config_args: object) -> tuple[str, ...]:
+    canonical = _sterile_git_config_args()
+    if (
+        type(config_args) is not tuple
+        or any(type(argument) is not str for argument in config_args)
+        or config_args != canonical
+    ):
+        raise WorkspaceSecurityError("sterile Git config arguments are not canonical")
+    return canonical
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -68,14 +163,25 @@ class WorkspacePathPolicy:
     reject_reparse_points: bool = True
 
     def __post_init__(self) -> None:
-        if not self.allowed_roots:
+        if isinstance(self.allowed_roots, (str, bytes)):
+            raise WorkspaceSecurityError("allowed workspace roots must be a path sequence")
+        try:
+            roots = tuple(self.allowed_roots)
+        except TypeError as exc:
+            raise WorkspaceSecurityError(
+                "allowed workspace roots must be a path sequence"
+            ) from exc
+        if not roots:
             raise WorkspaceSecurityError("at least one allowed workspace root is required")
-        for root in self.allowed_roots:
-            normalize_job_relative_path(root)
+        canonical_roots = tuple(
+            normalize_job_relative_path(root).as_posix()
+            for root in roots
+        )
+        object.__setattr__(self, "allowed_roots", canonical_roots)
 
     def allows(self, value: str) -> bool:
         candidate = normalize_job_relative_path(value)
-        roots = tuple(normalize_job_relative_path(root) for root in self.allowed_roots)
+        roots = tuple(pathlib.PurePosixPath(root) for root in self.allowed_roots)
         return any(candidate == root or root in candidate.parents for root in roots)
 
 
@@ -91,12 +197,12 @@ class SterileGitPlan:
     isolation_class: toolsmith_contracts.IsolationClass = toolsmith_contracts.IsolationClass.POLICY_ONLY
 
     def __post_init__(self) -> None:
-        if not self.branch_name.strip():
-            raise WorkspaceSecurityError("branch_name must not be empty")
-        if len(self.base_sha) != 40 or any(
-            character not in "0123456789abcdef" for character in self.base_sha.lower()
-        ):
-            raise WorkspaceSecurityError("base_sha must be a 40-character hexadecimal SHA")
+        validate_git_branch_name(self.branch_name)
+        validate_git_commit_sha(self.base_sha)
+        environment = validate_sterile_git_environment(self.environment)
+        config_args = validate_sterile_git_config_args(self.config_args)
+        object.__setattr__(self, "environment", environment)
+        object.__setattr__(self, "config_args", config_args)
         if self.private_git_dir == self.repository_root / ".git":
             raise WorkspaceSecurityError("production .git metadata cannot be worker metadata")
         if self.private_git_dir == self.worktree_root / ".git":
@@ -113,6 +219,9 @@ class FileEvidence:
     sha256: str
     size_bytes: int
 
+    def __post_init__(self) -> None:
+        _require_canonical_evidence_path(self.path)
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class TreeEvidence:
@@ -122,19 +231,41 @@ class TreeEvidence:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class TreeChangeEvidence:
+    path: str
+    kind: str
+    before_sha256: str | None
+    after_sha256: str | None
+    after_size_bytes: int | None
+
+    def __post_init__(self) -> None:
+        _require_canonical_evidence_path(self.path)
+        if self.kind not in {"added", "modified", "deleted"}:
+            raise WorkspaceSecurityError("tree change kind is invalid")
+        if self.kind == "added" and self.before_sha256 is not None:
+            raise WorkspaceSecurityError("added tree change cannot contain a before digest")
+        if self.kind == "deleted" and self.after_sha256 is not None:
+            raise WorkspaceSecurityError("deleted tree change cannot contain an after digest")
+        if self.kind != "deleted" and self.after_size_bytes is None:
+            raise WorkspaceSecurityError("non-deleted tree change requires after size")
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class TreeDeltaEvidence:
+    before_digest: str
+    after_digest: str
+    changes: tuple[TreeChangeEvidence, ...]
+    digest: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class ProductionIntegritySnapshot:
     base_sha: str
     tree_digest: str
 
     def __post_init__(self) -> None:
-        if len(self.base_sha) != 40 or any(
-            character not in "0123456789abcdef" for character in self.base_sha.lower()
-        ):
-            raise WorkspaceSecurityError("base_sha must be a 40-character hexadecimal SHA")
-        if len(self.tree_digest) != 64 or any(
-            character not in "0123456789abcdef" for character in self.tree_digest.lower()
-        ):
-            raise WorkspaceSecurityError("tree_digest must be a hexadecimal sha256")
+        validate_git_commit_sha(self.base_sha)
+        validate_sha256_digest(self.tree_digest, label="tree_digest")
 
 
 def _windows_component_is_reserved(component: str) -> bool:
@@ -145,12 +276,60 @@ def _windows_component_is_reserved(component: str) -> bool:
     return stem in _WINDOWS_RESERVED_BASENAMES
 
 
+def _is_reparse_point(file_stat: os.stat_result) -> bool:
+    attributes = getattr(file_stat, "st_file_attributes", 0)
+    return bool(
+        stat.FILE_ATTRIBUTE_REPARSE_POINT
+        and attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+    )
+
+
+def ensure_real_directory_root(root: pathlib.Path, *, label: str) -> pathlib.Path:
+    """Validate a trusted directory identity before canonical path resolution."""
+
+    try:
+        root_stat = root.lstat()
+    except OSError as exc:
+        raise WorkspaceSecurityError(f"{label} must exist") from exc
+    if stat.S_ISLNK(root_stat.st_mode) or _is_reparse_point(root_stat):
+        raise WorkspaceSecurityError(f"{label} must not be a symbolic link or reparse point")
+    resolved = root.resolve(strict=True)
+    if not resolved.is_dir():
+        raise WorkspaceSecurityError(f"{label} must be a directory")
+    return resolved
+
+
+def _paths_overlap(first: pathlib.Path, second: pathlib.Path) -> bool:
+    return first == second or first in second.parents or second in first.parents
+
+
+def _executable_identity_key(value: str) -> str:
+    if os.name == "nt":
+        normalized = pathlib.PureWindowsPath(value).as_posix()
+        if (
+            len(normalized) >= 7
+            and normalized.startswith("//?/")
+            and normalized[4] in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+            and normalized[5:7] == ":/"
+        ):
+            normalized = normalized[4:]
+        return normalized.casefold()
+    return value
+
+
 def normalize_job_relative_path(value: str) -> pathlib.PurePosixPath:
+    if type(value) is not str:
+        raise WorkspaceSecurityError("path must be exact text")
     stripped = value.strip()
     if not stripped or stripped != value:
         raise WorkspaceSecurityError("path must be non-empty and must not have outer whitespace")
-    if "\x00" in stripped:
-        raise WorkspaceSecurityError("NUL is forbidden in paths")
+    if any(
+        ord(character) < 32
+        or ord(character) == 127
+        or character in "\u0085\u2028\u2029"
+        for character in stripped
+    ):
+        raise WorkspaceSecurityError("control data is forbidden in paths")
 
     windows = pathlib.PureWindowsPath(stripped)
     normalized_text = stripped.replace("\\", "/")
@@ -172,6 +351,31 @@ def normalize_job_relative_path(value: str) -> pathlib.PurePosixPath:
     return pathlib.PurePosixPath(*parts)
 
 
+def _require_canonical_evidence_path(value: str) -> pathlib.PurePosixPath:
+    normalized = normalize_job_relative_path(value)
+    if normalized.as_posix() != value:
+        raise WorkspaceSecurityError(
+            "tree evidence path must use canonical POSIX repository spelling"
+        )
+    return normalized
+
+
+def ensure_worker_mutation_path(
+    value: str,
+    *,
+    allow_control_plane: bool = False,
+) -> pathlib.PurePosixPath:
+    normalized = normalize_job_relative_path(value)
+    parts = tuple(part.casefold() for part in normalized.parts)
+    if not allow_control_plane and any(
+        parts[: len(prefix)] == prefix for prefix in _CONTROL_PLANE_PREFIXES
+    ):
+        raise WorkspaceSecurityError(
+            "worker mutation of GitHub workflow/action control-plane paths requires trusted approval"
+        )
+    return normalized
+
+
 def ensure_path_policy(
     root: pathlib.Path,
     relative_path: str,
@@ -183,7 +387,7 @@ def ensure_path_policy(
     if not policy.allows(normalized.as_posix()):
         raise WorkspaceSecurityError("path is outside the allowed workspace roots")
 
-    root_resolved = root.resolve(strict=True)
+    root_resolved = ensure_real_directory_root(root, label="workspace root")
     candidate = root_resolved.joinpath(*normalized.parts)
     if must_exist:
         candidate.resolve(strict=True)
@@ -196,12 +400,7 @@ def ensure_path_policy(
         file_stat = current.lstat()
         if stat.S_ISLNK(file_stat.st_mode):
             raise WorkspaceSecurityError("symbolic links are forbidden in guarded workspace paths")
-        attributes = getattr(file_stat, "st_file_attributes", 0)
-        if (
-            policy.reject_reparse_points
-            and stat.FILE_ATTRIBUTE_REPARSE_POINT
-            and attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
-        ):
+        if policy.reject_reparse_points and _is_reparse_point(file_stat):
             raise WorkspaceSecurityError("Windows reparse points are forbidden in guarded paths")
 
     resolved_parent = candidate.parent.resolve(strict=False)
@@ -215,13 +414,31 @@ def ensure_path_policy(
 def sterile_git_environment(
     source: collections.abc.Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    source_env = dict(os.environ if source is None else source)
-    environment = {
-        key: value
-        for key, value in source_env.items()
-        if key.upper() in _ALLOWED_ENVIRONMENT_VARIABLES
-        and key.upper() not in _GIT_CREDENTIAL_VARIABLES
-    }
+    try:
+        source_env = dict(os.environ if source is None else source)
+    except (TypeError, ValueError) as exc:
+        raise WorkspaceSecurityError("source environment must be a string mapping") from exc
+
+    environment: dict[str, str] = {}
+    for key, value in source_env.items():
+        if type(key) is not str:
+            raise WorkspaceSecurityError("environment keys must be exact text")
+        identity = key.upper()
+        if (
+            identity not in _ALLOWED_ENVIRONMENT_VARIABLES
+            or identity in _GIT_CREDENTIAL_VARIABLES
+        ):
+            continue
+        if os.name != "nt" and key != identity:
+            continue
+        if type(value) is not str or "\x00" in value:
+            raise WorkspaceSecurityError(
+                "allowed environment values must be exact NUL-free text"
+            )
+        if identity in environment and environment[identity] != value:
+            raise WorkspaceSecurityError("conflicting environment variable aliases")
+        environment[identity] = value
+
     null_device = "NUL" if os.name == "nt" else "/dev/null"
     environment.update(
         {
@@ -229,6 +446,27 @@ def sterile_git_environment(
             "GIT_CONFIG_GLOBAL": null_device,
             "GIT_TERMINAL_PROMPT": "0",
             "GCM_INTERACTIVE": "never",
+        }
+    )
+    return environment
+
+
+def sterile_process_environment(
+    source: collections.abc.Mapping[str, str],
+    *,
+    temp_root: pathlib.Path,
+) -> dict[str, str]:
+    resolved_temp = ensure_real_directory_root(temp_root, label="worker temp root")
+    environment = sterile_git_environment(source)
+    for key in tuple(environment):
+        if key.upper() in {"TEMP", "TMP", "TMPDIR"}:
+            environment.pop(key)
+    environment.update(
+        {
+            "TEMP": str(resolved_temp),
+            "TMP": str(resolved_temp),
+            "TMPDIR": str(resolved_temp),
+            "PYTHONNOUSERSITE": "1",
         }
     )
     return environment
@@ -243,30 +481,16 @@ def make_sterile_git_plan(
     source_environment: collections.abc.Mapping[str, str] | None = None,
 ) -> SterileGitPlan:
     repository_root = repository_root.resolve(strict=False)
-    job_root = job_root.resolve(strict=False)
+    job_root = ensure_real_directory_root(pathlib.Path(job_root), label="job workspace root")
     private_git_dir = job_root / "_nika_private_git"
     worktree_root = job_root / "worktree"
 
-    try:
-        job_root.relative_to(repository_root)
-    except ValueError:
-        pass
-    else:
-        raise WorkspaceSecurityError("job workspace must not be inside the production repository")
+    if _paths_overlap(repository_root, job_root):
+        raise WorkspaceSecurityError(
+            "job workspace and production repository must be fully disjoint"
+        )
 
-    if repository_root == job_root:
-        raise WorkspaceSecurityError("job workspace must be distinct from production repository")
-
-    config_args = (
-        "-c",
-        "credential.helper=",
-        "-c",
-        "core.hooksPath=NUL" if os.name == "nt" else "core.hooksPath=/dev/null",
-        "-c",
-        "protocol.file.allow=never",
-        "-c",
-        "protocol.ext.allow=never",
-    )
+    config_args = _sterile_git_config_args()
     return SterileGitPlan(
         repository_root=repository_root,
         private_git_dir=private_git_dir,
@@ -282,19 +506,58 @@ def validate_typed_argv(
     argv: collections.abc.Sequence[str],
     allowed_executables: collections.abc.Iterable[str],
 ) -> tuple[str, ...]:
-    if not argv or any(not argument or "\x00" in argument for argument in argv):
+    if isinstance(argv, (str, bytes)):
         raise WorkspaceSecurityError("argv must contain non-empty NUL-free arguments")
-    executable = argv[0]
-    basename = pathlib.PureWindowsPath(executable).name.casefold()
-    if basename in _SHELL_EXECUTABLES:
-        raise WorkspaceSecurityError("generic shell entrypoints are forbidden")
+    try:
+        typed_argv = tuple(argv)
+    except TypeError as exc:
+        raise WorkspaceSecurityError(
+            "argv must contain non-empty NUL-free arguments"
+        ) from exc
+    if not typed_argv or any(
+        type(argument) is not str or not argument or "\x00" in argument
+        for argument in typed_argv
+    ):
+        raise WorkspaceSecurityError("argv must contain non-empty NUL-free arguments")
 
-    allowlist = {item.casefold() for item in allowed_executables if item.strip()}
+    executable = typed_argv[0]
+    windows_path = pathlib.PureWindowsPath(executable)
+    basename = windows_path.name.casefold()
+    if basename in _SHELL_EXECUTABLES or windows_path.suffix.casefold() in _WINDOWS_BATCH_SUFFIXES:
+        raise WorkspaceSecurityError("generic shell and Windows batch entrypoints are forbidden")
+
+    if isinstance(allowed_executables, (str, bytes)):
+        raise WorkspaceSecurityError("allowed executable set must not be empty")
+    try:
+        allowed = tuple(allowed_executables)
+    except TypeError as exc:
+        raise WorkspaceSecurityError("allowed executable set must not be empty") from exc
+    if any(type(item) is not str for item in allowed):
+        raise WorkspaceSecurityError("allowed executable set must contain exact text identities")
+    allowlist = {
+        _executable_identity_key(item)
+        for item in allowed
+        if item.strip()
+    }
     if not allowlist:
         raise WorkspaceSecurityError("allowed executable set must not be empty")
-    if executable.casefold() not in allowlist and basename not in allowlist:
-        raise WorkspaceSecurityError("executable is not explicitly allowlisted")
-    return tuple(argv)
+    if _executable_identity_key(executable) not in allowlist:
+        raise WorkspaceSecurityError("executable identity is not exactly allowlisted")
+    return typed_argv
+
+
+def assert_cleanup_tree_safe(root: pathlib.Path) -> None:
+    if not root.exists() and not root.is_symlink():
+        return
+    root_stat = root.lstat()
+    if stat.S_ISLNK(root_stat.st_mode) or _is_reparse_point(root_stat):
+        raise WorkspaceSecurityError("cleanup refuses symbolic links and reparse points")
+    if not root.is_dir():
+        raise WorkspaceSecurityError("cleanup root must be a directory")
+    for path in root.rglob("*"):
+        file_stat = path.lstat()
+        if stat.S_ISLNK(file_stat.st_mode) or _is_reparse_point(file_stat):
+            raise WorkspaceSecurityError("cleanup refuses symbolic links and reparse points")
 
 
 def _hash_file(path: pathlib.Path, *, max_file_bytes: int) -> tuple[str, int]:
@@ -316,21 +579,15 @@ def collect_tree_evidence(
     max_file_bytes: int = 32 * 1024 * 1024,
     max_total_bytes: int = 256 * 1024 * 1024,
 ) -> TreeEvidence:
-    root = root.resolve(strict=True)
-    if not root.is_dir():
-        raise WorkspaceSecurityError("tree evidence root must be a directory")
+    root = ensure_real_directory_root(root, label="tree evidence root")
 
     records: list[FileEvidence] = []
     total_bytes = 0
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
         relative = path.relative_to(root).as_posix()
-        normalize_job_relative_path(relative)
+        _require_canonical_evidence_path(relative)
         file_stat = path.lstat()
-        attributes = getattr(file_stat, "st_file_attributes", 0)
-        if stat.S_ISLNK(file_stat.st_mode) or (
-            stat.FILE_ATTRIBUTE_REPARSE_POINT
-            and attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
-        ):
+        if stat.S_ISLNK(file_stat.st_mode) or _is_reparse_point(file_stat):
             raise WorkspaceSecurityError("tree evidence refuses symlinks and reparse points")
         if path.is_dir():
             continue
@@ -353,6 +610,67 @@ def collect_tree_evidence(
         tree_hasher.update(str(record.size_bytes).encode("ascii"))
         tree_hasher.update(b"\n")
     return TreeEvidence(tuple(records), tree_hasher.hexdigest(), total_bytes)
+
+
+def collect_tree_delta_evidence(
+    before: TreeEvidence,
+    after: TreeEvidence,
+    *,
+    path_policy: WorkspacePathPolicy,
+    max_changed_files: int,
+    allow_control_plane: bool = False,
+) -> TreeDeltaEvidence:
+    if max_changed_files <= 0:
+        raise WorkspaceSecurityError("changed-file budget must be positive")
+    for item in (*before.files, *after.files):
+        _require_canonical_evidence_path(item.path)
+    before_files = {item.path: item for item in before.files}
+    after_files = {item.path: item for item in after.files}
+    changes: list[TreeChangeEvidence] = []
+    for path in sorted(set(before_files) | set(after_files), key=str.casefold):
+        old = before_files.get(path)
+        new = after_files.get(path)
+        if old == new:
+            continue
+        _require_canonical_evidence_path(path)
+        ensure_worker_mutation_path(path, allow_control_plane=allow_control_plane)
+        if not path_policy.allows(path):
+            raise WorkspaceSecurityError(f"worker changed path outside allowed scope: {path}")
+        if old is None:
+            kind = "added"
+        elif new is None:
+            kind = "deleted"
+        else:
+            kind = "modified"
+        changes.append(
+            TreeChangeEvidence(
+                path=path,
+                kind=kind,
+                before_sha256=None if old is None else old.sha256,
+                after_sha256=None if new is None else new.sha256,
+                after_size_bytes=None if new is None else new.size_bytes,
+            )
+        )
+        if len(changes) > max_changed_files:
+            raise WorkspaceSecurityError("worker exceeded changed-file budget")
+
+    delta_hasher = hashlib.sha256()
+    delta_hasher.update(before.digest.encode("ascii"))
+    delta_hasher.update(b"\x00")
+    delta_hasher.update(after.digest.encode("ascii"))
+    delta_hasher.update(b"\n")
+    for change in changes:
+        delta_hasher.update(change.path.encode("utf-8"))
+        delta_hasher.update(b"\x00")
+        delta_hasher.update(change.kind.encode("ascii"))
+        delta_hasher.update(b"\x00")
+        delta_hasher.update((change.before_sha256 or "-").encode("ascii"))
+        delta_hasher.update(b"\x00")
+        delta_hasher.update((change.after_sha256 or "-").encode("ascii"))
+        delta_hasher.update(b"\x00")
+        delta_hasher.update(str(change.after_size_bytes).encode("ascii"))
+        delta_hasher.update(b"\n")
+    return TreeDeltaEvidence(before.digest, after.digest, tuple(changes), delta_hasher.hexdigest())
 
 
 def assert_production_integrity(

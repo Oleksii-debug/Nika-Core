@@ -24,6 +24,10 @@ from nika_core.product_command.factory_status_adapter import (
     product_operations_status_entries,
     rolling_maintenance_status_entries,
 )
+from nika_core.product_command.operator_projection import (
+    FactoryOperatorProjection,
+    project_operator_status,
+)
 from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
     ProductProjectDecisionUnavailableError,
@@ -35,6 +39,7 @@ __all__ = [
     "CommandRouteDecision",
     "CommandRouteKind",
     "EvidenceReference",
+    "FactoryOperatorProjection",
     "ProductCommandCenter",
     "ProductCommandCenterScopeError",
     "ProductProjectCommandService",
@@ -53,5 +58,6 @@ __all__ = [
     "execution_status_entries",
     "product_operations_status_entries",
     "project_detail",
+    "project_operator_status",
     "rolling_maintenance_status_entries",
 ]

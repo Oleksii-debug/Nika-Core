@@ -12,7 +12,12 @@ from nika_core.product_command.contracts import (
     ProductStatusKind,
     ProductUserDecision,
 )
-from nika_core.product_decisions import ProductDecisionRepository, StoredProductDecision
+from nika_core.product_command.reference_safety import safe_evidence_reference
+from nika_core.product_decisions import (
+    ProductDecisionRepository,
+    ProductDecisionSetSummary,
+    StoredProductDecision,
+)
 from nika_core.product_project import (
     ProductDecision,
     ProductDecisionState,
@@ -26,10 +31,10 @@ from nika_core.product_project_lifecycle import (
     ProductProjectState,
     ProductProjectStatusTransition,
 )
+from nika_core.security import ActionIntent, ApprovalEvidence, ApprovalVerifier
 
 _MAX_LABEL = 240
 _MAX_DETAIL = 4000
-_MAX_REFERENCE = 512
 
 
 class ProductProjectDecisionUnavailableError(RuntimeError):
@@ -40,13 +45,31 @@ class ProductProjectPresentationConsistencyError(RuntimeError):
     """Raised when durable project state changes during one presentation read."""
 
 
+class ProductProjectDecisionNotFoundError(KeyError):
+    """Raised when an exact ProductDecision is absent from an existing project."""
+
+
 class ProductProjectCommandService:
     """PF5 adapter over the integrated durable PF1 repositories and lifecycle."""
 
-    def __init__(self, repository: ProductProjectRepository) -> None:
+    def __init__(
+        self,
+        repository: ProductProjectRepository,
+        *,
+        approval_verifier: ApprovalVerifier | None = None,
+    ) -> None:
         self._repository = repository
-        self._decisions = ProductDecisionRepository(repository.store)
+        self._decisions = ProductDecisionRepository(
+            repository.store,
+            approval_verifier=approval_verifier,
+        )
         self._lifecycle = ProductProjectLifecycleService(repository.store)
+
+    @staticmethod
+    def _require_expected_row_version(value: object) -> int:
+        if type(value) is not int or value < 0:
+            raise ValueError("expected_row_version must be a non-negative integer")
+        return value
 
     def create_project(
         self,
@@ -88,6 +111,90 @@ class ProductProjectCommandService:
             )
         return project_detail(after, decisions=decisions), after.spec.credential_refs
 
+    def inspect_project_presentation_context(
+        self,
+        project_id: str,
+    ) -> tuple[
+        ProductProjectDetail,
+        tuple[str, ...],
+        ProductDecisionSetSummary,
+    ]:
+        """Read bounded decision presentation data under one ProductProject fence."""
+
+        before = self._repository.get(project_id)
+        decision_summary = self._decisions.summarize_latest(project_id)
+        after = self._repository.get(project_id)
+        if (
+            before.row_version != after.row_version
+            or before.spec_version != after.spec_version
+            or before.status != after.status
+            or before.updated_at != after.updated_at
+        ):
+            raise ProductProjectPresentationConsistencyError(
+                "ProductProject changed while PF5 was composing bounded presentation; retry"
+            )
+        visible_decisions = (
+            (decision_summary.sole_pending,)
+            if decision_summary.sole_pending is not None
+            else ()
+        )
+        return (
+            project_detail(after, decisions=visible_decisions),
+            after.spec.credential_refs,
+            decision_summary,
+        )
+
+    def inspect_decision(
+        self,
+        project_id: str,
+        decision_id: str,
+    ) -> ProductUserDecision:
+        """Read one exact decision without materializing unrelated decisions."""
+        before = self._repository.get(project_id)
+        try:
+            decision = self._decisions.get(project_id, decision_id)
+        except KeyError as exc:
+            raise ProductProjectDecisionNotFoundError(decision_id) from exc
+        after = self._repository.get(project_id)
+        if (
+            before.row_version != after.row_version
+            or before.spec_version != after.spec_version
+            or before.status != after.status
+            or before.updated_at != after.updated_at
+        ):
+            raise ProductProjectPresentationConsistencyError(
+                "ProductProject changed while PF5 was reading one decision; retry"
+            )
+        return _decision_view(after, decision)
+
+    def list_decisions_by_state(
+        self,
+        project_id: str,
+        state: ProductDecisionState,
+        *,
+        limit: int,
+        offset: int = 0,
+    ) -> tuple[tuple[ProductUserDecision, ...], int]:
+        """Read one bounded decision page from the incumbent PF1 repository."""
+        before = self._repository.get(project_id)
+        decisions, total = self._decisions.list_latest_by_state(
+            project_id,
+            state,
+            limit=limit,
+            offset=offset,
+        )
+        after = self._repository.get(project_id)
+        if (
+            before.row_version != after.row_version
+            or before.spec_version != after.spec_version
+            or before.status != after.status
+            or before.updated_at != after.updated_at
+        ):
+            raise ProductProjectPresentationConsistencyError(
+                "ProductProject changed while PF5 was paging decisions; retry"
+            )
+        return tuple(_decision_view(after, item) for item in decisions), total
+
     def update_project(
         self,
         project_id: str,
@@ -98,6 +205,8 @@ class ProductProjectCommandService:
         desired_outcome: str | None = None,
         hypothesis: str | None = None,
     ) -> ProductProjectDetail:
+        if type(expected_spec_version) is not int or expected_spec_version < 1:
+            raise ValueError("expected_spec_version must be a positive integer")
         current = self._repository.get(project_id)
         if current.spec_version != expected_spec_version:
             raise StaleProjectVersionError(
@@ -125,6 +234,86 @@ class ProductProjectCommandService:
         )
         return self.inspect_project(project_id)
 
+    def prepare_owner_decision(
+        self,
+        project_id: str,
+        decision_id: str,
+        target_state: ProductDecisionState,
+    ) -> tuple[ProductDecision, int]:
+        """Snapshot one existing decision for an explicit owner transition.
+
+        The returned row version is only a concurrency token. The existing decision
+        intent and write paths remain authoritative and revalidate current project,
+        decision and sealed-evidence state before mutation.
+        """
+        if target_state not in {
+            ProductDecisionState.APPROVED,
+            ProductDecisionState.REJECTED,
+        }:
+            raise ValueError("owner decision target must be APPROVED or REJECTED")
+        before = self._repository.get(project_id)
+        stored = self._decisions.get(project_id, decision_id)
+        after = self._repository.get(project_id)
+        if (
+            before.row_version != after.row_version
+            or before.spec_version != after.spec_version
+            or before.status != after.status
+            or before.updated_at != after.updated_at
+        ):
+            raise ProductProjectPresentationConsistencyError(
+                "ProductProject changed while PF5 was preparing an owner decision; retry"
+            )
+        current = stored.decision
+        if current.state not in {ProductDecisionState.PROPOSED, target_state}:
+            raise ValueError("product decision is already final with a different outcome")
+        return (
+            replace(
+                current,
+                state=target_state,
+                decided_by_ref=(
+                    "user://packaged-owner"
+                    if target_state is ProductDecisionState.REJECTED
+                    else current.decided_by_ref
+                ),
+            ),
+            after.row_version,
+        )
+
+    def decision_approval_intent(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        idempotency_key: str,
+    ) -> ActionIntent:
+        return self._decisions.approval_intent(
+            project_id,
+            decision,
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
+        )
+
+    def _record_decision_effect(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        idempotency_key: str,
+        approval: ApprovalEvidence | None,
+        now: datetime | None,
+    ) -> None:
+        expected_row_version = self._require_expected_row_version(expected_row_version)
+        self._decisions.record(
+            project_id,
+            decision,
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
+        )
+
     def record_decision(
         self,
         project_id: str,
@@ -132,14 +321,43 @@ class ProductProjectCommandService:
         *,
         expected_row_version: int,
         idempotency_key: str,
+        approval: ApprovalEvidence | None = None,
+        now: datetime | None = None,
     ) -> ProductProjectDetail:
-        self._decisions.record(
+        self._record_decision_effect(
             project_id,
             decision,
             expected_row_version=expected_row_version,
             idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
         )
         return self.inspect_project(project_id)
+
+    def record_decision_for_presentation(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        idempotency_key: str,
+        approval: ApprovalEvidence | None = None,
+        now: datetime | None = None,
+    ) -> ProductProjectDetail:
+        """Commit through PF1, then return the bounded packaged presentation."""
+
+        self._record_decision_effect(
+            project_id,
+            decision,
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
+        )
+        detail, _credential_refs, _summary = self.inspect_project_presentation_context(
+            project_id
+        )
+        return detail
 
     def persist_decision(
         self,
@@ -148,6 +366,8 @@ class ProductProjectCommandService:
         *,
         expected_row_version: int,
         idempotency_key: str,
+        approval: ApprovalEvidence | None = None,
+        now: datetime | None = None,
     ) -> ProductProjectDetail:
         """Compatibility name for the now-real durable ProductDecision write path."""
         return self.record_decision(
@@ -155,6 +375,8 @@ class ProductProjectCommandService:
             decision,
             expected_row_version=expected_row_version,
             idempotency_key=idempotency_key,
+            approval=approval,
+            now=now,
         )
 
     def link_decision_requirement(
@@ -165,6 +387,7 @@ class ProductProjectCommandService:
         decision_id: str,
         expected_row_version: int,
     ) -> ProductProjectDetail:
+        expected_row_version = self._require_expected_row_version(expected_row_version)
         self._decisions.link_requirement(
             project_id,
             requirement_id=requirement_id,
@@ -194,6 +417,7 @@ class ProductProjectCommandService:
         reason: str,
         changed_by_ref: str,
     ) -> ProductProjectDetail:
+        expected_row_version = self._require_expected_row_version(expected_row_version)
         self._lifecycle.transition(
             project_id,
             new_state,
@@ -428,13 +652,9 @@ def _reference_entries(
 
 
 def _evidence(kind: str, reference: str, label: str) -> EvidenceReference:
-    visible_reference = reference
-    if len(visible_reference) > _MAX_REFERENCE:
-        digest = hashlib.sha256(visible_reference.encode("utf-8")).hexdigest()
-        visible_reference = f"sha256:{digest}"
     return EvidenceReference(
         kind=kind,
-        reference=visible_reference,
+        reference=safe_evidence_reference(reference),
         label=_bounded(label, _MAX_LABEL),
     )
 

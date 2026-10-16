@@ -40,7 +40,28 @@ public static class NikaUiaNative
 }
 '@
 
-$requiredNames = @('Nika Core', 'Що має зробити Nika?', 'Створити завдання', 'Клавіатура')
+$requiredNames = @(
+    'Nika Core',
+    'Що має зробити Nika?',
+    'Створити завдання',
+    'Голос Nika',
+    'Текст для озвучення',
+    'Озвучити текст',
+    'Скасувати озвучення',
+    'Голосовий ввід',
+    'Почати один голосовий ввід',
+    'Скасувати голосовий ввід',
+    'Перенести розпізнаний текст у поле команди',
+    'Локальна модель розпізнавання',
+    'Папка локальної голосової моделі — повний шлях',
+    'Імпортувати голосову модель',
+    'Скасувати імпорт голосової моделі',
+    'Клавіатура',
+    'Репозиторій з поточного плану',
+    'Повний шлях до локального Git-кореня',
+    'Прив’язати локальний репозиторій',
+    'Скасувати локальну прив’язку'
+)
 
 # WebView2 enables renderer accessibility on demand when assistive technology such
 # as a screen reader is detected. GitHub-hosted Windows runners do not run a
@@ -569,6 +590,51 @@ try {
         throw "Expected bound read-only UI Automation text '$Expected' did not appear."
     }
 
+    function Wait-BoundTextPrefixEvidence(
+        [string]$Prefix,
+        [int]$Attempts = 80
+    ) {
+        if ([string]::IsNullOrEmpty($Prefix)) {
+            throw 'UI Automation text-evidence prefix must not be empty.'
+        }
+        $typeCondition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ControlTypeProperty,
+            [System.Windows.Automation.ControlType]::Text
+        )
+        for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            Assert-BoundProcessGeneration
+            $currentWindow = Find-ExactWindow
+            if ($null -eq $currentWindow) { continue }
+            try {
+                foreach ($searchRoot in (Get-BoundSearchRoots $currentWindow)) {
+                    $candidates = @()
+                    if ($searchRoot.Current.ControlType -eq [System.Windows.Automation.ControlType]::Text) {
+                        $candidates += $searchRoot
+                    }
+                    $candidates += @(
+                        $searchRoot.FindAll(
+                            [System.Windows.Automation.TreeScope]::Descendants,
+                            $typeCondition
+                        )
+                    )
+                    foreach ($candidate in $candidates) {
+                        $name = $candidate.Current.Name
+                        if (
+                            $name -is [string] -and
+                            $name.StartsWith($Prefix, [System.StringComparison]::Ordinal)
+                        ) {
+                            return
+                        }
+                    }
+                }
+            } catch [System.Windows.Automation.ElementNotAvailableException] {
+                continue
+            }
+        }
+        throw "Expected bound read-only UI Automation text prefix '$Prefix' did not appear."
+    }
+
     function Wait-DescendantName(
         [string]$Expected,
         [System.Windows.Automation.ControlType]$ExpectedControlType = $null,
@@ -677,6 +743,49 @@ try {
         $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
         $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
         $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
+        $factoryLocalRepositoryControl = Wait-DescendantName 'Репозиторій з поточного плану' ([System.Windows.Automation.ControlType]::ComboBox)
+        $factoryLocalRepositoryRootControl = Wait-DescendantName 'Повний шлях до локального Git-кореня' ([System.Windows.Automation.ControlType]::Edit)
+        $factoryLocalRepositoryBindControl = Wait-DescendantName 'Прив’язати локальний репозиторій' ([System.Windows.Automation.ControlType]::Button)
+        $factoryLocalRepositoryUnbindControl = Wait-DescendantName 'Скасувати локальну прив’язку' ([System.Windows.Automation.ControlType]::Button)
+        foreach ($control in @(
+            $factoryLocalRepositoryControl,
+            $factoryLocalRepositoryRootControl,
+            $factoryLocalRepositoryBindControl,
+            $factoryLocalRepositoryUnbindControl
+        )) {
+            if ((Resolve-BoundControlIdentity $control).Current.IsEnabled) {
+                throw 'Packaged local repository control was enabled before local Product Factory execution authority was configured.'
+            }
+        }
+        Write-Host 'Packaged local repository controls are UIA-discoverable and fail closed before execution authority is configured.'
+        $voiceModelSourceControl = Wait-DescendantName 'Папка локальної голосової моделі — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
+        $voiceModelImportControl = Wait-DescendantName 'Імпортувати голосову модель' ([System.Windows.Automation.ControlType]::Button)
+        $voiceModelCancelControl = Wait-DescendantName 'Скасувати імпорт голосової моделі' ([System.Windows.Automation.ControlType]::Button)
+        if (-not (Resolve-BoundControlIdentity $voiceModelSourceControl).Current.IsEnabled) {
+            throw 'Local voice model source input must be enabled when the packaged candidate has no model.'
+        }
+        if (-not (Resolve-BoundControlIdentity $voiceModelImportControl).Current.IsEnabled) {
+            throw 'Local voice model Import control must be enabled when the packaged candidate has no model.'
+        }
+        if ((Resolve-BoundControlIdentity $voiceModelCancelControl).Current.IsEnabled) {
+            throw 'Local voice model Cancel control must be disabled while no import is active.'
+        }
+        Set-BoundControlFocus $voiceModelSourceControl
+        Wait-FocusName $voiceModelSourceControl
+        Write-Host 'Local voice model setup controls are UIA-discoverable and keyboard-focusable; no file import was invoked.'
+
+        $speechTextControl = Wait-DescendantName 'Текст для озвучення' ([System.Windows.Automation.ControlType]::Edit)
+        $speechStartControl = Wait-DescendantName 'Озвучити текст' ([System.Windows.Automation.ControlType]::Button)
+        $speechCancelControl = Wait-DescendantName 'Скасувати озвучення' ([System.Windows.Automation.ControlType]::Button)
+        if (-not (Resolve-BoundControlIdentity $speechStartControl).Current.IsEnabled) {
+            throw 'Packaged local speech Start control must be enabled while speech is idle.'
+        }
+        if ((Resolve-BoundControlIdentity $speechCancelControl).Current.IsEnabled) {
+            throw 'Packaged local speech Cancel control must be disabled while speech is idle.'
+        }
+        Set-BoundControlFocus $speechTextControl
+        Wait-FocusName $speechTextControl
+        Write-Host 'Packaged speech controls are UIA-discoverable and keyboard-focusable; no audio effect was invoked.'
 
         Set-BoundControlFocus $startControl
         [System.Windows.Forms.SendKeys]::SendWait('%1')
@@ -737,6 +846,191 @@ try {
     }
 
     if ($VerifySourceSetup) {
+        # The same packaged journey must expose and persist the canonical model choice before
+        # task acceptance. This proof stores only a fake local model identity; it never contacts
+        # Ollama, downloads a model, or claims live model inference/NVDA verification.
+        Wait-BoundTextEvidence 'Модель для нових завдань'
+        $modelRouteControl = Wait-DescendantName 'Тип маршруту моделі' ([System.Windows.Automation.ControlType]::ComboBox)
+        $modelNameControl = Wait-DescendantName 'Назва моделі' ([System.Windows.Automation.ControlType]::Edit)
+        $saveModelControl = Wait-DescendantName 'Зберегти модель' ([System.Windows.Automation.ControlType]::Button)
+        Set-BoundControlFocus $modelRouteControl
+        Set-BoundControlValue $modelNameControl 'uia-proof-model'
+        Set-BoundControlFocus $saveModelControl
+        [System.Windows.Forms.SendKeys]::SendWait(' ')
+        Wait-BoundTextEvidence 'Модель збережено для нових завдань: ollama, uia-proof-model.'
+        Wait-FocusName $commandControl
+
+        # Exercise the reserved intelligence-mode namespace through the same keyboard-only
+        # packaged command path. Each mutation must return focus to the exact command field;
+        # do not retry either effect inside this process because configure increments revision.
+        Set-BoundControlValue $commandControl 'режим інтелекту deterministic'
+        Set-BoundControlFocus $startControl
+        [System.Windows.Forms.SendKeys]::SendWait('^n')
+        Wait-FocusName $commandControl
+
+        Set-BoundControlValue $commandControl 'режим інтелекту ollama uia-proof-model http://localhost:11434'
+        Set-BoundControlFocus $startControl
+        [System.Windows.Forms.SendKeys]::SendWait('^n')
+        Wait-FocusName $commandControl
+
+        $modeCommandProbe = @'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    row = db.execute(
+        'SELECT revision, selection_json FROM v01_model_settings WHERE singleton = 1'
+    ).fetchone()
+    if row is None:
+        raise SystemExit('intelligence-mode command did not persist model settings')
+    revision, body = row
+    if revision != 3:
+        raise SystemExit('intelligence-mode command revision count is inconsistent')
+    model = json.loads(body)
+    expected = {
+        'route_kind': 'ollama',
+        'provider_id': 'ollama',
+        'model': 'uia-proof-model',
+        'base_url': 'http://localhost:11434',
+        'credential_ref': None,
+        'private_data_allowed': True,
+        'timeout_seconds': 60.0,
+    }
+    for key, value in expected.items():
+        if model.get(key) != value:
+            raise SystemExit('intelligence-mode command differs at ' + key)
+    task_count = db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]
+    if task_count != 0:
+        raise SystemExit('intelligence-mode command unexpectedly created a task')
+print('Packaged intelligence-mode commands changed canonical model settings without task creation.')
+'@
+        $modeCommandProbe | python - $env:NIKA_DB_PATH
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Packaged intelligence-mode command path did not persist the expected route.'
+        }
+
+        # Prove the newly integrated Product Factory operator through the same packaged
+        # keyboard/UIA path used by a real Windows user. This creates only one controlled
+        # durable ProductProject; it does not prepare or dispatch Product Factory work.
+        $productCommand = 'Створи застосунок для контрольованої UIA перевірки'
+        $normalizedProductGoal = $productCommand
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $productBytes = [System.Text.Encoding]::UTF8.GetBytes($normalizedProductGoal)
+            $productDigest = [System.BitConverter]::ToString(
+                $sha256.ComputeHash($productBytes)
+            ).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+        $productId = "product-$productDigest"
+
+        Wait-FocusName $commandControl
+        Set-BoundControlValue $commandControl $productCommand
+        Set-BoundControlFocus $startControl
+        [System.Windows.Forms.SendKeys]::SendWait('^n')
+        Wait-FocusName $tasksControl
+        $expectedProductCreated = (
+            "ProductProject створено або відкрито: $productId; spec version 1."
+        )
+        Wait-BoundTextEvidence $expectedProductCreated
+        Wait-BoundTextEvidence 'Оператор Product Factory'
+        Wait-BoundTextEvidence $productId
+        Wait-BoundTextEvidence $productCommand
+        foreach ($operatorEvidence in @(
+            'unassigned',
+            'active',
+            'none',
+            'not_started',
+            'inspect_project'
+        )) {
+            Wait-BoundTextEvidence $operatorEvidence
+        }
+
+        Set-BoundControlValue $commandControl 'сплануй поточний ProductProject'
+        Set-BoundControlFocus $startControl
+        [System.Windows.Forms.SendKeys]::SendWait('^n')
+        Wait-FocusName $tasksControl
+        Wait-BoundTextPrefixEvidence 'План Product Factory: '
+
+        $factoryPlanProbe = @'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+project_id = sys.argv[2]
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    row = db.execute(
+        'SELECT current_spec_version FROM product_projects WHERE project_id = ?',
+        (project_id,),
+    ).fetchone()
+    if row is None or row[0] != 2:
+        raise SystemExit('packaged Product Factory planning did not persist spec version 2')
+    spec_row = db.execute(
+        'SELECT spec_json FROM product_project_specs '
+        'WHERE project_id = ? AND spec_version = 2',
+        (project_id,),
+    ).fetchone()
+    if spec_row is None:
+        raise SystemExit('packaged Product Factory planning did not persist spec revision 2')
+    spec = json.loads(spec_row[0])
+    team_refs = spec.get('team_refs')
+    if not isinstance(team_refs, list):
+        raise SystemExit('packaged Product Factory planning persisted invalid team_refs')
+    owned = [
+        ref for ref in team_refs
+        if isinstance(ref, str) and ref.startswith('pf-team-plan:v1:')
+    ]
+    if len(owned) != 1:
+        raise SystemExit('packaged Product Factory planning did not persist one team-plan ref')
+    task_count = db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]
+    if task_count != 0:
+        raise SystemExit('packaged Product Factory planning unexpectedly created a task')
+print('Packaged Product Factory planning persisted one team plan without worker dispatch.')
+'@
+        $factoryPlanProbe | python - $env:NIKA_DB_PATH $productId
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Packaged Product Factory planning did not remain planning-only.'
+        }
+        Wait-BoundTextEvidence $productId
+        Set-BoundControlFocus $commandControl
+        Wait-FocusName $commandControl
+        $factoryOperatorHeading = Wait-DescendantName 'Оператор Product Factory' ([System.Windows.Automation.ControlType]::Text)
+
+        Set-BoundControlValue $commandControl 'покажи поточний статус Product Factory'
+        Set-BoundControlFocus $startControl
+        [System.Windows.Forms.SendKeys]::SendWait('^n')
+        $expectedFactoryStatus = (
+            "Статус Product Factory для ${productId}: " +
+            'поточна версія ProductProject ще не має підготовленого execution authority.'
+        )
+        Wait-BoundTextEvidence $expectedFactoryStatus
+        Wait-FocusName $factoryOperatorHeading
+
+        $factoryReadOnlyProbe = @'
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    task_count = db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]
+    if task_count != 0:
+        raise SystemExit('Product Factory operator/status proof unexpectedly created a task')
+print('Packaged Product Factory operator and unprepared status remained read-only.')
+'@
+        $factoryReadOnlyProbe | python - $env:NIKA_DB_PATH
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Packaged Product Factory operator/status path was not read-only.'
+        }
+        Set-BoundControlFocus $commandControl
+        Wait-FocusName $commandControl
+
         $sourceRootControl = Wait-DescendantName 'Папка джерел — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
         $sourceAControl = Wait-DescendantName 'Перший файл — назва в цій папці або повний шлях' ([System.Windows.Automation.ControlType]::Edit)
         $sourceBControl = Wait-DescendantName 'Другий файл — назва в цій папці або повний шлях' ([System.Windows.Automation.ControlType]::Edit)
@@ -757,6 +1051,120 @@ try {
             [System.Windows.Forms.SendKeys]::SendWait('^n')
             Wait-FocusName $tasksControl
             Wait-BoundTextEvidence 'Командне завдання завершено; збережені результати учасників доступні.'
+
+            $modelBindingProbe = @'
+import hashlib
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    db.row_factory = sqlite3.Row
+    row = db.execute(
+        'SELECT payload_json FROM tasks ORDER BY created_at DESC LIMIT 1'
+    ).fetchone()
+    if row is None:
+        raise SystemExit('controlled proof task is missing')
+    payload = json.loads(row['payload_json'])
+    selection_id = payload.get('v01_model_selection')
+    if not isinstance(selection_id, str) or len(selection_id) != 64:
+        raise SystemExit('task did not freeze a canonical model selection id')
+    selected = db.execute(
+        'SELECT selection_json FROM v01_model_selections WHERE selection_id = ?',
+        (selection_id,),
+    ).fetchone()
+    if selected is None:
+        raise SystemExit('frozen model selection is missing')
+    body = selected['selection_json']
+    if hashlib.sha256(body.encode('utf-8')).hexdigest() != selection_id:
+        raise SystemExit('frozen model selection identity is inconsistent')
+    model = json.loads(body)
+    expected = {
+        'route_kind': 'ollama',
+        'provider_id': 'ollama',
+        'model': 'uia-proof-model',
+        'base_url': 'http://localhost:11434',
+        'credential_ref': None,
+        'private_data_allowed': True,
+        'timeout_seconds': 60.0,
+    }
+    for key, value in expected.items():
+        if model.get(key) != value:
+            raise SystemExit('frozen model selection differs at ' + key)
+print('Controlled packaged task froze canonical local model selection.')
+'@
+            $modelBindingProbe | python - $env:NIKA_DB_PATH
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Packaged model selection was not durably frozen into the controlled task.'
+            }
+
+            # Prove that the packaged task list exposes the canonical task identity
+            # through UI Automation, then use that exact identity in a keyboard-only
+            # targeted status command. The read-only probe emits only the task UUID.
+            $taskIdentityProbe = @'
+import sqlite3
+import sys
+import uuid
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    rows = db.execute(
+        'SELECT task_id, state FROM tasks ORDER BY created_at ASC'
+    ).fetchall()
+    if len(rows) != 1:
+        raise SystemExit('controlled proof must own exactly one task before targeted status')
+    task_id, state = rows[0]
+    try:
+        parsed = uuid.UUID(task_id)
+    except (TypeError, ValueError, AttributeError):
+        raise SystemExit('controlled proof task id is not a UUID')
+    if str(parsed) != task_id:
+        raise SystemExit('controlled proof task id is not canonical')
+    if str(state).upper() != 'COMPLETED':
+        raise SystemExit('controlled proof task is not completed before targeted status')
+    print(task_id)
+'@
+            $taskId = ($taskIdentityProbe | python - $env:NIKA_DB_PATH).Trim()
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($taskId)) {
+                throw 'Could not read the controlled canonical task identity.'
+            }
+            $parsedTaskId = [guid]::Empty
+            if (-not [guid]::TryParseExact($taskId, 'D', [ref]$parsedTaskId) -or
+                $parsedTaskId.ToString('D') -cne $taskId) {
+                throw 'Controlled task identity is not a canonical lowercase UUID.'
+            }
+            Wait-BoundTextEvidence "ID: $taskId — Завершено — Порівняй два контрольовані джерела."
+
+            Wait-FocusName $commandControl
+            Set-BoundControlValue $commandControl "task status $taskId"
+            Set-BoundControlFocus $startControl
+            [System.Windows.Forms.SendKeys]::SendWait('^n')
+            Wait-FocusName $tasksControl
+            Wait-BoundTextEvidence "Завдання: $taskId; state COMPLETED."
+
+            $directStatusProbe = @'
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    rows = db.execute(
+        'SELECT state FROM tasks ORDER BY created_at ASC'
+    ).fetchall()
+    if len(rows) != 1:
+        raise SystemExit('targeted status command unexpectedly changed task count')
+    if str(rows[0][0]).upper() != 'COMPLETED':
+        raise SystemExit('controlled task changed after targeted status command')
+print('Packaged targeted task status command was read-only.')
+'@
+            $directStatusProbe | python - $env:NIKA_DB_PATH
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Packaged targeted task status was not a read-only command.'
+            }
         } catch {
             # Diagnostics are restricted to this proof's clean, controlled database
             # and the exact bound Nika window. No source contents or stored payloads.
@@ -779,7 +1187,7 @@ with sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + '?mode=ro', uri=True
             $stateProbe | python - $env:NIKA_DB_PATH
             throw
         }
-        Write-Host 'Packaged source setup -> save action -> canonical task/team -> visible completed result verified.'
+        Write-Host 'Packaged model UI -> durable task model selection -> source setup -> canonical task/team -> visible completed result verified.'
     }
 
     Write-Host 'WebView2 UI Automation descendants, exact semantic identity, and keyboard/focus flow verified successfully.'

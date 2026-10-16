@@ -1,0 +1,290 @@
+# MANUAL-DEV27 Coding Worker Containment Hardening
+
+Status: implementation candidate in `work/manual-dev27/containment-hardening`.
+
+Starting canonical main for the lane was `bd7517f38c04560aa7350b870d8a51bfb6c8113b`.
+The lane was then merged forward, without force push, to include current compatible main
+`8e2e0eb3f0f65b75e1d23b0f36ab2bf09a8477ba` after DEV06 Product Factory worker lifecycle
+integration advanced the shared base.
+
+## Ownership boundary
+
+This lane owns low-level coding-worker workspace/process containment primitives,
+filesystem boundary checks, cleanup, and output provenance.
+
+It does not own Product Factory worker adaptation. High-level Product Factory mapping
+continues to consume the framework-neutral `CodingWorkerPort` contract through the DEV06
+boundary.
+
+PR #72 remains the owner of physical Windows junction/reparse and Job Object descendant
+termination proof. This lane intentionally does not edit
+`tests/test_toolsmith_windows_security.py` or change the Windows Job Object semantics
+covered there.
+
+## REUSE -> ADAPT -> CUSTOM (thin)
+
+REUSE:
+
+- `subprocess` typed argv with `shell=False`;
+- the installed host Git CLI rather than a new Git implementation;
+- Windows Job Objects already used by the process runner;
+- `pathlib`, `os`, `stat`, and OS reparse/symlink metadata;
+- private Git metadata with no retained remotes;
+- sterile Git environment construction;
+- deterministic SHA-256 tree evidence.
+
+ADAPT:
+
+- exact executable identity is checked before launch;
+- runtime launch requires an absolute pinned executable instead of PATH/CWD lookup;
+- every named executable symlink hop is shell-policy checked before dereference;
+- `Popen` receives the final canonical resolved executable rather than the allowlisted alias;
+- the final canonical executable identity is shell-policy checked and rebound to the original
+  `ProcessPolicy.allowed_executables` exact allowlist before launch;
+- an executable alias is usable only when both the alias and its canonical target are explicitly
+  trusted; an alias cannot substitute an arbitrary non-shell executable;
+- opaque/non-symlink executable reparse indirection is rejected before launch;
+- Windows `.bat` and `.cmd` entrypoints are denied because the operating system can invoke them
+  through a system shell even when Python is called with `shell=False`;
+- host-side private-Git preparation resolves `git` from the trusted host PATH once and then uses
+  only the canonical absolute executable, never the worker-supplied PATH as executable authority;
+- the child environment is filtered again at the process boundary;
+- TEMP/TMP/TMPDIR are pinned into the declared worker workspace;
+- cwd is required to remain below the declared worker workspace root;
+- a cancellation already in force returns before temp setup or process creation, with a second
+  cancellation check immediately before `Popen`;
+- workspace, evidence and process-temp roots are rejected when the root object itself is a
+  symlink or Windows reparse point;
+- the private-Git job root is a pre-created trusted directory whose identity is validated at plan
+  creation, before Git preparation and again before destructive cleanup;
+- production repository and job workspace roots must be fully disjoint in both directions;
+- cleanup removes only canonical private Git/worktree roots and refuses reparse/symlink content;
+- before/after tree evidence is converted into deterministic added/modified/deleted delta
+  evidence and checked against allowed paths and changed-file budget.
+
+CUSTOM:
+
+Only Nika-specific policy glue: control-plane path classification, evidence records, and
+fail-closed validation. No alternate generic sandbox or Git framework is introduced.
+
+## Security invariants covered by this batch
+
+1. A path-qualified executable cannot pass an allowlist merely because its basename matches.
+2. A worker process cannot rely on PATH/CWD executable search in `run_typed_process`.
+3. An allowlisted executable alias cannot hide a forbidden named shell in its symlink chain;
+   the runner validates each named hop before dereference and launches only the canonical target.
+4. A canonical executable reached through an allowlisted alias must itself be explicitly present
+   in the original exact executable allowlist; a non-shell target cannot be substituted silently.
+5. Opaque/non-symlink executable reparse indirection fails closed before process launch.
+6. Windows batch entrypoints (`.bat`/`.cmd`) are forbidden even if path-allowlisted because their
+   arguments can be interpreted by the system shell despite Python `shell=False`.
+7. Generic shell entrypoints remain forbidden and arguments remain typed/literal.
+8. Child environment input is reduced to the explicit safe environment surface; known tokens,
+   arbitrary custom variables, Python path poisoning, SSH agent variables, and Git credential
+   overrides are not inherited.
+9. Process TEMP/TMP/TMPDIR point into the declared workspace, not a host-supplied temp path.
+10. A declared process cwd outside its workspace root fails closed before process launch.
+11. A cancellation already set before execution cannot launch the child process or create the
+    worker process-temp tree; cancellation is checked again after environment preparation and
+    immediately before `Popen`.
+12. Guarded workspace, evidence and temp roots fail closed if the root itself is a symlink or
+    Windows reparse point; evidence collection must not resolve an attacker-replaced worktree root
+    into an external tree before validating the root object.
+13. `make_sterile_git_plan()` requires a pre-created real job directory and rejects an initial
+    symlink/reparse job root before canonicalization can erase that identity evidence.
+14. Private-Git prepare/cleanup require the declared job root itself to remain a real directory;
+    replacing the job root after plan creation fails closed before Git execution or recursive
+    deletion can be redirected into an external tree.
+15. Host-side private Git commands use a canonical host-resolved Git executable; a worker PATH
+    value cannot substitute a different `git` binary, and relative path-qualified Git identities
+    are rejected.
+16. A job root cannot be inside the production repository, equal to it, or contain it.
+17. Cleanup does not recursively delete the job root and refuses symlink/reparse content before
+    removing the canonical private Git and worktree roots.
+18. Output delta evidence detects additions, modifications, and deletions deterministically,
+    enforces allowed path scope, and enforces the changed-file budget.
+19. `.github/workflows` and `.github/actions` mutations are denied by default by the output
+    provenance boundary unless a trusted higher-level control-plane approval explicitly opts in.
+
+## AUD02 executable-indirection repair
+
+Independent AUD02 QA-only PR #199 reproduced a real command-boundary defect against an earlier
+DEV27 candidate. An exactly allowlisted absolute alias could point to `/bin/sh`; the old runner
+validated only the alias name, resolved it, and then launched the resolved target without
+preserving the shell-policy evidence from the resolution chain.
+
+The QA-only oracle failed on Ubuntu exactly as intended: the forbidden shell executed and the
+test reported that no security exception was raised. Windows skipped that portable `/bin/sh`
+fixture, so the finding is specifically independent POSIX evidence rather than a claim about the
+separate PR #72 physical Windows proof.
+
+The production repair keeps explicitly trusted symlinked executables usable while closing that
+attack family and the follow-on canonical-substitution variant:
+
+1. the originally requested executable still has to match the trusted `ProcessPolicy` allowlist;
+2. the executable must still be an absolute path;
+3. every named symlink hop is visited with loop/depth bounds and reuses the same generic-shell
+   validation before dereference;
+4. the final canonical target is resolved strictly and generic-shell validation is applied again;
+5. the final canonical target must independently match the original exact executable allowlist;
+6. opaque/non-symlink executable reparse indirection fails closed before launch;
+7. only that canonical path is passed to `subprocess.Popen(..., shell=False)`;
+8. a symlink loop or invalid/missing target fails before process launch.
+
+DEV27 regressions cover a nested alias chain through `/bin/sh`, rejection of an alias whose
+canonical Python target was not explicitly allowlisted, a legitimate safe Python symlink where
+both alias and canonical target are trusted, an opaque executable-reparse no-launch oracle, and a
+symlink loop that must fail before launch. The independent AUD02 attack must still be replayed on
+the final exact DEV27 head; DEV27 does not self-clear the `AUD02-BLOCK` label from its own
+regression evidence.
+
+This repair is command-boundary hardening, not an immutable executable-content attestation
+system. It does not claim protection against replacement of an otherwise approved executable file
+between policy creation and launch, nor against a general-purpose interpreter deliberately granted
+by policy being used as arbitrary code. Those stronger hostile-code guarantees require trusted
+artifact identity and/or real OS/remote isolation rather than path-name validation alone.
+
+## Windows batch-entrypoint repair
+
+Python's documented Windows subprocess behavior permits `.bat` and `.cmd` files to be launched by
+the operating system through a system shell even when the Python call itself uses `shell=False`.
+That behavior conflicts with Nika's `ProcessPolicy(shell_allowed=False)` boundary because
+worker-controlled arguments could then be parsed according to shell rules without Python adding
+shell escaping.
+
+The runtime validator therefore rejects `.bat` and `.cmd` entrypoints before allowlist acceptance,
+including case variants. A deterministic regression proves that an exactly path-allowlisted batch
+entrypoint is still denied when supplied an argument containing shell metacharacters. This is a
+conservative command-boundary policy; Nika does not switch to `shell=True` to make batch execution
+work.
+
+## Root-level indirection repair
+
+A DEV27 self-audit found that the earlier `collect_tree_evidence()` implementation resolved its
+root before rejecting symlink/reparse entries below it. If a worker replaced the entire worktree
+root with an indirection to another tree before evidence capture, provenance could be collected
+from the wrong filesystem authority.
+
+The shared low-level root guard now performs `lstat()` on the supplied root before canonical
+resolution, rejects symbolic links and Windows reparse points, requires an actual directory, and
+is reused by guarded workspace paths, process workspace/temp roots and tree-evidence collection.
+Focused regressions prove that a symlinked evidence root, workspace root and process-temp root all
+fail closed. Physical Windows junction evidence owned by PR #72 remains separate and is not copied
+into this lane.
+
+## Private-Git job-root identity repair
+
+A later DEV27 self-audit extended the same root-identity attack family to host-side Git preparation
+and cleanup. The old plan builder canonicalized `job_root` before proving that the supplied object
+was not an indirection, and the old cleanup canonicalized `plan.private_git_dir.parent` before
+proving that the job-root object was still trusted. Either behavior could erase evidence of an
+attacker-selected symlink/reparse root.
+
+The repair applies one real-directory primitive at all relevant boundaries. The trusted host must
+create the job directory first. `make_sterile_git_plan()` rejects a missing, symbolic-link or
+Windows-reparse job root before canonicalization. The resulting canonical plan keeps
+`_nika_private_git` and `worktree` as direct children of that root. Preparation revalidates the
+root before invoking Git and before creating the worktree. Cleanup revalidates after read-only tree
+checks and immediately before each recursive deletion.
+
+Portable regressions cover both an initially indirect job root and replacement after plan
+creation. Preparation must fail before Git or private paths can be created in an external tree.
+Cleanup must fail while preserving external `_nika_private_git` and `worktree` markers. Physical
+Windows junction/reparse proof remains with PR #72 rather than being duplicated here.
+
+This is path-identity hardening rather than a race-free filesystem transaction. A hostile actor
+able to replace a trusted directory in the tiny interval after final validation and before an OS
+filesystem operation can still create a TOCTOU race. The operational invariant is therefore that
+worker descendants are terminated before cleanup and the trusted host owns the job-root parent.
+Stronger hostile-concurrent-filesystem guarantees require handle-relative/OS sandbox primitives,
+not a false Python-level claim.
+
+## Host Git executable identity repair
+
+The private-Git helper reused the installed Git CLI as intended, but it previously passed the
+literal name `git` to subprocess calls together with `plan.environment`. Because that environment
+contains a filtered `PATH`, a caller-controlled worker PATH could become executable-selection
+authority for trusted host-side Git operations.
+
+The repair separates executable discovery from the worker environment. A bare Git name is resolved
+once using the host process PATH, converted to the canonical executable target, and every private
+Git command uses that absolute identity. A caller may explicitly supply an absolute Git executable;
+it is canonicalized without PATH search. Relative path-qualified Git values are rejected. The
+worker environment may still carry PATH for child tooling, but it cannot decide which Git binary
+the trusted private-workspace controller invokes.
+
+Focused regressions prove host PATH is used for discovery even when `plan.environment["PATH"]`
+points at an attacker directory, prove the first Git argv is absolute/canonical, prove absolute Git
+identity avoids PATH discovery, and reject relative path-qualified Git input.
+
+This is still host executable path hardening, not signed-binary attestation. Replacement of the
+trusted host Git file itself requires OS/package integrity controls outside this Python boundary.
+
+## Pre-launch cancellation repair
+
+Another DEV27 self-audit found a deterministic side-effect race in the old process runner. When a
+`cancellation_event` was already set before `run_typed_process()` was called, the runner still
+created the child with `Popen` and only noticed cancellation in its post-launch polling loop. A
+short-lived command could therefore perform an immediate side effect even though cancellation
+authority already existed before dispatch.
+
+The runner now checks cancellation after trusted argv/cwd/workspace validation but before process
+environment/temp preparation, and checks it again after environment setup and before `Popen`. A
+pre-cancelled request returns a typed failed/cancelled `ProcessExecutionResult` without creating the
+worker temp directory or launching the child. A marker-writing regression proves the marker and
+`_nika_process_tmp` remain absent.
+
+This does not claim a mathematically atomic cancellation-to-process-creation transaction. A new
+cancellation can still race in the very small interval after the final check and before the OS
+creates the process; once a process exists, existing Job Object/process-group termination remains
+the containment mechanism. Eliminating that residual launch race requires a stronger OS-specific
+suspended-process/dispatch primitive or a remote sandbox transaction.
+
+## Isolation truth and non-goals
+
+`POLICY_ONLY` and Windows `PROCESS_CONTAINED` remain exactly what their names state. They are not
+filesystem or network sandboxes. This batch does not relabel them and does not claim that Python
+validation can confine arbitrary hostile code.
+
+The documented Popen-to-Job assignment race remains a limitation of the current Windows
+process-contained runner and is not silently reclassified as solved.
+
+Network-deny or approved-host enforcement for untrusted coding execution still requires a real OS
+or remote sandbox adapter. A future OpenHands, Codex, container, VM, Windows Sandbox or equivalent
+worker must remain behind `CodingWorkerPort` and provide independently verified isolation evidence
+before it can be classified `OS_SANDBOXED` or `REMOTE_SANDBOXED`.
+
+A worker process that can execute arbitrary Python or another general-purpose interpreter must be
+treated as arbitrary code. Executable allowlisting is command-boundary hardening, not a substitute
+for OS isolation.
+
+## Required integration sequence for a real coding-worker adapter
+
+1. The trusted host creates a dedicated real-directory job root fully disjoint from production
+   source and metadata.
+2. Build the sterile Git plan only after that root exists, then prepare private Git metadata and
+   the worktree through `prepare_private_git_workspace()`.
+3. Capture the initial `TreeEvidence`.
+4. Launch only through an isolation adapter appropriate to the job's network/filesystem policy.
+   If the low-level typed process runner is used for trusted bounded commands, supply a pinned
+   absolute executable and declared workspace root.
+5. Capture final `TreeEvidence` and derive `TreeDeltaEvidence` with the allowed paths and
+   changed-file budget.
+6. Independently verify candidate tests and exact digests; do not trust worker self-report.
+7. Re-check production repository integrity.
+8. Cancel/terminate process descendants before cleanup.
+9. Clean only the private Git/worktree roots with `cleanup_private_git_workspace()`.
+10. Promotion/registration remains outside the worker and cannot expand the original task
+    permission ceiling.
+
+## Acceptance evidence required before integration credit
+
+- Ruff, compile, dependency consistency and full pytest must be green on the exact candidate SHA
+  through Core CI on Ubuntu and Windows.
+- M12 pre-human release gate must be green on that same exact SHA where applicable.
+- The AUD02 executable-indirection and canonical-target substitution attack families must be
+  independently replayed on that exact candidate and clear the blocker; prior-head QA evidence
+  cannot clear a newer candidate.
+- Compatibility with PR #72 is architectural unless/until its physical Windows test is present in
+  the same integrated main; this lane does not copy another owner's test into its PR.
+- `HUMAN_TESTED=false` and `NVDA_VERIFIED=false` unless a real human/NVDA run is recorded.
