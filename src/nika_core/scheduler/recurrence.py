@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
+from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.contracts import ScheduledJob, SchedulerPort, TriggerKind
 from nika_core.scheduler.store import IMMUTABLE_JOB_BINDING_KEY, ScheduledJobStore
 
@@ -131,7 +132,9 @@ class DurableRecurrenceService:
         job_id = _job_id(recurrence_key)
         existing = self._jobs.get(job_id)
         if existing is not None:
-            state, existing_payload = _decode_job(existing, expected_recurrence_id=recurrence_key)
+            state, existing_payload = self._decode_effective_job(
+                existing, expected_recurrence_id=recurrence_key
+            )
             expected = (
                 task_key,
                 target_action,
@@ -177,7 +180,7 @@ class DurableRecurrenceService:
         job = self._jobs.get(_job_id(recurrence_key))
         if job is None:
             return None
-        state, _ = _decode_job(job, expected_recurrence_id=recurrence_key)
+        state, _ = self._decode_effective_job(job, expected_recurrence_id=recurrence_key)
         return state
 
     def pause(self, recurrence_id: str) -> RecurrenceState:
@@ -361,7 +364,47 @@ class DurableRecurrenceService:
         job = self._jobs.get(_job_id(recurrence_key))
         if job is None:
             raise KeyError(f"unknown recurrence: {recurrence_key}")
-        return _decode_job(job, expected_recurrence_id=recurrence_key)
+        return self._decode_effective_job(job, expected_recurrence_id=recurrence_key)
+
+    def _decode_effective_job(
+        self,
+        job: ScheduledJob,
+        *,
+        expected_recurrence_id: str,
+    ) -> tuple[RecurrenceState, dict[str, Any]]:
+        try:
+            return _decode_job(job, expected_recurrence_id=expected_recurrence_id)
+        except ValueError as exc:
+            # The scheduler independently disables a recurrence after its parent
+            # task becomes terminal or disappears. Its embedded ACTIVE metadata
+            # cannot be rewritten by the scheduler, so project the safe terminal
+            # status without laundering arbitrary disabled/corrupt records.
+            if (
+                job.enabled
+                or str(exc) != "durable recurrence enabled state does not match lifecycle state"
+            ):
+                raise
+            state, payload = _decode_job(
+                replace(job, enabled=True),
+                expected_recurrence_id=expected_recurrence_id,
+            )
+            task_state = self._jobs.task_state(state.task_id)
+            if task_state not in {
+                None,
+                TaskState.CANCELLED,
+                TaskState.COMPLETED,
+                TaskState.ARCHIVED,
+            }:
+                raise exc
+            return (
+                replace(
+                    state,
+                    status=RecurrenceStatus.CANCELLED,
+                    next_due_at=None,
+                    next_occurrence_id=None,
+                ),
+                payload,
+            )
 
     def _persist(self, state: RecurrenceState, target_payload: dict[str, Any]) -> None:
         enabled = state.status is RecurrenceStatus.ACTIVE and state.next_due_at is not None
@@ -434,11 +477,19 @@ def _decode_job(
 ) -> tuple[RecurrenceState, dict[str, Any]]:
     if job.action_id != DurableRecurrenceService.ACTION_ID:
         raise ValueError("durable recurrence job has an unexpected action_id")
+    if (
+        job.trigger_kind is not TriggerKind.DATE
+        or job.coalesce is not True
+        or type(job.max_instances) is not int
+        or job.max_instances != 1
+        or job.misfire_grace_seconds is not None
+    ):
+        raise ValueError("durable recurrence scheduler envelope is corrupt")
     metadata = job.payload.get(_RECURRENCE_PAYLOAD_KEY)
     target_payload = job.payload.get(_TARGET_PAYLOAD_KEY)
     if not isinstance(metadata, dict) or not isinstance(target_payload, dict):
         raise TypeError("durable recurrence payload is corrupt")
-    if metadata.get("version") != _RECURRENCE_VERSION:
+    if type(metadata.get("version")) is not int or metadata["version"] != _RECURRENCE_VERSION:
         raise ValueError("unsupported durable recurrence payload version")
     recurrence_id = _required_text(metadata.get("recurrence_id"), "persisted recurrence_id")
     if recurrence_id != expected_recurrence_id:
@@ -503,6 +554,9 @@ def _decode_job(
         last_completed_occurrence_id=last_id,
         terminal_reason=terminal_reason,
     )
+    expected_run_date = state.next_due_at or state.last_completed_due_at or state.anchor_at
+    if job.trigger != {"run_date": _iso(expected_run_date)}:
+        raise ValueError("durable recurrence scheduled trigger is corrupt")
     persisted_binding = job.payload.get(IMMUTABLE_JOB_BINDING_KEY)
     expected_binding = _definition_fingerprint(
         recurrence_id=state.recurrence_id,
@@ -619,13 +673,22 @@ def _canonical_task_id(value: object, *, label: str = "task_id") -> str:
         raise ValueError(f"{label} is required")
     if value != value.strip():
         raise ValueError(f"{label} must be canonical")
+    _require_utf8(value, label)
     return value
 
 
 def _required_text(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} is required")
+    _require_utf8(value, label)
     return value.strip()
+
+
+def _require_utf8(value: str, label: str) -> None:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} must be valid UTF-8 text") from exc
 
 
 def _utc_now() -> datetime:
