@@ -141,12 +141,15 @@ class ProcessPolicy:
     shell_allowed: bool = False
 
     def __post_init__(self) -> None:
-        if self.shell_allowed:
+        if type(self.shell_allowed) is not bool or self.shell_allowed:
             raise ValueError("generic shell execution is not allowed")
-        if not self.allowed_executables:
-            raise ValueError("at least one executable must be allowlisted")
-        if any(not item.strip() for item in self.allowed_executables):
-            raise ValueError("allowed executable names must not be empty")
+        if type(self.allowed_executables) is not tuple or not self.allowed_executables:
+            raise ValueError("at least one executable must be allowlisted as a tuple")
+        if any(
+            type(item) is not str or not item.strip() or "\x00" in item
+            for item in self.allowed_executables
+        ):
+            raise ValueError("allowed executable names must be nonempty text without NUL")
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,10 +158,22 @@ class NetworkPolicy:
     approved_hosts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.mode) is not NetworkMode:
+            raise ValueError("network policy mode must be a NetworkMode value")
+        if type(self.approved_hosts) is not tuple or any(
+            type(host) is not str or not host or host != host.strip()
+            for host in self.approved_hosts
+        ):
+            raise ValueError("network approved hosts must be a tuple of nonempty canonical text")
         if self.mode is NetworkMode.DENY and self.approved_hosts:
             raise ValueError("DENY network policy cannot contain approved hosts")
         if self.mode is NetworkMode.APPROVED_HOSTS and not self.approved_hosts:
             raise ValueError("approved-host network policy requires at least one host")
+
+
+_MAX_PROCESS_TIMEOUT_SECONDS = 60 * 60
+_MAX_CAPTURED_OUTPUT_BYTES = 64 * 1024 * 1024
+_MAX_CHANGED_FILES = 10_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,8 +183,16 @@ class ResourceBudget:
     max_changed_files: int
 
     def __post_init__(self) -> None:
-        if self.timeout_seconds <= 0 or self.max_output_bytes <= 0 or self.max_changed_files <= 0:
-            raise ValueError("resource budget values must be positive")
+        values = (self.timeout_seconds, self.max_output_bytes, self.max_changed_files)
+        if any(type(value) is not int or value <= 0 for value in values):
+            raise ValueError("resource budget values must be positive integers")
+        limits = (
+            (self.timeout_seconds, _MAX_PROCESS_TIMEOUT_SECONDS),
+            (self.max_output_bytes, _MAX_CAPTURED_OUTPUT_BYTES),
+            (self.max_changed_files, _MAX_CHANGED_FILES),
+        )
+        if any(value > maximum for value, maximum in limits):
+            raise ValueError("resource budget values exceed safe limits")
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,14 +202,25 @@ class AcceptanceCommand:
     timeout_seconds: int | None = None
 
     def __post_init__(self) -> None:
-        if not self.argv or any(not item for item in self.argv):
-            raise ValueError("acceptance command argv must not be empty")
+        if type(self.argv) is not tuple or not self.argv or any(
+            type(item) is not str or not item or "\x00" in item for item in self.argv
+        ):
+            raise ValueError("acceptance command argv must be nonempty text arguments")
+        if type(self.cwd) is not str:
+            raise ValueError("acceptance command cwd must be text")
         if self.argv[0].casefold() in {"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "bash", "sh"}:
             raise ValueError("shell executables are not valid acceptance command entrypoints")
         if self.cwd != ".":
             normalize_relative_path(self.cwd)
-        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
-            raise ValueError("acceptance command timeout must be positive")
+        if self.timeout_seconds is not None and (
+            type(self.timeout_seconds) is not int or self.timeout_seconds <= 0
+        ):
+            raise ValueError("acceptance command timeout must be a positive integer")
+        if (
+            self.timeout_seconds is not None
+            and self.timeout_seconds > _MAX_PROCESS_TIMEOUT_SECONDS
+        ):
+            raise ValueError("acceptance command timeout exceeds safe limit")
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,8 +254,8 @@ class ChangedFile:
         normalize_relative_path(self.path)
         if len(self.sha256) != 64 or any(c not in "0123456789abcdef" for c in self.sha256.lower()):
             raise ValueError("changed-file sha256 must be hexadecimal")
-        if self.size_bytes < 0:
-            raise ValueError("changed-file size must be non-negative")
+        if type(self.size_bytes) is not int or self.size_bytes < 0:
+            raise ValueError("changed-file size must be a non-negative integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +267,8 @@ class TestEvidence:
     def __post_init__(self) -> None:
         if not self.command:
             raise ValueError("test evidence requires a command")
+        if type(self.exit_code) is not int:
+            raise ValueError("test evidence exit code must be an integer")
         if not self.output_digest.strip():
             raise ValueError("test evidence requires an output digest")
 
@@ -322,8 +358,8 @@ class CapabilityManifestV1:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
-            raise ValueError("only capability manifest schema v1 is supported")
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError("only integer capability manifest schema v1 is supported")
         if not all(value.strip() for value in (self.capability_id, self.version, self.digest, self.entrypoint, self.source)):
             raise ValueError("capability manifest fields must not be empty")
         if not self.permissions:

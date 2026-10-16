@@ -8,6 +8,7 @@ from threading import Barrier, Lock
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.experience_ledger import ContinuityKind, ContinuityOutcome, ExperienceLedger
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
@@ -438,3 +439,149 @@ def test_malformed_wait_payload_fails_closed_without_secret_leak(tmp_path) -> No
     assert events
     assert events[-1].event_type == "runtime.connectivity_wait_rejected"
     assert "НЕ_ЛОГУВАТИ" not in repr(events)
+
+
+def test_connectivity_wait_persists_privacy_safe_experience_across_restart(tmp_path) -> None:
+    db_path = tmp_path / "Ніка Connectivity Experience" / "nika core.db"
+    store = SQLiteStore(db_path)
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    probe = _ConnectivityProbe(available=False)
+    policy = RetryPolicy(max_retries=3, base_delay_seconds=1, max_delay_seconds=5)
+    now = datetime(2026, 10, 5, 11, 0, tzinfo=UTC)
+    task_id = _running_task(queue)
+    operation_id = "private-operation-name-must-not-persist"
+    service = ConnectivityWaitService(
+        queue=queue,
+        jobs=jobs,
+        audit=audit,
+        probe=probe,
+    )
+    service.defer(
+        task_id=task_id,
+        job_id="connectivity-private-job",
+        action_id="runtime.resume_after_connectivity",
+        intent=_network_intent(policy, operation_id=operation_id, now=now),
+    )
+
+    ledger = ExperienceLedger(store)
+    deferred = ledger.list_for_task(task_id)
+    assert len(deferred) == 1
+    assert deferred[0].kind is ContinuityKind.INTERNET
+    assert deferred[0].outcome is ContinuityOutcome.WAITING
+    assert deferred[0].reason_code == "network_wait_deferred"
+    assert deferred[0].attempt == 1
+    assert operation_id not in deferred[0].event_key
+    assert "connectivity-private-job" not in deferred[0].event_key
+    assert "НЕ_ЛОГУВАТИ" not in repr(deferred[0])
+
+    rescheduled = service.evaluate(
+        job_id="connectivity-private-job",
+        policy=policy,
+        now=now + timedelta(seconds=2),
+        replay_safe=True,
+    )
+    assert rescheduled.disposition is ScriptRetryDisposition.SCHEDULED
+    assert rescheduled.intent is not None
+    waiting = ledger.list_for_task(task_id)
+    assert [(item.outcome, item.reason_code, item.attempt) for item in waiting] == [
+        (ContinuityOutcome.WAITING, "network_wait_deferred", 1),
+        (ContinuityOutcome.WAITING, "network_unavailable", 2),
+    ]
+
+    probe.available = True
+    resumed = service.evaluate(
+        job_id="connectivity-private-job",
+        policy=policy,
+        now=rescheduled.intent.not_before_utc,
+        replay_safe=True,
+    )
+    assert resumed.disposition is ScriptRetryDisposition.READY
+    events = ExperienceLedger(SQLiteStore(db_path)).list_for_task(task_id)
+    assert [(item.outcome, item.reason_code, item.attempt) for item in events] == [
+        (ContinuityOutcome.WAITING, "network_wait_deferred", 1),
+        (ContinuityOutcome.WAITING, "network_unavailable", 2),
+        (ContinuityOutcome.RESUMED, "network_reconnected", 2),
+    ]
+
+
+def test_connectivity_terminal_retry_persists_blocked_experience(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Connectivity Blocked" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    policy = RetryPolicy(max_retries=1, base_delay_seconds=1, max_delay_seconds=5)
+    now = datetime(2026, 10, 5, 11, 30, tzinfo=UTC)
+    task_id = _running_task(queue)
+    service = ConnectivityWaitService(
+        queue=queue,
+        jobs=jobs,
+        audit=audit,
+        probe=_ConnectivityProbe(available=True),
+    )
+    service.defer(
+        task_id=task_id,
+        job_id="connectivity-deadline-evidence",
+        action_id="runtime.resume_after_connectivity",
+        intent=_network_intent(
+            policy,
+            operation_id="deadline-evidence",
+            now=now,
+            deadline=now + timedelta(seconds=2),
+        ),
+    )
+
+    decision = service.evaluate(
+        job_id="connectivity-deadline-evidence",
+        policy=policy,
+        now=now + timedelta(seconds=3),
+        replay_safe=True,
+    )
+    assert decision.disposition is ScriptRetryDisposition.DEADLINE_EXCEEDED
+    assert queue.get(task_id).state is TaskState.BLOCKED
+    events = ExperienceLedger(store).list_for_task(task_id)
+    assert events[-1].kind is ContinuityKind.INTERNET
+    assert events[-1].outcome is ContinuityOutcome.BLOCKED
+    assert events[-1].reason_code == "retry_deadline_exceeded"
+
+
+def test_connectivity_experience_failure_rolls_back_task_job_and_audit(
+    tmp_path, monkeypatch
+) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Connectivity Experience Atomic" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    policy = RetryPolicy(max_retries=1, base_delay_seconds=1, max_delay_seconds=5)
+    now = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
+    task_id = _running_task(queue)
+    service = ConnectivityWaitService(
+        queue=queue,
+        jobs=jobs,
+        audit=audit,
+        probe=_ConnectivityProbe(available=False),
+    )
+
+    def fail_experience(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("injected experience failure")
+
+    monkeypatch.setattr(ExperienceLedger, "record_with_connection", fail_experience)
+    with pytest.raises(RuntimeError, match="injected experience failure"):
+        service.defer(
+            task_id=task_id,
+            job_id="connectivity-experience-atomic",
+            action_id="runtime.resume_after_connectivity",
+            intent=_network_intent(policy, operation_id="atomic-evidence", now=now),
+        )
+
+    assert queue.get(task_id).state is TaskState.RUNNING
+    assert jobs.get("connectivity-experience-atomic") is None
+    assert audit.list_for(
+        entity_type="scheduled_job",
+        entity_id="connectivity-experience-atomic",
+    ) == ()
+    assert ExperienceLedger(store).list_for_task(task_id) == ()
