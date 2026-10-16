@@ -28,12 +28,16 @@ class MemoryService:
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)
         key = _required("key", key)
+        if type(user_approved) is not bool:
+            raise ValueError("user_approved must be a boolean")
         if scope is MemoryScope.USER and not user_approved:
             raise PermissionError("user long-term memory requires explicit approval")
         if expires_at is not None:
             expires_at = _as_utc(expires_at)
         now = datetime.now(UTC)
-        body = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        body = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
         with self._store.connection() as conn:
             existing = conn.execute(
                 "SELECT created_at FROM memory_records WHERE scope = ? AND owner_id = ? "
@@ -120,8 +124,15 @@ class MemoryService:
         namespace: str,
         now: datetime | None = None,
     ) -> tuple[MemoryRecord, ...]:
-        self.purge_expired(now=now)
+        current = _as_utc(now) if now is not None else datetime.now(UTC)
         with self._store.connection() as conn:
+            # A namespace read must not delete another owner's or scope's memory.
+            # Keep expiry cleanup and the returned snapshot in one transaction.
+            conn.execute(
+                "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                "AND namespace = ? AND expires_at IS NOT NULL AND expires_at <= ?",
+                (scope.value, owner_id, namespace, current.isoformat()),
+            )
             rows = conn.execute(
                 "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
                 "AND namespace = ? ORDER BY memory_key",
