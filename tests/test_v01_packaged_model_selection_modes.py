@@ -263,6 +263,7 @@ def test_local_external_and_configured_api_reach_only_selected_gateway_routes(
                 json={
                     "model": payload["model"],
                     "message": {"role": "assistant", "content": "ollama result"},
+                    "done": True,
                 },
             )
         if request.url.path == "/v1/chat/completions":

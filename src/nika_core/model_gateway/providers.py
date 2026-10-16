@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -117,10 +118,29 @@ class OpenAICompatibleProvider:
             ) from exc
 
         try:
-            raw_text = body["choices"][0]["message"]["content"]
+            if not isinstance(body, dict) or "error" in body:
+                raise ValueError("model provider did not return a successful object")
+            choice = body["choices"][0]
+            # This adapter returns text, not partial generations or tool calls.
+            # Some compatible providers omit finish_reason; when supplied,
+            # a nonterminal reason must never become a successful result.
+            if "finish_reason" in choice and choice["finish_reason"] != "stop":
+                raise ValueError("model response is not a completed text answer")
+            message = choice["message"]
+            if not isinstance(message, dict):
+                raise TypeError("message must be an object")
+            # A legacy compatible endpoint may omit role, but an explicitly
+            # non-assistant message must not be treated as the model's answer.
+            if "role" in message and message["role"] != "assistant":
+                raise ValueError("model response is not an assistant message")
+            raw_text = message["content"]
             if not isinstance(raw_text, str):
                 raise TypeError("message content must be text")
-            model = str(body.get("model") or request.model or self._default_model)
+            # The provider must positively attest its model identity. Never
+            # manufacture evidence from the outbound request or default.
+            model = body["model"]
+            if type(model) is not str or not model or model != model.strip():
+                raise ValueError("provider model identity is invalid")
             raw_usage = body.get("usage")
             if raw_usage is None:
                 raw_usage = {}
@@ -158,7 +178,8 @@ class OllamaProvider:
     GPT-OSS. The reasoning trace is still not copied into Nika's shared
     response contract. Client cancellation is not represented as hard
     server-side inference cancellation because the native Ollama API does not
-    provide that guarantee.
+    provide that guarantee. Redirect following is explicitly disabled so the
+    LOCAL privacy boundary cannot escape to another HTTP origin.
     """
 
     def __init__(
@@ -171,8 +192,21 @@ class OllamaProvider:
     ) -> None:
         if not default_model.strip():
             raise ValueError("default_model must not be empty")
+        if default_model != default_model.strip():
+            raise ValueError("default_model must not contain surrounding whitespace")
         if not base_url.strip():
             raise ValueError("base_url must not be empty")
+        if base_url != base_url.strip():
+            raise ValueError("base_url must not contain surrounding whitespace")
+        parsed = urlsplit(base_url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Ollama base_url requires an HTTP(S) loopback host")
+        if parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("Ollama local route must use a loopback host")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("Ollama base_url must not contain userinfo")
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("Ollama base_url must not contain path, query, or fragment")
         self._capabilities = ProviderCapabilities(
             provider_id="ollama",
             kind=ProviderKind.LOCAL,
@@ -204,9 +238,16 @@ class OllamaProvider:
 
         started = time.perf_counter()
         try:
-            async with self._client_factory(timeout=request.timeout_seconds) as client:
+            async with self._client_factory(
+                timeout=request.timeout_seconds,
+                trust_env=False,
+                follow_redirects=False,
+            ) as client:
                 response = await client.post(f"{self._base_url}/api/chat", json=payload)
                 response.raise_for_status()
+                media_type = response.headers.get("content-type", "").partition(";")[0]
+                if media_type.strip().casefold() != "application/json":
+                    raise ValueError("Ollama must return a JSON response")
                 body = response.json()
         except httpx.TimeoutException as exc:
             raise ModelGatewayError(
@@ -232,13 +273,21 @@ class OllamaProvider:
             ) from exc
 
         try:
+            if not isinstance(body, dict) or "error" in body:
+                raise ValueError("Ollama did not return a successful object")
+            if body.get("done") is not True:
+                raise ValueError("Ollama returned an incomplete response")
+            if "done_reason" in body and body["done_reason"] != "stop":
+                raise ValueError("Ollama response was not completed normally")
+            response_model = body["model"]
+            if not isinstance(response_model, str) or response_model != model:
+                raise ValueError("Ollama response model differs from requested model")
             raw_message = body["message"]
-            if not isinstance(raw_message, dict):
-                raise TypeError("message must be an object")
+            if not isinstance(raw_message, dict) or raw_message.get("role") != "assistant":
+                raise TypeError("message must be an assistant object")
             text = raw_message["content"]
             if not isinstance(text, str):
                 raise TypeError("message content must be text")
-            response_model = str(body.get("model") or model)
             prompt_tokens = _optional_int(body.get("prompt_eval_count"))
             output_tokens = _optional_int(body.get("eval_count"))
             usage = ModelUsage(
