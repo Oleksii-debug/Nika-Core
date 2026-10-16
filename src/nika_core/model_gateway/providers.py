@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -158,7 +159,8 @@ class OllamaProvider:
     GPT-OSS. The reasoning trace is still not copied into Nika's shared
     response contract. Client cancellation is not represented as hard
     server-side inference cancellation because the native Ollama API does not
-    provide that guarantee.
+    provide that guarantee. Redirect following is explicitly disabled so the
+    LOCAL privacy boundary cannot escape to another HTTP origin.
     """
 
     def __init__(
@@ -171,8 +173,21 @@ class OllamaProvider:
     ) -> None:
         if not default_model.strip():
             raise ValueError("default_model must not be empty")
+        if default_model != default_model.strip():
+            raise ValueError("default_model must not contain surrounding whitespace")
         if not base_url.strip():
             raise ValueError("base_url must not be empty")
+        if base_url != base_url.strip():
+            raise ValueError("base_url must not contain surrounding whitespace")
+        parsed = urlsplit(base_url)
+        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("Ollama base_url requires an HTTP(S) loopback host")
+        if parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
+            raise ValueError("Ollama local route must use a loopback host")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("Ollama base_url must not contain userinfo")
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("Ollama base_url must not contain path, query, or fragment")
         self._capabilities = ProviderCapabilities(
             provider_id="ollama",
             kind=ProviderKind.LOCAL,
@@ -204,7 +219,11 @@ class OllamaProvider:
 
         started = time.perf_counter()
         try:
-            async with self._client_factory(timeout=request.timeout_seconds) as client:
+            async with self._client_factory(
+                timeout=request.timeout_seconds,
+                trust_env=False,
+                follow_redirects=False,
+            ) as client:
                 response = await client.post(f"{self._base_url}/api/chat", json=payload)
                 response.raise_for_status()
                 body = response.json()
