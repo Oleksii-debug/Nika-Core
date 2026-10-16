@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from enum import StrEnum
+from math import isfinite
 
 from .product_factory_coordinator import CoordinatorSnapshot
 from .product_factory_deployment import DeploymentFabricSnapshot
@@ -21,6 +22,10 @@ from .product_factory_incident_contracts import (
     SupplyChainAdvisory,
 )
 from .product_factory_incidents import IncidentRepairReleaseCoordinator
+
+
+MAX_INCIDENT_SNAPSHOT_BYTES = 2 * 1024 * 1024
+MAX_INCIDENT_JSON_DEPTH = 64
 
 
 def dump_incident_snapshot(snapshot: IncidentLifecycleSnapshot) -> str:
@@ -43,11 +48,30 @@ def load_incident_snapshot(
 ) -> IncidentLifecycleSnapshot:
     """Parse canonical PF8 JSON and revalidate external authority before trust."""
 
-    if not isinstance(payload, str) or not payload.strip():
+    if type(payload) is not str:
+        raise ProductIncidentError("incident snapshot payload must be non-empty JSON text")
+    # Apply the cheap size check before stripping or encoding untrusted text.
+    if len(payload) > MAX_INCIDENT_SNAPSHOT_BYTES:
+        raise ProductIncidentError("incident snapshot payload exceeds byte limit")
+    if not payload.strip():
         raise ProductIncidentError("incident snapshot payload must be non-empty JSON text")
     try:
-        raw = json.loads(payload)
-    except json.JSONDecodeError as exc:
+        encoded = payload.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ProductIncidentError("incident snapshot payload must be valid UTF-8") from exc
+    if len(encoded) > MAX_INCIDENT_SNAPSHOT_BYTES:
+        raise ProductIncidentError("incident snapshot payload exceeds byte limit")
+    _check_json_depth(payload)
+    try:
+        raw = json.loads(
+            payload,
+            object_pairs_hook=_unique_pairs,
+            parse_constant=_reject_nonfinite,
+            parse_float=_finite_float,
+        )
+    except ProductIncidentError:
+        raise
+    except (ValueError, RecursionError) as exc:
         raise ProductIncidentError("incident snapshot payload is invalid JSON") from exc
     root = _mapping(
         raw,
@@ -387,6 +411,10 @@ def _list(raw: object, label: str) -> list[object]:
 def _text(raw: object, label: str) -> str:
     if not isinstance(raw, str) or not raw.strip():
         raise ProductIncidentError(f"{label} must be non-empty text")
+    try:
+        raw.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ProductIncidentError(f"{label} must be valid UTF-8") from exc
     return raw
 
 
@@ -406,9 +434,13 @@ def _datetime(raw: object, label: str) -> datetime:
     text = _text(raw, label)
     try:
         value = datetime.fromisoformat(text)
-    except ValueError as exc:
-        raise ProductIncidentError(f"{label} must be ISO-8601 datetime text") from exc
-    return _aware_json(value)
+        return _aware_json(value)
+    except ProductIncidentError:
+        raise
+    except (ValueError, OverflowError) as exc:
+        raise ProductIncidentError(
+            f"{label} must be ISO-8601 datetime text in the UTC range"
+        ) from exc
 
 
 def _enum(enum_type: type[StrEnum], raw: object, label: str) -> StrEnum:
@@ -420,12 +452,67 @@ def _enum(enum_type: type[StrEnum], raw: object, label: str) -> StrEnum:
 
 
 def _canonical(payload: object) -> bytes:
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ProductIncidentError("incident snapshot cannot be serialized") from exc
+    if len(encoded) > MAX_INCIDENT_SNAPSHOT_BYTES:
+        raise ProductIncidentError("incident snapshot payload exceeds byte limit")
+    return encoded
+
+
+def _check_json_depth(payload: str) -> None:
+    # Count structural brackets only: quoted JSON text can legitimately contain
+    # escaped quotes, backslashes and arbitrary braces.
+    depth = 0
+    quoted = False
+    escaped = False
+    for char in payload:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_INCIDENT_JSON_DEPTH:
+                raise ProductIncidentError("incident snapshot exceeds JSON depth limit")
+        elif char in "]}":
+            depth -= 1
+            if depth < 0:
+                raise ProductIncidentError("incident snapshot payload is invalid JSON")
+    if quoted or depth != 0:
+        raise ProductIncidentError("incident snapshot payload is invalid JSON")
+
+
+def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProductIncidentError("incident snapshot contains duplicate JSON keys")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(_value: str) -> object:
+    raise ProductIncidentError("incident snapshot contains non-finite JSON numbers")
+
+
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not isfinite(parsed):
+        raise ProductIncidentError("incident snapshot contains non-finite JSON numbers")
+    return parsed
 
 
 def _aware_json(value: datetime) -> datetime:

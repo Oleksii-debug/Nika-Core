@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from urllib.parse import quote
+
+import pytest
+from pydantic import ValidationError
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_command.contracts import EvidenceReference
 from nika_core.product_command.deployment_adapter import deployment_status_entries
 from nika_core.product_command.factory_status_adapter import deployment_execution_status_entries
-from nika_core.product_command.product_project_adapter import ProductProjectCommandService
+from nika_core.product_command.product_project_adapter import (
+    ProductProjectCommandService,
+    _evidence as product_project_evidence,
+)
+from nika_core.product_command.reference_safety import safe_evidence_reference
 from nika_core.product_factory_deployment import (
     DeploymentFabricSnapshot,
     DeploymentIntent,
@@ -42,9 +50,18 @@ def test_public_evidence_contract_hashes_sensitive_and_oversized_references() ->
         "authorization:Bearer raw-value",
         "provider-session:raw-session",
         "https://example.invalid/callback?access_token=raw-token",
+        "https://example.invalid/callback?access%5Ftoken=raw-token",
+        "https://example.invalid/callback?%41ccess%5Ftoken=raw-token",
+        "https://example.invalid/callback?access%255Ftoken%253Draw-token",
+        "authorization%3ABearer+raw-value",
+        "credential%253A%252F%252Fprovider%252Fproject-1%252Fwriter",
     )
 
-    for reference in sensitive:
+    deeply_encoded = "access_token=raw-token"
+    for _ in range(12):
+        deeply_encoded = quote(deeply_encoded, safe="")
+
+    for reference in (*sensitive, deeply_encoded):
         presented = EvidenceReference(kind="test", reference=reference, label="Evidence")
         assert presented.reference.startswith("evidence-sha256:")
         assert reference not in presented.reference
@@ -60,6 +77,46 @@ def test_public_evidence_contract_hashes_sensitive_and_oversized_references() ->
         label="Evidence",
     )
     assert safe.reference == "health://project-1/service-api/healthy"
+
+    encoded_safe = EvidenceReference(
+        kind="test",
+        reference="https://example.invalid/report?section=access%20review",
+        label="Evidence",
+    )
+    assert encoded_safe.reference == "https://example.invalid/report?section=access%20review"
+
+
+def test_public_evidence_reference_uses_utf8_byte_budget() -> None:
+    exact_limit = "ж" * 256
+    over_limit = "ж" * 257
+
+    assert len(exact_limit.encode("utf-8")) == 512
+    assert len(over_limit.encode("utf-8")) == 514
+    assert safe_evidence_reference(exact_limit) == exact_limit
+
+    protected = safe_evidence_reference(over_limit)
+    assert protected.startswith("evidence-sha256:")
+    assert over_limit not in protected
+
+    presented = EvidenceReference(kind="test", reference=over_limit, label="Evidence")
+    assert presented.reference == protected
+
+
+def test_public_evidence_reference_rejects_invalid_utf8() -> None:
+    malformed = "evidence://\ud800"
+
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        safe_evidence_reference(malformed)
+
+    with pytest.raises(ValidationError, match="valid UTF-8"):
+        EvidenceReference(kind="test", reference=malformed, label="Evidence")
+
+
+def test_product_project_evidence_cannot_bypass_utf8_admission() -> None:
+    malformed = "evidence://" + "x" * 600 + "\ud800"
+
+    with pytest.raises(ValidationError, match="valid UTF-8"):
+        product_project_evidence("test", malformed, "Evidence")
 
 
 def test_execution_projection_never_surfaces_raw_credential_use_event_id() -> None:

@@ -35,6 +35,12 @@ def _git(cwd: pathlib.Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _python_process_policy() -> ProcessPolicy:
+    canonical = str(pathlib.Path(sys.executable).resolve(strict=True))
+    allowed = (sys.executable,) if canonical == sys.executable else (sys.executable, canonical)
+    return ProcessPolicy(allowed)
+
+
 def _make_source_repository(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
     if shutil.which("git") is None:
         pytest.skip("Git CLI unavailable")
@@ -108,7 +114,7 @@ def test_typed_runner_preserves_literal_arguments_and_captures_output(
     argument = "value;still-literal"
     result = run_typed_process(
         (sys.executable, "-c", "import sys; print(sys.argv[1])", argument),
-        process_policy=ProcessPolicy((sys.executable,)),
+        process_policy=_python_process_policy(),
         resource_budget=ResourceBudget(
             timeout_seconds=5,
             max_output_bytes=4096,
@@ -133,7 +139,7 @@ def test_typed_runner_preserves_literal_arguments_and_captures_output(
 def test_typed_runner_kills_on_timeout(tmp_path: pathlib.Path) -> None:
     result = run_typed_process(
         (sys.executable, "-c", "import time; time.sleep(30)"),
-        process_policy=ProcessPolicy((sys.executable,)),
+        process_policy=_python_process_policy(),
         resource_budget=ResourceBudget(
             timeout_seconds=1,
             max_output_bytes=4096,
@@ -152,7 +158,7 @@ def test_typed_runner_honors_cancellation(tmp_path: pathlib.Path) -> None:
     cancellation.set()
     result = run_typed_process(
         (sys.executable, "-c", "import time; time.sleep(30)"),
-        process_policy=ProcessPolicy((sys.executable,)),
+        process_policy=_python_process_policy(),
         resource_budget=ResourceBudget(
             timeout_seconds=5,
             max_output_bytes=4096,
@@ -170,7 +176,7 @@ def test_typed_runner_honors_cancellation(tmp_path: pathlib.Path) -> None:
 def test_typed_runner_kills_on_output_limit(tmp_path: pathlib.Path) -> None:
     result = run_typed_process(
         (sys.executable, "-c", "print('x' * 20000)"),
-        process_policy=ProcessPolicy((sys.executable,)),
+        process_policy=_python_process_policy(),
         resource_budget=ResourceBudget(
             timeout_seconds=5,
             max_output_bytes=1024,
