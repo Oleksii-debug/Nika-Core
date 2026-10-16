@@ -8,7 +8,7 @@ from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_state import TaskState
-from nika_core.scheduler.contracts import ScheduledJob, TriggerKind
+from nika_core.scheduler.contracts import ScheduledJob, ScheduleIdentity, TriggerKind
 
 IMMUTABLE_JOB_BINDING_KEY = "_nika_immutable_job_binding_v1"
 _MAX_JSON_DEPTH = 32
@@ -34,7 +34,7 @@ class ScheduledJobStore:
         job = _canonical_job(job)
         now = datetime.now(UTC).isoformat()
         existing = conn.execute(
-            "SELECT * FROM scheduled_jobs WHERE job_id = ?",
+            _JOB_SELECT + " WHERE j.job_id = ?",
             (job.job_id,),
         ).fetchone()
         if existing is not None:
@@ -46,6 +46,26 @@ class ScheduledJobStore:
             )
             if existing_binding is not None and incoming_binding != existing_binding:
                 raise ValueError("scheduled job immutable binding conflict")
+            if existing_job.identity is not None:
+                if job.identity is None:
+                    raise ValueError("persisted schedule identity cannot be cleared")
+                if job.identity != existing_job.identity:
+                    raise ValueError("persisted schedule identity cannot be changed")
+        if job.identity is not None:
+            duplicate = conn.execute(
+                """SELECT job_id FROM scheduled_job_bindings
+                WHERE scope = ? AND owner_id = ? AND dedup_key = ? AND job_id != ?""",
+                (
+                    job.identity.scope,
+                    job.identity.owner_id,
+                    job.identity.dedup_key,
+                    job.job_id,
+                ),
+            ).fetchone()
+            if duplicate is not None:
+                raise ValueError(
+                    "schedule dedup key is already bound to another job for this owner"
+                )
         created_at = existing["created_at"] if existing else now
         conn.execute(
             """INSERT INTO scheduled_jobs(
@@ -77,6 +97,21 @@ class ScheduledJobStore:
                 now,
             ),
         )
+        if job.identity is not None:
+            conn.execute(
+                """INSERT INTO scheduled_job_bindings(
+                    job_id, scope, owner_id, dedup_key, product_project_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id) DO NOTHING""",
+                (
+                    job.job_id,
+                    job.identity.scope,
+                    job.identity.owner_id,
+                    job.identity.dedup_key,
+                    job.identity.product_project_id,
+                    now,
+                ),
+            )
 
     def get(self, job_id: str) -> ScheduledJob | None:
         job_key = _stable_identity(job_id, "job_id")
@@ -91,7 +126,7 @@ class ScheduledJobStore:
         """Read one job inside a caller-owned SQLite transaction."""
         job_key = _stable_identity(job_id, "job_id")
         row = conn.execute(
-            "SELECT * FROM scheduled_jobs WHERE job_id = ?",
+            _JOB_SELECT + " WHERE j.job_id = ?",
             (job_key,),
         ).fetchone()
         return _from_row(row) if row else None
@@ -99,7 +134,7 @@ class ScheduledJobStore:
     def list_enabled(self) -> tuple[ScheduledJob, ...]:
         with self._store.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM scheduled_jobs ORDER BY job_id"
+                _JOB_SELECT + " ORDER BY j.job_id"
             ).fetchall()
         enabled_jobs: list[ScheduledJob] = []
         for row in rows:
@@ -107,6 +142,17 @@ class ScheduledJobStore:
                 continue
             enabled_jobs.append(_from_row(row))
         return tuple(enabled_jobs)
+
+    def list_for_owner(self, *, scope: str, owner_id: str) -> tuple[ScheduledJob, ...]:
+        scope_key = _stable_identity(scope, "schedule owner scope")
+        owner_key = _stable_identity(owner_id, "schedule owner_id")
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                _JOB_SELECT
+                + " WHERE b.scope = ? AND b.owner_id = ? ORDER BY b.dedup_key, j.job_id",
+                (scope_key, owner_key),
+            ).fetchall()
+        return tuple(_from_row(row) for row in rows)
 
     def set_enabled(self, job_id: str, enabled: bool) -> bool:
         with self._store.connection() as conn:
@@ -125,7 +171,7 @@ class ScheduledJobStore:
             raise TypeError("enabled must be an exact bool")
         if enabled:
             row = conn.execute(
-                "SELECT * FROM scheduled_jobs WHERE job_id = ?",
+                _JOB_SELECT + " WHERE j.job_id = ?",
                 (job_key,),
             ).fetchone()
             if row is None:
@@ -212,6 +258,16 @@ class ScheduledJobStore:
         return task_state is not None and task_state not in _TERMINAL_TASK_STATES
 
 
+_JOB_SELECT = """SELECT
+    j.*,
+    b.scope AS identity_scope,
+    b.owner_id AS identity_owner_id,
+    b.dedup_key AS identity_dedup_key,
+    b.product_project_id AS identity_product_project_id
+FROM scheduled_jobs AS j
+LEFT JOIN scheduled_job_bindings AS b ON b.job_id = j.job_id"""
+
+
 def _canonical_job(job: ScheduledJob) -> ScheduledJob:
     if type(job) is not ScheduledJob:
         raise TypeError("job must be an exact ScheduledJob")
@@ -251,6 +307,24 @@ def _canonical_job(job: ScheduledJob) -> ScheduledJob:
         payload.get(IMMUTABLE_JOB_BINDING_KEY),
         "scheduled job immutable binding",
     )
+    identity = None
+    if job.identity is not None:
+        if type(job.identity) is not ScheduleIdentity:
+            raise TypeError("identity must be an exact ScheduleIdentity or None")
+        product_project_id = job.identity.product_project_id
+        identity = ScheduleIdentity(
+            scope=_stable_identity(job.identity.scope, "schedule identity scope"),
+            owner_id=_stable_identity(job.identity.owner_id, "schedule identity owner_id"),
+            dedup_key=_stable_identity(job.identity.dedup_key, "schedule identity dedup_key"),
+            product_project_id=(
+                None
+                if product_project_id is None
+                else _stable_identity(
+                    product_project_id,
+                    "schedule identity product_project_id",
+                )
+            ),
+        )
     return ScheduledJob(
         job_id=job_id,
         action_id=action_id,
@@ -261,6 +335,7 @@ def _canonical_job(job: ScheduledJob) -> ScheduledJob:
         coalesce=coalesce,
         max_instances=max_instances,
         misfire_grace_seconds=grace,
+        identity=identity,
     )
 
 
@@ -386,6 +461,41 @@ def _stable_identity(value: object, label: str) -> str:
 
 
 def _from_row(row: object) -> ScheduledJob:
+    identity_scope = row["identity_scope"]
+    identity_owner_id = row["identity_owner_id"]
+    identity_dedup_key = row["identity_dedup_key"]
+    identity_product_project_id = row["identity_product_project_id"]
+    if identity_scope is None:
+        if any(
+            value is not None
+            for value in (
+                identity_owner_id,
+                identity_dedup_key,
+                identity_product_project_id,
+            )
+        ):
+            raise ValueError("persisted schedule identity is corrupt")
+        identity = None
+    else:
+        identity = ScheduleIdentity(
+            scope=_stable_identity(identity_scope, "persisted schedule identity scope"),
+            owner_id=_stable_identity(
+                identity_owner_id,
+                "persisted schedule identity owner_id",
+            ),
+            dedup_key=_stable_identity(
+                identity_dedup_key,
+                "persisted schedule identity dedup_key",
+            ),
+            product_project_id=(
+                None
+                if identity_product_project_id is None
+                else _stable_identity(
+                    identity_product_project_id,
+                    "persisted schedule identity product_project_id",
+                )
+            ),
+        )
     job_id = _stable_identity(row["job_id"], "persisted job_id")
     action_id = _stable_identity(row["action_id"], "persisted action_id")
     trigger_kind_raw = _exact_text(row["trigger_kind"], "persisted trigger_kind")
@@ -423,6 +533,7 @@ def _from_row(row: object) -> ScheduledJob:
         coalesce=coalesce,
         max_instances=max_instances,
         misfire_grace_seconds=grace,
+        identity=identity,
     )
 
 

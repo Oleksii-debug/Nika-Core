@@ -91,6 +91,7 @@ class APSchedulerAdapter(SchedulerPort):
         if type(job) is not ScheduledJob:
             raise TypeError("job must be an exact ScheduledJob")
         job_id = _require_job_id(job.job_id)
+        _make_trigger(job)
         self._jobs.upsert(job)
         effective_job = self._required_job(job_id)
         if self._started or self._starting:
@@ -126,6 +127,7 @@ class APSchedulerAdapter(SchedulerPort):
 
     def resume(self, job_id: str) -> None:
         job = self._required_job(_require_job_id(job_id))
+        _make_trigger(job)
         self._jobs.set_enabled(job.job_id, True)
         enabled_job = self._required_job(job.job_id)
         if not enabled_job.enabled:
@@ -236,26 +238,26 @@ class APSchedulerAdapter(SchedulerPort):
         try:
             handler = self._handler_resolver(action_id)
         except Exception as exc:
-            self._audit_failure(job_id, action_id, exc)
+            self._audit_failure(job, exc)
             raise
         if self._audit is not None:
             self._audit.append(
                 event_type="scheduler.job_started",
                 entity_type="scheduled_job",
                 entity_id=job_id,
-                payload={"action_id": job.action_id},
+                payload=_audit_payload(job),
             )
         try:
             handler(dict(job.payload))
         except Exception as exc:
-            self._audit_failure(job_id, job.action_id, exc)
+            self._audit_failure(job, exc)
             raise
         if self._audit is not None:
             self._audit.append(
                 event_type="scheduler.job_completed",
                 entity_type="scheduled_job",
                 entity_id=job_id,
-                payload={"action_id": job.action_id},
+                payload=_audit_payload(job),
             )
 
     def _task_authority_allows(self, job: ScheduledJob) -> bool:
@@ -301,13 +303,15 @@ class APSchedulerAdapter(SchedulerPort):
                 payload=payload,
             )
 
-    def _audit_failure(self, job_id: str, action_id: str, exc: Exception) -> None:
+    def _audit_failure(self, job: ScheduledJob, exc: Exception) -> None:
         if self._audit is not None:
+            payload = _audit_payload(job)
+            payload["error_type"] = type(exc).__name__
             self._audit.append(
                 event_type="scheduler.job_failed",
                 entity_type="scheduled_job",
-                entity_id=job_id,
-                payload={"action_id": action_id, "error_type": type(exc).__name__},
+                entity_id=job.job_id,
+                payload=payload,
             )
 
     def _required_job(self, job_id: str) -> ScheduledJob:
@@ -319,16 +323,33 @@ class APSchedulerAdapter(SchedulerPort):
 
     def _audit_change(self, event_type: str, job: ScheduledJob) -> None:
         if self._audit is not None:
+            payload = _audit_payload(job)
+            payload.update(
+                {
+                    "trigger_kind": job.trigger_kind.value,
+                    "enabled": job.enabled,
+                }
+            )
             self._audit.append(
                 event_type=event_type,
                 entity_type="scheduled_job",
                 entity_id=job.job_id,
-                payload={
-                    "action_id": job.action_id,
-                    "trigger_kind": job.trigger_kind.value,
-                    "enabled": job.enabled,
-                },
+                payload=payload,
             )
+
+
+def _audit_payload(job: ScheduledJob) -> dict[str, Any]:
+    payload: dict[str, Any] = {"action_id": job.action_id}
+    if job.identity is not None:
+        payload.update(
+            {
+                "scope": job.identity.scope,
+                "owner_id": job.identity.owner_id,
+                "dedup_key": job.identity.dedup_key,
+                "product_project_id": job.identity.product_project_id,
+            }
+        )
+    return payload
 
 
 def _require_job_id(value: object) -> str:
