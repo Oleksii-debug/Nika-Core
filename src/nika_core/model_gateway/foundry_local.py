@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -37,6 +38,32 @@ class FoundryModelEvidence:
     output_modalities: str | None
     capability_tags: str | None
     supports_tool_calling: bool | None
+
+
+
+def _snapshot_download_authorization(
+    authorization: ModelDownloadAuthorization,
+) -> ModelDownloadAuthorization:
+    """Detach exact, validated model-license intent before async SDK work."""
+    if type(authorization) is not ModelDownloadAuthorization:
+        raise ValueError("download authorization must be a canonical record")
+    provider_id = authorization.provider_id
+    model = authorization.model
+    license_reference = authorization.license_reference
+    expected_model_id = authorization.expected_model_id
+    if (
+        type(provider_id) is not str
+        or type(model) is not str
+        or type(license_reference) is not str
+        or (expected_model_id is not None and type(expected_model_id) is not str)
+    ):
+        raise ValueError("download authorization must contain canonical plain text")
+    return ModelDownloadAuthorization(
+        provider_id=provider_id,
+        model=model,
+        license_reference=license_reference,
+        expected_model_id=expected_model_id,
+    )
 
 
 class FoundryLocalProvider:
@@ -206,12 +233,27 @@ class FoundryLocalProvider:
         and retains the shared provider/model-management slots until the native
         worker really exits.
         """
+        # Frozen dataclasses can still be mutated via object.__setattr__. Take an
+        # owned, validated authorization snapshot *before* any await/SDK/lock;
+        # later caller mutation must not change the model or license authority.
+        authorization = _snapshot_download_authorization(authorization)
         if authorization.provider_id != self.capabilities.provider_id:
             raise ValueError(
                 "download authorization provider does not match Foundry Local provider"
             )
-        if timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be greater than zero")
+        # Authorization does not authorize an unbounded native model download.
+        # Reject bool/NaN/infinity/overflow before touching the SDK or acquiring locks.
+        if type(timeout_seconds) not in (int, float):
+            raise ValueError("timeout_seconds must be finite and between 0 and 86400")
+        try:
+            seconds = float(timeout_seconds)
+        except OverflowError as exc:
+            raise ValueError(
+                "timeout_seconds must be finite and between 0 and 86400"
+            ) from exc
+        if not math.isfinite(seconds) or not 0 < seconds <= 86400:
+            raise ValueError("timeout_seconds must be finite and between 0 and 86400")
+        timeout_seconds = seconds
         if (
             self._expected_model_id is not None
             and authorization.expected_model_id is not None
