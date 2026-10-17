@@ -98,7 +98,7 @@ class AgentDefinitionRepository:
             ).fetchone()
             if row is None:
                 raise KeyError("agent definition draft does not exist")
-            persisted = AgentDefinition.model_validate_json(row["definition_json"])
+            persisted = AgentDefinition.import_json(row["definition_json"])
             if persisted != definition:
                 raise ValueError("activation definition differs from persisted immutable draft")
             required = tuple(str(item) for item in json.loads(row["required_approvals_json"]))
@@ -170,10 +170,10 @@ class AgentDefinitionRepository:
 
     @staticmethod
     def _decode(row) -> StoredAgentDefinition:
-        payload = json.loads(row["definition_json"])
+        payload = AgentDefinition.import_json(row["definition_json"])
         required = tuple(str(item) for item in json.loads(row["required_approvals_json"]))
         return StoredAgentDefinition(
-            definition=AgentDefinition.model_validate(payload),
+            definition=payload,
             status=str(row["status"]),
             required_human_approvals=required,
             highest_risk=int(row["highest_risk"]),
