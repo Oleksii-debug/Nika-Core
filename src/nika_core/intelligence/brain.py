@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import unicodedata
 from dataclasses import dataclass
 
 from nika_core.intelligence.contracts import (
@@ -52,6 +54,40 @@ class _StateObservationFailure:
     message: str
 
 
+def _require_run_identity(value: object, *, name: str) -> None:
+    """Reuse canonical bounded UTF-8 identity admission before durable effects."""
+    if type(value) is not str or not value or len(value) > 512 or value != value.strip():
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+    if unicodedata.normalize("NFC", value) != value:
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in value
+    ):
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text") from exc
+    if len(encoded) > 512:
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+
+
+def _positive_finite_seconds(value: object, *, name: str) -> float:
+    """Admit an exact finite deadline budget before starting work."""
+    if type(value) not in (int, float):
+        raise ValueError(f"{name} must be a positive finite number")
+    try:
+        seconds = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be a positive finite number") from exc
+    if not math.isfinite(seconds):
+        raise ValueError(f"{name} must be a positive finite number")
+    if seconds <= 0:
+        raise ValueError(f"{name} must be greater than zero")
+    return seconds
+
+
 class DeterministicBrain:
     """Plan, validate, re-plan and execute explicit workflows without a language model."""
 
@@ -82,16 +118,19 @@ class DeterministicBrain:
         planning_timeout_seconds: float = 30.0,
         observation_timeout_seconds: float = 10.0,
     ) -> DeterministicBrainResult:
-        if not run_id.strip():
-            raise ValueError("run_id must not be empty")
-        if max_steps <= 0:
-            raise ValueError("max_steps must be greater than zero")
-        if max_replans < 0:
-            raise ValueError("max_replans must be non-negative")
-        if planning_timeout_seconds <= 0:
-            raise ValueError("planning_timeout_seconds must be greater than zero")
-        if observation_timeout_seconds <= 0:
-            raise ValueError("observation_timeout_seconds must be greater than zero")
+        _require_run_identity(run_id, name="run_id")
+        if task_id is not None:
+            _require_run_identity(task_id, name="task_id")
+        if type(max_steps) is not int or max_steps <= 0:
+            raise ValueError("max_steps must be a positive integer")
+        if type(max_replans) is not int or max_replans < 0:
+            raise ValueError("max_replans must be a non-negative integer")
+        planning_timeout_seconds = _positive_finite_seconds(
+            planning_timeout_seconds, name="planning_timeout_seconds"
+        )
+        observation_timeout_seconds = _positive_finite_seconds(
+            observation_timeout_seconds, name="observation_timeout_seconds"
+        )
         if self._effect_journal is not None and (task_id is None or not task_id.strip()):
             raise ValueError("task_id is required when effect_journal is configured")
 
@@ -99,6 +138,20 @@ class DeterministicBrain:
         # evidence and must never turn into ToolCall.approved=True.
         del approved_action_ids
 
+        # Recovery checkpoints and the action catalog are immutable sequences. A
+        # consumable iterator could pass the first identity scan and then appear
+        # empty when calculating the remaining step budget, replaying completed work.
+        if type(actions) is not tuple:
+            raise ValueError("actions must be an immutable tuple")
+        if type(previously_completed_action_ids) is not tuple:
+            raise ValueError("previously_completed_action_ids must be an immutable tuple")
+
+        # Action IDs are durable completion/effect generation identities.
+        # Admit all of them before planner or journal operations.
+        for action in actions:
+            _require_run_identity(action.action_id, name="action_id")
+        for action_id in previously_completed_action_ids:
+            _require_run_identity(action_id, name="previously_completed_action_id")
         action_map = {action.action_id: action for action in actions}
         if len(action_map) != len(actions):
             raise ValueError("duplicate deterministic action_id")
@@ -120,7 +173,8 @@ class DeterministicBrain:
         completed_set = set(previously_completed_action_ids)
         history: list[DeterministicPlan] = []
         replans = 0
-        executed_steps = 0
+        # A recovered action already consumed this task's total execution budget.
+        executed_steps = len(previously_completed_action_ids)
 
         journal = self._effect_journal
         if journal is not None:
@@ -153,6 +207,60 @@ class DeterministicBrain:
                         "deterministic task has an unresolved side effect and requires "
                         f"reconciliation: {unresolved[0]}"
                     ),
+                )
+
+        # A checkpoint with an already-satisfied goal is terminal irrespective of
+        # how much budget remains. Never plan an unnecessary external effect just
+        # because a prior run stopped short of the step ceiling.
+        # Task-wide unresolved journal records above still take precedence.
+        if executed_steps <= max_steps and self._goal_satisfied(current_state, goal):
+            # The caller's recovered state may be stale. Re-observe it before
+            # claiming success when an authoritative observer is configured.
+            if state_observer is not None:
+                observed, observation_failure = await self._observe_state(
+                    state_observer, timeout_seconds=observation_timeout_seconds
+                )
+                if observation_failure is not None:
+                    return self._failure(
+                        plan=DeterministicPlan(steps=()),
+                        completed=completed,
+                        state=current_state,
+                        history=history,
+                        replans=replans,
+                        code=observation_failure.code,
+                        message=observation_failure.message,
+                    )
+                if observed is None:  # pragma: no cover - observer contract
+                    raise AssertionError("state observation returned no state or failure")
+                current_state = observed
+                if not self._goal_satisfied(current_state, goal):
+                    if executed_steps == max_steps:
+                        return self._failure(
+                            plan=DeterministicPlan(steps=()),
+                            completed=completed,
+                            state=current_state,
+                            history=history,
+                            replans=replans,
+                            code=DeterministicErrorCode.PLAN_TOO_LONG,
+                            message="recovered state changed after max_steps was exhausted",
+                        )
+                    # Observed drift invalidated terminality. Continue through
+                    # the normal validated planner using the remaining budget.
+                else:
+                    return DeterministicBrainResult(
+                        plan=DeterministicPlan(steps=()),
+                        completed_actions=tuple(completed),
+                        final_state=current_state,
+                        planning_history=tuple(history),
+                        replans=0,
+                    )
+            else:
+                return DeterministicBrainResult(
+                    plan=DeterministicPlan(steps=()),
+                    completed_actions=tuple(completed),
+                    final_state=current_state,
+                    planning_history=tuple(history),
+                    replans=0,
                 )
 
         loop = asyncio.get_running_loop()
