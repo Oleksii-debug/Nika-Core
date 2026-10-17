@@ -67,6 +67,11 @@
 
     <section aria-labelledby="tasks-heading">
       <h2 id="tasks-heading" tabindex="-1">Завдання</h2>
+      <label for="task-target">Виберіть завдання для призупинення, продовження або зупинки</label>
+      <p id="task-target-help">Завдання вибирається за його збереженим ідентифікатором. Без вибору дія дозволена лише за відсутності неоднозначності.</p>
+      <select id="task-target" aria-describedby="task-target-help">
+        <option value="">Без явного вибору — тільки одне відповідне завдання</option>
+      </select>
       <p id="tasks-empty">Завдань ще немає.</p>
       <ol id="tasks-list" aria-label="Список завдань"></ol>
     </section>
