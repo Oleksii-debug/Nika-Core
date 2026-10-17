@@ -220,8 +220,14 @@ def test_deterministic_brain_times_out_slow_planner() -> None:
             brain.run(
                 run_id="planner-timeout",
                 state=WorldState(),
-                goal=DeterministicGoal(),
-                actions=(),
+                # A satisfied checkpoint bypasses planning by design; keep this
+                # test on a reachable but *unfinished* task to exercise deadline.
+                goal=DeterministicGoal(required=frozenset({"done"})),
+                actions=(
+                    DeterministicAction(
+                        action_id="finish", adds=frozenset({"done"}),
+                    ),
+                ),
                 planning_timeout_seconds=0.01,
             )
         )

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import unicodedata
+from copy import deepcopy
 from dataclasses import dataclass
 
 from nika_core.intelligence.contracts import (
@@ -13,10 +16,16 @@ from nika_core.intelligence.contracts import (
     DeterministicPlan,
     DeterministicPlanner,
     DeterministicPlanningError,
+    PlanStep,
     WorldState,
     WorldStateObserver,
 )
 from nika_core.tools import ToolCall, ToolExecutor, ToolRisk, ToolSpec
+
+
+# Bound repeated planner snapshots independently of the per-plan step limit.
+# State drift can force thousands of valid but unexecuted replans.
+_MAX_PLANNING_HISTORY_STEPS = 100_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +61,135 @@ class _StateObservationFailure:
     message: str
 
 
+def _require_run_identity(value: object, *, name: str) -> None:
+    """Reuse canonical bounded UTF-8 identity admission before durable effects."""
+    if type(value) is not str or not value or len(value) > 512 or value != value.strip():
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+    if unicodedata.normalize("NFC", value) != value:
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in value
+    ):
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text") from exc
+    if len(encoded) > 512:
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+
+
+def _positive_finite_seconds(value: object, *, name: str) -> float:
+    """Admit an exact finite deadline budget before starting work."""
+    if type(value) not in (int, float):
+        raise ValueError(f"{name} must be a positive finite number")
+    try:
+        seconds = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be a positive finite number") from exc
+    if not math.isfinite(seconds):
+        raise ValueError(f"{name} must be a positive finite number")
+    if seconds <= 0:
+        raise ValueError(f"{name} must be greater than zero")
+    if seconds > 86_400:
+        raise ValueError(f"{name} must not exceed 86400 seconds")
+    return seconds
+
+
+
+def _require_plain_json_arguments(
+    value: object, *, depth: int = 0, budget: list[int], size_budget: list[int]
+) -> None:
+    """Reject behavioral, malformed and oversized input before caller-owned deepcopy."""
+    budget[0] -= 1
+    if budget[0] < 0 or depth > 32:
+        raise ValueError("deterministic run inputs cannot be detached safely")
+    kind = type(value)
+    if value is None or kind is bool:
+        return
+    if kind is str:
+        # Every Unicode scalar encodes to at least one byte. Check codepoint
+        # length first so a multi-gigabyte input cannot force a huge temporary
+        # UTF-8 allocation merely to be refused at this admission fence.
+        if len(value) > size_budget[0]:
+            raise ValueError("deterministic run inputs cannot be detached safely")
+        try:
+            size_budget[0] -= len(value.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise ValueError(
+                "deterministic run inputs cannot be detached safely"
+            ) from exc
+        if size_budget[0] < 0:
+            raise ValueError("deterministic run inputs cannot be detached safely")
+        return
+    if kind is int:
+        # Huge integers can exhaust JSON fingerprinting/encoding even with a
+        # small element count. Bound each primitive before invoking the journal.
+        if value.bit_length() > 4096:
+            raise ValueError("deterministic run inputs cannot be detached safely")
+        return
+    if kind is float and math.isfinite(value):
+        return
+    if kind in (list, tuple):
+        for item in value:
+            _require_plain_json_arguments(
+                item, depth=depth + 1, budget=budget, size_budget=size_budget
+            )
+        return
+    if kind is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                break
+            # Argument names are audit/schema identifiers, not free-form text.
+            # Reject bidi/control/normalization spoofing before evidence or tools.
+            try:
+                _require_run_identity(key, name="argument_key")
+            except ValueError as exc:
+                raise ValueError(
+                    "deterministic run inputs cannot be detached safely"
+                ) from exc
+            _require_plain_json_arguments(
+                key, depth=depth + 1, budget=budget, size_budget=size_budget
+            )
+            _require_plain_json_arguments(
+                item, depth=depth + 1, budget=budget, size_budget=size_budget
+            )
+        else:
+            return
+    raise ValueError("deterministic run inputs cannot be detached safely")
+
+
+def _require_plain_facts(value: object) -> None:
+    """Admit bounded canonical symbolic facts before planning or durable effects."""
+    if type(value) is not frozenset or len(value) > 10000:
+        raise ValueError("deterministic run inputs cannot be detached safely")
+    try:
+        for fact in value:
+            _require_run_identity(fact, name="fact")
+    except ValueError as exc:
+        raise ValueError("deterministic run inputs cannot be detached safely") from exc
+
+
+def _require_plain_plan(value: object) -> bool:
+    """Bound untrusted planner step identities before snapshot, history or tools."""
+    if type(value) is not DeterministicPlan or type(value.steps) is not tuple:
+        return False
+    for step in value.steps:
+        if type(step) is not PlanStep:
+            return False
+        try:
+            # Reuse the same canonical run/action/tool identity fence; merely
+            # accepting a plain str would admit surrogates, controls and
+            # oversized or non-normalized labels into persisted plan evidence.
+            _require_run_identity(step.action_id, name="plan_action_id")
+            if step.tool_id is not None:
+                _require_run_identity(step.tool_id, name="plan_tool_id")
+        except ValueError:
+            return False
+    return True
+
+
 class DeterministicBrain:
     """Plan, validate, re-plan and execute explicit workflows without a language model."""
 
@@ -82,16 +220,22 @@ class DeterministicBrain:
         planning_timeout_seconds: float = 30.0,
         observation_timeout_seconds: float = 10.0,
     ) -> DeterministicBrainResult:
-        if not run_id.strip():
-            raise ValueError("run_id must not be empty")
-        if max_steps <= 0:
-            raise ValueError("max_steps must be greater than zero")
-        if max_replans < 0:
-            raise ValueError("max_replans must be non-negative")
-        if planning_timeout_seconds <= 0:
-            raise ValueError("planning_timeout_seconds must be greater than zero")
-        if observation_timeout_seconds <= 0:
-            raise ValueError("observation_timeout_seconds must be greater than zero")
+        _require_run_identity(run_id, name="run_id")
+        if task_id is not None:
+            _require_run_identity(task_id, name="task_id")
+        # Bound authority to the same catalog ceiling even if a hostile caller
+        # supplies a huge Python integer. Never let planner output or replan
+        # work escape the supported 10k action budget.
+        if type(max_steps) is not int or not 1 <= max_steps <= 10_000:
+            raise ValueError("max_steps must be an integer between 1 and 10000")
+        if type(max_replans) is not int or not 0 <= max_replans <= 10_000:
+            raise ValueError("max_replans must be an integer between 0 and 10000")
+        planning_timeout_seconds = _positive_finite_seconds(
+            planning_timeout_seconds, name="planning_timeout_seconds"
+        )
+        observation_timeout_seconds = _positive_finite_seconds(
+            observation_timeout_seconds, name="observation_timeout_seconds"
+        )
         if self._effect_journal is not None and (task_id is None or not task_id.strip()):
             raise ValueError("task_id is required when effect_journal is configured")
 
@@ -99,6 +243,73 @@ class DeterministicBrain:
         # evidence and must never turn into ToolCall.approved=True.
         del approved_action_ids
 
+        # Recovery checkpoints and the action catalog are immutable sequences. A
+        # consumable iterator could pass the first identity scan and then appear
+        # empty when calculating the remaining step budget, replaying completed work.
+        if type(actions) is not tuple:
+            raise ValueError("actions must be an immutable tuple")
+        if type(previously_completed_action_ids) is not tuple:
+            raise ValueError("previously_completed_action_ids must be an immutable tuple")
+        # Refuse unbounded catalogs/checkpoints before scanning or deep-copying
+        # any untrusted action arguments. One run may admit at most 10k IDs.
+        if len(actions) > 10_000:
+            raise ValueError("deterministic action catalog exceeds 10000 entries")
+        if len(previously_completed_action_ids) > 10_000:
+            raise ValueError("deterministic completion checkpoint exceeds 10000 entries")
+
+        # Treat caller-owned records as input, not mutable runtime authority. In
+        # particular, a frozen DeterministicAction still contains a mutable arguments
+        # mapping. A planner or state observer must not be able to change that mapping
+        # between plan validation, durable reservation and ToolExecutor dispatch.
+        if type(state) is not WorldState or type(goal) is not DeterministicGoal:
+            raise ValueError("state and goal must be canonical deterministic records")
+        if any(type(action) is not DeterministicAction for action in actions):
+            raise ValueError("actions must be canonical deterministic action records")
+        try:
+            # Only plain inert JSON-like values may be copied into authority-bearing
+            # actions. A foreign __deepcopy__ could return an alias or execute code.
+            # Validate before invoking deepcopy, and bound deeply nested payloads.
+            _require_plain_facts(state.facts)
+            _require_plain_facts(goal.required)
+            _require_plain_facts(goal.forbidden)
+            if goal.required & goal.forbidden:
+                raise ValueError("contradictory deterministic goal")
+            # A catalog with 10k actions must not multiply the per-action
+            # limits into unbounded admission/deepcopy/planner work.
+            # Keep both the established per-action budgets and bounded
+            # aggregate node/UTF-8-byte budgets across the complete run.
+            catalog_nodes = [100_000]
+            catalog_utf8_bytes = [4 * 1024 * 1024]
+            catalog_fact_slots = 0
+            for action in actions:
+                _require_run_identity(action.action_id, name="action_id")
+                if action.tool_id is not None:
+                    _require_run_identity(action.tool_id, name="tool_id")
+                for facts in (action.requires, action.forbids, action.adds, action.removes):
+                    _require_plain_facts(facts)
+                    catalog_fact_slots += len(facts)
+                    if catalog_fact_slots > 100_000:
+                        raise ValueError("deterministic action fact catalog exceeds 100000 entries")
+                if action.requires & action.forbids or action.adds & action.removes:
+                    raise ValueError("contradictory deterministic action")
+                _require_plain_json_arguments(
+                    action.arguments, budget=[10000], size_budget=[256 * 1024]
+                )
+                _require_plain_json_arguments(
+                    action.arguments,
+                    budget=catalog_nodes,
+                    size_budget=catalog_utf8_bytes,
+                )
+            state, goal, actions = deepcopy((state, goal, actions))
+        except Exception as exc:
+            raise ValueError("deterministic run inputs cannot be detached safely") from exc
+
+        # Action IDs are durable completion/effect generation identities.
+        # Admit all of them before planner or journal operations.
+        for action in actions:
+            _require_run_identity(action.action_id, name="action_id")
+        for action_id in previously_completed_action_ids:
+            _require_run_identity(action_id, name="previously_completed_action_id")
         action_map = {action.action_id: action for action in actions}
         if len(action_map) != len(actions):
             raise ValueError("duplicate deterministic action_id")
@@ -119,8 +330,10 @@ class DeterministicBrain:
         completed = list(previously_completed_action_ids)
         completed_set = set(previously_completed_action_ids)
         history: list[DeterministicPlan] = []
+        admitted_plan_steps = 0
         replans = 0
-        executed_steps = 0
+        # A recovered action already consumed this task's total execution budget.
+        executed_steps = len(previously_completed_action_ids)
 
         journal = self._effect_journal
         if journal is not None:
@@ -128,6 +341,14 @@ class DeterministicBrain:
                 raise AssertionError("durable deterministic task identity is unavailable")
             try:
                 unresolved = journal.unresolved_operation_keys(task_id=task_id)
+                # A corrupt or replaceable journal adapter must not smuggle
+                # malformed recovery evidence into result/history output or
+                # cause a type-dependent crash before the reconciliation gate.
+                # The canonical runtime journal returns an immutable tuple.
+                if type(unresolved) is not tuple or len(unresolved) > 10_000:
+                    raise ValueError("invalid unresolved effect evidence carrier")
+                for operation_key in unresolved:
+                    _require_run_identity(operation_key, name="operation_key")
             except Exception as exc:  # noqa: BLE001 - fail closed before planning or effects.
                 return self._failure(
                     plan=DeterministicPlan(steps=()),
@@ -155,6 +376,60 @@ class DeterministicBrain:
                     ),
                 )
 
+        # A checkpoint with an already-satisfied goal is terminal irrespective of
+        # how much budget remains. Never plan an unnecessary external effect just
+        # because a prior run stopped short of the step ceiling.
+        # Task-wide unresolved journal records above still take precedence.
+        if executed_steps <= max_steps and self._goal_satisfied(current_state, goal):
+            # The caller's recovered state may be stale. Re-observe it before
+            # claiming success when an authoritative observer is configured.
+            if state_observer is not None:
+                observed, observation_failure = await self._observe_state(
+                    state_observer, timeout_seconds=observation_timeout_seconds
+                )
+                if observation_failure is not None:
+                    return self._failure(
+                        plan=DeterministicPlan(steps=()),
+                        completed=completed,
+                        state=current_state,
+                        history=history,
+                        replans=replans,
+                        code=observation_failure.code,
+                        message=observation_failure.message,
+                    )
+                if observed is None:  # pragma: no cover - observer contract
+                    raise AssertionError("state observation returned no state or failure")
+                current_state = observed
+                if not self._goal_satisfied(current_state, goal):
+                    if executed_steps == max_steps:
+                        return self._failure(
+                            plan=DeterministicPlan(steps=()),
+                            completed=completed,
+                            state=current_state,
+                            history=history,
+                            replans=replans,
+                            code=DeterministicErrorCode.PLAN_TOO_LONG,
+                            message="recovered state changed after max_steps was exhausted",
+                        )
+                    # Observed drift invalidated terminality. Continue through
+                    # the normal validated planner using the remaining budget.
+                else:
+                    return DeterministicBrainResult(
+                        plan=DeterministicPlan(steps=()),
+                        completed_actions=tuple(completed),
+                        final_state=current_state,
+                        planning_history=tuple(history),
+                        replans=0,
+                    )
+            else:
+                return DeterministicBrainResult(
+                    plan=DeterministicPlan(steps=()),
+                    completed_actions=tuple(completed),
+                    final_state=current_state,
+                    planning_history=tuple(history),
+                    replans=0,
+                )
+
         loop = asyncio.get_running_loop()
         planning_deadline = loop.time() + planning_timeout_seconds
 
@@ -180,6 +455,79 @@ class DeterministicBrain:
                 actions=available_actions,
                 planning_deadline=planning_deadline,
             )
+            # Reject oversized exact plans *before* scanning or copying their steps.
+            # The untrusted planner cannot force a large snapshot merely by
+            # returning a tuple larger than this run's remaining step allowance.
+            if (
+                type(plan) is DeterministicPlan
+                and type(plan.steps) is tuple
+                and len(plan.steps) > remaining_steps
+            ):
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.PLAN_TOO_LONG,
+                    message=(
+                        f"plan exceeds max_steps budget: {len(plan.steps)} > {remaining_steps}"
+                    ),
+                )
+            # Inspect the exact carrier *before* deepcopy: invalid planner objects
+            # may define behavioral __deepcopy__ hooks that must never run here.
+            if not _require_plain_plan(plan):
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                    message="planner returned a malformed deterministic plan",
+                )
+            # A changing observer can force thousands of individually valid
+            # plans without consuming the executed-step limit. Bound cumulative
+            # snapshot/history work before deepcopy and before tool dispatch.
+            if len(plan.steps) > _MAX_PLANNING_HISTORY_STEPS - admitted_plan_steps:
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.PLANNER_RESOURCE_LIMIT,
+                    message="deterministic planning history resource limit exceeded",
+                )
+            admitted_plan_steps += len(plan.steps)
+            # A planner may retain its result and mutate frozen PlanStep objects
+            # after returning. Own an independent plan snapshot before validation,
+            # history, observer awaits, and ToolExecutor dispatch.
+            try:
+                plan = deepcopy(plan)
+            except Exception:
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                    message="planner returned an unsafe deterministic plan carrier",
+                )
+            # The planner is a replaceable/untrusted adapter. Validate its carrier
+            # before indexing a step or publishing it as durable plan evidence.
+            # Malformed steps must never reach ToolExecutor or a journal reservation.
+            if not _require_plain_plan(plan):
+                return self._failure(
+                    plan=DeterministicPlan(steps=()),
+                    completed=completed,
+                    state=current_state,
+                    history=history,
+                    replans=replans,
+                    code=DeterministicErrorCode.INVALID_PLAN,
+                    message="planner returned a malformed deterministic plan",
+                )
             history.append(plan)
 
             validation_failure = self._validate_plan(
@@ -541,27 +889,67 @@ class DeterministicBrain:
         *,
         timeout_seconds: float,
     ) -> tuple[WorldState | None, _StateObservationFailure | None]:
+        # A replaceable observer may suppress cancellation forever. Shield its
+        # task so a timeout only bounds *our* wait, never waits for the adapter
+        # to acknowledge cancellation. Late observations cannot grant effects.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+
+        def _discard_observer_completion(done: asyncio.Task[WorldState]) -> None:
+            # Cancelled or late-failing detached adapters must not emit an
+            # unhandled-task exception after Nika rejected their evidence.
+            if not done.cancelled():
+                try:
+                    done.exception()
+                except Exception:
+                    pass
+
+        observation_task: asyncio.Task[WorldState] | None = None
         try:
-            async with asyncio.timeout(timeout_seconds):
-                observed = await observer.observe()
+            observation_task = asyncio.create_task(observer.observe())
+            observation_task.add_done_callback(_discard_observer_completion)
+            observed = await asyncio.wait_for(
+                asyncio.shield(observation_task), timeout=timeout_seconds
+            )
         except TimeoutError:
+            if observation_task is not None:
+                observation_task.cancel()
             return None, _StateObservationFailure(
                 DeterministicErrorCode.STATE_OBSERVATION_TIMEOUT,
                 "world-state observation timed out",
             )
         except asyncio.CancelledError:
+            if observation_task is not None:
+                observation_task.cancel()
             raise
         except Exception as exc:  # noqa: BLE001 - normalize observer adapter failures.
+            if observation_task is not None:
+                observation_task.cancel()
             return None, _StateObservationFailure(
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
                 f"world-state observation failed: {type(exc).__name__}",
             )
-        if not isinstance(observed, WorldState):
+        if loop.time() >= deadline:
+            return None, _StateObservationFailure(
+                DeterministicErrorCode.STATE_OBSERVATION_TIMEOUT,
+                "world-state observation timed out",
+            )
+        # The observer is replaceable and can retain or corrupt a frozen record.
+        # Do not accept subclass behavior, mutable fact carriers, or nontext facts;
+        # detach the authoritative observation before any subsequent await.
+        if type(observed) is not WorldState:
             return None, _StateObservationFailure(
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
-                "world-state observer returned an invalid state type",
+                "world-state observer returned an invalid state",
             )
-        return observed, None
+        try:
+            _require_plain_facts(observed.facts)
+        except ValueError:
+            return None, _StateObservationFailure(
+                DeterministicErrorCode.STATE_OBSERVATION_FAILED,
+                "world-state observer returned an invalid state",
+            )
+        return WorldState(facts=frozenset(observed.facts)), None
 
     async def _plan(
         self,
@@ -579,17 +967,30 @@ class DeterministicBrain:
                 code=DeterministicErrorCode.PLANNING_TIMEOUT,
             )
         try:
+            # Planner implementations are replaceable and run in another thread.
+            # Give them detached candidates rather than live validation/permission
+            # state: even object.__setattr__ can mutate frozen dataclass carriers.
+            planner_state, planner_goal, planner_actions = deepcopy((state, goal, actions))
             async with asyncio.timeout(remaining):
                 return await asyncio.to_thread(
                     self._planner.plan,
-                    state=state,
-                    goal=goal,
-                    actions=actions,
+                    state=planner_state,
+                    goal=planner_goal,
+                    actions=planner_actions,
                 )
         except TimeoutError as exc:
             raise DeterministicPlanningError(
                 "deterministic planner timed out",
                 code=DeterministicErrorCode.PLANNING_TIMEOUT,
+            ) from exc
+        except DeterministicPlanningError:
+            raise
+        except Exception as exc:
+            # Replaceable planner failures must not leak provider-specific details
+            # or cross the model-free execution boundary as arbitrary exceptions.
+            raise DeterministicPlanningError(
+                "deterministic planner adapter failed",
+                code=DeterministicErrorCode.PLANNER_FAILURE,
             ) from exc
 
     @classmethod
