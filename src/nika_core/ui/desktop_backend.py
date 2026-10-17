@@ -110,7 +110,10 @@ class DesktopBackend:
         self._ensure_defaults()
 
     def create_task(self, payload: Mapping[str, Any]) -> UIResult:
-        command = str(payload.get("command", "")).strip()
+        raw_command = payload.get("command", "")
+        if type(raw_command) is not str:
+            raise ValueError("Команда має бути текстом.")
+        command = raw_command.strip()
         if not command:
             raise ValueError("Введіть команду перед створенням завдання.")
         task_payload: dict[str, Any] = {"command": command}
@@ -132,8 +135,8 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def pause_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_controllable(action="призупинення")
+    def pause_task(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._only_controllable(action="призупинення", payload=payload)
         if record is None:
             raise ValueError("Немає активного завдання, яке можна призупинити.")
         if record.state == TaskState.RUNNING:
@@ -159,8 +162,8 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def resume_task(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_with_state(TaskState.PAUSED, action="продовження")
+    def resume_task(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._only_with_state(TaskState.PAUSED, action="продовження", payload=payload)
         if record is None:
             raise ValueError("Немає призупиненого завдання для продовження.")
 
@@ -201,12 +204,13 @@ class DesktopBackend:
             focus_id="tasks-heading",
         )
 
-    def stop_agent(self, _payload: Mapping[str, Any]) -> UIResult:
-        record = self._only_controllable(action="зупинки")
+    def stop_agent(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self._only_controllable(action="зупинки", payload=payload)
         if record is None:
             cancelled = self._only_with_state(
                 TaskState.CANCELLED,
                 action="повторної зупинки",
+                payload=payload,
             )
             if cancelled is not None:
                 return UIResult(
@@ -441,7 +445,31 @@ class DesktopBackend:
                 )
             )
 
-    def _only_controllable(self, *, action: str) -> TaskRecord | None:
+    def _selected_task(self, payload: Mapping[str, Any]) -> TaskRecord | None:
+        """Resolve an explicit durable task ID; never guess across workspace or agent scope."""
+        if "task_id" not in payload:
+            return None
+        task_id = payload["task_id"]
+        if (
+            type(task_id) is not str
+            or not 1 <= len(task_id) <= 128
+            or not all(char.isascii() and (char.isalnum() or char in "-_.") for char in task_id)
+        ):
+            raise ValueError("Потрібен коректний текстовий ідентифікатор завдання.")
+        try:
+            record = self._queue.get(task_id)
+        except KeyError:
+            raise ValueError("Вказане завдання не знайдено.") from None
+        if record.workspace_id != _DEFAULT_WORKSPACE_ID or record.agent_id != _DEFAULT_AGENT_ID:
+            raise ValueError("Вказане завдання не належить поточному робочому простору.")
+        return record
+
+    def _only_controllable(
+        self, *, action: str, payload: Mapping[str, Any] | None = None
+    ) -> TaskRecord | None:
+        if payload is not None and "task_id" in payload:
+            selected = self._selected_task(payload)
+            return selected if selected is not None and selected.state not in _TERMINAL_STATES else None
         records = [
             record
             for record in self._queue.list_recent(limit=50)
@@ -449,7 +477,12 @@ class DesktopBackend:
         ]
         return self._require_unambiguous(records, action=action)
 
-    def _only_with_state(self, state: TaskState, *, action: str) -> TaskRecord | None:
+    def _only_with_state(
+        self, state: TaskState, *, action: str, payload: Mapping[str, Any] | None = None
+    ) -> TaskRecord | None:
+        if payload is not None and "task_id" in payload:
+            selected = self._selected_task(payload)
+            return selected if selected is not None and selected.state == state else None
         records = [
             record for record in self._queue.list_recent(limit=50) if record.state == state
         ]
