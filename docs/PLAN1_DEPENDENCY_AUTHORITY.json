@@ -1,0 +1,232 @@
+{
+  "schema_version": 1,
+  "plan": 1,
+  "section": 1,
+  "project": "nika-core",
+  "source_path": "pyproject.toml",
+  "source_revision": "main@a82149694d5efa2fde1a4c3bb46c474b9c20c87e",
+  "python_compatibility": ">=3.12,<3.14",
+  "resolution_state": "DECLARED_RANGES_ONLY_NOT_REPRODUCIBLE",
+  "evidence_policy": "This file inventories requested dependency constraints and authority boundaries; it is not a lockfile, resolved version assertion, upstream maintenance audit, license certification, installation proof or Section DONE.",
+  "groups": [
+    {
+      "group": "base",
+      "mode": "REUSE",
+      "canonical_owner": "Nika-owned application DTOs, persistence, file/HTTP adapters",
+      "capability": "Platform/data/document parsing",
+      "activation": "required",
+      "requirements": [
+        "platformdirs>=4,<5",
+        "pydantic>=2,<3",
+        "pydantic-settings>=2,<3",
+        "httpx>=0.28,<1",
+        "pypdf>=6.14,<7",
+        "python-docx>=1.2,<2",
+        "openpyxl>=3.1.5,<4",
+        "defusedxml>=0.7.1,<1"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "agent",
+      "mode": "ADAPT",
+      "canonical_owner": "AgentRuntimePort, SchedulerPort and ModelGateway",
+      "capability": "Replaceable orchestration, model and scheduling engines",
+      "activation": "optional",
+      "requirements": [
+        "langgraph>=1,<2",
+        "langgraph-checkpoint-sqlite>=3.1,<4",
+        "aiosqlite>=0.20,<1",
+        "deepagents>=0.5.2,<1",
+        "litellm>=1,<2",
+        "apscheduler>=3.11,<4",
+        "psutil>=7,<8",
+        "mcp>=2,<3"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "embedded-ai",
+      "mode": "ADAPT",
+      "canonical_owner": "ModelGateway provider adapter",
+      "capability": "Local model inference",
+      "activation": "optional",
+      "requirements": [
+        "foundry-local-sdk-winml>=1.2.3,<2; sys_platform == 'win32'",
+        "foundry-local-sdk>=1.2.3,<2; sys_platform != 'win32'"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "planning",
+      "mode": "ADAPT",
+      "canonical_owner": "Deterministic Brain contracts and ToolExecutor",
+      "capability": "Model-free planning engine",
+      "activation": "optional",
+      "requirements": [
+        "unified-planning>=1.3,<2",
+        "up-aries==0.5.0"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "gui",
+      "mode": "ADAPT",
+      "canonical_owner": "Desktop UI action bridge",
+      "capability": "Windows shell",
+      "activation": "optional",
+      "requirements": [
+        "pywebview>=6.2.1,<7"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "browser",
+      "mode": "ADAPT",
+      "canonical_owner": "Semantic browser interaction port",
+      "capability": "Browser DOM automation",
+      "activation": "optional",
+      "requirements": [
+        "playwright>=1.60,<2"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "windows-interaction",
+      "mode": "ADAPT",
+      "canonical_owner": "Semantic UIA interaction port",
+      "capability": "Windows object-model automation",
+      "activation": "optional",
+      "requirements": [
+        "pywinauto>=0.6.8,<0.7; sys_platform == 'win32'"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "learning",
+      "mode": "ADAPT",
+      "canonical_owner": "Experiments/promotion authority",
+      "capability": "Measured learning capability",
+      "activation": "optional",
+      "requirements": [
+        "dspy>=3,<4",
+        "scikit-learn>=1.7,<2"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "media",
+      "mode": "ADAPT",
+      "canonical_owner": "Media acquisition/transcription boundaries",
+      "capability": "Optional media engines",
+      "activation": "optional",
+      "requirements": [
+        "yt-dlp==2026.7.4",
+        "pysubs2==1.8.1"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "credentials",
+      "mode": "REUSE",
+      "canonical_owner": "Credential/Identity Broker reference boundary",
+      "capability": "Protected OS credential access",
+      "activation": "optional",
+      "requirements": [
+        "keyring==25.7.0; sys_platform == 'win32'",
+        "pywin32-ctypes==0.2.3; sys_platform == 'win32'"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "deployment",
+      "mode": "ADAPT",
+      "canonical_owner": "Authorized deployment/staging adapter",
+      "capability": "Remote deployment worker",
+      "activation": "optional",
+      "requirements": [
+        "ansible-runner==2.4.3; sys_platform != 'win32'"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "dev",
+      "mode": "REUSE",
+      "canonical_owner": "Repository CI and source-verification harness",
+      "capability": "Automated development verification",
+      "activation": "test-only",
+      "requirements": [
+        "pytest>=8,<9",
+        "ruff>=0.12,<1",
+        "pytest-cov>=6,<8"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "qa",
+      "mode": "REUSE",
+      "canonical_owner": "Release/QA provenance gate",
+      "capability": "Security and packaging verification",
+      "activation": "test-only",
+      "requirements": [
+        "pip-audit>=2,<3",
+        "pyinstaller>=6,<7"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    },
+    {
+      "group": "build-system",
+      "mode": "REUSE",
+      "canonical_owner": "Nika package build backend and source distribution",
+      "capability": "Build-system dependency and packaging authority",
+      "activation": "build-only",
+      "requirements": [
+        "setuptools>=75",
+        "wheel"
+      ],
+      "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
+      "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"
+    }
+  ],
+  "rejected_competing_authorities": [
+    {
+      "technology": "Microsoft Agent Framework",
+      "decision": "SECONDARY_ONLY",
+      "reason": "LangGraph remains the adopted orchestration adapter behind the one AgentRuntimePort"
+    },
+    {
+      "technology": "CrewAI / Agno / Agent Zero",
+      "decision": "REFERENCE_ONLY",
+      "reason": "Do not create a parallel agent runtime"
+    },
+    {
+      "technology": "Qdrant as durable state",
+      "decision": "REJECT_AS_AUTHORITY",
+      "reason": "Canonical SQLite state and audit cannot be replaced by a vector index"
+    },
+    {
+      "technology": "WebView2 / ASGI / HTTP DTO as domain core",
+      "decision": "REJECT_AS_AUTHORITY",
+      "reason": "Transport and presentation types must remain outside application/domain contracts"
+    },
+    {
+      "technology": "Direct provider SDK use from domain contracts",
+      "decision": "REJECT_AS_AUTHORITY",
+      "reason": "ModelGateway remains the single intelligence routing authority"
+    }
+  ],
+  "build_backend": "setuptools.build_meta"
+}
