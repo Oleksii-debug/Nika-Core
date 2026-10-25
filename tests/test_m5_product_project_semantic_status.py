@@ -112,7 +112,7 @@ def test_product_project_refresh_preserves_backend_focus_precedence() -> None:
         "async function dispatch(actionId, trigger = null) {",
         "async function refreshKeymap() {",
     )
-    assert dispatch.index("await refreshState();") < dispatch.index(
-        "const focusId = result.focus_id ||"
+    assert dispatch.index("const focusId = result.focus_id ||") < dispatch.index(
+        "await refreshState();"
     )
     assert 'focusElementById("product-project-heading")' not in dispatch
