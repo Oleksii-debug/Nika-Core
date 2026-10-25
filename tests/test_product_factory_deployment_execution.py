@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 import pytest
@@ -356,3 +356,346 @@ def test_scale_many_services_remain_independent_across_restart() -> None:
     assert len(provider.deploy_calls) == 30
     assert len(set(provider.deploy_calls)) == 30
     assert all(restored.get(spec.operation_id).state is OperationState.SUCCEEDED for spec in specs)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"attempt": True}, "attempt"),
+        ({"attempt": 1.5}, "attempt"),
+        ({"state": "pending"}, "state"),
+        ({"state": "succeeded"}, "state"),
+        ({"deployment_state": "healthy"}, "deployment state"),
+        ({"evidence_refs": ["provider:ok"]}, "evidence"),
+        ({"evidence_refs": (3,)}, "evidence"),
+        ({"evidence_refs": (" ",)}, "evidence"),
+        ({"spec": None}, "snapshot record"),
+    ],
+)
+def test_restore_rejects_ambiguous_snapshot_carriers_without_mutation(
+    changes: dict[str, object], error: str
+) -> None:
+    source, _, _, _ = _coordinator()
+    spec = _spec("project-a", "source")
+    source.submit(spec, now=NOW)
+    bad_record = replace(source.snapshot().records[0], **changes)
+
+    target, _, _, _ = _coordinator()
+    existing = _spec("project-a", "existing")
+    target.submit(existing, now=NOW)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match=error):
+        target.restore(DeploymentExecutionSnapshot((bad_record,)))
+    assert target.snapshot() == before
+
+
+@pytest.mark.parametrize("records", [None, [], [object()], (object(),)])
+def test_restore_rejects_invalid_snapshot_structure_before_mutation(records: object) -> None:
+    coordinator, _, _, _ = _coordinator()
+    spec = _spec("project-a", "existing")
+    coordinator.submit(spec, now=NOW)
+    before = coordinator.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match="snapshot"):
+        coordinator.restore(DeploymentExecutionSnapshot(records))
+    assert coordinator.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value", "error"),
+    [
+        ("attempt", -1, "attempt"),
+        ("attempt", False, "attempt"),
+        ("updated_at", "2026-08-21", "timestamp"),
+        ("updated_at", None, "timestamp"),
+        ("spec", object(), "snapshot record"),
+    ],
+)
+def test_restore_rejects_corrupted_record_after_frozen_dataclass_mutation(
+    attribute: str, value: object, error: str
+) -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    corrupt = replace(source.snapshot().records[0])
+    object.__setattr__(corrupt, attribute, value)
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+    with pytest.raises(DeploymentExecutionError, match=error):
+        target.restore(DeploymentExecutionSnapshot((corrupt,)))
+    assert target.snapshot() == before
+
+
+def test_restore_invalid_later_record_cannot_partially_replace_existing_state() -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    good = source.snapshot().records[0]
+    malformed = replace(good, spec=_spec("project-a", "another"), attempt=True)
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+    with pytest.raises(DeploymentExecutionError, match="attempt"):
+        target.restore(DeploymentExecutionSnapshot((good, malformed)))
+    assert target.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"request": None}, "request or intent"),
+        ({"intent": None}, "request or intent"),
+        ({"operation_id": None}, "identity"),
+        ({"credential_ref": 123}, "identity"),
+        ({"credential_audience": b"staging"}, "identity"),
+        ({"credential_scope": ""}, "identity"),
+        ({"credential_ttl_seconds": True}, "lease durations"),
+        ({"credential_ttl_seconds": 1.5}, "lease durations"),
+        ({"credential_ttl_seconds": float("nan")}, "lease durations"),
+        ({"credential_ttl_seconds": 0}, "lease durations"),
+        ({"node_lease_seconds": False}, "lease durations"),
+        ({"node_lease_seconds": float("inf")}, "lease durations"),
+        ({"node_lease_seconds": "300"}, "lease durations"),
+    ],
+)
+def test_execution_spec_rejects_ambiguous_input_carriers(
+    changes: dict[str, object], error: str
+) -> None:
+    spec = _spec("project-a", "source")
+    with pytest.raises(DeploymentExecutionError, match=error):
+        replace(spec, **changes)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "error"),
+    [
+        ("credential_ttl_seconds", True, "lease durations"),
+        ("node_lease_seconds", 1.5, "lease durations"),
+        ("credential_scope", None, "identity"),
+        ("request", None, "request or intent"),
+    ],
+)
+def test_restore_revalidates_tampered_execution_spec_before_mutation(
+    field_name: str, invalid_value: object, error: str
+) -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    valid = source.snapshot().records[0]
+    tampered_spec = replace(valid.spec)
+    object.__setattr__(tampered_spec, field_name, invalid_value)
+    corrupted = replace(valid, spec=tampered_spec)
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+    with pytest.raises(DeploymentExecutionError, match=error):
+        target.restore(DeploymentExecutionSnapshot((corrupted,)))
+    assert target.snapshot() == before
+
+
+
+@pytest.mark.parametrize(
+    ("state", "deployment_state"),
+    [
+        (OperationState.SUCCEEDED, None),
+        (OperationState.SUCCEEDED, DeploymentState.REJECTED),
+        (OperationState.RECONCILE_REQUIRED, DeploymentState.HEALTHY),
+        (OperationState.REJECTED, DeploymentState.ROLLED_BACK),
+        (OperationState.ROLLED_BACK, DeploymentState.REJECTED),
+        (OperationState.PENDING, DeploymentState.HEALTHY),
+    ],
+)
+def test_restore_rejects_impossible_deployment_state_pairs_without_mutation(
+    state: OperationState,
+    deployment_state: DeploymentState | None,
+) -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    valid = source.snapshot().records[0]
+    corrupted = replace(
+        valid,
+        state=state,
+        deployment_state=deployment_state,
+        attempt=0 if state is OperationState.PENDING else 1,
+    )
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match="does not match operation state"):
+        target.restore(DeploymentExecutionSnapshot((corrupted,)))
+    assert target.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    ("state", "attempt"),
+    [
+        (OperationState.PENDING, 1),
+        (OperationState.WAITING_FOR_NODE, 0),
+        (OperationState.BLOCKED_CREDENTIAL, 0),
+        (OperationState.RECOVERY_REQUIRED, 0),
+        (OperationState.RECONCILE_REQUIRED, 0),
+        (OperationState.SUCCEEDED, 0),
+        (OperationState.REJECTED, 0),
+        (OperationState.ROLLED_BACK, 0),
+    ],
+)
+def test_restore_rejects_impossible_state_attempt_pairs_without_mutation(
+    state: OperationState,
+    attempt: int,
+) -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    valid = source.snapshot().records[0]
+    deployment_state = {
+        OperationState.RECONCILE_REQUIRED: DeploymentState.UNCERTAIN,
+        OperationState.SUCCEEDED: DeploymentState.HEALTHY,
+        OperationState.REJECTED: DeploymentState.REJECTED,
+        OperationState.ROLLED_BACK: DeploymentState.ROLLED_BACK,
+    }.get(state)
+    corrupted = replace(
+        valid,
+        state=state,
+        attempt=attempt,
+        deployment_state=deployment_state,
+    )
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match="attempt count"):
+        target.restore(DeploymentExecutionSnapshot((corrupted,)))
+    assert target.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    ("state", "deployment_state"),
+    [
+        (OperationState.PENDING, None),
+        (OperationState.RECOVERY_REQUIRED, None),
+        (OperationState.RECONCILE_REQUIRED, DeploymentState.UNCERTAIN),
+        (OperationState.SUCCEEDED, DeploymentState.HEALTHY),
+        (OperationState.REJECTED, DeploymentState.REJECTED),
+        (OperationState.ROLLED_BACK, DeploymentState.ROLLED_BACK),
+    ],
+)
+def test_restore_preserves_valid_deployment_state_pairs(
+    state: OperationState,
+    deployment_state: DeploymentState | None,
+) -> None:
+    source, _, _, _ = _coordinator()
+    spec = _spec("project-a", "source")
+    source.submit(spec, now=NOW)
+    valid = source.snapshot().records[0]
+    record = replace(
+        valid,
+        state=state,
+        deployment_state=deployment_state,
+        attempt=0 if state is OperationState.PENDING else 1,
+    )
+
+    target, _, _, _ = _coordinator()
+    target.restore(DeploymentExecutionSnapshot((record,)))
+
+    restored = target.get(spec.operation_id)
+    assert restored.state is state
+    assert restored.deployment_state is deployment_state
+
+
+def test_restore_rejects_tampered_request_resources_without_mutation() -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    valid = source.snapshot().records[0]
+    tampered_request = replace(valid.spec.request)
+    object.__setattr__(tampered_request, "resources", object())
+    tampered_spec = replace(valid.spec)
+    object.__setattr__(tampered_spec, "request", tampered_request)
+    corrupted = replace(valid, spec=tampered_spec)
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match="request or intent"):
+        target.restore(DeploymentExecutionSnapshot((corrupted,)))
+    assert target.snapshot() == before
+
+
+@pytest.mark.parametrize("nested_field", ["environment", "release"])
+def test_restore_rejects_tampered_intent_nested_carriers_without_mutation(
+    nested_field: str,
+) -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    valid = source.snapshot().records[0]
+    tampered_intent = replace(valid.spec.intent)
+    object.__setattr__(tampered_intent, nested_field, object())
+    tampered_spec = replace(valid.spec)
+    object.__setattr__(tampered_spec, "intent", tampered_intent)
+    corrupted = replace(valid, spec=tampered_spec)
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match="request or intent"):
+        target.restore(DeploymentExecutionSnapshot((corrupted,)))
+    assert target.snapshot() == before
+
+
+def test_restore_rejects_tampered_release_payload_without_mutation() -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    valid = source.snapshot().records[0]
+    tampered_release = replace(valid.spec.intent.release)
+    object.__setattr__(tampered_release, "source_sha", b"1" * 40)
+    tampered_intent = replace(valid.spec.intent)
+    object.__setattr__(tampered_intent, "release", tampered_release)
+    tampered_spec = replace(valid.spec)
+    object.__setattr__(tampered_spec, "intent", tampered_intent)
+    corrupted = replace(valid, spec=tampered_spec)
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match="request or intent"):
+        target.restore(DeploymentExecutionSnapshot((corrupted,)))
+    assert target.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "error"),
+    [
+        ("request", object(), "request or intent"),
+        ("credential_ttl_seconds", True, "lease durations"),
+    ],
+)
+def test_submit_revalidates_tampered_spec_before_publication(
+    field_name: str,
+    invalid_value: object,
+    error: str,
+) -> None:
+    coordinator, _, _, _ = _coordinator()
+    spec = _spec("project-a", "tampered-submit")
+    object.__setattr__(spec, field_name, invalid_value)
+    before = coordinator.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match=error):
+        coordinator.submit(spec, now=NOW)
+
+    assert coordinator.snapshot() == before
+
+
+def test_submit_rejects_non_spec_carrier_before_publication() -> None:
+    coordinator, _, _, _ = _coordinator()
+    before = coordinator.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match="execution spec"):
+        coordinator.submit(object(), now=NOW)
+
+    assert coordinator.snapshot() == before
