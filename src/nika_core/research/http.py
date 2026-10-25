@@ -8,10 +8,22 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
-from nika_core.research.models import RefreshDisposition
+from nika_core.research.models import RefreshDisposition, ResearchFetchFailureClass
+from nika_core.research.source_identity import (
+    ResearchSourceIdentityError,
+    canonical_http_locator,
+)
 
 
 class NetworkPolicyError(RuntimeError):
+    pass
+
+
+class PrivateResearchSourceError(NetworkPolicyError):
+    pass
+
+
+class UnsupportedResearchSourceError(NetworkPolicyError):
     pass
 
 
@@ -89,6 +101,7 @@ class HttpFetchResult:
     message: str = ""
     retryable: bool = False
     retry_after_seconds: float | None = None
+    failure_class: ResearchFetchFailureClass | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,10 +178,20 @@ def _connect_url(logical_url: str, address: str) -> tuple[str, str, str]:
         raise NetworkPolicyError("URL has no hostname")
     host_header = _display_host(parts.hostname, port, parts.scheme)
     address_host = f"[{address}]" if ":" in address else address
-    netloc = address_host if port == (443 if parts.scheme == "https" else 80) else f"{address_host}:{port}"
+    netloc = (
+        address_host
+        if port == (443 if parts.scheme == "https" else 80)
+        else f"{address_host}:{port}"
+    )
     path = parts.path or "/"
     connect = urlunsplit((parts.scheme, netloc, path, parts.query, ""))
     return connect, host_header, parts.hostname
+
+
+def _identity_failure_class(error: ResearchSourceIdentityError) -> ResearchFetchFailureClass:
+    if error.code == "unsupported_source":
+        return ResearchFetchFailureClass.UNSUPPORTED
+    return ResearchFetchFailureClass.POLICY
 
 
 class HttpxResearchFetcher:
@@ -195,7 +218,7 @@ class HttpxResearchFetcher:
         except ValueError as exc:
             raise NetworkPolicyError("URL authority or port is malformed") from exc
         if parts.scheme not in {"http", "https"}:
-            raise NetworkPolicyError("only HTTP(S) URLs are supported")
+            raise UnsupportedResearchSourceError("only HTTP(S) URLs are supported")
         if parts.scheme == "http" and not policy.allow_insecure_http:
             raise NetworkPolicyError("plain HTTP is disabled by policy")
         if parts.hostname is None:
@@ -229,7 +252,7 @@ class HttpxResearchFetcher:
             if rendered not in safe:
                 safe.append(rendered)
         if not safe:
-            raise NetworkPolicyError("hostname resolves only to non-public addresses")
+            raise PrivateResearchSourceError("hostname resolves only to non-public addresses")
         return tuple(safe[: policy.max_resolved_addresses])
 
     @staticmethod
@@ -288,15 +311,21 @@ class HttpxResearchFetcher:
     ) -> HttpFetchResult:
         active = policy or HttpFetchPolicy()
         try:
-            requested_url = urlunsplit((*urlsplit(url)[:4], ""))
-        except ValueError as exc:
+            requested_url = canonical_http_locator(url)
+        except ResearchSourceIdentityError as exc:
+            public_url = (
+                "<redacted-http-url>"
+                if exc.code == "credentials_forbidden"
+                else "<invalid-http-url>"
+            )
             return HttpFetchResult(
                 RefreshDisposition.BLOCKED,
-                url,
-                url,
+                public_url,
+                public_url,
                 None,
                 error_code="network_policy",
-                message=f"malformed URL: {exc}",
+                message=str(exc),
+                failure_class=_identity_failure_class(exc),
             )
         current_url = requested_url
         headers = {
@@ -352,6 +381,7 @@ class HttpxResearchFetcher:
                                 status,
                                 error_code="redirect_missing_location",
                                 message="redirect response did not include Location",
+                                failure_class=ResearchFetchFailureClass.HTTP,
                             )
                         if redirect_count >= active.max_redirects:
                             return HttpFetchResult(
@@ -361,8 +391,20 @@ class HttpxResearchFetcher:
                                 status,
                                 error_code="redirect_limit",
                                 message="redirect limit exceeded",
+                                failure_class=ResearchFetchFailureClass.HTTP,
                             )
-                        current_url = urljoin(current_url, location)
+                        try:
+                            current_url = canonical_http_locator(urljoin(current_url, location))
+                        except ResearchSourceIdentityError as exc:
+                            return HttpFetchResult(
+                                RefreshDisposition.BLOCKED,
+                                requested_url,
+                                current_url,
+                                status,
+                                error_code="network_policy",
+                                message=f"redirect target violates research URL policy: {exc}",
+                                failure_class=_identity_failure_class(exc),
+                            )
                         headers.pop("If-None-Match", None)
                         headers.pop("If-Modified-Since", None)
                         continue
@@ -383,6 +425,7 @@ class HttpxResearchFetcher:
                             status,
                             error_code="authentication_required",
                             message="source requires credentials or access not granted to Research",
+                            failure_class=ResearchFetchFailureClass.AUTH,
                         )
                     if status in {404, 410}:
                         return HttpFetchResult(
@@ -392,6 +435,7 @@ class HttpxResearchFetcher:
                             status,
                             error_code="source_removed",
                             message="source returned a permanent missing status",
+                            failure_class=ResearchFetchFailureClass.HTTP,
                         )
                     if status in _RETRYABLE_STATUSES:
                         return HttpFetchResult(
@@ -406,6 +450,7 @@ class HttpxResearchFetcher:
                                 response.headers,
                                 maximum=active.max_backoff_seconds,
                             ),
+                            failure_class=ResearchFetchFailureClass.HTTP,
                         )
                     if status < 200 or status >= 300:
                         return HttpFetchResult(
@@ -415,6 +460,7 @@ class HttpxResearchFetcher:
                             status,
                             error_code="http_status",
                             message=f"source returned HTTP status {status}",
+                            failure_class=ResearchFetchFailureClass.HTTP,
                         )
                     media_type = _media_type(response.headers)
                     if media_type not in _SUPPORTED_MEDIA_TYPES:
@@ -428,6 +474,7 @@ class HttpxResearchFetcher:
                             last_modified=last_modified,
                             error_code="unsupported_media_type",
                             message=f"unsupported response media type: {media_type or '<missing>'}",
+                            failure_class=ResearchFetchFailureClass.UNSUPPORTED,
                         )
                     return HttpFetchResult(
                         RefreshDisposition.CHANGED,
@@ -439,6 +486,26 @@ class HttpxResearchFetcher:
                         etag=etag,
                         last_modified=last_modified,
                     )
+        except PrivateResearchSourceError as exc:
+            return HttpFetchResult(
+                RefreshDisposition.BLOCKED,
+                requested_url,
+                current_url,
+                None,
+                error_code="network_policy",
+                message=str(exc),
+                failure_class=ResearchFetchFailureClass.PRIVATE,
+            )
+        except UnsupportedResearchSourceError as exc:
+            return HttpFetchResult(
+                RefreshDisposition.BLOCKED,
+                requested_url,
+                current_url,
+                None,
+                error_code="network_policy",
+                message=str(exc),
+                failure_class=ResearchFetchFailureClass.UNSUPPORTED,
+            )
         except NetworkPolicyError as exc:
             return HttpFetchResult(
                 RefreshDisposition.BLOCKED,
@@ -447,6 +514,7 @@ class HttpxResearchFetcher:
                 None,
                 error_code="network_policy",
                 message=str(exc),
+                failure_class=ResearchFetchFailureClass.POLICY,
             )
         except ResponseTooLargeError as exc:
             return HttpFetchResult(
@@ -456,6 +524,7 @@ class HttpxResearchFetcher:
                 None,
                 error_code="response_too_large",
                 message=str(exc),
+                failure_class=ResearchFetchFailureClass.RESOURCE,
             )
         except (httpx.TimeoutException, httpx.TransportError, OSError) as exc:
             return HttpFetchResult(
@@ -466,4 +535,5 @@ class HttpxResearchFetcher:
                 error_code=type(exc).__name__,
                 message=str(exc)[:1000],
                 retryable=True,
+                failure_class=ResearchFetchFailureClass.NETWORK,
             )
