@@ -4,9 +4,11 @@ import argparse
 import json
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import Keymap
@@ -15,6 +17,10 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.default_actions import build_default_action_registry
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
+from nika_core.packaged_agent_builder import (
+    PackagedAgentBuilderDraftHandler,
+    PackagedAgentBuilderStateProjector,
+)
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
@@ -28,11 +34,45 @@ from nika_core.product_project import ProductProjectRepository
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
+from nika_core.ui.packaged_speech import PackagedSpeechFeature, build_packaged_speech
+from nika_core.ui.packaged_voice import PackagedVoiceFeature, build_packaged_voice
+from nika_core.ui.packaged_voice_model_setup import PackagedVoiceModelSetup
 from nika_core.ui.shell import launch_windows_shell
+from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
 from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
 from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
 from nika_core.v01_source_settings import V01SourceSettings
 from nika_core.windows_autostart import WindowsAutostartService
+
+
+class _StartupRecoveryInventoryError(RuntimeError):
+    """Fail-closed packaged startup boundary; never exposes raw recovery diagnostics."""
+
+
+@dataclass(slots=True)
+class WindowsBridgeSession:
+    bridge: UIActionBridge
+    products: ProductProjectCommandService
+    backend: DesktopBackend
+    voice: PackagedVoiceFeature
+    voice_model_setup: PackagedVoiceModelSetup
+    speech: PackagedSpeechFeature
+    _closed: bool = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.voice_model_setup.close()
+        finally:
+            try:
+                self.speech.close()
+            finally:
+                try:
+                    self.voice.close()
+                finally:
+                    self.backend.close()
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -44,35 +84,82 @@ def _focus(focus_id: str, message: str) -> UIResult:
     )
 
 
-def build_windows_bridge(
-    config: AppConfig,
-) -> tuple[UIActionBridge, ProductProjectCommandService]:
+def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
     store = SQLiteStore(config.database_path)
     store.initialize()
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
+    model_settings = V01ModelSettings(store)
+    def prepare_task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        source_bound = source_settings.prepare_task_payload(payload)
+        return model_settings.prepare_task_payload(source_bound)
+
+    runtime = V01PackagedThreeAgentRuntime(
+        store=store,
+        config=config,
+        source_settings=source_settings,
+    )
     backend = DesktopBackend(
         queue=TaskQueue(store),
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
-        runtime=V01PackagedThreeAgentRuntime(
-            store=store, config=config, source_settings=source_settings
-        ),
-        prepare_task_payload=source_settings.prepare_task_payload,
+        runtime=runtime,
+        prepare_task_payload=prepare_task_payload,
         autostart_service=(
             WindowsAutostartService(Path(sys.executable))
             if sys.platform == "win32" and getattr(sys, "frozen", False)
             else None
         ),
     )
+    voice = build_packaged_voice(
+        config.database_path.parent,
+        submit=backend.submit_packaged_coroutine,
+    )
+    voice_model_setup = PackagedVoiceModelSetup(
+        config.database_path.parent,
+        submit=backend.submit_packaged_coroutine,
+    )
+    speech = build_packaged_speech()
+    try:
+        backend.start_startup_recovery()
+    except Exception as exc:
+        try:
+            voice_model_setup.close()
+        finally:
+            try:
+                speech.close()
+            finally:
+                try:
+                    voice.close()
+                finally:
+                    backend.close()
+        raise _StartupRecoveryInventoryError(
+            "packaged startup recovery inventory failed"
+        ) from exc
+
     products = ProductProjectCommandService(ProductProjectRepository(store))
+    agent_definitions = AgentDefinitionRepository(store)
+
+    def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
+        try:
+            return backend.create_task(payload)
+        except ModelSetupError as exc:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=str(exc),
+                focus_id="model-route-kind",
+            )
+
     product_router = PackagedProductCommandRouter(
         products=products,
-        ordinary_handler=backend.create_task,
+        ordinary_handler=create_ordinary_task,
+        agent_builder_handler=PackagedAgentBuilderDraftHandler(agent_definitions),
         selection_store=PackagedProductSelectionStore(store),
     )
+    agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
     command_center = ProductCommandCenter(products)
     product_state = PackagedProductStateProvider(
         base_state=backend.snapshot,
@@ -85,7 +172,35 @@ def build_windows_bridge(
     )
 
     def source_state() -> Mapping[str, Any]:
-        return {**packaged_state(), "v01_sources": source_settings.snapshot()}
+        state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
+        state["v01_model_settings"] = model_settings.snapshot()
+        state["voice"] = voice.snapshot()
+        state["voice_model_setup"] = voice_model_setup.snapshot()
+        state["speech"] = speech.snapshot()
+        return agent_builder_state.decorate(state)
+
+    def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
+        if payload:
+            return UIResult(
+                request_id="model-settings",
+                status="rejected",
+                message="Перечитування моделі не приймає параметрів.",
+                focus_id="model-route-kind",
+            )
+        snapshot = model_settings.snapshot()
+        if snapshot.get("status") == "invalid":
+            return UIResult(
+                request_id="model-settings",
+                status="failed",
+                message="Не вдалося прочитати збережені налаштування моделі.",
+                focus_id="model-route-kind",
+            )
+        return UIResult(
+            request_id="model-settings",
+            status="completed",
+            message="Збережені налаштування моделі перечитано.",
+            focus_id="model-route-kind",
+        )
 
     bridge = UIActionBridge(
         actions,
@@ -95,9 +210,17 @@ def build_windows_bridge(
             "task.pause": backend.pause_task,
             "task.resume": backend.resume_task,
             "agent.stop": backend.stop_agent,
+            "voice.start": voice.start,
+            "voice.cancel": voice.cancel,
+            "voice.model.import": voice_model_setup.start,
+            "voice.model.cancel": voice_model_setup.cancel,
+            "speech.start": speech.speak,
+            "speech.cancel": speech.cancel,
             "team.sources.configure": source_settings.configure,
             "settings.autostart.configure": backend.autostart_settings.configure,
             "settings.autostart.refresh": backend.autostart_settings.refresh,
+            "settings.model.configure": model_settings.configure,
+            "settings.model.refresh": refresh_model_settings,
             "nav.tasks": lambda _payload: _focus("tasks-heading", "Завдання відкрито."),
             "nav.agents": lambda _payload: _focus("agents-heading", "Агенти відкрито."),
             "nav.logs": lambda _payload: _focus("logs-heading", "Журнал відкрито."),
@@ -108,7 +231,21 @@ def build_windows_bridge(
         },
         state_provider=source_state,
     )
-    return bridge, products
+    return WindowsBridgeSession(
+        bridge=bridge,
+        products=products,
+        backend=backend,
+        voice=voice,
+        voice_model_setup=voice_model_setup,
+        speech=speech,
+    )
+
+
+def build_windows_bridge(
+    config: AppConfig,
+) -> tuple[UIActionBridge, ProductProjectCommandService]:
+    session = build_windows_session(config)
+    return session.bridge, session.products
 
 
 def _require_product_state(
@@ -174,78 +311,140 @@ def _run_pf11_proof(
     command: str,
     output_path: Path | None,
 ) -> int:
-    bridge, products = build_windows_bridge(config)
-    decision = route_command(command)
-    if decision.normalized_goal is None:
-        raise RuntimeError("PF11 proof command did not produce a normalized ProductProject goal")
-    project_id = product_project_identity(decision.normalized_goal)
-    recovered_before_command = bridge.get_state()
-    recovered_project = recovered_before_command.get("state", {}).get("product_project")
-    if isinstance(recovered_project, Mapping) and recovered_project.get("project_id") != project_id:
-        raise RuntimeError("PF11 restart restored a different ProductProject selection")
-    result = bridge.dispatch(
-        {
-            "request_id": "pf11-packaged-proof",
-            "action_id": "task.create",
-            "payload": {"command": command},
+    session = build_windows_session(config)
+    try:
+        bridge = session.bridge
+        products = session.products
+        decision = route_command(command)
+        if decision.normalized_goal is None:
+            raise RuntimeError(
+                "PF11 proof command did not produce a normalized ProductProject goal"
+            )
+        project_id = product_project_identity(decision.normalized_goal)
+        recovered_before_command = bridge.get_state()
+        recovered_project = recovered_before_command.get("state", {}).get("product_project")
+        if (
+            isinstance(recovered_project, Mapping)
+            and recovered_project.get("project_id") != project_id
+        ):
+            raise RuntimeError("PF11 restart restored a different ProductProject selection")
+        result = bridge.dispatch(
+            {
+                "request_id": "pf11-packaged-proof",
+                "action_id": "task.create",
+                "payload": {"command": command},
+            }
+        )
+        if result.get("status") != "completed":
+            raise RuntimeError(f"PF11 packaged ProductProject route failed: {result}")
+        detail = products.inspect_project(project_id)
+        if detail.summary.project_id != project_id or detail.summary.version != 1:
+            raise RuntimeError("PF11 packaged ProductProject identity/version proof failed")
+        product_state = _require_product_state(bridge.get_state(), project_id=project_id)
+        current_result = bridge.dispatch(
+            {
+                "request_id": "pf11-packaged-current-proof",
+                "action_id": "task.create",
+                "payload": {"command": "Show current ProductProject"},
+            }
+        )
+        _require_current_product_result(
+            current_result,
+            project_id=project_id,
+            spec_version=detail.summary.version,
+            state=detail.summary.state,
+            goal=detail.summary.goal,
+        )
+        payload = {
+            "route": decision.route.value,
+            "project_id": project_id,
+            "spec_version": detail.summary.version,
+            "state": detail.summary.state,
+            "command_center_state_proven": True,
+            "current_command_proven": True,
+            "current_command_focus_proven": True,
+            "bridge_state_project_id": product_state["project_id"],
+            "bridge_state_spec_version": product_state["spec_version"],
+            "bridge_state_status_count": product_state["status_count"],
+            "bridge_state_decision_count": product_state["decision_count"],
+            "restart_selection_integrity_proven": True,
+            "bounded_projection_proven": True,
+            "human_tested": False,
+            "nvda_verified": False,
+            "production_release_ready": False,
         }
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        if output_path is None:
+            print(serialized)
+        else:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(serialized + "\n", encoding="utf-8")
+        return 0
+    finally:
+        session.close()
+
+
+
+def _run_voice_runtime_proof(output_path: Path | None) -> int:
+    if sys.platform != "win32":
+        raise RuntimeError("packaged voice runtime proof requires Windows")
+    if output_path is None:
+        raise ValueError("--voice-runtime-proof-output is required")
+    try:
+        import _sounddevice_data
+        import numpy
+        import sherpa_onnx
+        import sounddevice
+        from sherpa_onnx.lib import _sherpa_onnx
+    except Exception as exc:  # noqa: BLE001 - packaged native dependency proof boundary
+        raise RuntimeError(
+            f"packaged voice dependency import failed: {type(exc).__name__}"
+        ) from None
+
+    sounddevice_roots = tuple(Path(item) for item in _sounddevice_data.__path__)
+    portaudio_dlls = tuple(
+        candidate
+        for root in sounddevice_roots
+        for candidate in (root / "portaudio-binaries").glob("libportaudio*.dll")
+        if candidate.is_file()
     )
-    if result.get("status") != "completed":
-        raise RuntimeError(f"PF11 packaged ProductProject route failed: {result}")
-    detail = products.inspect_project(project_id)
-    if detail.summary.project_id != project_id or detail.summary.version != 1:
-        raise RuntimeError("PF11 packaged ProductProject identity/version proof failed")
-    product_state = _require_product_state(bridge.get_state(), project_id=project_id)
-    current_result = bridge.dispatch(
-        {
-            "request_id": "pf11-packaged-current-proof",
-            "action_id": "task.create",
-            "payload": {"command": "Show current ProductProject"},
-        }
-    )
-    _require_current_product_result(
-        current_result,
-        project_id=project_id,
-        spec_version=detail.summary.version,
-        state=detail.summary.state,
-        goal=detail.summary.goal,
-    )
+    if not portaudio_dlls:
+        raise RuntimeError("packaged sounddevice data does not contain PortAudio DLLs")
+
     payload = {
-        "route": decision.route.value,
-        "project_id": project_id,
-        "spec_version": detail.summary.version,
-        "state": detail.summary.state,
-        "command_center_state_proven": True,
-        "current_command_proven": True,
-        "current_command_focus_proven": True,
-        "bridge_state_project_id": product_state["project_id"],
-        "bridge_state_spec_version": product_state["spec_version"],
-        "bridge_state_status_count": product_state["status_count"],
-        "bridge_state_decision_count": product_state["decision_count"],
-        "restart_selection_integrity_proven": True,
-        "bounded_projection_proven": True,
+        "schema": "nika.packaged-voice-runtime-proof:v1",
+        "numpy_imported": numpy is not None,
+        "sherpa_onnx_imported": sherpa_onnx is not None,
+        "sherpa_native_imported": _sherpa_onnx is not None,
+        "sounddevice_imported": sounddevice is not None,
+        "sounddevice_data_proven": True,
+        "microphone_opened": False,
+        "model_loaded": False,
         "human_tested": False,
         "nvda_verified": False,
         "production_release_ready": False,
     }
-    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    if output_path is None:
-        print(serialized)
-    else:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(serialized + "\n", encoding="utf-8")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     return 0
-
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pf11-proof", action="store_true")
     parser.add_argument("--pf11-proof-output", type=Path)
+    parser.add_argument("--voice-runtime-proof", action="store_true")
+    parser.add_argument("--voice-runtime-proof-output", type=Path)
     parser.add_argument(
         "--pf11-proof-command",
         default=("Створи застосунок для керування витратами малого бізнесу"),
     )
     args = parser.parse_args(argv)
+    if args.voice_runtime_proof:
+        return _run_voice_runtime_proof(args.voice_runtime_proof_output)
+
     from nika_core.reliability.legacy_database import LegacyDatabaseConflict
     from nika_core.ui.startup_error import show_recovery_error
 
@@ -260,8 +459,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             command=args.pf11_proof_command,
             output_path=args.pf11_proof_output,
         )
-    bridge, _products = build_windows_bridge(config)
-    launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
+    try:
+        session = build_windows_session(config)
+    except _StartupRecoveryInventoryError:
+        show_recovery_error(
+            "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
+            "Запуск зупинено без автоматичного повторення дій."
+        )
+        return 1
+    try:
+        launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
+    finally:
+        session.close()
     return 0
 
 

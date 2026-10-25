@@ -100,6 +100,21 @@ class APSchedulerAdapter(SchedulerPort):
             effective_job = self._required_job(job_id)
         self._audit_change("scheduler.job_upserted", effective_job)
 
+    def activate_persisted(self, job: ScheduledJob) -> None:
+        """Reconcile an already-durable job without overwriting newer SQLite state.
+
+        ConnectivityWaitService atomically commits its task, job and audit before
+        runtime installation. Calling upsert() here would write a stale snapshot
+        if another process replaced the job between commit and activation.
+        The existing runtime synchronizer reads the latest durable authority
+        and installs only that snapshot; start() rehydrates when not running.
+        """
+        if type(job) is not ScheduledJob:
+            raise TypeError("job must be an exact ScheduledJob")
+        job_id = _require_job_id(job.job_id)
+        if self._started or self._starting:
+            self._sync_runtime_job(job_id)
+
     def remove(self, job_id: str) -> bool:
         job_id = _require_job_id(job_id)
         removed = self._jobs.delete(job_id)
