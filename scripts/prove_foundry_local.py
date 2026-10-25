@@ -18,6 +18,7 @@ from nika_core.model_gateway.contracts import (
     ModelResponse,
     PrivacyClass,
 )
+from nika_core.model_gateway.foundry_cache_evidence import foundry_cache_tree_sha256
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider, FoundryModelEvidence
 from nika_core.model_gateway.gateway import ModelGateway
 
@@ -32,27 +33,7 @@ def _installed_foundry_package() -> tuple[str, str]:
 
 
 def _tree_sha256(root: Path) -> dict[str, object]:
-    if not root.exists() or not root.is_dir():
-        raise ValueError(f"model cache path is not a directory: {root}")
-    digest = hashlib.sha256()
-    file_count = 0
-    total_bytes = 0
-    for path in sorted((item for item in root.rglob("*") if item.is_file()), key=str):
-        relative = path.relative_to(root).as_posix()
-        digest.update(relative.encode("utf-8"))
-        digest.update(b"\0")
-        with path.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-                total_bytes += len(chunk)
-        digest.update(b"\0")
-        file_count += 1
-    return {
-        "algorithm": "sha256-tree-v1",
-        "sha256": digest.hexdigest(),
-        "file_count": file_count,
-        "total_bytes": total_bytes,
-    }
+    return foundry_cache_tree_sha256(root)
 
 
 def _resource_snapshot() -> dict[str, object]:
@@ -314,7 +295,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hash-model-cache",
         action="store_true",
-        help="Hash every cached model file after successful lifecycle proof; may take substantial time",
+        help=(
+            "Hash every cached model file with length-prefixed path/size framing after a "
+            "successful lifecycle proof; may take substantial time"
+        ),
     )
     parser.add_argument("--max-cpu-percent", type=float)
     parser.add_argument("--max-memory-percent", type=float)
