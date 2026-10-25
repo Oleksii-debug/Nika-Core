@@ -119,6 +119,25 @@
     activityLog.appendChild(item);
   }
 
+  function reportKeymapBridgeFailure(focusTarget) {
+    actionsReady = false;
+    const message = "Немає підтвердження стану карти клавіш. Комбінації тимчасово вимкнено до успішного перечитування.";
+    announce(message, true);
+    appendLog(message);
+    focusTarget?.focus?.();
+  }
+
+  function validKeymapResponse(response, requireData = false) {
+    return Boolean(
+      response
+      && typeof response === "object"
+      && !Array.isArray(response)
+      && typeof response.ok === "boolean"
+      && typeof response.message === "string"
+      && (!requireData || !response.ok || typeof response.data === "string"),
+    );
+  }
+
   function requestId() {
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
     return `ui-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -634,12 +653,20 @@
           : `Зберегти комбінацію для ${accessibleActionLabel}`,
       );
       save.addEventListener("click", async () => {
-        const response = await globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null);
-        announce(response.message, !response.ok);
-        if (response.ok) {
-          await refreshKeymap();
-          focusElementById(saveFocusId);
-        } else input.focus();
+        try {
+          const response = await globalThis.pywebview.api.set_binding(
+            action.action_id,
+            input.value.trim() || null,
+          );
+          if (!validKeymapResponse(response)) throw new Error("Invalid keymap acknowledgement");
+          announce(response.message, !response.ok);
+          if (response.ok) {
+            if (!await refreshKeymap()) throw new Error("Keymap refresh unavailable");
+            focusElementById(saveFocusId);
+          } else input.focus();
+        } catch {
+          reportKeymapBridgeFailure(input);
+        }
       });
       const restore = document.createElement("button");
       const restoreFocusId = keymapControlId(action.action_id, "restore");
@@ -651,11 +678,16 @@
         `Відновити комбінацію за замовчуванням для ${accessibleActionLabel}`,
       );
       restore.addEventListener("click", async () => {
-        const response = await globalThis.pywebview.api.restore_default(action.action_id);
-        announce(response.message, !response.ok);
-        if (response.ok) {
-          await refreshKeymap();
-          focusElementById(restoreFocusId);
+        try {
+          const response = await globalThis.pywebview.api.restore_default(action.action_id);
+          if (!validKeymapResponse(response)) throw new Error("Invalid keymap acknowledgement");
+          announce(response.message, !response.ok);
+          if (response.ok) {
+            if (!await refreshKeymap()) throw new Error("Keymap refresh unavailable");
+            focusElementById(restoreFocusId);
+          } else restore.focus();
+        } catch {
+          reportKeymapBridgeFailure(restore);
         }
       });
       controlCell.append(save, document.createTextNode(" "), restore);
@@ -707,20 +739,32 @@
     startStatePolling();
   }
 
-  document.getElementById("keymap-export").addEventListener("click", async () => {
-    const response = await globalThis.pywebview.api.export_keymap();
-    announce(response.message, !response.ok);
-    if (response.ok) {
-      keymapJson.value = response.data;
-      keymapJson.focus();
+  document.getElementById("keymap-export").addEventListener("click", async (event) => {
+    const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    try {
+      const response = await globalThis.pywebview.api.export_keymap();
+      if (!validKeymapResponse(response, true)) throw new Error("Invalid keymap acknowledgement");
+      announce(response.message, !response.ok);
+      if (response.ok) {
+        keymapJson.value = response.data;
+        keymapJson.focus();
+      } else trigger?.focus();
+    } catch {
+      reportKeymapBridgeFailure(trigger);
     }
   });
 
   document.getElementById("keymap-import").addEventListener("click", async () => {
-    const response = await globalThis.pywebview.api.import_keymap(keymapJson.value);
-    announce(response.message, !response.ok);
-    if (response.ok) await refreshKeymap();
-    else keymapJson.focus();
+    try {
+      const response = await globalThis.pywebview.api.import_keymap(keymapJson.value);
+      if (!validKeymapResponse(response)) throw new Error("Invalid keymap acknowledgement");
+      announce(response.message, !response.ok);
+      if (response.ok) {
+        if (!await refreshKeymap()) throw new Error("Keymap refresh unavailable");
+      } else keymapJson.focus();
+    } catch {
+      reportKeymapBridgeFailure(keymapJson);
+    }
   });
 
   document.addEventListener("click", (event) => {
