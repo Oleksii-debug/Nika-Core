@@ -378,6 +378,16 @@ class HttpResearchService:
                 validators=validators,
                 policy=self._policy,
             )
+            if result.disposition is RefreshDisposition.NOT_MODIFIED and (
+                state.current_raw_sha256 is None
+                or not (validators.etag or validators.last_modified)
+            ):
+                result = replace(
+                    result,
+                    disposition=RefreshDisposition.FAILED,
+                    error_code="unexpected_not_modified",
+                    message="HTTP 304 without a validated cached source",
+                )
             if result.retryable and attempt < self._policy.max_attempts:
                 self._record_fetch_attempt(
                     source_id=source_id,

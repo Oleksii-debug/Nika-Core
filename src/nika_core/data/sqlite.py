@@ -6,15 +6,24 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from nika_core.data.experience_ledger_schema import (
+    EXPERIENCE_LEDGER_MIGRATIONS,
+    EXPERIENCE_LEDGER_SCHEMA_VERSION,
+)
 from nika_core.data.multi_agent_state_schema import (
     MULTI_AGENT_STATE_MIGRATIONS,
     MULTI_AGENT_STATE_SCHEMA_VERSION,
 )
 from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
+from nika_core.model_artifact_schema import (
+    MODEL_ARTIFACT_MIGRATIONS,
+    MODEL_ARTIFACT_SCHEMA_VERSION,
+)
 from nika_core.product_project_schema import (
     PRODUCT_PROJECT_MIGRATIONS,
     PRODUCT_PROJECT_SCHEMA_VERSION,
 )
+from nika_core.research.knowledge_schema import initialize_knowledge_schema
 
 
 class SQLiteStore:
@@ -58,8 +67,39 @@ class SQLiteStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (version, datetime.now(UTC).isoformat()),
                 )
+            self._initialize_experience_ledger_schema(conn)
             self._initialize_multi_agent_state_schema(conn)
             self._initialize_product_project_schema(conn)
+            self._initialize_model_artifact_schema(conn)
+            initialize_knowledge_schema(conn)
+
+    @staticmethod
+    def _initialize_experience_ledger_schema(conn: sqlite3.Connection) -> None:
+        """Apply continuity Experience Ledger migrations through the canonical store."""
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS experience_ledger_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT MAX(version) AS version FROM experience_ledger_schema_migrations"
+        ).fetchone()
+        current = int(row["version"] or 0)
+        if current > EXPERIENCE_LEDGER_SCHEMA_VERSION:
+            raise RuntimeError(
+                "experience ledger database schema "
+                f"{current} is newer than supported schema {EXPERIENCE_LEDGER_SCHEMA_VERSION}"
+            )
+        for version in range(current + 1, EXPERIENCE_LEDGER_SCHEMA_VERSION + 1):
+            statements = EXPERIENCE_LEDGER_MIGRATIONS.get(version)
+            if statements is None:
+                raise RuntimeError(f"missing experience ledger migration {version}")
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO experience_ledger_schema_migrations(version, applied_at) "
+                "VALUES (?, ?)",
+                (version, datetime.now(UTC).isoformat()),
+            )
 
     @staticmethod
     def _initialize_multi_agent_state_schema(conn: sqlite3.Connection) -> None:
@@ -124,7 +164,42 @@ class SQLiteStore:
                 (version, datetime.now(UTC).isoformat()),
             )
 
+    @staticmethod
+    def _initialize_model_artifact_schema(conn: sqlite3.Connection) -> None:
+        """Apply provider-neutral model provenance migrations through the canonical store."""
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_artifact_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT MAX(version) AS version FROM model_artifact_schema_migrations"
+        ).fetchone()
+        current = int(row["version"] or 0)
+        if current > MODEL_ARTIFACT_SCHEMA_VERSION:
+            raise RuntimeError(
+                "model artifact database schema "
+                f"{current} is newer than supported schema {MODEL_ARTIFACT_SCHEMA_VERSION}"
+            )
+        for version in range(current + 1, MODEL_ARTIFACT_SCHEMA_VERSION + 1):
+            statements = MODEL_ARTIFACT_MIGRATIONS.get(version)
+            if statements is None:
+                raise RuntimeError(f"missing model artifact migration {version}")
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO model_artifact_schema_migrations(version, applied_at) "
+                "VALUES (?, ?)",
+                (version, datetime.now(UTC).isoformat()),
+            )
+
     def schema_version(self) -> int:
         with self.connection() as conn:
             row = conn.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()
+        return int(row["version"] or 0)
+
+    def knowledge_schema_version(self) -> int:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT MAX(version) AS version FROM knowledge_schema_migrations"
+            ).fetchone()
         return int(row["version"] or 0)

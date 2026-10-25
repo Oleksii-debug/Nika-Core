@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from enum import IntEnum
 
@@ -44,11 +45,30 @@ class AgentCompiler:
         model_profiles: set[str] | frozenset[str],
         schedule_ids: set[str] | frozenset[str] = frozenset(),
         resource_budget_refs: set[str] | frozenset[str] = frozenset(),
+        permission_catalog: Mapping[str, Collection[str]] | None = None,
     ) -> None:
-        self._tools = {tool.tool_id: tool for tool in tools}
+        # A registry is an authority, not a last-writer-wins mapping. Freeze the
+        # classified risk so caller-side mutation of a ToolSpec cannot change
+        # the classification of an already constructed compiler.
+        self._tools: dict[str, RiskTier] = {}
+        for tool in tools:
+            if tool.tool_id in self._tools:
+                raise ValueError("duplicate registered tool identity")
+            self._tools[tool.tool_id] = _TOOL_RISK_TO_TIER[tool.risk]
         self._model_profiles = frozenset(model_profiles)
         self._schedule_ids = frozenset(schedule_ids)
         self._resource_budget_refs = frozenset(resource_budget_refs)
+        self._permission_catalog = {
+            tool_id: frozenset(
+                permission.strip() for permission in permissions if permission.strip()
+            )
+            for tool_id, permissions in (permission_catalog or {}).items()
+        }
+        unknown_catalog_tools = sorted(set(self._permission_catalog) - set(self._tools))
+        if unknown_catalog_tools:
+            raise ValueError(
+                "permission catalog references unknown tools: " + ", ".join(unknown_catalog_tools)
+            )
 
     def compile(self, definition: AgentDefinition) -> CompilationResult:
         if definition.model_profile not in self._model_profiles:
@@ -64,25 +84,35 @@ class AgentCompiler:
         approvals: list[str] = []
         highest = RiskTier.R0_READ_ONLY
         for grant in definition.tool_grants:
-            spec = self._tools.get(grant.tool_id)
-            if spec is None:
+            actual = self._tools.get(grant.tool_id)
+            if actual is None:
                 raise ValueError(f"unknown tool: {grant.tool_id}")
-            actual = _TOOL_RISK_TO_TIER[spec.risk]
             declared = RiskTier(grant.max_risk)
             if declared < actual:
                 raise ValueError(
-                    f"tool grant for {grant.tool_id} permits {declared.name} but tool requires {actual.name}"
+                    f"tool grant for {grant.tool_id} permits {declared.name} "
+                    f"but tool requires {actual.name}"
                 )
             if declared > actual:
                 raise ValueError(
-                    f"tool grant for {grant.tool_id} overstates risk beyond registered tool classification"
+                    f"tool grant for {grant.tool_id} overstates risk beyond "
+                    "registered tool classification"
                 )
+
+            allowed_permissions = self._permission_catalog.get(grant.tool_id, frozenset())
+            unknown_permissions = sorted(set(grant.scopes) - allowed_permissions)
+            if unknown_permissions:
+                raise ValueError(
+                    f"unknown permission scope(s) for {grant.tool_id}: "
+                    + ", ".join(unknown_permissions)
+                )
+
             highest = max(highest, actual)
             if actual is RiskTier.R4_HIGH_IMPACT:
                 approvals.append(grant.tool_id)
 
         return CompilationResult(
-            definition=definition,
+            definition=definition.model_copy(deep=True),
             required_human_approvals=tuple(sorted(approvals)),
             highest_risk=highest,
         )
