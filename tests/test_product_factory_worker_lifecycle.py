@@ -13,6 +13,7 @@ from nika_core.product_factory_coding_worker_adapter import (
 )
 from nika_core.product_factory_coordinator import ProductFactoryCoordinator, WorkState
 from nika_core.product_factory_orchestration import (
+    OwnershipLease,
     ProductComponent,
     ProductRepositoryGraph,
     RepositoryRef,
@@ -68,9 +69,15 @@ class Contexts:
     def __init__(self, path_identity: RepositoryPathIdentity | None = None) -> None:
         self.path_identity = path_identity
 
-    async def context_for(self, _request):
+    async def context_for(self, request):
         return CodingWorkerDispatchContext(
             repository_tree_digest="tree-v1",
+            ownership_lease=OwnershipLease(
+                lease_id=f"owner:{request.work_id}",
+                worker_id="worker-1",
+                component_ids=(request.component_id,),
+                allowed_paths=request.allowed_paths,
+            ),
             lease=WorkspaceLease(
                 lease_id="lease-1",
                 workspace_root=Path("worker-root"),
@@ -201,7 +208,7 @@ def test_safe_repair_uses_exact_failed_result_sha_and_preserves_component_scope(
     assert repair.work_id != first.work_id
 
 
-def test_cancel_requires_recoverable_post_cancel_state_or_blocks_fail_closed() -> None:
+def test_cancel_without_recovery_state_retains_running_authority_fail_closed() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
     worker = Worker(_success, inspect_state=None)
@@ -211,8 +218,8 @@ def test_cancel_requires_recoverable_post_cancel_state_or_blocks_fail_closed() -
 
     assert worker.cancelled == [request.work_id]
     assert outcome.disposition is ComponentWorkerDisposition.CANCEL_RECOVERY_UNAVAILABLE
-    assert outcome.record.state is WorkState.BLOCKED
-    assert "host reconciliation required" in (outcome.record.blocker or "")
+    assert outcome.record.state is WorkState.RUNNING
+    assert outcome.record.blocker is None
     assert worker.recovered == []
 
 
