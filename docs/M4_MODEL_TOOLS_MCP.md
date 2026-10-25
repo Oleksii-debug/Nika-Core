@@ -47,6 +47,30 @@ Tools have stable IDs, JSON-schema input metadata, risk class and deadline. `EXT
 
 The acceptance suite constructs a real official `MCPServer` in process, discovers its generated schema through `Client.list_tools()`, then invokes it through `Client.call_tool()`. This is the official SDK's in-memory transport, so the proof traverses MCP protocol handling without starting a subprocess or network listener. Risky MCP calls also fail closed at the adapter boundary when the `ToolCall` lacks explicit approval, preventing direct adapter use from bypassing the product approval policy.
 
+## Canonical MCP registration and execution
+
+MCP discovery is not itself runtime authority. The production composition path is:
+
+`official MCP Client discovery -> exact Nika ToolSpec -> caller-owned canonical ToolExecutor -> permission/approval/effect boundary -> MCP call`.
+
+`MCPClientAdapter.register_tools(executor)` performs bounded discovery first, preflights the
+entire discovered ID set against the caller-owned `ToolExecutor`, and only then registers the exact
+discovered `ToolSpec` objects with MCP-backed handlers. A collision therefore fails before a
+partial MCP catalog can be installed. The adapter does not create a second persistent tool registry,
+permission engine, approval engine or effect ledger.
+
+The compatibility `MCPClientAdapter.call()` path also rediscovers the exact current tool spec
+before execution and delegates execution to `ToolExecutor`. Caller-controlled
+`ToolCall.approved=True` remains compatibility metadata only and can never grant execution.
+External/high-impact MCP calls still require the trusted approval policy and durable
+`ToolEffectGuard` exactly like native tools.
+
+Untrusted MCP configuration cannot downgrade the default risk below
+`EXTERNAL_SIDE_EFFECT`. Transport targets are excluded from configuration `repr`; server
+namespaces are stable; discovery uses finite positive deadlines and strict positive integer
+page/tool bounds; repeated pagination cursors and duplicate tool IDs fail closed. MCP transport
+and protocol failures are normalized without exposing raw transport exception details.
+
 ## Acceptance evidence required for current provider hardening
 
 1. shared verification passes on the exact candidate SHA on Ubuntu and Windows;
