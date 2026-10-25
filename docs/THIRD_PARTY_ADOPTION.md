@@ -2,7 +2,9 @@
 
 Canonical rule: before implementing a new subsystem, inspect current official documentation and maintained upstream projects. Record **REUSE**, **ADAPT**, **CUSTOM (thin)** or **REJECT/CAUTION**. Prefer package dependencies/adapters over vendored source.
 
-The broad inventory remains `docs/REUSE_CATALOG_2026-08-18.md`. Newer intelligence decisions are binding in `docs/INTELLIGENCE_REUSE_2026-08-19.md`; expanded end-state scope is binding in `docs/FULL_PRODUCT_VISION_2026-08-19.md`.
+The broad inventory remains `docs/REUSE_CATALOG_2026-08-18.md`. The current deep candidate supplement is `docs/REUSE_CATALOG_2026-08-27_DEEP_AUDIT.md`. Newer intelligence decisions are binding in `docs/INTELLIGENCE_REUSE_2026-08-19.md`; expanded end-state scope is binding in `docs/FULL_PRODUCT_VISION_2026-08-19.md`.
+
+A deep-catalog entry is **not** an adoption decision. Before a candidate becomes a dependency/tool/binary/model, the owning lane must re-check exact current version/commit, code and model/data/binary licenses, provenance/checksum, Windows/package behavior, download/network/credential behavior, focused Nika benefit, tests and rollback/removal path. The current `V0.1_ONLY_UNTIL_RELEASE` sequencing remains binding: future-only implementation does not start merely because a component has been researched.
 
 ## Product boundary
 Nika owns stable task/agent/workspace identity, lifecycle, permissions, approvals, audit evidence, provider/tool/runtime/planner ports, accessibility semantics, plugin compatibility, Product Journey semantics and release/recovery policy. Mature generic engines remain replaceable components behind these boundaries.
