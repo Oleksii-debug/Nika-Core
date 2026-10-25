@@ -12,7 +12,14 @@ on:
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_m5_shell_required_assets.py"
       - "tests/test_qa_workflow_lineage.py"
+      - "tests/test_release_archive_windows_safety.py"
+      - "tests/test_release_manifest_integrity.py"
+      - "tests/test_release_special_bundle_entries.py"
+      - "tests/test_windows_packaging_ancestor_links.py"
+      - "tests/test_windows_packaging_input_safety.py"
+      - "tests/test_windows_packaging_output_safety.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
   push:
@@ -28,7 +35,14 @@ on:
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_m5_shell_required_assets.py"
       - "tests/test_qa_workflow_lineage.py"
+      - "tests/test_release_archive_windows_safety.py"
+      - "tests/test_release_manifest_integrity.py"
+      - "tests/test_release_special_bundle_entries.py"
+      - "tests/test_windows_packaging_ancestor_links.py"
+      - "tests/test_windows_packaging_input_safety.py"
+      - "tests/test_windows_packaging_output_safety.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
   workflow_dispatch:
@@ -64,11 +78,21 @@ jobs:
         id: release
         shell: pwsh
         run: |
-          $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
-          if (-not $version) { throw 'Could not resolve [project].version from pyproject.toml' }
+          $version = python -c "from pathlib import Path; from scripts.m11_release import project_version; print(project_version(Path('.')))"
+          if (-not $version) { throw 'Could not resolve validated [project].version from pyproject.toml' }
           "version=$version" >> $env:GITHUB_OUTPUT
-      - name: Run M11 M12 source regressions
-        run: python -m pytest tests/test_m11_m12_release.py tests/test_qa_workflow_lineage.py -q
+      - name: Run M11 release boundary regressions
+        run: >-
+          python -m pytest -q
+          tests/test_m11_m12_release.py
+          tests/test_m5_shell_required_assets.py
+          tests/test_qa_workflow_lineage.py
+          tests/test_release_archive_windows_safety.py
+          tests/test_release_manifest_integrity.py
+          tests/test_release_special_bundle_entries.py
+          tests/test_windows_packaging_ancestor_links.py
+          tests/test_windows_packaging_input_safety.py
+          tests/test_windows_packaging_output_safety.py
       - name: Build standalone one-dir Windows candidate, notices and manifest
         shell: pwsh
         run: >-
@@ -76,10 +100,14 @@ jobs:
           --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
       - name: Verify packaged WebView2 UI Automation and keyboard focus
         shell: pwsh
-        run: ./scripts/v01_autostart_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
+        env:
+          NIKA_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: ./scripts/v01_autostart_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle ("Nika Core " + $env:NIKA_RELEASE_VERSION)
       - name: Create distributable ZIP
         shell: pwsh
-        run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force
+        env:
+          NIKA_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ("./dist/NikaCore-" + $env:NIKA_RELEASE_VERSION + "-windows-x64.zip") -Force
       - name: Upload M11 release candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

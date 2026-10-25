@@ -127,6 +127,21 @@ def test_verifier_rejects_invalid_manifest_metadata(
     assert finding in verify_release_manifest(bundle, manifest)
 
 
+@pytest.mark.parametrize("alias", ["Release-Manifest.json", "RELEASE-MANIFEST.JSON"])
+def test_manifest_rejects_casefold_alias_of_reserved_root_file(
+    tmp_path: Path,
+    alias: str,
+) -> None:
+    bundle, _ = _bundle(tmp_path)
+    manifest = ReleaseManifest(
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+        files=(ReleaseFile(path=alias, size=1, sha256="0" * 64),),
+    )
+    assert verify_release_manifest(bundle, manifest) == ("manifest:path:0",)
+
+
 @pytest.mark.parametrize(
     "path",
     [
@@ -255,6 +270,32 @@ def _valid_release_zip(tmp_path: Path) -> tuple[Path, Path]:
     artifact = tmp_path / "NikaCore-1.0.0-windows-x64.zip"
     _write_release_zip(bundle, artifact)
     return bundle, artifact
+
+
+def test_nested_manifest_named_asset_is_manifest_bound(tmp_path: Path) -> None:
+    bundle = tmp_path / "Nika Core"
+    (bundle / "assets").mkdir(parents=True)
+    (bundle / "NikaCore.exe").write_bytes(b"exe")
+    nested = bundle / "assets" / "release-manifest.json"
+    nested.write_bytes(b"nested")
+
+    manifest = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+    )
+    assert {item.path for item in manifest.files} == {
+        "NikaCore.exe",
+        "assets/release-manifest.json",
+    }
+    write_release_manifest(bundle, manifest)
+    assert verify_release_manifest(bundle, manifest) == ()
+
+    nested.write_bytes(b"modified")
+    assert verify_release_manifest(bundle, manifest) == (
+        "size:assets/release-manifest.json",
+    )
 
 
 def test_release_archive_verifies_embedded_manifest(tmp_path: Path) -> None:

@@ -12,6 +12,7 @@ from typing import Any
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PRODUCT_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.!+_-]*$")
 _MANIFEST_VERSION = 2
 _RELEASE_MANIFEST_NAME = "release-manifest.json"
 _MAX_RELEASE_MANIFEST_BYTES = 4 * 1024 * 1024
@@ -135,15 +136,30 @@ def _safe_files(bundle_dir: Path) -> tuple[Path, ...]:
     if not root.is_dir():
         raise ValueError("bundle_dir must be a directory")
     files: list[Path] = []
-    for candidate in root.rglob("*"):
-        if candidate.is_symlink():
-            resolved = candidate.resolve(strict=True)
-            try:
-                resolved.relative_to(root)
-            except ValueError as exc:
-                raise ValueError(f"bundle symlink escapes release root: {candidate}") from exc
-        if candidate.is_file():
-            files.append(candidate)
+    directories = [root]
+    while directories:
+        # Explicit iteration must fail rather than certify an incomplete release.
+        for candidate in directories.pop().iterdir():
+            if getattr(candidate, "is_junction", lambda: False)():
+                raise ValueError(f"bundle junction is unsupported: {candidate}")
+            if candidate.is_symlink():
+                resolved = candidate.resolve(strict=True)
+                try:
+                    resolved.relative_to(root)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"bundle symlink escapes release root: {candidate}"
+                    ) from exc
+                if candidate.is_dir():
+                    raise ValueError(
+                        f"bundle directory symlink is unsupported: {candidate}"
+                    )
+            if candidate.is_file():
+                files.append(candidate)
+            elif candidate.is_dir():
+                directories.append(candidate)
+            else:
+                raise ValueError(f"unsupported release bundle entry: {candidate}")
     return tuple(sorted(files, key=lambda item: item.relative_to(root).as_posix()))
 
 
@@ -178,17 +194,40 @@ def _release_path_is_secret(value: object) -> bool:
 
 
 def _canonical_release_path(value: object) -> bool:
-    return _canonical_relative_path(value) and value != _RELEASE_MANIFEST_NAME
+    return (
+        _canonical_relative_path(value)
+        and isinstance(value, str)
+        and value.casefold() != _RELEASE_MANIFEST_NAME
+    )
+
+
+def require_product_version(
+    value: object,
+    *,
+    authority: str = "product version",
+) -> str:
+    """Return one canonical release-version token safe for manifests and artifact names."""
+
+    if type(value) is not str:
+        raise ValueError(f"{authority} must be exact text")
+    if not value or value != value.strip():
+        raise ValueError(f"{authority} must be non-empty canonical text")
+    if (
+        len(value) > _MAX_PRODUCT_VERSION_CHARS
+        or _PRODUCT_VERSION_RE.fullmatch(value) is None
+    ):
+        raise ValueError(
+            f"{authority} exceeds the bounded release-version text contract"
+        )
+    return value
 
 
 def _valid_product_version(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and len(value) <= _MAX_PRODUCT_VERSION_CHARS
-        and value == value.strip()
-        and not any(ord(character) < 32 for character in value)
-    )
+    try:
+        require_product_version(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
@@ -252,11 +291,7 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
         or manifest.product != manifest.product.strip()
     ):
         findings.append("manifest:product")
-    if (
-        not isinstance(manifest.version, str)
-        or not manifest.version
-        or manifest.version != manifest.version.strip()
-    ):
+    if not _valid_product_version(manifest.version):
         findings.append("manifest:product-version")
     if (
         not isinstance(manifest.source_sha, str)
@@ -314,7 +349,7 @@ def build_release_manifest(
             sha256=_sha256(path),
         )
         for path in _safe_files(root)
-        if path.name != _RELEASE_MANIFEST_NAME
+        if path.relative_to(root).as_posix() != _RELEASE_MANIFEST_NAME
     )
     if not entries:
         raise ValueError("release bundle is empty")
@@ -371,7 +406,7 @@ def verify_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> tupl
     actual_paths = {
         path.relative_to(root).as_posix(): path
         for path in _safe_files(root)
-        if path.name != _RELEASE_MANIFEST_NAME
+        if path.relative_to(root).as_posix() != _RELEASE_MANIFEST_NAME
     }
     findings: list[str] = []
     for relative_path in sorted(actual_paths):

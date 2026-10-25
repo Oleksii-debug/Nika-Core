@@ -200,3 +200,25 @@ def test_m12_workflow_keeps_signing_privilege_on_trusted_main_only() -> None:
         "--deny-self-hosted-runners",
     ):
         assert expected in workflow
+
+
+def test_attestation_canonical_version_rejects_unsafe_release_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import m12_attestation_evidence
+
+    project_root = tmp_path / "project"
+    scripts_dir = project_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    fake_script = scripts_dir / "m12_attestation_evidence.py"
+    fake_script.write_text("# fixture\n", encoding="utf-8")
+    (project_root / "pyproject.toml").write_text(
+        '[project]\nname = "nika-core"\n'
+        'version = "1.0.0$(Write-Host injected)"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m12_attestation_evidence, "__file__", str(fake_script))
+
+    with pytest.raises(RuntimeError, match="canonical project version is invalid"):
+        m12_attestation_evidence._canonical_product_version()
