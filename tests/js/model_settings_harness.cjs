@@ -1,0 +1,782 @@
+"use strict";
+const fs = require("node:fs");
+const assert = require("node:assert/strict");
+const tick = () => new Promise((resolve) => setImmediate(resolve));
+
+const listeners = {};
+let poll;
+class Element {}
+class HTMLElement extends Element {
+  constructor(id = "", tagName = "DIV") {
+    super();
+    this.id = id;
+    this.tagName = tagName;
+    this.type = "";
+    this.textContent = "";
+    this.dataset = {};
+    this.children = [];
+    this.attributes = {};
+    this.listeners = {};
+    this.hidden = false;
+    this.disabled = false;
+    this.checked = false;
+    this.value = "";
+    this.isContentEditable = false;
+  }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  addEventListener(name, fn) { this.listeners[name] = fn; }
+  replaceChildren(...items) { this.children = items; }
+  appendChild(item) { this.children.push(item); return item; }
+  append(...items) { this.children.push(...items); }
+  focus() { if (!this.disabled) document.activeElement = this; }
+  matches(selector) {
+    if (selector === "input, textarea, select") {
+      return ["INPUT", "TEXTAREA", "SELECT"].includes(this.tagName);
+    }
+    return false;
+  }
+  closest() { return this.dataset.actionId ? this : null; }
+}
+global.Element = Element;
+global.HTMLElement = HTMLElement;
+
+const elements = {};
+function element(id, tag = "DIV") {
+  if (!elements[id]) elements[id] = new HTMLElement(id, tag);
+  return elements[id];
+}
+global.document = {
+  activeElement: null,
+  hidden: false,
+  documentElement: element("documentElement", "HTML"),
+  getElementById: (id) => element(id),
+  createElement: (tag) => new HTMLElement("", String(tag).toUpperCase()),
+  createTextNode: (text) => Object.assign(new HTMLElement(), { textContent: text }),
+  addEventListener: (name, fn) => { listeners[name] = fn; },
+};
+global.window = {
+  addEventListener() {},
+  setInterval(fn) { poll = fn; return 1; },
+  clearInterval() {},
+};
+
+const tags = {
+  "model-route-kind": "SELECT",
+  "model-provider": "INPUT",
+  "model-name": "INPUT",
+  "model-base-url": "INPUT",
+  "model-credential-ref": "INPUT",
+  "model-private-data": "INPUT",
+  "model-timeout": "INPUT",
+  "model-save": "BUTTON",
+  "model-reload": "BUTTON",
+  "autostart-enabled": "INPUT",
+  "autostart-save": "BUTTON",
+  "command-input": "TEXTAREA",
+  "voice-model-source": "INPUT",
+  "voice-model-import": "BUTTON",
+  "speech-text": "TEXTAREA",
+  "speech-start": "BUTTON",
+  "speech-cancel": "BUTTON",
+  "source-root": "INPUT",
+  "source-a": "INPUT",
+  "source-b": "INPUT",
+  "keymap-json": "TEXTAREA",
+};
+for (const [id, tag] of Object.entries(tags)) {
+  elements[id] = new HTMLElement(id, tag);
+}
+element("model-private-data").type = "checkbox";
+element("autostart-enabled").type = "checkbox";
+element("model-save").dataset.actionId = "settings.model.configure";
+element("model-reload").dataset.actionId = "settings.model.refresh";
+element("model-reload").dataset.errorFocusTarget = "model-settings-heading";
+element("autostart-save").dataset.actionId = "settings.autostart.configure";
+element("voice-model-import").dataset.actionId = "voice.model.import";
+element("voice-model-import").dataset.errorFocusTarget = "voice-model-source";
+element("speech-start").dataset.actionId = "speech.start";
+element("speech-cancel").dataset.actionId = "speech.cancel";
+
+let currentVoiceModelSetup = {
+  schema: "nika.packaged-voice-model-setup:v1",
+  status: "missing",
+  generation: 0,
+  active: false,
+  installed: false,
+  can_import: true,
+  restart_required: false,
+  message: "Локальна голосова модель ще не встановлена.",
+};
+let currentSpeech = {
+  schema: "nika.packaged-speech-state:v1",
+  available: true,
+  status: "idle",
+  generation: 0,
+  active: false,
+  message: "Локальне озвучення Windows готове.",
+  accepted_characters: 0,
+  spoken_characters: 0,
+  chunk_count: 0,
+  pending_characters: 0,
+};
+let currentModel = { status: "missing", revision: 0 };
+let currentRecovery = {
+  schema_version: 1,
+  status: "ready",
+  auto_resume_count: 0,
+  manual_resume_count: 0,
+  approval_count: 0,
+  uncertain_count: 0,
+  blocked_count: 0,
+  resume_failed_count: 0,
+};
+let dispatchMode = "success";
+let failRead = false;
+let deferredStateRead = null;
+const calls = [];
+
+function safeModelSnapshot(payload) {
+  const providerKind = payload.route_kind === "deterministic"
+    ? null
+    : (payload.route_kind === "openai_compatible" ? "cloud" : "local");
+  return {
+    status: "ready",
+    revision: payload.revision + 1,
+    route_kind: payload.route_kind,
+    provider_id: payload.provider_id,
+    provider_kind: providerKind,
+    model: payload.model,
+    base_url: payload.base_url,
+    timeout_seconds: payload.timeout_seconds,
+    private_data_allowed: payload.route_kind === "openai_compatible"
+      ? payload.private_data_allowed
+      : true,
+    credential_configured: payload.credential_ref !== null,
+  };
+}
+
+function snapshot() {
+  return {
+    ok: true,
+    state: {
+      tasks: [],
+      agents: [],
+      workspaces: [],
+      autostart: { schema_version: 1, state: "disabled", can_change: true, message: "ok" },
+      startup_recovery: currentRecovery,
+      v01_sources: { status: "missing", revision: 0, root: "", source_a: "", source_b: "" },
+      v01_model_settings: currentModel,
+      voice_model_setup: currentVoiceModelSetup,
+      speech: currentSpeech,
+      product_project: null,
+      v01_team_task: null,
+    },
+  };
+}
+
+function holdNextStateRead(response = null) {
+  let release;
+  deferredStateRead = new Promise((resolve) => {
+    release = () => resolve(response ?? snapshot());
+  });
+  return release;
+}
+
+function holdNextStateReadFailure() {
+  let release;
+  deferredStateRead = new Promise((_resolve, reject) => {
+    release = () => reject(new Error("PRIVATE_STALE_STATE_CANARY"));
+  });
+  return release;
+}
+
+global.pywebview = { api: {
+  list_actions: async () => [{
+    action_id: "nav.tasks",
+    label: "Завдання",
+    category: "Навігація",
+    scope: "app",
+    binding: "Space+Control",
+    may_be_unbound: true,
+  }],
+  get_state: async () => {
+    if (failRead) throw new Error("PRIVATE_MODEL_CANARY");
+    if (deferredStateRead) {
+      const pending = deferredStateRead;
+      deferredStateRead = null;
+      return pending;
+    }
+    return snapshot();
+  },
+  dispatch: async (command) => {
+    calls.push(command);
+    if (dispatchMode === "disconnect") throw new Error("PRIVATE_MODEL_CANARY");
+    if (command.action_id === "voice.model.import") {
+      currentVoiceModelSetup = {
+        schema: "nika.packaged-voice-model-setup:v1",
+        status: "restart_required",
+        generation: currentVoiceModelSetup.generation + 1,
+        active: false,
+        installed: true,
+        can_import: false,
+        restart_required: true,
+        message: "Локальну голосову модель встановлено. Перезапустіть Nika Core.",
+      };
+      return {
+        status: "completed",
+        message: "Локальну голосову модель встановлено. Перезапустіть Nika Core.",
+        focus_id: "voice-heading",
+      };
+    }
+    if (command.action_id === "speech.start") {
+      currentSpeech = {
+        schema: "nika.packaged-speech-state:v1",
+        available: true,
+        status: "completed",
+        generation: currentSpeech.generation + 1,
+        active: false,
+        message: "Озвучення завершено.",
+        accepted_characters: command.payload.text.length,
+        spoken_characters: command.payload.text.length,
+        chunk_count: 1,
+        pending_characters: 0,
+      };
+      return { status: "completed", message: "Озвучення розпочато.", focus_id: "speech-cancel" };
+    }
+    if (command.action_id === "speech.cancel") {
+      currentSpeech = {
+        ...currentSpeech,
+        status: "cancelled",
+        active: false,
+        message: "Озвучення скасовано.",
+        pending_characters: 0,
+      };
+      return { status: "completed", message: "Скасування озвучення запитано.", focus_id: "speech-heading" };
+    }
+    if (command.action_id === "settings.model.refresh") {
+      return { status: "completed", message: "Збережені налаштування моделі перечитано.", focus_id: "model-route-kind" };
+    }
+    if (command.action_id === "settings.model.configure" && dispatchMode === "reject-provider") {
+      return { status: "rejected", message: "Перевірте постачальника моделі.", focus_id: "model-provider" };
+    }
+    if (command.action_id === "settings.model.configure") {
+      currentModel = safeModelSnapshot(command.payload);
+      return { status: "completed", message: "Модель збережено для нових завдань.", focus_id: "command-input" };
+    }
+    return { status: "completed", message: "ok" };
+  },
+  export_keymap: async () => ({ ok: true, data: "{}", message: "ok" }),
+  import_keymap: async () => ({ ok: true, message: "ok" }),
+} };
+
+eval(fs.readFileSync(process.argv[2], "utf8"));
+
+function fire(target, name) {
+  const fn = target.listeners[name];
+  if (fn) fn({ target });
+}
+function click(target) {
+  fire(target, "click");
+  if (listeners.click) listeners.click({ target });
+}
+const route = element("model-route-kind");
+const provider = element("model-provider");
+const model = element("model-name");
+const baseUrl = element("model-base-url");
+const credential = element("model-credential-ref");
+const privateData = element("model-private-data");
+const timeout = element("model-timeout");
+const save = element("model-save");
+const reload = element("model-reload");
+const status = element("model-settings-status");
+const voiceModelSource = element("voice-model-source");
+const voiceModelImport = element("voice-model-import");
+const speechText = element("speech-text");
+const speechStart = element("speech-start");
+const speechCancel = element("speech-cancel");
+
+(async () => {
+  await tick(); await tick(); await tick();
+  assert.equal(route.value, "ollama");
+  assert.equal(provider.value, "ollama");
+  assert.equal(provider.disabled, true);
+  assert.equal(credential.disabled, true);
+  assert.equal(baseUrl.value, "http://localhost:11434");
+  assert.equal(timeout.value, "60");
+  assert.equal(privateData.checked, true);
+  assert.match(status.textContent, /ще не вибрано/);
+  assert.match(element("recovery-status").textContent, /Перевірку відновлення завершено/);
+  assert.equal(element("recovery-summary").hidden, false);
+  assert.equal(element("recovery-auto-count").textContent, "0");
+  assert.equal(element("recovery-uncertain-count").textContent, "0");
+
+  assert.equal(voiceModelImport.disabled, false);
+  voiceModelSource.value = "C:\\models\\nika-whisper";
+  const voiceImportCallCount = calls.length;
+  click(voiceModelImport);
+  await tick(); await tick(); await tick();
+  assert.equal(calls.length, voiceImportCallCount + 1);
+  assert.equal(calls.at(-1).action_id, "voice.model.import");
+  assert.deepEqual(calls.at(-1).payload, { source_root: "C:\\models\\nika-whisper" });
+  assert.equal(voiceModelSource.value, "");
+  assert.match(element("voice-model-status").textContent, /Перезапустіть Nika Core/);
+  assert.equal(voiceModelImport.disabled, true);
+  assert.match(element("app-status").textContent, /Перезапустіть Nika Core/);
+
+  assert.equal(speechStart.disabled, false);
+  assert.equal(speechCancel.disabled, true);
+  speechText.value = "Озвучити цей явний тест.";
+  const speechCallCount = calls.length;
+  click(speechStart);
+  await tick(); await tick(); await tick();
+  assert.equal(calls.length, speechCallCount + 1);
+  assert.equal(calls.at(-1).action_id, "speech.start");
+  assert.deepEqual(calls.at(-1).payload, { text: "Озвучити цей явний тест." });
+  assert.equal(element("speech-status").textContent, "Озвучення завершено.");
+  assert.match(element("app-status").textContent, /Озвучення завершено/);
+  assert.equal(speechStart.disabled, false);
+  assert.equal(speechCancel.disabled, true);
+
+  currentSpeech = {
+    ...currentSpeech,
+    status: "running",
+    generation: currentSpeech.generation + 1,
+    active: true,
+    message: "Озвучення виконується.",
+    accepted_characters: 12,
+    spoken_characters: 0,
+    pending_characters: 12,
+  };
+  await poll();
+  assert.equal(speechStart.disabled, true);
+  assert.equal(speechCancel.disabled, false);
+  click(speechCancel);
+  await tick(); await tick(); await tick();
+  assert.equal(calls.at(-1).action_id, "speech.cancel");
+  assert.deepEqual(calls.at(-1).payload, {});
+  assert.equal(element("speech-status").textContent, "Озвучення скасовано.");
+  assert.equal(speechStart.disabled, false);
+  assert.equal(speechCancel.disabled, true);
+
+  const staleResponse = snapshot();
+  staleResponse.state.voice_model_setup = {
+    ...currentVoiceModelSetup,
+    status: "missing",
+    generation: currentVoiceModelSetup.generation,
+    active: false,
+    installed: false,
+    can_import: true,
+    restart_required: false,
+    message: "STALE_VOICE_STATE_MUST_NOT_WIN",
+  };
+  staleResponse.state.speech = {
+    ...currentSpeech,
+    status: "running",
+    generation: currentSpeech.generation + 1,
+    active: true,
+    message: "STALE_SPEECH_STATE_MUST_NOT_WIN",
+    accepted_characters: 17,
+    spoken_characters: 0,
+    pending_characters: 17,
+  };
+  let releaseStaleRead = holdNextStateRead(staleResponse);
+  const staleSuccessPoll = poll();
+  await tick();
+
+  currentVoiceModelSetup = {
+    ...currentVoiceModelSetup,
+    generation: currentVoiceModelSetup.generation + 1,
+    message: "LATEST_VOICE_STATE_MUST_WIN",
+  };
+  currentSpeech = {
+    ...currentSpeech,
+    status: "completed",
+    generation: currentSpeech.generation + 2,
+    active: false,
+    message: "LATEST_SPEECH_STATE_MUST_WIN",
+    pending_characters: 0,
+  };
+  await poll();
+  assert.equal(element("voice-model-status").textContent, "LATEST_VOICE_STATE_MUST_WIN");
+  assert.equal(element("speech-status").textContent, "LATEST_SPEECH_STATE_MUST_WIN");
+  assert.equal(document.documentElement.dataset.nikaReady, "true");
+
+  releaseStaleRead();
+  await staleSuccessPoll;
+  await tick();
+  assert.equal(element("voice-model-status").textContent, "LATEST_VOICE_STATE_MUST_WIN");
+  assert.equal(element("speech-status").textContent, "LATEST_SPEECH_STATE_MUST_WIN");
+  assert.equal(document.documentElement.dataset.nikaReady, "true");
+  assert.equal(
+    JSON.stringify(Object.values(elements).map((e) => e.textContent))
+      .includes("STALE_VOICE_STATE_MUST_NOT_WIN"),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(Object.values(elements).map((e) => e.textContent))
+      .includes("STALE_SPEECH_STATE_MUST_NOT_WIN"),
+    false,
+  );
+
+  const releaseStaleFailure = holdNextStateReadFailure();
+  const staleFailurePoll = poll();
+  await tick();
+  currentSpeech = {
+    ...currentSpeech,
+    generation: currentSpeech.generation + 1,
+    message: "LATEST_AFTER_STALE_FAILURE",
+  };
+  await poll();
+  assert.equal(element("speech-status").textContent, "LATEST_AFTER_STALE_FAILURE");
+  releaseStaleFailure();
+  await staleFailurePoll;
+  await tick();
+  assert.equal(element("speech-status").textContent, "LATEST_AFTER_STALE_FAILURE");
+  assert.equal(document.documentElement.dataset.nikaReady, "true");
+  assert.equal(
+    JSON.stringify(Object.values(elements).map((e) => e.textContent))
+      .includes("PRIVATE_STALE_STATE_CANARY"),
+    false,
+  );
+
+  model.focus();
+  const recoveryFocus = document.activeElement;
+  currentRecovery = {
+    ...currentRecovery,
+    status: "recovering",
+    auto_resume_count: 1,
+  };
+  await poll();
+  assert.equal(document.activeElement, recoveryFocus, "Recovery polling must not steal focus");
+  assert.match(element("recovery-status").textContent, /crash-left/);
+  assert.equal(element("recovery-auto-count").textContent, "1");
+
+  currentRecovery = {
+    ...currentRecovery,
+    status: "attention",
+    auto_resume_count: 0,
+    uncertain_count: 1,
+  };
+  await poll();
+  assert.equal(document.activeElement, recoveryFocus, "Attention state must not steal focus");
+  assert.match(element("recovery-status").textContent, /невизначена або заблокована/i);
+  assert.equal(element("recovery-uncertain-count").textContent, "1");
+  assert.match(element("app-status").textContent, /невизначена або заблокована/i);
+
+  currentRecovery = {
+    ...currentRecovery,
+    status: "ready",
+    uncertain_count: 0,
+  };
+  await poll();
+  assert.match(element("recovery-status").textContent, /Перевірку відновлення завершено/);
+
+  const nonEditable = element("tasks-heading");
+  let shortcutPrevented = false;
+  const beforeShortcut = calls.length;
+  listeners.keydown({
+    target: nonEditable, key: " ", ctrlKey: true, altKey: false, shiftKey: false, metaKey: false,
+    preventDefault() { shortcutPrevented = true; },
+  });
+  await tick(); await tick();
+  assert.equal(shortcutPrevented, true, "Ctrl+Space must be intercepted for a matched app shortcut");
+  assert.equal(calls.length, beforeShortcut + 1);
+  assert.equal(calls.at(-1).action_id, "nav.tasks");
+  assert.deepEqual(calls.at(-1).payload, {});
+
+  model.focus();
+  let prevented = false;
+  const beforeEditableShortcut = calls.length;
+  listeners.keydown({
+    target: model, key: " ", ctrlKey: true, altKey: false, shiftKey: false, metaKey: false,
+    preventDefault() { prevented = true; },
+  });
+  assert.equal(prevented, false, "Ctrl+Space in an editable model field must remain native");
+  assert.equal(calls.length, beforeEditableShortcut, "Editable Ctrl+Space must not dispatch an app action");
+
+  listeners.keydown({
+    target: model, key: "a", ctrlKey: true, altKey: false, shiftKey: false, metaKey: false,
+    preventDefault() { prevented = true; },
+  });
+  assert.equal(prevented, false, "Standard editing keys in model input must not be intercepted");
+
+  model.value = "qwen3:8b";
+  fire(model, "input");
+  const focusedBeforePoll = document.activeElement;
+  await poll();
+  assert.equal(model.value, "qwen3:8b", "Polling must preserve an unsaved model draft");
+  assert.equal(document.activeElement, focusedBeforePoll, "Polling must not steal focus");
+  assert.match(status.textContent, /ще не збережено/);
+
+  click(save);
+  await tick(); await tick(); await tick();
+  const localCall = calls.find((call) => call.action_id === "settings.model.configure");
+  assert.ok(localCall);
+  assert.deepEqual(localCall.payload, {
+    revision: 0,
+    route_kind: "ollama",
+    provider_id: "ollama",
+    model: "qwen3:8b",
+    base_url: "http://localhost:11434",
+    credential_ref: null,
+    private_data_allowed: true,
+    timeout_seconds: 60,
+  });
+  assert.equal(document.activeElement, element("command-input"));
+  assert.match(status.textContent, /ollama, qwen3:8b/);
+
+  let releaseStateRead = holdNextStateRead();
+  click(reload);
+  await tick();
+  assert.equal(
+    document.activeElement,
+    route,
+    "Refresh acknowledgement focus must land before the state refresh resolves",
+  );
+  assert.equal(route.disabled, false, "Only the acknowledged refresh target should be restored early");
+  assert.equal(model.disabled, true, "Unrelated model controls must remain pending-disabled");
+  assert.equal(baseUrl.disabled, true, "Unrelated model controls must remain pending-disabled");
+  assert.equal(provider.disabled, true, "Route-disabled provider must not be reopened by refresh focus");
+  assert.equal(save.disabled, true, "Mutation control must remain disabled until state refresh completes");
+  releaseStateRead();
+  await tick(); await tick();
+  assert.equal(model.disabled, false);
+  assert.equal(provider.disabled, true);
+
+  route.value = "deterministic";
+  fire(route, "change");
+  assert.equal(provider.disabled, true);
+  assert.equal(model.disabled, true);
+  assert.equal(baseUrl.disabled, true);
+  assert.equal(credential.disabled, true);
+  assert.equal(privateData.disabled, true);
+  assert.equal(provider.value, "");
+  assert.equal(model.value, "");
+  assert.equal(baseUrl.value, "");
+  assert.equal(credential.value, "");
+  click(save);
+  await tick(); await tick(); await tick();
+  const afterDeterministic = calls.filter((call) => call.action_id === "settings.model.configure");
+  assert.deepEqual(afterDeterministic[1].payload, {
+    revision: 1,
+    route_kind: "deterministic",
+    provider_id: null,
+    model: null,
+    base_url: null,
+    credential_ref: null,
+    private_data_allowed: true,
+    timeout_seconds: 60,
+  });
+  assert.match(status.textContent, /без LLM/);
+
+  route.value = "foundry_local";
+  fire(route, "change");
+  assert.equal(provider.disabled, true);
+  assert.equal(model.disabled, false);
+  assert.equal(baseUrl.disabled, true);
+  assert.equal(credential.disabled, true);
+  assert.equal(privateData.disabled, true);
+  assert.equal(provider.value, "foundry-local");
+  assert.equal(baseUrl.value, "");
+  assert.equal(credential.value, "");
+  model.value = "phi-4-mini";
+  fire(model, "input");
+  click(save);
+  await tick(); await tick(); await tick();
+  const afterFoundry = calls.filter((call) => call.action_id === "settings.model.configure");
+  assert.deepEqual(afterFoundry[2].payload, {
+    revision: 2,
+    route_kind: "foundry_local",
+    provider_id: "foundry-local",
+    model: "phi-4-mini",
+    base_url: null,
+    credential_ref: null,
+    private_data_allowed: true,
+    timeout_seconds: 60,
+  });
+  assert.match(status.textContent, /Foundry Local, phi-4-mini/);
+
+  route.value = "openai_compatible";
+  fire(route, "change");
+  assert.equal(provider.disabled, false);
+  assert.equal(credential.disabled, false);
+  assert.equal(provider.value, "");
+  assert.equal(baseUrl.value, "");
+  provider.value = "lab-api";
+  fire(provider, "input");
+  model.value = "model-x";
+  fire(model, "input");
+  baseUrl.value = "https://api.example.test/v1";
+  fire(baseUrl, "input");
+  credential.value = "env:NIKA_TEST_API_KEY";
+  fire(credential, "input");
+  privateData.checked = false;
+  fire(privateData, "change");
+  timeout.value = "45";
+  fire(timeout, "input");
+  click(save);
+  await tick(); await tick(); await tick();
+
+  const apiCalls = calls.filter((call) => call.action_id === "settings.model.configure");
+  assert.equal(apiCalls.length, 4);
+  assert.deepEqual(apiCalls[3].payload, {
+    revision: 3,
+    route_kind: "openai_compatible",
+    provider_id: "lab-api",
+    model: "model-x",
+    base_url: "https://api.example.test/v1",
+    credential_ref: "env:NIKA_TEST_API_KEY",
+    private_data_allowed: false,
+    timeout_seconds: 45,
+  });
+  assert.equal(credential.value, "", "Credential reference must not be reflected from persisted snapshot");
+  assert.match(status.textContent, /навмисно не показується/);
+  assert.equal(JSON.stringify(currentModel).includes("NIKA_TEST_API_KEY"), false);
+
+  credential.value = "env:NIKA_TEST_API_KEY";
+  fire(credential, "input");
+  route.value = "deterministic";
+  fire(route, "change");
+  assert.equal(provider.value, "", "API provider identity must not survive a deterministic switch");
+  assert.equal(model.value, "", "API model identity must not survive a deterministic switch");
+  assert.equal(baseUrl.value, "", "API endpoint must not survive a deterministic switch");
+  assert.equal(credential.value, "", "API credential reference must not survive a deterministic switch");
+
+  route.value = "openai_compatible";
+  fire(route, "change");
+  provider.value = "lab-api";
+  fire(provider, "input");
+  model.value = "model-x";
+  fire(model, "input");
+  baseUrl.value = "https://api.example.test/v1";
+  fire(baseUrl, "input");
+  credential.value = "env:NIKA_TEST_API_KEY";
+  fire(credential, "input");
+  privateData.checked = false;
+  fire(privateData, "change");
+  timeout.value = "45";
+  fire(timeout, "input");
+  dispatchMode = "reject-provider";
+  releaseStateRead = holdNextStateRead();
+  click(save);
+  await tick();
+  assert.equal(
+    document.activeElement,
+    provider,
+    "Rejected Configure focus must land before the state refresh resolves",
+  );
+  assert.equal(provider.disabled, false, "The acknowledged correction target must be focusable");
+  assert.equal(route.disabled, true, "Unrelated model controls must remain pending-disabled");
+  assert.equal(model.disabled, true, "Unrelated model controls must remain pending-disabled");
+  assert.equal(save.disabled, true, "Rejected write must not reopen Save before state refresh");
+  releaseStateRead();
+  await tick(); await tick();
+  dispatchMode = "success";
+  assert.equal(provider.disabled, false);
+  assert.equal(credential.value, "env:NIKA_TEST_API_KEY", "Rejected draft must survive state refresh");
+
+  route.value = "ollama";
+  fire(route, "change");
+  model.value = "qwen3:8b";
+  fire(model, "input");
+  baseUrl.value = "https://api.example.test/v1";
+  fire(baseUrl, "input");
+  assert.equal(provider.disabled, true, "Ollama provider identity is route-owned and disabled");
+  dispatchMode = "reject-provider";
+  releaseStateRead = holdNextStateRead();
+  model.focus();
+  click(save);
+  await tick();
+  assert.equal(
+    document.activeElement,
+    model,
+    "A rejected local-route save must not temporarily enable its disabled provider target",
+  );
+  releaseStateRead();
+  await tick(); await tick();
+  dispatchMode = "success";
+  assert.equal(provider.disabled, true);
+  assert.equal(
+    document.activeElement,
+    route,
+    "After refresh, an unfocusable backend correction target must fall back to the enabled route selector",
+  );
+
+  model.focus();
+  model.value = "unsaved-model";
+  fire(model, "input");
+  const dirtyFocus = document.activeElement;
+  await poll();
+  assert.equal(model.value, "unsaved-model");
+  assert.equal(document.activeElement, dirtyFocus);
+
+  currentModel = { ...currentModel, revision: currentModel.revision + 1, model: "external-model" };
+  await poll();
+  assert.equal(save.disabled, true, "Concurrent revision change must block stale save");
+  assert.match(status.textContent, /іншому вікні/);
+  click(reload);
+  await tick(); await tick(); await tick();
+  assert.equal(model.value, "external-model");
+  assert.equal(save.disabled, false);
+
+  currentModel = { status: "invalid" };
+  await poll();
+  assert.equal(save.disabled, true);
+  assert.match(status.textContent, /пошкоджені або несумісні/);
+
+  currentModel = {
+    status: "ready", revision: 9, route_kind: "ollama", provider_id: "ollama",
+    provider_kind: "local", model: "safe-model", base_url: "http://localhost:11434",
+    timeout_seconds: 60, private_data_allowed: true, credential_configured: false,
+  };
+  failRead = false;
+  await poll();
+  model.focus();
+  const beforeReadFailure = document.activeElement;
+  failRead = true;
+  await poll();
+  assert.equal(document.activeElement, beforeReadFailure, "Read failure must not move focus");
+  assert.equal(save.disabled, true);
+  assert.equal(JSON.stringify(Object.values(elements).map((e) => e.textContent)).includes("PRIVATE_MODEL_CANARY"), false);
+
+  failRead = false;
+  await poll();
+
+  currentRecovery = {
+    schema_version: 1,
+    status: "unknown",
+    auto_resume_count: 0,
+    manual_resume_count: 0,
+    approval_count: 0,
+    uncertain_count: 0,
+    blocked_count: 0,
+    resume_failed_count: 0,
+  };
+  const beforeInvalidRecovery = document.activeElement;
+  await poll();
+  assert.equal(document.activeElement, beforeInvalidRecovery, "Invalid recovery state must not steal focus");
+  assert.match(element("recovery-status").textContent, /недоступний або несумісний/);
+  currentRecovery = {
+    schema_version: 1,
+    status: "ready",
+    auto_resume_count: 0,
+    manual_resume_count: 0,
+    approval_count: 0,
+    uncertain_count: 0,
+    blocked_count: 0,
+    resume_failed_count: 0,
+  };
+  await poll();
+
+  model.value = "no-blind-retry";
+  fire(model, "input");
+  dispatchMode = "disconnect";
+  const beforeDisconnect = calls.length;
+  click(save);
+  await tick(); await tick(); await tick();
+  assert.equal(calls.length, beforeDisconnect + 1, "Unknown write outcome must not be retried");
+  assert.match(element("app-status").textContent, /Немає підтвердження зміни моделі/);
+  assert.equal(JSON.stringify(Object.values(elements).map((e) => e.textContent)).includes("PRIVATE_MODEL_CANARY"), false);
+
+  console.log("PASS: model settings + startup recovery renderer, Ctrl+Space keymap, draft/race, keyboard focus, safe credential reference, no blind retry");
+})().catch((error) => { console.error(error); process.exitCode = 1; });
