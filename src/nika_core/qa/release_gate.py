@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +14,20 @@ class ReleaseGateEvidence:
     packaged_uia_passed: bool = False
     human_tested: bool = False
     nvda_verified: bool = False
+
+    def __post_init__(self) -> None:
+        _require_exact_evidence(self)
+
+
+def _require_exact_evidence(evidence: ReleaseGateEvidence) -> None:
+    # These values authorize release claims. Dataclass type hints alone do not
+    # reject truthy strings/integers, and frozen DTOs can be mutated with
+    # object.__setattr__ after construction.
+    if type(evidence) is not ReleaseGateEvidence:
+        raise TypeError("release gate evidence must be ReleaseGateEvidence")
+    for item in fields(ReleaseGateEvidence):
+        if type(getattr(evidence, item.name)) is not bool:
+            raise TypeError(f"release gate evidence {item.name} must be an exact bool")
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,6 +50,7 @@ _AUTOMATED_REQUIREMENTS = (
 
 
 def evaluate_release_gate(evidence: ReleaseGateEvidence) -> ReleaseGateResult:
+    _require_exact_evidence(evidence)
     automated_blockers = tuple(
         message for field, message in _AUTOMATED_REQUIREMENTS if not getattr(evidence, field)
     )

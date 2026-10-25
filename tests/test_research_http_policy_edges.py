@@ -9,6 +9,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.research import (
     ContentAddressedBlobStore,
     FreshnessState,
+    HttpFetchPolicy,
     HttpResearchService,
     HttpxResearchFetcher,
     LocalCorpusService,
@@ -54,6 +55,24 @@ def test_malformed_or_disallowed_urls_are_classified_not_raised(url: str) -> Non
     assert result.error_code == "network_policy"
     assert requests == []
 
+
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "connect_timeout_seconds",
+        "read_timeout_seconds",
+        "write_timeout_seconds",
+        "pool_timeout_seconds",
+        "backoff_base_seconds",
+        "max_backoff_seconds",
+    ],
+)
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_http_policy_rejects_nonfinite_timing(field: str, value: float) -> None:
+    with pytest.raises(ValueError, match="finite|positive"):
+        HttpFetchPolicy(**{field: value})
 
 def test_failure_after_prior_success_marks_source_stale(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")

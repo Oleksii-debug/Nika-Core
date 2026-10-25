@@ -1,0 +1,254 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.research.knowledge import (
+    KnowledgeCorpus,
+    KnowledgeIngestRequest,
+    KnowledgeVisibility,
+    RetrievalScope,
+)
+
+_TIMESTAMP = "2026-08-23T00:00:00+00:00"
+
+
+def _make_store(tmp_path: Path) -> SQLiteStore:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    with store.connection() as conn:
+        conn.executemany(
+            """INSERT INTO research_workspaces(workspace_id, name, created_at, updated_at)
+            VALUES (?, ?, ?, ?)""",
+            (
+                ("ws-a", "A", _TIMESTAMP, _TIMESTAMP),
+                ("ws-b", "B", _TIMESTAMP, _TIMESTAMP),
+            ),
+        )
+        conn.executemany(
+            """INSERT INTO research_sources(
+                source_id, workspace_id, kind, locator, created_at, updated_at
+            ) VALUES (?, ?, 'local_file', ?, ?, ?)""",
+            (
+                ("fixture-source:ws-a", "ws-a", "approved:ws-a", _TIMESTAMP, _TIMESTAMP),
+                ("fixture-source:ws-b", "ws-b", "approved:ws-b", _TIMESTAMP, _TIMESTAMP),
+            ),
+        )
+    return store
+
+
+def _request(
+    *,
+    workspace_id: str,
+    artifact_key: str,
+    text: str,
+    visibility: KnowledgeVisibility = KnowledgeVisibility.WORKSPACE,
+    allowed_principals: tuple[str, ...] = (),
+) -> KnowledgeIngestRequest:
+    return KnowledgeIngestRequest(
+        workspace_id=workspace_id,
+        artifact_key=artifact_key,
+        title=artifact_key,
+        media_type="text/plain",
+        text=text,
+        source_locator=f"approved:{workspace_id}",
+        parser_name="text",
+        parser_version="1",
+        approved_by="approval:owner",
+        source_id=f"fixture-source:{workspace_id}",
+        visibility=visibility,
+        allowed_principals=allowed_principals,
+    )
+
+
+def _scope(
+    principal_id: str,
+    *workspace_ids: str,
+    allowed_artifact_keys: tuple[str, ...] | None = None,
+) -> RetrievalScope:
+    return RetrievalScope(
+        principal_id=principal_id,
+        workspace_ids=workspace_ids,
+        allowed_artifact_keys=allowed_artifact_keys,
+    )
+
+
+def _seed_balanced_pair(corpus: KnowledgeCorpus) -> None:
+    corpus.ingest(
+        _request(
+            workspace_id="ws-a",
+            artifact_key="a-alpha-heavy",
+            text=" ".join(["alpha"] * 10 + ["beta"]),
+        )
+    )
+    corpus.ingest(
+        _request(
+            workspace_id="ws-a",
+            artifact_key="b-beta-heavy",
+            text=" ".join(["alpha"] + ["beta"] * 10),
+        )
+    )
+
+
+def _ranking(corpus: KnowledgeCorpus, principal_id: str) -> list[tuple[str, float]]:
+    hits = corpus.search(_scope(principal_id, "ws-a"), "alpha beta")
+    return [(hit.provenance.artifact_key, hit.rank) for hit in hits]
+
+
+def _assert_same_ranking(
+    actual: list[tuple[str, float]],
+    expected: list[tuple[str, float]],
+) -> None:
+    assert [item[0] for item in actual] == [item[0] for item in expected]
+    assert [item[1] for item in actual] == pytest.approx(
+        [item[1] for item in expected],
+        rel=0.0,
+        abs=1e-15,
+    )
+
+
+def test_other_workspace_cannot_change_authorized_bm25_ranking(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    corpus = KnowledgeCorpus(store)
+    _seed_balanced_pair(corpus)
+    baseline = _ranking(corpus, "user:reader")
+
+    assert [item[0] for item in baseline] == ["a-alpha-heavy", "b-beta-heavy"]
+    assert baseline[0][1] == pytest.approx(baseline[1][1], rel=0.0, abs=1e-15)
+
+    for index in range(100):
+        corpus.ingest(
+            _request(
+                workspace_id="ws-b",
+                artifact_key=f"private-workspace-{index:03d}",
+                text=f"alpha inaccessible filler {index}",
+            )
+        )
+
+    _assert_same_ranking(_ranking(corpus, "user:reader"), baseline)
+
+
+def test_restricted_documents_cannot_change_unauthorized_bm25_ranking(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    corpus = KnowledgeCorpus(store)
+    _seed_balanced_pair(corpus)
+    baseline = _ranking(corpus, "user:reader")
+
+    for index in range(100):
+        corpus.ingest(
+            _request(
+                workspace_id="ws-a",
+                artifact_key=f"alice-only-{index:03d}",
+                text=f"alpha restrictedonly filler {index}",
+                visibility=KnowledgeVisibility.RESTRICTED,
+                allowed_principals=("user:alice",),
+            )
+        )
+
+    _assert_same_ranking(_ranking(corpus, "user:reader"), baseline)
+    assert corpus.search(_scope("user:reader", "ws-a"), "restrictedonly") == []
+    alice_hits = corpus.search(
+        _scope("user:alice", "ws-a"),
+        "restrictedonly",
+        limit=100,
+    )
+    assert len(alice_hits) == 100
+    assert all(hit.provenance.artifact_key.startswith("alice-only-") for hit in alice_hits)
+
+
+def test_exact_authorized_artifact_scope_is_applied_before_ranking_and_limit(
+    tmp_path: Path,
+) -> None:
+    store = _make_store(tmp_path)
+    corpus = KnowledgeCorpus(store)
+    corpus.ingest(
+        _request(
+            workspace_id="ws-a",
+            artifact_key="allowed-document",
+            text="needle authorized result",
+        )
+    )
+    corpus.ingest(
+        _request(
+            workspace_id="ws-a",
+            artifact_key="denied-document",
+            text=" ".join(["needle"] * 40 + ["DENIED_CANARY"]),
+        )
+    )
+
+    unrestricted = corpus.search(_scope("user:reader", "ws-a"), "needle", limit=1)
+    assert unrestricted[0].provenance.artifact_key == "denied-document"
+
+    authorized = corpus.search(
+        _scope(
+            "user:reader",
+            "ws-a",
+            allowed_artifact_keys=("allowed-document",),
+        ),
+        "needle",
+        limit=1,
+    )
+
+    assert [hit.provenance.artifact_key for hit in authorized] == ["allowed-document"]
+    assert all("DENIED_CANARY" not in hit.text for hit in authorized)
+    assert all("DENIED_CANARY" not in hit.snippet for hit in authorized)
+
+
+def test_exact_authorized_artifact_scope_intersects_incumbent_acl(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    corpus = KnowledgeCorpus(store)
+    corpus.ingest(
+        _request(
+            workspace_id="ws-a",
+            artifact_key="alice-only",
+            text="needle restricted canary",
+            visibility=KnowledgeVisibility.RESTRICTED,
+            allowed_principals=("user:alice",),
+        )
+    )
+
+    reader_scope = _scope(
+        "user:reader",
+        "ws-a",
+        allowed_artifact_keys=("alice-only",),
+    )
+    assert corpus.search(reader_scope, "needle") == []
+
+    alice_scope = _scope(
+        "user:alice",
+        "ws-a",
+        allowed_artifact_keys=("alice-only",),
+    )
+    assert [hit.provenance.artifact_key for hit in corpus.search(alice_scope, "needle")] == [
+        "alice-only"
+    ]
+
+
+def test_next_search_rebuilds_exact_artifact_scope_after_revocation(tmp_path: Path) -> None:
+    store = _make_store(tmp_path)
+    corpus = KnowledgeCorpus(store)
+    corpus.ingest(
+        _request(
+            workspace_id="ws-a",
+            artifact_key="revocable-document",
+            text="needle revocable content",
+        )
+    )
+
+    granted_scope = _scope(
+        "user:reader",
+        "ws-a",
+        allowed_artifact_keys=("revocable-document",),
+    )
+    assert corpus.search(granted_scope, "needle", limit=1)
+
+    revoked_scope = _scope(
+        "user:reader",
+        "ws-a",
+        allowed_artifact_keys=(),
+    )
+    assert corpus.search(revoked_scope, "needle", limit=1) == []

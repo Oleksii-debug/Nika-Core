@@ -11,6 +11,7 @@ from nika_core.product_factory_coding_worker_adapter import (
 )
 from nika_core.product_factory_coordinator import ProductFactoryCoordinator, WorkState
 from nika_core.product_factory_orchestration import (
+    OwnershipLease,
     ProductComponent,
     ProductRepositoryGraph,
     RepositoryRef,
@@ -36,6 +37,7 @@ SHA_B = "b" * 40
 DIGEST = "d" * 64
 TREE = "tree-v1"
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
+PRODUCER = "worker:core-builder"
 
 
 def _graph() -> ProductRepositoryGraph:
@@ -76,11 +78,23 @@ def _coordinator() -> ProductFactoryCoordinator:
     return coordinator
 
 
-def _context() -> CodingWorkerDispatchContext:
+def _context(
+    *,
+    worker_id: str = PRODUCER,
+    workspace_lease_id: str = "lease-1",
+    ownership_component_ids: tuple[str, ...] = ("core",),
+    ownership_paths: tuple[str, ...] = ("src/core",),
+) -> CodingWorkerDispatchContext:
     return CodingWorkerDispatchContext(
         repository_tree_digest=TREE,
+        ownership_lease=OwnershipLease(
+            lease_id="ownership-1",
+            worker_id=worker_id,
+            component_ids=ownership_component_ids,
+            allowed_paths=ownership_paths,
+        ),
         lease=WorkspaceLease(
-            lease_id="lease-1",
+            lease_id=workspace_lease_id,
             workspace_root=Path("worker-root"),
             isolation_class=IsolationClass.PROCESS_CONTAINED,
             expires_at="2026-08-21T00:00:00Z",
@@ -96,12 +110,13 @@ def _run(coroutine):
 
 
 class FakeContexts:
-    def __init__(self) -> None:
+    def __init__(self, context: CodingWorkerDispatchContext | None = None) -> None:
         self.requests = []
+        self.context = context or _context()
 
     async def context_for(self, request):
         self.requests.append(request)
-        return _context()
+        return self.context
 
 
 class FakeEvidence:
@@ -176,6 +191,7 @@ def test_dispatch_maps_component_scope_to_public_coding_job_and_exact_evidence()
     assert envelope.result_sha == SHA_B
     assert envelope.diff_digest == DIGEST
     assert envelope.coding_result.test_evidence[0].exit_code == 0
+    assert envelope.producer_actor_id == PRODUCER
 
 
 def test_run_component_hands_success_to_independent_review_without_auto_accepting() -> None:
@@ -236,6 +252,7 @@ def test_recovery_rebuilds_same_bounded_job_and_returns_exact_envelope() -> None
     assert recovered_state == state
     assert envelope.work_id == request.work_id
     assert envelope.result_sha == SHA_B
+    assert envelope.producer_actor_id == PRODUCER
 
 
 def test_stale_evidence_is_rejected_before_it_can_reach_reconciliation() -> None:
@@ -304,3 +321,31 @@ def test_worker_result_for_wrong_job_id_is_rejected() -> None:
 
     with pytest.raises(CodingWorkerAdapterError, match="job id"):
         _run(adapter.dispatch(request))
+
+
+def test_producer_identity_comes_from_ownership_actor_not_workspace_lease() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    context = _context(worker_id="worker:trusted-builder", workspace_lease_id="workspace-other")
+    adapter = CodingWorkerComponentAdapter(FakeWorker(), FakeContexts(context), FakeEvidence())
+
+    envelope = _run(adapter.dispatch(request))
+
+    assert envelope.producer_actor_id == "worker:trusted-builder"
+    assert envelope.producer_actor_id != "workspace-lease:workspace-other"
+
+
+def test_dispatch_rejects_ownership_assignment_for_different_component() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    context = _context(
+        ownership_component_ids=("ui",),
+        ownership_paths=("src/ui",),
+    )
+    worker = FakeWorker()
+    adapter = CodingWorkerComponentAdapter(worker, FakeContexts(context), FakeEvidence())
+
+    with pytest.raises(CodingWorkerAdapterError, match="does not include active component"):
+        _run(adapter.dispatch(request))
+
+    assert worker.executed == []

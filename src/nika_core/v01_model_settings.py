@@ -4,7 +4,9 @@ import hashlib
 import math
 import re
 import sqlite3
+import unicodedata
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -28,21 +30,33 @@ from nika_core.model_gateway.api_route import (
     CredentialResolverPort,
     EnvironmentCredentialResolver,
 )
-from nika_core.model_gateway.contracts import PrivacyClass, ProviderKind
+from nika_core.model_gateway.contracts import (
+    ModelRequest,
+    PrivacyClass,
+    ProviderCapabilities,
+    ProviderKind,
+)
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 from nika_core.model_gateway.gateway import ModelGateway, model_identity_fingerprint
 from nika_core.model_gateway.providers import OllamaProvider
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.multi_agent.supervisor import MultiAgentSupervisor
+from nika_core.security.model_cloud_authority import (
+    StandingPermissionCloudEffectAuthorizer,
+    StandingPermissionExecutionAuthority,
+)
 from nika_core.ui.bridge_models import UIResult
+from nika_core.v01_settings_json import bounded_stored_utf8, load_persisted_json_object
 
 MAX_MODEL_SETTINGS_REVISION = (1 << 53) - 1
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
-_SCHEMA_VERSION = 1
+_MAX_STORED_SELECTION_BYTES = 64 * 1024
+_SCHEMA_VERSION = 3
 _TASK_SELECTION_FIELD = "v01_model_selection"
 _SELECTION_ID = re.compile(r"[0-9a-f]{64}")
 _ENV_CREDENTIAL_REF = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*")
+_FORBIDDEN_IDENTITY_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 _MIGRATIONS = {
     1: (
         (
@@ -60,11 +74,88 @@ _MIGRATIONS = {
             "selection_json TEXT NOT NULL, created_at TEXT NOT NULL)"
         ),
     ),
+    2: (
+        (
+            "CREATE TABLE v01_model_promotions ("
+            "decision_sha256 TEXT PRIMARY KEY, "
+            "binding_sha256 TEXT NOT NULL, "
+            "base_artifact_sha256 TEXT NOT NULL, "
+            "base_descriptor_digest TEXT NOT NULL, "
+            "challenger_artifact_sha256 TEXT NOT NULL, "
+            "challenger_descriptor_digest TEXT NOT NULL, "
+            "previous_selection_id TEXT NOT NULL, "
+            "activated_selection_id TEXT NOT NULL, "
+            "activated_revision INTEGER NOT NULL CHECK(activated_revision > 0), "
+            "rollback_revision INTEGER, "
+            "CHECK(rollback_revision IS NULL OR rollback_revision > activated_revision))"
+        ),
+    ),
+    3: (
+        "ALTER TABLE v01_model_promotions ADD COLUMN activation_request_sha256 TEXT",
+        "ALTER TABLE v01_model_promotions ADD COLUMN activation_attestation_sha256 TEXT",
+    ),
 }
 
 
 class ModelSetupError(ValueError):
     """Fixed user-safe model configuration failure without provider diagnostics."""
+
+
+@dataclass(frozen=True, slots=True)
+class ModelPromotionReceipt:
+    """Durable, secret-free evidence for one default-model promotion effect."""
+
+    decision_sha256: str
+    binding_sha256: str
+    base_artifact_sha256: str
+    base_descriptor_digest: str
+    challenger_artifact_sha256: str
+    challenger_descriptor_digest: str
+    activation_request_sha256: str | None
+    activation_attestation_sha256: str | None
+    previous_selection_id: str
+    activated_selection_id: str
+    activated_revision: int
+    rollback_revision: int | None = None
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.decision_sha256, "decision_sha256"),
+            (self.binding_sha256, "binding_sha256"),
+            (self.base_artifact_sha256, "base_artifact_sha256"),
+            (self.base_descriptor_digest, "base_descriptor_digest"),
+            (self.challenger_artifact_sha256, "challenger_artifact_sha256"),
+            (self.challenger_descriptor_digest, "challenger_descriptor_digest"),
+            (self.previous_selection_id, "previous_selection_id"),
+            (self.activated_selection_id, "activated_selection_id"),
+        ):
+            if type(value) is not str or _SELECTION_ID.fullmatch(value) is None:
+                raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+        activation_proof = (
+            self.activation_request_sha256,
+            self.activation_attestation_sha256,
+        )
+        if (activation_proof[0] is None) != (activation_proof[1] is None):
+            raise ValueError("activation attestation evidence must be complete")
+        for value, name in (
+            (self.activation_request_sha256, "activation_request_sha256"),
+            (self.activation_attestation_sha256, "activation_attestation_sha256"),
+        ):
+            if value is not None and (
+                type(value) is not str or _SELECTION_ID.fullmatch(value) is None
+            ):
+                raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+        if (
+            type(self.activated_revision) is not int
+            or not 1 <= self.activated_revision <= MAX_MODEL_SETTINGS_REVISION
+        ):
+            raise ValueError("activated_revision is invalid")
+        if self.rollback_revision is not None and (
+            type(self.rollback_revision) is not int
+            or self.rollback_revision <= self.activated_revision
+            or self.rollback_revision > MAX_MODEL_SETTINGS_REVISION
+        ):
+            raise ValueError("rollback_revision is invalid")
 
 
 class ModelSelection(BaseModel):
@@ -98,7 +189,14 @@ class ModelSelection(BaseModel):
     def clean_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        if value != value.strip() or not value or any(ord(char) < 32 for char in value):
+        if (
+            value != value.strip()
+            or not value
+            or any(
+                unicodedata.category(char) in _FORBIDDEN_IDENTITY_CATEGORIES
+                for char in value
+            )
+        ):
             raise ValueError("invalid model route text")
         return value
 
@@ -218,8 +316,13 @@ class ModelSelection(BaseModel):
     @classmethod
     def from_stored(cls, value: str) -> ModelSelection:
         try:
-            return cls.model_validate_json(value)
-        except (TypeError, ValueError, ValidationError) as exc:
+            if type(value) is not str:
+                raise TypeError("stored model selection must be text")
+            decoded = load_persisted_json_object(
+                value, max_bytes=_MAX_STORED_SELECTION_BYTES
+            )
+            return cls.model_validate(decoded)
+        except (TypeError, ValueError, ValidationError, RecursionError) as exc:
             raise ModelSetupError(
                 "Збережені налаштування моделі пошкоджені або несумісні."
             ) from exc
@@ -286,7 +389,13 @@ class V01ModelSettings:
         if row is None or not isinstance(row["selection_json"], str):
             raise ModelSetupError("Збережену модель завдання не знайдено.")
         body = row["selection_json"]
-        if hashlib.sha256(body.encode("utf-8")).hexdigest() != selection_id:
+        try:
+            raw = bounded_stored_utf8(body, max_bytes=_MAX_STORED_SELECTION_BYTES)
+        except (TypeError, ValueError) as exc:
+            raise ModelSetupError(
+                "Збережену модель завдання не вдалося перевірити."
+            ) from exc
+        if hashlib.sha256(raw).hexdigest() != selection_id:
             raise ModelSetupError("Збережену модель завдання не вдалося перевірити.")
         return ModelSelection.from_stored(body)
 
@@ -296,6 +405,476 @@ class V01ModelSettings:
         if row is None:
             raise ModelSetupError("Спочатку виберіть режим та, якщо потрібно, модель.")
         return ModelSelection.from_stored(row["selection_json"])
+
+    @staticmethod
+    def _promotion_receipt(row: sqlite3.Row) -> ModelPromotionReceipt:
+        try:
+            return ModelPromotionReceipt(
+                decision_sha256=row["decision_sha256"],
+                binding_sha256=row["binding_sha256"],
+                base_artifact_sha256=row["base_artifact_sha256"],
+                base_descriptor_digest=row["base_descriptor_digest"],
+                challenger_artifact_sha256=row["challenger_artifact_sha256"],
+                challenger_descriptor_digest=row["challenger_descriptor_digest"],
+                activation_request_sha256=row["activation_request_sha256"],
+                activation_attestation_sha256=row["activation_attestation_sha256"],
+                previous_selection_id=row["previous_selection_id"],
+                activated_selection_id=row["activated_selection_id"],
+                activated_revision=row["activated_revision"],
+                rollback_revision=row["rollback_revision"],
+            )
+        except (IndexError, TypeError, ValueError) as exc:
+            raise ModelSetupError(
+                "Збережений запис просування моделі пошкоджений."
+            ) from exc
+
+    @staticmethod
+    def _require_promotion_digest(value: object, *, field: str) -> str:
+        if type(value) is not str or _SELECTION_ID.fullmatch(value) is None:
+            raise ModelSetupError(f"{field} має бути точним SHA-256.")
+        return value
+
+    def promotion_receipt(
+        self,
+        decision_sha256: str,
+    ) -> ModelPromotionReceipt | None:
+        """Read validated durable promotion evidence without changing the route."""
+
+        decision_digest = self._require_promotion_digest(
+            decision_sha256,
+            field="SHA-256 рішення",
+        )
+        try:
+            with self._store.connection() as conn:
+                row = conn.execute(
+                    "SELECT * FROM v01_model_promotions WHERE decision_sha256 = ?",
+                    (decision_digest,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise ModelSetupError(
+                "Не вдалося надійно прочитати запис просування моделі."
+            ) from exc
+        if row is None:
+            return None
+        return self._promotion_receipt(row)
+
+    def activate_promoted_local_model(
+        self,
+        *,
+        expected_revision: int,
+        base_provider_id: str,
+        base_model_id: str,
+        challenger_provider_id: str,
+        challenger_model_id: str,
+        decision_sha256: str,
+        binding_sha256: str,
+        base_artifact_sha256: str,
+        base_descriptor_digest: str,
+        challenger_artifact_sha256: str,
+        challenger_descriptor_digest: str,
+        activation_request_sha256: str,
+        activation_attestation_sha256: str,
+    ) -> ModelPromotionReceipt:
+        """Atomically activate an attested local challenger for future tasks only.
+
+        The decision digest is the idempotency key. Existing task bindings remain
+        immutable because they reference their already-frozen selection IDs.
+        """
+
+        decision_digest = self._require_promotion_digest(
+            decision_sha256,
+            field="SHA-256 рішення",
+        )
+        binding_digest = self._require_promotion_digest(
+            binding_sha256,
+            field="SHA-256 зв'язування",
+        )
+        base_artifact_digest = self._require_promotion_digest(
+            base_artifact_sha256,
+            field="SHA-256 базового артефакту",
+        )
+        base_descriptor = self._require_promotion_digest(
+            base_descriptor_digest,
+            field="SHA-256 базового дескриптора",
+        )
+        challenger_artifact_digest = self._require_promotion_digest(
+            challenger_artifact_sha256,
+            field="SHA-256 артефакту-кандидата",
+        )
+        challenger_descriptor = self._require_promotion_digest(
+            challenger_descriptor_digest,
+            field="SHA-256 дескриптора-кандидата",
+        )
+        activation_request_digest = self._require_promotion_digest(
+            activation_request_sha256,
+            field="SHA-256 запиту активаційної атестації",
+        )
+        activation_attestation_digest = self._require_promotion_digest(
+            activation_attestation_sha256,
+            field="SHA-256 активаційної атестації",
+        )
+        if (
+            type(expected_revision) is not int
+            or not 1 <= expected_revision < MAX_MODEL_SETTINGS_REVISION
+        ):
+            raise ModelSetupError("Очікувана версія налаштувань моделі некоректна.")
+        for value in (
+            base_provider_id,
+            base_model_id,
+            challenger_provider_id,
+            challenger_model_id,
+        ):
+            if type(value) is not str or not value or value != value.strip():
+                raise ModelSetupError("Ідентичність моделі для просування некоректна.")
+
+        try:
+            with self._store.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                existing = conn.execute(
+                    "SELECT * FROM v01_model_promotions WHERE decision_sha256 = ?",
+                    (decision_digest,),
+                ).fetchone()
+                if existing is not None:
+                    receipt = self._promotion_receipt(existing)
+                    if receipt.rollback_revision is not None:
+                        raise ModelSetupError(
+                            "Це просування вже було відкотило і не може бути повторно застосоване."
+                        )
+                    if (
+                        receipt.binding_sha256 != binding_digest
+                        or receipt.base_artifact_sha256 != base_artifact_digest
+                        or receipt.base_descriptor_digest != base_descriptor
+                        or receipt.challenger_artifact_sha256
+                        != challenger_artifact_digest
+                        or receipt.challenger_descriptor_digest
+                        != challenger_descriptor
+                    ):
+                        raise ModelSetupError(
+                            "Це рішення вже прив'язане до іншого навчального доказу."
+                        )
+                    previous = self._selection_by_id(
+                        conn, receipt.previous_selection_id
+                    )
+                    activated = self._selection_by_id(
+                        conn, receipt.activated_selection_id
+                    )
+                    if (
+                        previous.provider_id != base_provider_id
+                        or previous.model != base_model_id
+                        or activated.provider_id != challenger_provider_id
+                        or activated.model != challenger_model_id
+                    ):
+                        raise ModelSetupError(
+                            "Повтор просування не збігається з початковою моделлю."
+                        )
+                    settings_row = conn.execute(
+                        "SELECT * FROM v01_model_settings WHERE singleton = 1"
+                    ).fetchone()
+                    current_revision = self._revision(settings_row)
+                    if settings_row is None:
+                        raise ModelSetupError(
+                            "Поточні налаштування моделі відсутні."
+                        )
+                    current_selection = ModelSelection.from_stored(
+                        settings_row["selection_json"]
+                    )
+                    current_id, _ = self._selection_id(current_selection)
+                    if (
+                        current_revision != receipt.activated_revision
+                        or current_id != receipt.activated_selection_id
+                    ):
+                        raise ModelSetupError(
+                            "Просування більше не володіє поточним маршрутом моделі."
+                        )
+                    return receipt
+
+                row = conn.execute(
+                    "SELECT * FROM v01_model_settings WHERE singleton = 1"
+                ).fetchone()
+                revision = self._revision(row)
+                if row is None:
+                    raise ModelSetupError(
+                        "Спочатку виберіть активну локальну модель."
+                    )
+                if revision != expected_revision:
+                    raise ModelSetupError(
+                        "Налаштування моделі вже змінено. Просування не виконано."
+                    )
+                current = ModelSelection.from_stored(row["selection_json"])
+                if (
+                    current.route_kind != "ollama"
+                    or current.provider_kind is not ProviderKind.LOCAL
+                    or current.provider_id != "ollama"
+                ):
+                    raise ModelSetupError(
+                        "Автоматичне просування зараз підтримує лише локальний Ollama."
+                    )
+                if (
+                    current.provider_id != base_provider_id
+                    or current.model != base_model_id
+                ):
+                    raise ModelSetupError(
+                        "Поточна модель не збігається з перевіреним чемпіоном."
+                    )
+                if challenger_provider_id != base_provider_id:
+                    raise ModelSetupError(
+                        "Зміна локального постачальника потребує окремої конфігурації."
+                    )
+                if challenger_model_id == base_model_id:
+                    raise ModelSetupError(
+                        "Модель-кандидат не відрізняється від поточного чемпіона."
+                    )
+                try:
+                    replacement = ModelSelection.model_validate(
+                        {
+                            **current.model_dump(),
+                            "model": challenger_model_id,
+                        }
+                    )
+                except (TypeError, ValueError, ValidationError) as exc:
+                    raise ModelSetupError(
+                        "Модель-кандидат не утворює коректний локальний маршрут."
+                    ) from exc
+
+                previous_id, previous_json = self._selection_id(current)
+                activated_id, activated_json = self._selection_id(replacement)
+                for selection_id, selection_json, expected in (
+                    (previous_id, previous_json, current),
+                    (activated_id, activated_json, replacement),
+                ):
+                    conn.execute(
+                        "INSERT OR IGNORE INTO v01_model_selections VALUES (?, ?)",
+                        (selection_id, selection_json),
+                    )
+                    if self._selection_by_id(conn, selection_id) != expected:
+                        raise ModelSetupError(
+                            "Не вдалося зафіксувати маршрут просування моделі."
+                        )
+
+                next_revision = revision + 1
+                updated = conn.execute(
+                    "UPDATE v01_model_settings SET revision = ?, selection_json = ? "
+                    "WHERE singleton = 1 AND revision = ? AND selection_json = ?",
+                    (
+                        next_revision,
+                        activated_json,
+                        revision,
+                        row["selection_json"],
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise ModelSetupError(
+                        "Налаштування моделі змінилися під час просування."
+                    )
+                conn.execute(
+                    "INSERT INTO v01_model_promotions ("
+                    "decision_sha256, binding_sha256, base_artifact_sha256, "
+                    "base_descriptor_digest, challenger_artifact_sha256, "
+                    "challenger_descriptor_digest, activation_request_sha256, "
+                    "activation_attestation_sha256, previous_selection_id, "
+                    "activated_selection_id, activated_revision, rollback_revision"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                    (
+                        decision_digest,
+                        binding_digest,
+                        base_artifact_digest,
+                        base_descriptor,
+                        challenger_artifact_digest,
+                        challenger_descriptor,
+                        activation_request_digest,
+                        activation_attestation_digest,
+                        previous_id,
+                        activated_id,
+                        next_revision,
+                    ),
+                )
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="v01.model.promoted",
+                    entity_type="model_settings",
+                    entity_id="default",
+                    payload={
+                        "revision": next_revision,
+                        "provider_id": challenger_provider_id,
+                        "previous_model_fingerprint": model_identity_fingerprint(
+                            base_model_id
+                        ),
+                        "activated_model_fingerprint": model_identity_fingerprint(
+                            challenger_model_id
+                        ),
+                        "decision_sha256": decision_digest,
+                        "binding_sha256": binding_digest,
+                        "base_artifact_sha256": base_artifact_digest,
+                        "base_descriptor_digest": base_descriptor,
+                        "challenger_artifact_sha256": challenger_artifact_digest,
+                        "challenger_descriptor_digest": challenger_descriptor,
+                        "activation_request_sha256": activation_request_digest,
+                        "activation_attestation_sha256": activation_attestation_digest,
+                        "rollback_selection_id": previous_id,
+                    },
+                )
+                return ModelPromotionReceipt(
+                    decision_sha256=decision_digest,
+                    binding_sha256=binding_digest,
+                    base_artifact_sha256=base_artifact_digest,
+                    base_descriptor_digest=base_descriptor,
+                    challenger_artifact_sha256=challenger_artifact_digest,
+                    challenger_descriptor_digest=challenger_descriptor,
+                    activation_request_sha256=activation_request_digest,
+                    activation_attestation_sha256=activation_attestation_digest,
+                    previous_selection_id=previous_id,
+                    activated_selection_id=activated_id,
+                    activated_revision=next_revision,
+                )
+        except ModelSetupError:
+            raise
+        except sqlite3.Error as exc:
+            raise ModelSetupError(
+                "Не вдалося надійно застосувати просування моделі."
+            ) from exc
+
+    def rollback_promoted_local_model(
+        self,
+        *,
+        decision_sha256: str,
+        binding_sha256: str,
+        base_artifact_sha256: str,
+        base_descriptor_digest: str,
+        challenger_artifact_sha256: str,
+        challenger_descriptor_digest: str,
+        expected_revision: int,
+    ) -> ModelPromotionReceipt:
+        """Restore the exact pre-promotion route if the promotion still owns it."""
+
+        decision_digest = self._require_promotion_digest(
+            decision_sha256,
+            field="SHA-256 рішення",
+        )
+        binding_digest = self._require_promotion_digest(
+            binding_sha256,
+            field="SHA-256 зв'язування",
+        )
+        base_artifact_digest = self._require_promotion_digest(
+            base_artifact_sha256,
+            field="SHA-256 базового артефакту",
+        )
+        base_descriptor = self._require_promotion_digest(
+            base_descriptor_digest,
+            field="SHA-256 базового дескриптора",
+        )
+        challenger_artifact_digest = self._require_promotion_digest(
+            challenger_artifact_sha256,
+            field="SHA-256 артефакту-кандидата",
+        )
+        challenger_descriptor = self._require_promotion_digest(
+            challenger_descriptor_digest,
+            field="SHA-256 дескриптора-кандидата",
+        )
+        if (
+            type(expected_revision) is not int
+            or not 1 <= expected_revision < MAX_MODEL_SETTINGS_REVISION
+        ):
+            raise ModelSetupError("Очікувана версія налаштувань моделі некоректна.")
+        try:
+            with self._store.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM v01_model_promotions WHERE decision_sha256 = ?",
+                    (decision_digest,),
+                ).fetchone()
+                if row is None:
+                    raise ModelSetupError("Запис просування моделі не знайдено.")
+                receipt = self._promotion_receipt(row)
+                if (
+                    receipt.binding_sha256 != binding_digest
+                    or receipt.base_artifact_sha256 != base_artifact_digest
+                    or receipt.base_descriptor_digest != base_descriptor
+                    or receipt.challenger_artifact_sha256
+                    != challenger_artifact_digest
+                    or receipt.challenger_descriptor_digest
+                    != challenger_descriptor
+                ):
+                    raise ModelSetupError(
+                        "Запис відкату належить іншому навчальному доказу."
+                    )
+                if receipt.rollback_revision is not None:
+                    return receipt
+
+                settings_row = conn.execute(
+                    "SELECT * FROM v01_model_settings WHERE singleton = 1"
+                ).fetchone()
+                revision = self._revision(settings_row)
+                if settings_row is None:
+                    raise ModelSetupError("Поточні налаштування моделі відсутні.")
+                if (
+                    revision != expected_revision
+                    or revision != receipt.activated_revision
+                ):
+                    raise ModelSetupError(
+                        "Після просування модель уже змінено. Відкат зупинено."
+                    )
+                current = ModelSelection.from_stored(settings_row["selection_json"])
+                current_id, _ = self._selection_id(current)
+                if current_id != receipt.activated_selection_id:
+                    raise ModelSetupError(
+                        "Поточний маршрут більше не належить цьому просуванню."
+                    )
+                previous = self._selection_by_id(
+                    conn, receipt.previous_selection_id
+                )
+                previous_id, previous_json = self._selection_id(previous)
+                if previous_id != receipt.previous_selection_id:
+                    raise ModelSetupError("Маршрут відкату не пройшов перевірку.")
+
+                next_revision = revision + 1
+                updated = conn.execute(
+                    "UPDATE v01_model_settings SET revision = ?, selection_json = ? "
+                    "WHERE singleton = 1 AND revision = ? AND selection_json = ?",
+                    (
+                        next_revision,
+                        previous_json,
+                        revision,
+                        settings_row["selection_json"],
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise ModelSetupError(
+                        "Налаштування моделі змінилися під час відкату."
+                    )
+                conn.execute(
+                    "UPDATE v01_model_promotions SET rollback_revision = ? "
+                    "WHERE decision_sha256 = ? AND rollback_revision IS NULL",
+                    (next_revision, decision_digest),
+                )
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="v01.model.promotion_rolled_back",
+                    entity_type="model_settings",
+                    entity_id="default",
+                    payload={
+                        "revision": next_revision,
+                        "decision_sha256": decision_digest,
+                        "restored_selection_id": receipt.previous_selection_id,
+                    },
+                )
+                return ModelPromotionReceipt(
+                    decision_sha256=receipt.decision_sha256,
+                    binding_sha256=receipt.binding_sha256,
+                    base_artifact_sha256=receipt.base_artifact_sha256,
+                    base_descriptor_digest=receipt.base_descriptor_digest,
+                    challenger_artifact_sha256=receipt.challenger_artifact_sha256,
+                    challenger_descriptor_digest=receipt.challenger_descriptor_digest,
+                    previous_selection_id=receipt.previous_selection_id,
+                    activated_selection_id=receipt.activated_selection_id,
+                    activated_revision=receipt.activated_revision,
+                    rollback_revision=next_revision,
+                )
+        except ModelSetupError:
+            raise
+        except sqlite3.Error as exc:
+            raise ModelSetupError(
+                "Не вдалося надійно відкотити просування моделі."
+            ) from exc
 
     def configure(self, payload: Mapping[str, Any]) -> UIResult:
         try:
@@ -490,6 +1069,50 @@ class V01ModelSettings:
             return accepted
 
 
+class _TaskBoundCloudEffectAuthorizer:
+    """Resolve current outer-task authority on the exact effect task."""
+
+    def __init__(
+        self,
+        *,
+        delegate: StandingPermissionCloudEffectAuthorizer,
+        task_id: str,
+        authority_resolver: Callable[
+            [str],
+            StandingPermissionExecutionAuthority | None,
+        ],
+    ) -> None:
+        if type(delegate) is not StandingPermissionCloudEffectAuthorizer:
+            raise TypeError("delegate must be StandingPermissionCloudEffectAuthorizer")
+        if type(task_id) is not str or not task_id:
+            raise TypeError("task_id must be exact non-empty text")
+        if not callable(authority_resolver):
+            raise TypeError("authority_resolver must be callable")
+        self._delegate = delegate
+        self._task_id = task_id
+        self._authority_resolver = authority_resolver
+
+    def authorize_cloud_effect(
+        self,
+        *,
+        request: ModelRequest,
+        provider: ProviderCapabilities,
+    ) -> None:
+        try:
+            authority = self._authority_resolver(self._task_id)
+        except Exception:  # noqa: BLE001 - trusted host resolver boundary
+            raise PermissionError("cloud execution authority could not be resolved") from None
+        if type(authority) is not StandingPermissionExecutionAuthority:
+            raise PermissionError("cloud execution has no current host authority")
+        if authority.context.task_id != self._task_id:
+            raise PermissionError("cloud execution authority belongs to another task")
+        with self._delegate.execution_scope(authority):
+            self._delegate.authorize_cloud_effect(
+                request=request,
+                provider=provider,
+            )
+
+
 class V01BoundModelRuntimeFactory:
     """Reconstruct the existing ModelGatewayAgentRuntime from a task's frozen route."""
 
@@ -503,7 +1126,30 @@ class V01BoundModelRuntimeFactory:
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
         foundry_manager_factory: Callable[[], Any] | None = None,
         intelligence_policy: IntelligenceModePolicy | None = None,
+        cloud_effect_authorizer: StandingPermissionCloudEffectAuthorizer | None = None,
+        cloud_execution_authority_resolver: (
+            Callable[[str], StandingPermissionExecutionAuthority | None] | None
+        ) = None,
     ) -> None:
+        if (cloud_effect_authorizer is None) != (
+            cloud_execution_authority_resolver is None
+        ):
+            raise TypeError(
+                "cloud effect authorizer and execution authority resolver "
+                "must be configured together"
+            )
+        if (
+            cloud_effect_authorizer is not None
+            and type(cloud_effect_authorizer) is not StandingPermissionCloudEffectAuthorizer
+        ):
+            raise TypeError(
+                "cloud_effect_authorizer must be StandingPermissionCloudEffectAuthorizer"
+            )
+        if (
+            cloud_execution_authority_resolver is not None
+            and not callable(cloud_execution_authority_resolver)
+        ):
+            raise TypeError("cloud_execution_authority_resolver must be callable")
         self._store = store
         self._definitions = definitions
         self._settings = settings or V01ModelSettings(store)
@@ -511,12 +1157,14 @@ class V01BoundModelRuntimeFactory:
         self._client_factory = client_factory
         self._foundry_manager_factory = foundry_manager_factory
         self._intelligence_policy = intelligence_policy or IntelligenceModePolicy()
+        self._cloud_effect_authorizer = cloud_effect_authorizer
+        self._cloud_execution_authority_resolver = cloud_execution_authority_resolver
 
     def for_task(self, task_id: str) -> ModelGatewayAgentRuntime | None:
         selection = self._settings.for_task(task_id)
         if selection.route_kind == "deterministic":
             return None
-        return self._runtime_for_selection(selection)
+        return self._runtime_for_selection(selection, task_id=task_id)
 
     def supervisor_for_task(
         self,
@@ -538,7 +1186,7 @@ class V01BoundModelRuntimeFactory:
                 "Детермінований режим виконується packaged runtime без ModelGateway."
             )
         return MultiAgentSupervisor(
-            runtime=self._runtime_for_selection(selection),
+            runtime=self._runtime_for_selection(selection, task_id=task_id),
             store=store,
             definitions=self._definitions,
             runtime_timeout_seconds=selection.timeout_seconds,
@@ -550,7 +1198,27 @@ class V01BoundModelRuntimeFactory:
             raise ModelSetupError(f"Збережений маршрут моделі не має поля {field}.")
         return value
 
-    def _runtime_for_selection(self, selection: ModelSelection) -> ModelGatewayAgentRuntime:
+    def _task_cloud_authorizer(
+        self,
+        *,
+        task_id: str,
+    ) -> _TaskBoundCloudEffectAuthorizer | None:
+        authorizer = self._cloud_effect_authorizer
+        resolver = self._cloud_execution_authority_resolver
+        if authorizer is None or resolver is None:
+            return None
+        return _TaskBoundCloudEffectAuthorizer(
+            delegate=authorizer,
+            task_id=task_id,
+            authority_resolver=resolver,
+        )
+
+    def _runtime_for_selection(
+        self,
+        selection: ModelSelection,
+        *,
+        task_id: str,
+    ) -> ModelGatewayAgentRuntime:
         if selection.route_kind == "deterministic":
             raise ModelSetupError(
                 "Детермінований режим не повинен створювати ModelGateway runtime."
@@ -561,7 +1229,19 @@ class V01BoundModelRuntimeFactory:
         if provider_kind is None:
             raise ModelSetupError("Збережений маршрут моделі не має типу постачальника.")
 
-        gateway = ModelGateway(audit_log=AuditLog(self._store))
+        cloud_effect_authorizer = (
+            self._task_cloud_authorizer(task_id=task_id)
+            if provider_kind is ProviderKind.CLOUD
+            else None
+        )
+        gateway = (
+            ModelGateway(
+                audit_log=AuditLog(self._store),
+                cloud_effect_authorizer=cloud_effect_authorizer,
+            )
+            if cloud_effect_authorizer is not None
+            else ModelGateway(audit_log=AuditLog(self._store))
+        )
         mode = {
             "foundry_local": IntelligenceMode.EMBEDDED_LOCAL,
             "ollama": IntelligenceMode.EXTERNAL_LOCAL,
