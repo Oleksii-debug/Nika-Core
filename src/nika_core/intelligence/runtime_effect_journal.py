@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from threading import Lock
 
 from nika_core.intelligence.contracts import (
     DeterministicAction,
@@ -12,6 +13,7 @@ from nika_core.intelligence.contracts import (
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
     IdempotencyLedger,
+    IdempotencyRecord,
     IdempotencyStatus,
 )
 
@@ -24,6 +26,8 @@ class RuntimeIdempotencyEffectJournal:
 
     def __init__(self, ledger: IdempotencyLedger) -> None:
         self._ledger = ledger
+        self._reservation_lock = Lock()
+        self._owned_reservations: dict[str, tuple[str, str, str, str]] = {}
 
     def unresolved_operation_keys(self, *, task_id: str) -> tuple[str, ...]:
         if not task_id.strip():
@@ -72,10 +76,23 @@ class RuntimeIdempotencyEffectJournal:
                 if item.operation_key != operation_key
             )
             if competing:
-                # No handler has run yet. Drop only our own PENDING reservation and block behind
-                # the concurrently visible task effect instead of allowing two mutations to race.
-                self._ledger.release_pending(operation_key)
+                # No handler has run yet. Drop only our own exact PENDING reservation and block
+                # behind the concurrently visible task effect instead of allowing two mutations
+                # to race or deleting a reservation that was rebound after our insert.
+                try:
+                    self._ledger.release_pending_if_matches(
+                        operation_key=operation_key,
+                        task_id=record.task_id,
+                        operation_type=record.operation_type,
+                        input_fingerprint=record.input_fingerprint,
+                        created_at=record.created_at,
+                    )
+                except (IdempotencyConflictError, KeyError) as exc:
+                    raise DeterministicEffectConflictError(
+                        "deterministic action reservation changed before safe release"
+                    ) from exc
                 return self._blocked_reservation(competing[0])
+            self._remember_reservation(record)
 
         return DeterministicEffectReservation(
             operation_key=operation_key,
@@ -84,13 +101,75 @@ class RuntimeIdempotencyEffectJournal:
         )
 
     def complete(self, operation_key: str) -> None:
-        self._ledger.complete(operation_key)
+        task_id, operation_type, fingerprint, created_at = self._owned_identity(operation_key)
+        try:
+            self._ledger.complete_pending_if_matches(
+                operation_key=operation_key,
+                task_id=task_id,
+                operation_type=operation_type,
+                input_fingerprint=fingerprint,
+                created_at=created_at,
+            )
+        except (IdempotencyConflictError, KeyError) as exc:
+            raise DeterministicEffectConflictError(
+                "deterministic action reservation changed before completion"
+            ) from exc
+        self._forget_reservation(operation_key)
 
     def mark_uncertain(self, operation_key: str) -> None:
-        self._ledger.mark_uncertain(operation_key)
+        task_id, operation_type, fingerprint, created_at = self._owned_identity(operation_key)
+        try:
+            self._ledger.mark_pending_uncertain_if_matches(
+                operation_key=operation_key,
+                task_id=task_id,
+                operation_type=operation_type,
+                input_fingerprint=fingerprint,
+                created_at=created_at,
+            )
+        except (IdempotencyConflictError, KeyError) as exc:
+            raise DeterministicEffectConflictError(
+                "deterministic action reservation changed before uncertainty recording"
+            ) from exc
+        self._forget_reservation(operation_key)
 
     def release_pending(self, operation_key: str) -> None:
-        self._ledger.release_pending(operation_key)
+        task_id, operation_type, fingerprint, created_at = self._owned_identity(operation_key)
+        try:
+            self._ledger.release_pending_if_matches(
+                operation_key=operation_key,
+                task_id=task_id,
+                operation_type=operation_type,
+                input_fingerprint=fingerprint,
+                created_at=created_at,
+            )
+        except (IdempotencyConflictError, KeyError) as exc:
+            raise DeterministicEffectConflictError(
+                "deterministic action reservation changed before safe release"
+            ) from exc
+        self._forget_reservation(operation_key)
+
+    def _remember_reservation(self, record: IdempotencyRecord) -> None:
+        identity = (
+            record.task_id,
+            record.operation_type,
+            record.input_fingerprint,
+            record.created_at,
+        )
+        with self._reservation_lock:
+            self._owned_reservations[record.operation_key] = identity
+
+    def _owned_identity(self, operation_key: str) -> tuple[str, str, str, str]:
+        with self._reservation_lock:
+            identity = self._owned_reservations.get(operation_key)
+        if identity is None:
+            raise DeterministicEffectConflictError(
+                "deterministic action finalization lacks reservation authority"
+            )
+        return identity
+
+    def _forget_reservation(self, operation_key: str) -> None:
+        with self._reservation_lock:
+            self._owned_reservations.pop(operation_key, None)
 
     def _unresolved_records(self, task_id: str):
         return tuple(
@@ -125,7 +204,7 @@ class RuntimeIdempotencyEffectJournal:
         payload = {
             "action_id": action.action_id,
             "adds": sorted(action.adds),
-            "arguments": action.arguments,
+            "arguments": dict(action.arguments),
             "forbids": sorted(action.forbids),
             "removes": sorted(action.removes),
             "requires": sorted(action.requires),

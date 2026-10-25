@@ -1,0 +1,570 @@
+from __future__ import annotations
+
+import hashlib
+import hmac
+import ntpath
+import os
+import stat
+from dataclasses import dataclass
+from pathlib import Path
+
+from nika_core.model_artifacts import (
+    ModelArtifactDescriptor,
+    ModelArtifactRegistryError,
+    ModelIntegrityBasis,
+)
+
+_READ_CHUNK_BYTES = 1024 * 1024
+_WINDOWS_FINAL_PATH_BUFFER = 32768
+_MAX_SIGNED_64 = (1 << 63) - 1
+_HEX_DIGITS = frozenset("0123456789abcdef")
+
+
+class CandidateArtifactIntegrityError(RuntimeError):
+    """Safe failure from the candidate-model artifact integrity boundary."""
+
+
+def _require_evidence_sha256(name: str, value: object) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in _HEX_DIGITS for character in value)
+    ):
+        raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+    return value
+
+
+def _require_evidence_size(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= _MAX_SIGNED_64:
+        raise ValueError("size_bytes must be a positive signed-64 integer")
+    return value
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class VerifiedCandidateArtifact:
+    """Minimized receipt produced by the canonical physical verifier.
+
+    Construction history is not a Python security boundary: hostile code can use
+    ``object.__new__`` / ``object.__setattr__``. Direct construction and subclassing
+    are disabled to prevent accidental bypass, but consumers receiving a receipt from
+    outside the verifier boundary must still reverify the physical artifact at their
+    own point of use rather than trusting the object type alone.
+    """
+
+    descriptor_digest: str
+    registry_key: str
+    sha256: str
+    size_bytes: int
+
+    def __init_subclass__(cls, **_: object) -> None:
+        raise TypeError("VerifiedCandidateArtifact cannot be subclassed")
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _is_reparse_point(value: os.stat_result) -> bool:
+    attributes = int(getattr(value, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return bool(attributes & reparse_flag)
+
+
+def _require_regular(value: os.stat_result) -> None:
+    if stat.S_ISLNK(value.st_mode) or _is_reparse_point(value):
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact must not be a symbolic link or reparse point"
+        )
+    if not stat.S_ISREG(value.st_mode):
+        raise CandidateArtifactIntegrityError("candidate artifact must be a regular file")
+
+
+def _safe_lstat(path: Path) -> os.stat_result:
+    try:
+        return os.lstat(path)
+    except OSError as exc:
+        raise CandidateArtifactIntegrityError("candidate artifact is not accessible") from exc
+
+
+def _resolve_candidate_path(
+    path: str | os.PathLike[str],
+    *,
+    allowed_root: str | os.PathLike[str] | None,
+) -> tuple[Path, Path | None]:
+    if isinstance(path, bytes):
+        raise TypeError("candidate artifact path must be text or a text path-like object")
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        raise ValueError("candidate artifact path must be absolute")
+
+    try:
+        resolved_parent = candidate.parent.resolve(strict=True)
+    except OSError as exc:
+        raise CandidateArtifactIntegrityError("candidate artifact parent is not accessible") from exc
+    resolved_candidate = resolved_parent / candidate.name
+
+    if allowed_root is None:
+        return resolved_candidate, None
+    if isinstance(allowed_root, bytes):
+        raise TypeError("allowed_root must be text or a text path-like object")
+    root = Path(allowed_root)
+    if not root.is_absolute():
+        raise ValueError("allowed_root must be absolute")
+
+    root_lstat = _safe_lstat(root)
+    if stat.S_ISLNK(root_lstat.st_mode) or _is_reparse_point(root_lstat):
+        raise CandidateArtifactIntegrityError(
+            "allowed_root must not be a symbolic link or reparse point"
+        )
+    if not stat.S_ISDIR(root_lstat.st_mode):
+        raise CandidateArtifactIntegrityError("allowed_root must be a directory")
+    try:
+        resolved_root = root.resolve(strict=True)
+    except OSError as exc:
+        raise CandidateArtifactIntegrityError("allowed_root is not accessible") from exc
+    if not resolved_parent.is_relative_to(resolved_root):
+        raise CandidateArtifactIntegrityError("candidate artifact is outside the allowed root")
+    return resolved_candidate, resolved_root
+
+
+def _open_read_only(path: Path) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        return os.open(path, flags)
+    except OSError as exc:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact could not be opened safely"
+        ) from exc
+
+
+def _normalize_windows_final_path(raw_path: str) -> str:
+    if raw_path.startswith("\\\\?\\UNC\\"):
+        raw_path = "\\\\" + raw_path[8:]
+    elif raw_path.startswith("\\\\?\\"):
+        raw_path = raw_path[4:]
+    return ntpath.normcase(ntpath.normpath(raw_path))
+
+
+def _windows_final_path(file_descriptor: int) -> str:
+    try:
+        import ctypes
+        import msvcrt
+
+        handle = msvcrt.get_osfhandle(file_descriptor)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_final_path = kernel32.GetFinalPathNameByHandleW
+        get_final_path.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_wchar),
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+        ]
+        get_final_path.restype = ctypes.c_uint32
+        buffer = ctypes.create_unicode_buffer(_WINDOWS_FINAL_PATH_BUFFER)
+        length = get_final_path(
+            ctypes.c_void_p(handle),
+            buffer,
+            len(buffer),
+            0,
+        )
+    except (ImportError, OSError, ValueError) as exc:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact final handle path could not be verified"
+        ) from exc
+    if length == 0 or length >= len(buffer):
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact final handle path could not be verified"
+        )
+    return _normalize_windows_final_path(buffer.value)
+
+
+def _windows_file_identity(file_descriptor: int) -> tuple[int, int, int]:
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        class ByHandleFileInformation(ctypes.Structure):
+            _fields_ = [
+                ("dwFileAttributes", wintypes.DWORD),
+                ("ftCreationTime", wintypes.FILETIME),
+                ("ftLastAccessTime", wintypes.FILETIME),
+                ("ftLastWriteTime", wintypes.FILETIME),
+                ("dwVolumeSerialNumber", wintypes.DWORD),
+                ("nFileSizeHigh", wintypes.DWORD),
+                ("nFileSizeLow", wintypes.DWORD),
+                ("nNumberOfLinks", wintypes.DWORD),
+                ("nFileIndexHigh", wintypes.DWORD),
+                ("nFileIndexLow", wintypes.DWORD),
+            ]
+
+        handle = msvcrt.get_osfhandle(file_descriptor)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        get_file_information = kernel32.GetFileInformationByHandle
+        get_file_information.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ByHandleFileInformation),
+        ]
+        get_file_information.restype = wintypes.BOOL
+        information = ByHandleFileInformation()
+        success = get_file_information(
+            ctypes.c_void_p(handle),
+            ctypes.byref(information),
+        )
+    except (AttributeError, ImportError, OSError, ValueError) as exc:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact Windows file identity could not be verified"
+        ) from exc
+    if not success:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact Windows file identity could not be verified"
+        )
+    return (
+        int(information.dwVolumeSerialNumber),
+        int(information.nFileIndexHigh),
+        int(information.nFileIndexLow),
+    )
+
+
+def _require_windows_handle_matches_path(file_descriptor: int, path: Path) -> None:
+    expected_path = _normalize_windows_final_path(ntpath.abspath(str(path)))
+    if _windows_final_path(file_descriptor) != expected_path:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact path changed before verification"
+        )
+
+
+def _require_windows_handle_within_root(file_descriptor: int, root: Path) -> None:
+    final_path = _windows_final_path(file_descriptor)
+    normalized_root = _normalize_windows_final_path(str(root))
+    try:
+        common = ntpath.commonpath((normalized_root, final_path))
+    except ValueError as exc:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact final handle escapes the allowed root"
+        ) from exc
+    if common != normalized_root:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact final handle escapes the allowed root"
+        )
+
+
+def _require_windows_current_path_identity(
+    path: Path,
+    expected_identity: tuple[int, int, int],
+    *,
+    root: Path | None,
+) -> None:
+    current_descriptor = _open_read_only(path)
+    try:
+        _require_windows_handle_matches_path(current_descriptor, path)
+        if root is not None:
+            _require_windows_handle_within_root(current_descriptor, root)
+        try:
+            current = os.fstat(current_descriptor)
+        except OSError as exc:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact metadata could not be re-read"
+            ) from exc
+        _require_regular(current)
+        if _windows_file_identity(current_descriptor) != expected_identity:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact path changed during verification"
+            )
+    finally:
+        try:
+            os.close(current_descriptor)
+        except OSError:
+            pass
+
+
+def _require_windows_path_still_targets_open_file(
+    path: Path,
+    file_descriptor: int,
+    expected_identity: tuple[int, int, int],
+    *,
+    root: Path | None,
+) -> None:
+    _require_windows_handle_matches_path(file_descriptor, path)
+    if root is not None:
+        _require_windows_handle_within_root(file_descriptor, root)
+    if _windows_file_identity(file_descriptor) != expected_identity:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact changed during verification"
+        )
+    _require_windows_current_path_identity(
+        path,
+        expected_identity,
+        root=root,
+    )
+
+
+def _open_posix_contained(path: Path, root: Path) -> tuple[int, os.stat_result]:
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise CandidateArtifactIntegrityError("candidate artifact is outside the allowed root") from exc
+    parts = relative.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise CandidateArtifactIntegrityError("candidate artifact relative path is invalid")
+
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    nofollow_flag = getattr(os, "O_NOFOLLOW", 0)
+    if directory_flag == 0 or nofollow_flag == 0:
+        raise CandidateArtifactIntegrityError(
+            "platform cannot establish no-follow allowed-root containment"
+        )
+
+    directory_descriptors: list[int] = []
+    try:
+        root_descriptor = os.open(root, os.O_RDONLY | directory_flag | nofollow_flag)
+        directory_descriptors.append(root_descriptor)
+        current_descriptor = root_descriptor
+        for part in parts[:-1]:
+            next_descriptor = os.open(
+                part,
+                os.O_RDONLY | directory_flag | nofollow_flag,
+                dir_fd=current_descriptor,
+            )
+            directory_descriptors.append(next_descriptor)
+            current_descriptor = next_descriptor
+
+        before = os.stat(parts[-1], dir_fd=current_descriptor, follow_symlinks=False)
+        _require_regular(before)
+        file_descriptor = os.open(
+            parts[-1],
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | nofollow_flag,
+            dir_fd=current_descriptor,
+        )
+        return file_descriptor, before
+    except CandidateArtifactIntegrityError:
+        raise
+    except (OSError, TypeError, NotImplementedError) as exc:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact could not be opened safely within the allowed root"
+        ) from exc
+    finally:
+        for descriptor in reversed(directory_descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _open_contained_read_only(path: Path, root: Path) -> tuple[int, os.stat_result]:
+    if os.name != "nt":
+        return _open_posix_contained(path, root)
+
+    before = _safe_lstat(path)
+    _require_regular(before)
+    file_descriptor = _open_read_only(path)
+    try:
+        _require_windows_handle_matches_path(file_descriptor, path)
+        _require_windows_handle_within_root(file_descriptor, root)
+    except CandidateArtifactIntegrityError:
+        try:
+            os.close(file_descriptor)
+        except OSError:
+            pass
+        raise
+    return file_descriptor, before
+
+
+def _canonical_descriptor_snapshot(
+    descriptor: ModelArtifactDescriptor,
+) -> ModelArtifactDescriptor:
+    if type(descriptor) is not ModelArtifactDescriptor:
+        raise TypeError("descriptor must be a ModelArtifactDescriptor")
+    try:
+        return ModelArtifactDescriptor.from_json(descriptor.canonical_json())
+    except (AttributeError, ModelArtifactRegistryError, TypeError, ValueError) as exc:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact descriptor is not canonical"
+        ) from exc
+
+
+def _require_physical_descriptor(
+    descriptor: ModelArtifactDescriptor,
+) -> tuple[ModelArtifactDescriptor, str, int]:
+    snapshot = _canonical_descriptor_snapshot(descriptor)
+    if snapshot.integrity_basis is not ModelIntegrityBasis.SHA256:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact requires canonical SHA-256 integrity provenance"
+        )
+    if snapshot.sha256 is None or snapshot.size_bytes is None:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact descriptor requires exact digest and size"
+        )
+    return snapshot, snapshot.sha256, snapshot.size_bytes
+
+
+def _require_descriptor_unchanged(
+    descriptor: ModelArtifactDescriptor,
+    snapshot: ModelArtifactDescriptor,
+) -> None:
+    current = _canonical_descriptor_snapshot(descriptor)
+    if current.canonical_json() != snapshot.canonical_json():
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact descriptor changed during verification"
+        )
+
+
+def verify_candidate_artifact(
+    path: str | os.PathLike[str],
+    descriptor: ModelArtifactDescriptor,
+    *,
+    allowed_root: str | os.PathLike[str] | None = None,
+) -> VerifiedCandidateArtifact:
+    """Verify physical candidate bytes against canonical model provenance.
+
+    The canonical descriptor is owned by ``nika_core.model_artifacts``. This adapter
+    owns only physical byte verification. With ``allowed_root`` it binds containment
+    to the object actually opened: descriptor-relative no-follow traversal on POSIX,
+    and final-handle containment validation on Windows. Paths and model bytes are
+    deliberately absent from returned evidence. Consumers must re-run this verifier
+    at their point of use instead of accepting a receipt as construction-history proof.
+    """
+    descriptor_snapshot, expected_sha256, expected_size = _require_physical_descriptor(
+        descriptor
+    )
+
+    candidate, resolved_root = _resolve_candidate_path(path, allowed_root=allowed_root)
+    if resolved_root is None:
+        before_path = _safe_lstat(candidate)
+        _require_regular(before_path)
+        file_descriptor = _open_read_only(candidate)
+    else:
+        file_descriptor, before_path = _open_contained_read_only(candidate, resolved_root)
+    before_identity = _stat_identity(before_path)
+    windows_identity: tuple[int, int, int] | None = None
+
+    try:
+        try:
+            opened = os.fstat(file_descriptor)
+        except OSError as exc:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact metadata could not be read"
+            ) from exc
+        _require_regular(opened)
+        opened_identity = _stat_identity(opened)
+        if os.name == "nt":
+            _require_windows_handle_matches_path(file_descriptor, candidate)
+            if resolved_root is not None:
+                _require_windows_handle_within_root(file_descriptor, resolved_root)
+            windows_identity = _windows_file_identity(file_descriptor)
+        elif opened_identity != before_identity:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact changed before verification"
+            )
+        if opened.st_size != expected_size:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact size does not match provenance"
+            )
+
+        digest = hashlib.sha256()
+        total_bytes = 0
+        while True:
+            remaining_with_sentinel = expected_size + 1 - total_bytes
+            if remaining_with_sentinel <= 0:
+                raise CandidateArtifactIntegrityError(
+                    "candidate artifact grew during verification"
+                )
+            try:
+                chunk = os.read(
+                    file_descriptor,
+                    min(_READ_CHUNK_BYTES, remaining_with_sentinel),
+                )
+            except OSError as exc:
+                raise CandidateArtifactIntegrityError(
+                    "candidate artifact could not be read"
+                ) from exc
+            if not chunk:
+                break
+            total_bytes += len(chunk)
+            if total_bytes > expected_size:
+                raise CandidateArtifactIntegrityError(
+                    "candidate artifact grew during verification"
+                )
+            digest.update(chunk)
+
+        if total_bytes != expected_size:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact size changed during verification"
+            )
+        try:
+            after_open = os.fstat(file_descriptor)
+        except OSError as exc:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact metadata could not be re-read"
+            ) from exc
+        if _stat_identity(after_open) != opened_identity:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact changed during verification"
+            )
+        if os.name == "nt":
+            if windows_identity is None:
+                raise CandidateArtifactIntegrityError(
+                    "candidate artifact Windows file identity is unavailable"
+                )
+            _require_windows_path_still_targets_open_file(
+                candidate,
+                file_descriptor,
+                windows_identity,
+                root=resolved_root,
+            )
+        actual_sha256 = digest.hexdigest()
+    finally:
+        try:
+            os.close(file_descriptor)
+        except OSError:
+            pass
+
+    if os.name == "nt":
+        if windows_identity is None:
+            raise CandidateArtifactIntegrityError(
+                "candidate artifact Windows file identity is unavailable"
+            )
+        _require_windows_current_path_identity(
+            candidate,
+            windows_identity,
+            root=resolved_root,
+        )
+
+    after_path = _safe_lstat(candidate)
+    _require_regular(after_path)
+    if after_path.st_size != expected_size:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact path changed during verification"
+        )
+    if os.name != "nt" and _stat_identity(after_path) != before_identity:
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact path changed during verification"
+        )
+    if not hmac.compare_digest(actual_sha256, expected_sha256):
+        raise CandidateArtifactIntegrityError(
+            "candidate artifact digest does not match provenance"
+        )
+
+    _require_descriptor_unchanged(descriptor, descriptor_snapshot)
+    descriptor_digest = _require_evidence_sha256(
+        "descriptor_digest",
+        descriptor_snapshot.descriptor_digest,
+    )
+    registry_key = _require_evidence_sha256(
+        "registry_key", descriptor_snapshot.registry_key
+    )
+    receipt_sha256 = _require_evidence_sha256("sha256", expected_sha256)
+    receipt_size = _require_evidence_size(expected_size)
+    receipt = object.__new__(VerifiedCandidateArtifact)
+    object.__setattr__(receipt, "descriptor_digest", descriptor_digest)
+    object.__setattr__(receipt, "registry_key", registry_key)
+    object.__setattr__(receipt, "sha256", receipt_sha256)
+    object.__setattr__(receipt, "size_bytes", receipt_size)
+    return receipt
