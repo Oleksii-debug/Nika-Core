@@ -9,6 +9,8 @@ class DeterministicErrorCode(StrEnum):
     DEPENDENCY_UNAVAILABLE = "dependency_unavailable"
     GOAL_UNREACHABLE = "goal_unreachable"
     NO_PLAN_FOUND = "no_plan_found"
+    NO_VALID_PLAN = "no_valid_plan"
+    INVALID_GOAL = "invalid_goal"
     PLANNING_TIMEOUT = "planning_timeout"
     PLANNER_RESOURCE_LIMIT = "planner_resource_limit"
     UNSUPPORTED_PROBLEM = "unsupported_problem"
@@ -19,6 +21,9 @@ class DeterministicErrorCode(StrEnum):
     ACTION_UNAVAILABLE = "action_unavailable"
     STATE_OBSERVATION_TIMEOUT = "state_observation_timeout"
     STATE_OBSERVATION_FAILED = "state_observation_failed"
+    MISSING_CAPABILITY = "missing_capability"
+    POLICY_DENIED_CAPABILITY = "policy_denied_capability"
+    TEMPORARILY_UNAVAILABLE_CAPABILITY = "temporarily_unavailable_capability"
     TOOL_EXECUTION_FAILED = "tool_execution_failed"
     SIDE_EFFECT_JOURNAL_REQUIRED = "side_effect_journal_required"
     SIDE_EFFECT_IDENTITY_CONFLICT = "side_effect_identity_conflict"
@@ -40,6 +45,12 @@ class DeterministicPlanningError(RuntimeError):
         self.code = code
 
 
+class InvalidDeterministicGoalError(ValueError):
+    """Raised when a deterministic goal is structurally contradictory or malformed."""
+
+    code = DeterministicErrorCode.INVALID_GOAL
+
+
 @dataclass(frozen=True, slots=True)
 class WorldState:
     facts: frozenset[str] = field(default_factory=frozenset)
@@ -56,9 +67,9 @@ class DeterministicGoal:
 
     def __post_init__(self) -> None:
         if self.required & self.forbidden:
-            raise ValueError("goal cannot require and forbid the same fact")
+            raise InvalidDeterministicGoalError("goal cannot require and forbid the same fact")
         if any(not fact.strip() for fact in self.required | self.forbidden):
-            raise ValueError("goal facts must not be empty")
+            raise InvalidDeterministicGoalError("goal facts must not be empty")
 
 
 @dataclass(frozen=True, slots=True)

@@ -62,7 +62,7 @@ def test_planner_action_id_cannot_manufacture_high_impact_approval(tmp_path) -> 
 
     assert not result.ok
     assert result.error == "approval required"
-    assert result.error_code is DeterministicErrorCode.TOOL_EXECUTION_FAILED
+    assert result.error_code is DeterministicErrorCode.POLICY_DENIED_CAPABILITY
     assert called is False
     assert IdempotencyLedger(store).list_for_task(task.task_id) == ()
 
