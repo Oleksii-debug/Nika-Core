@@ -32,10 +32,10 @@ def resolve_strict(snapshot: SemanticSnapshot, locator: ControlLocator) -> Contr
     """Resolve exactly one semantic node; zero and multiple matches fail closed."""
     matches = tuple(node for node in snapshot.controls if _matches(node, locator))
     if not matches:
-        raise TargetNotFoundError(f"No semantic target matched {locator!r}")
+        raise TargetNotFoundError("No semantic target matched the requested constraints")
     if len(matches) != 1:
         raise AmbiguousTargetError(
-            f"Semantic target is ambiguous: {len(matches)} controls matched {locator!r}"
+            f"Semantic target is ambiguous: {len(matches)} controls matched"
         )
     return matches[0]
 
@@ -48,3 +48,27 @@ def validate_snapshot(expected: SemanticSnapshot, current: SemanticSnapshot) -> 
         raise StaleSnapshotError("Interaction generation changed; re-observation is required")
     if expected.revision != current.revision:
         raise StaleSnapshotError("Semantic revision changed; re-observation is required")
+
+
+def validate_action_target(expected: ControlNode, current: ControlNode) -> None:
+    """Reject stale or non-actionable semantics before authorizing an adapter effect.
+
+    Focus and screen bounds are observation details, not target identity. A changed
+    value, role, name, attributes, visibility or enabled state is action-relevant
+    even if an adapter incorrectly reports the same semantic revision/node ID.
+    """
+    if (
+        expected.node_id != current.node_id
+        or expected.role != current.role
+        or expected.name != current.name
+        or expected.value != current.value
+        or expected.attributes != current.attributes
+    ):
+        raise StaleSnapshotError("Semantic action target changed; re-observation is required")
+    if (
+        expected.enabled is not True
+        or current.enabled is not True
+        or expected.visible is not True
+        or current.visible is not True
+    ):
+        raise StaleSnapshotError("Semantic action target is disabled or hidden")

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from nika_core.interaction import (
+    AmbiguousTargetError,
     ApplicationIdentity,
     ControlLocator,
     ControlNode,
@@ -15,6 +16,7 @@ from nika_core.interaction import (
     PermissionBlockedError,
     SemanticSnapshot,
     StaleSnapshotError,
+    TargetNotFoundError,
 )
 from nika_core.interaction.orchestration import (
     InteractionReplayBlockedError,
@@ -22,6 +24,7 @@ from nika_core.interaction.orchestration import (
     InteractionRisk,
     SemanticInteractionCoordinator,
 )
+from nika_core.interaction.resolver import resolve_strict
 from nika_core.runtime.idempotency import IdempotencyStatus
 from nika_core.security.policy import (
     ApprovalLedger,
@@ -108,7 +111,11 @@ class FakeAdapter:
         return self.verify_result
 
 
-def _policy(tmp_path: Path, *, granted: bool = True) -> tuple[SecurityPolicy, ExecutionBudgetLedger]:
+def _policy(
+    tmp_path: Path,
+    *,
+    granted: bool = True,
+) -> tuple[SecurityPolicy, ExecutionBudgetLedger]:
     policy = SecurityPolicy(
         granted_tools=frozenset({"interaction.invoke"} if granted else set()),
         sandbox=SandboxPolicy(workspace_root=tmp_path),
@@ -225,7 +232,9 @@ def test_failed_postcondition_marks_side_effect_uncertain(tmp_path: Path) -> Non
     assert ledger.uncertain is False
 
 
-def test_adapter_failure_after_local_action_propagates_without_false_success(tmp_path: Path) -> None:
+def test_adapter_failure_after_local_action_propagates_without_false_success(
+    tmp_path: Path,
+) -> None:
     save = ControlNode("save", "button", "Save")
     adapter = FakeAdapter([_snapshot(save), _snapshot(save)])
     adapter.fail_after_start = True
@@ -247,3 +256,188 @@ def test_fingerprint_changes_with_semantic_target() -> None:
         risk=first.risk,
     )
     assert first.fingerprint != second.fingerprint
+
+
+@pytest.mark.parametrize("enabled,visible", [(False, True), (True, False), (False, False)])
+@pytest.mark.parametrize("changed_at_second_observation", [False, True])
+def test_non_actionable_control_never_reaches_authorization_or_adapter(
+    tmp_path: Path, enabled: bool, visible: bool, changed_at_second_observation: bool
+) -> None:
+    actionable = ControlNode("save", "button", "Save")
+    blocked = ControlNode("save", "button", "Save", enabled=enabled, visible=visible)
+    snapshots = (
+        [_snapshot(actionable), _snapshot(blocked)]
+        if changed_at_second_observation
+        else [_snapshot(blocked), _snapshot(blocked)]
+    )
+    adapter = FakeAdapter(snapshots)
+    ledger = FakeLedger()
+    with pytest.raises(StaleSnapshotError, match="disabled or hidden"):
+        _coordinator(tmp_path, adapter, ledger).execute(
+            _request(InteractionRisk.R2_EXTERNAL_SIDE_EFFECT)
+        )
+    assert adapter.act_calls == 0
+    assert ledger.reserved is False
+
+
+@pytest.mark.parametrize(
+    "original,changed",
+    [
+        (ControlNode("save", "button", "Save"), ControlNode("replacement", "button", "Save")),
+        (ControlNode("save", "button", "Save", value="old"),
+         ControlNode("save", "button", "Save", value="new")),
+        (ControlNode("save", "button", "Save", attributes=(("label", "Save"),)),
+         ControlNode("save", "button", "Save", attributes=(("label", "Publish"),))),
+    ],
+)
+def test_semantic_drift_at_unchanged_revision_blocks_before_effect(
+    tmp_path: Path, original: ControlNode, changed: ControlNode
+) -> None:
+    adapter = FakeAdapter([_snapshot(original), _snapshot(changed)])
+    ledger = FakeLedger()
+    with pytest.raises(StaleSnapshotError, match="target changed"):
+        _coordinator(tmp_path, adapter, ledger).execute(
+            _request(InteractionRisk.R2_EXTERNAL_SIDE_EFFECT)
+        )
+    assert adapter.act_calls == 0
+    assert ledger.reserved is False
+
+
+def test_focus_and_geometry_changes_do_not_replace_semantic_target(tmp_path: Path) -> None:
+    original = ControlNode("save", "button", "Save", bounds=(0, 0, 10, 10))
+    focused = ControlNode(
+        "save", "button", "Save", focused=True, bounds=(10, 10, 20, 20)
+    )
+    adapter = FakeAdapter([_snapshot(original), _snapshot(focused), _snapshot(focused)])
+    assert _coordinator(tmp_path, adapter, FakeLedger()).execute(_request()).succeeded
+    assert adapter.act_calls == 1
+
+
+def test_resolution_errors_never_echo_sensitive_locator_contents() -> None:
+    sensitive = "NIKA_PRIVATE_LOCATOR_CANARY"
+    with pytest.raises(TargetNotFoundError) as missing:
+        resolve_strict(_snapshot(), ControlLocator(name=sensitive))
+    assert sensitive not in str(missing.value)
+
+    duplicate = ControlNode("save", "button", sensitive)
+    with pytest.raises(AmbiguousTargetError) as ambiguous:
+        resolve_strict(_snapshot(duplicate, duplicate), ControlLocator(name=sensitive))
+    assert sensitive not in str(ambiguous.value)
+
+
+@pytest.mark.parametrize("enabled,visible", [("false", True), (True, "false"), (1, True)])
+def test_non_boolean_actionability_cannot_authorize_effect(
+    tmp_path: Path, enabled: object, visible: object
+) -> None:
+    # Runtime adapter DTOs are not protected by dataclass type annotations.
+    forged = ControlNode("save", "button", "Save", enabled=enabled, visible=visible)
+    adapter = FakeAdapter([_snapshot(forged), _snapshot(forged)])
+    ledger = FakeLedger()
+    with pytest.raises(StaleSnapshotError, match="disabled or hidden"):
+        _coordinator(tmp_path, adapter, ledger).execute(
+            _request(InteractionRisk.R2_EXTERNAL_SIDE_EFFECT)
+        )
+    assert adapter.act_calls == 0
+    assert ledger.reserved is False
+
+
+def test_reused_mutated_control_carrier_is_fenced_before_effect(tmp_path: Path) -> None:
+    shared = ControlNode("save", "button", "Save", value="draft")
+
+    class MutatingAdapter(FakeAdapter):
+        def observe(self) -> SemanticSnapshot:
+            if self.index == 1:
+                object.__setattr__(shared, "value", "publish")
+            return super().observe()
+
+    adapter = MutatingAdapter([_snapshot(shared), _snapshot(shared)])
+    ledger = FakeLedger()
+    with pytest.raises(StaleSnapshotError, match="target changed"):
+        _coordinator(tmp_path, adapter, ledger).execute(
+            _request(InteractionRisk.R2_EXTERNAL_SIDE_EFFECT)
+        )
+    assert adapter.act_calls == 0
+    assert ledger.reserved is False
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        ControlNode("save", "button", "Save", enabled=False),
+        ControlNode("save", "button", "Save", visible=False),
+        ControlNode("save", "button", "Save", value="unexpected"),
+        ControlNode("replacement", "button", "Save"),
+    ],
+)
+def test_focus_transition_cannot_redirect_or_disable_the_action(
+    tmp_path: Path, changed: ControlNode
+) -> None:
+    save = ControlNode("save", "button", "Save")
+
+    class ChangingFocusAdapter(FakeAdapter):
+        def focus(self, node: ControlNode) -> None:
+            super().focus(node)
+            self.snapshots.append(_snapshot(changed))
+
+    adapter = ChangingFocusAdapter([_snapshot(save), _snapshot(save)])
+    with pytest.raises(StaleSnapshotError):
+        _coordinator(tmp_path, adapter, FakeLedger()).execute(_request())
+    assert adapter.act_calls == 0
+
+
+def test_focus_navigation_rejects_stale_target_before_effect(tmp_path: Path) -> None:
+    save = ControlNode("save", "button", "Save")
+
+    class NavigatingFocusAdapter(FakeAdapter):
+        def focus(self, node: ControlNode) -> None:
+            super().focus(node)
+            self.snapshots.append(_snapshot(save, generation=2))
+
+    adapter = NavigatingFocusAdapter([_snapshot(save), _snapshot(save)])
+    with pytest.raises(StaleSnapshotError, match="changed after focus"):
+        _coordinator(tmp_path, adapter, FakeLedger()).execute(_request())
+    assert adapter.act_calls == 0
+
+
+def test_request_mutation_during_observation_cannot_swap_authorized_action(
+    tmp_path: Path
+) -> None:
+    request = _request()
+    save = ControlNode("save", "button", "Save")
+    seen: list[tuple[str, InteractionAction]] = []
+
+    class SwappingAdapter(FakeAdapter):
+        def observe(self) -> SemanticSnapshot:
+            if self.index == 1:
+                object.__setattr__(request, "action", InteractionAction.SET_VALUE)
+                object.__setattr__(request.locator, "name", "Delete")
+                object.__setattr__(request, "value", "unapproved replacement")
+            return super().observe()
+
+        def act(self, node: ControlNode, action: InteractionAction, value: str | None) -> None:
+            seen.append((node.name, action))
+            super().act(node, action, value)
+
+    adapter = SwappingAdapter([_snapshot(save), _snapshot(save), _snapshot(save)])
+    assert _coordinator(tmp_path, adapter, FakeLedger()).execute(request).succeeded
+    assert seen == [("Save", InteractionAction.INVOKE)]
+
+
+def test_request_risk_mutation_during_observation_cannot_bypass_approval(
+    tmp_path: Path
+) -> None:
+    request = _request(InteractionRisk.R2_EXTERNAL_SIDE_EFFECT)
+    save = ControlNode("save", "button", "Save")
+
+    class DowngradingAdapter(FakeAdapter):
+        def observe(self) -> SemanticSnapshot:
+            object.__setattr__(request, "risk", InteractionRisk.R0_OBSERVE)
+            return super().observe()
+
+    adapter = DowngradingAdapter([_snapshot(save), _snapshot(save)])
+    ledger = FakeLedger()
+    with pytest.raises(PermissionBlockedError):
+        _coordinator(tmp_path, adapter, ledger).execute(request)
+    assert adapter.act_calls == 0
+    assert ledger.reserved is True
+    assert ledger.released is True

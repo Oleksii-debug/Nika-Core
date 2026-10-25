@@ -6,9 +6,7 @@ This layer owns the safety sequence around adapters. Framework-specific objects 
 
 from __future__ import annotations
 
-import hashlib
-import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -33,7 +31,7 @@ from .domain import (
     SemanticSnapshot,
     StaleSnapshotError,
 )
-from .resolver import resolve_strict, validate_snapshot
+from .resolver import resolve_strict, validate_action_target, validate_snapshot
 
 
 class InteractionRisk(StrEnum):
@@ -91,6 +89,27 @@ class InteractionAdapter(Protocol):
     ) -> bool: ...
 
 
+def _detach_snapshot(snapshot: SemanticSnapshot) -> SemanticSnapshot:
+    """Copy adapter-owned semantic evidence before any later adapter callback can mutate it."""
+    target = snapshot.target
+    application = None if target.application is None else replace(target.application)
+    window = target.window
+    if window is not None:
+        window = replace(window, application=replace(window.application))
+    browser = None if target.browser is None else replace(target.browser)
+    detached_target = replace(
+        target,
+        application=application,
+        window=window,
+        browser=browser,
+    )
+    controls = tuple(
+        replace(node, attributes=tuple((key, value) for key, value in node.attributes))
+        for node in snapshot.controls
+    )
+    return replace(snapshot, target=detached_target, controls=controls)
+
+
 @dataclass(frozen=True, slots=True)
 class InteractionRequest:
     task_id: str
@@ -101,34 +120,62 @@ class InteractionRequest:
     action: InteractionAction
     risk: InteractionRisk
     value: str | None = None
+    project_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.task_id.strip() or not self.operation_key.strip():
-            raise ValueError("task_id and operation_key must not be empty")
-        if not self.tool_id.strip() or not self.target.strip():
-            raise ValueError("tool_id and target must not be empty")
+        for value, label in (
+            (self.task_id, "task_id"),
+            (self.operation_key, "operation_key"),
+            (self.tool_id, "tool_id"),
+            (self.target, "target"),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{label} must not be empty")
+            if value != value.strip():
+                raise ValueError(f"{label} must not contain surrounding whitespace")
+        if self.project_id is not None:
+            if not isinstance(self.project_id, str) or not self.project_id.strip():
+                raise ValueError("project_id must not be empty when provided")
+            if self.project_id != self.project_id.strip():
+                raise ValueError("project_id must not contain surrounding whitespace")
+        if not isinstance(self.locator, ControlLocator):
+            raise TypeError("locator must be a ControlLocator")
+        if not isinstance(self.action, InteractionAction):
+            raise TypeError("action must be an InteractionAction")
+        if not isinstance(self.risk, InteractionRisk):
+            raise TypeError("risk must be an InteractionRisk")
+        if self.value is not None and not isinstance(self.value, str):
+            raise TypeError("interaction value must be a string when provided")
+
+    @property
+    def approval_intent(self) -> ActionIntent:
+        """Canonical exact semantic effect used for approval and durable replay identity."""
+        return ActionIntent(
+            action_id=self.operation_key,
+            tool_id=self.tool_id,
+            risk=self.risk.tool_risk,
+            target=self.target,
+            approval_required=self.risk.approval_required,
+            task_id=self.task_id,
+            project_id=self.project_id,
+            effect_id=self.operation_key,
+            arguments={
+                "action": self.action.value,
+                "locator": {
+                    "role": self.locator.role,
+                    "name": self.locator.name,
+                    "label": self.locator.label,
+                    "text": self.locator.text,
+                    "ancestor_node_id": self.locator.ancestor_node_id,
+                    "attributes": [list(item) for item in self.locator.attributes],
+                },
+                "value": self.value,
+            },
+        )
 
     @property
     def fingerprint(self) -> str:
-        payload = json.dumps(
-            [
-                "nika-interaction-v1",
-                self.tool_id,
-                self.target,
-                self.action.value,
-                self.risk.value,
-                self.locator.role,
-                self.locator.name,
-                self.locator.label,
-                self.locator.text,
-                self.locator.ancestor_node_id,
-                list(self.locator.attributes),
-                self.value,
-            ],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        return self.approval_intent.approval_fingerprint
 
 
 class InteractionUncertainError(RuntimeError):
@@ -160,22 +207,32 @@ class SemanticInteractionCoordinator:
         Adapter failure after an external action starts becomes UNCERTAIN and is never retried
         blindly.
         """
-        observed = self.adapter.observe()
+        # Frozen dataclasses are still externally mutable via object.__setattr__.
+        # Detach the request and nested locator before observing or authorizing.
+        request = replace(
+            request,
+            locator=replace(
+                request.locator,
+                attributes=tuple((key, value) for key, value in request.locator.attributes),
+            ),
+        )
+        observed = _detach_snapshot(self.adapter.observe())
         node = resolve_strict(observed, request.locator)
 
-        current = self.adapter.observe()
+        current = _detach_snapshot(self.adapter.observe())
         validate_snapshot(observed, current)
         current_node = resolve_strict(current, request.locator)
-        if current_node.node_id != node.node_id:
-            raise StaleSnapshotError("Resolved semantic node changed during validation")
+        validate_action_target(node, current_node)
 
+        # Freeze one canonical effect before durable state or trusted policy calls.
+        intent = request.approval_intent
         reserved = False
         if request.risk.durable_side_effect:
             record, created = self.idempotency.reserve_once(
                 operation_key=request.operation_key,
                 task_id=request.task_id,
                 operation_type="interaction.execute",
-                input_fingerprint=request.fingerprint,
+                input_fingerprint=intent.approval_fingerprint,
             )
             if not created:
                 if record.status is IdempotencyStatus.COMPLETED:
@@ -185,13 +242,6 @@ class SemanticInteractionCoordinator:
                 )
             reserved = True
 
-        intent = ActionIntent(
-            action_id=request.operation_key,
-            tool_id=request.tool_id,
-            risk=request.risk.tool_risk,
-            target=request.target,
-            approval_required=request.risk.approval_required,
-        )
         try:
             authorize_action(
                 intent,
@@ -208,15 +258,26 @@ class SemanticInteractionCoordinator:
         focus_before = self.adapter.capture_focus()
         action_started = False
         try:
+            pre_focus_node = current_node
             self.adapter.focus(current_node)
             focused = self.adapter.capture_focus()
             if focused != current_node.node_id:
                 raise StaleSnapshotError("Semantic target did not receive verified focus")
 
+            # A focus handler can change semantics or navigate. Snapshot the new adapter
+            # evidence before any later callback can mutate a reused carrier.
+            pre_action = _detach_snapshot(self.adapter.observe())
+            if pre_action.target != current.target or pre_action.generation != current.generation:
+                raise StaleSnapshotError("Interaction target changed after focus")
+            action_node = resolve_strict(pre_action, request.locator)
+            validate_action_target(pre_focus_node, action_node)
+
             action_started = True
-            self.adapter.act(current_node, request.action, request.value)
-            after = self.adapter.observe()
-            if not self.adapter.verify(current, after, current_node, request.action, request.value):
+            self.adapter.act(action_node, request.action, request.value)
+            after = _detach_snapshot(self.adapter.observe())
+            if not self.adapter.verify(
+                pre_action, after, action_node, request.action, request.value
+            ):
                 if reserved:
                     self.idempotency.mark_uncertain(request.operation_key)
                 raise InteractionUncertainError(
@@ -237,9 +298,9 @@ class SemanticInteractionCoordinator:
                 succeeded=True,
                 action=request.action,
                 evidence=InteractionEvidence(
-                    snapshot_generation=current.generation,
-                    snapshot_revision=current.revision,
-                    matched_node_id=current_node.node_id,
+                    snapshot_generation=pre_action.generation,
+                    snapshot_revision=pre_action.revision,
+                    matched_node_id=action_node.node_id,
                     focus_before=focus_before,
                     focus_after=focus_after,
                     details=(("risk", request.risk.value),),
