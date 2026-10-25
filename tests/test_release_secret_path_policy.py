@@ -27,6 +27,16 @@ SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
         "Auth/TOKEN.JSON",
         "browser/cookies.txt",
         "Browser/Cookies.Txt",
+        "browser/cookies.sqlite",
+        "auth/credentials.json",
+        "oauth/client_secret.json",
+        "oauth/oauth_credentials.json",
+        "telegram/user.session",
+        "signing/release.pfx",
+        "signing/release.p12",
+        "signing/release.pkcs12",
+        "signing/release.jks",
+        "signing/release.keystore",
         ".env/payload.bin",
         "state/.ENV.local/payload.bin",
     ],
@@ -67,7 +77,16 @@ def test_manifest_verifier_rejects_forged_secret_path(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "relative_path",
-    [".env", "nested/TOKEN.JSON", "cache/Cookies.Txt", ".env/payload.bin"],
+    [
+        ".env",
+        "nested/TOKEN.JSON",
+        "cache/Cookies.Txt",
+        "cache/cookies.db",
+        "auth/Credentials.JSON",
+        "oauth/client_secrets.json",
+        "telegram/user.session",
+        ".env/payload.bin",
+    ],
 )
 def test_archive_verifier_rejects_secret_member_before_manifest_trust(
     tmp_path: Path,
@@ -98,7 +117,18 @@ def test_archive_verifier_rejects_secret_member_before_manifest_trust(
 
 @pytest.mark.parametrize(
     "relative_path",
-    ["tokenizer.json", "cookies_policy.txt", ".env.example", ".env.example/readme.txt"],
+    [
+        "tokenizer.json",
+        "cookies_policy.txt",
+        "oauth_documentation.json",
+        "session_notes.txt",
+        "user.session.example",
+        "certificate.pem",
+        "public.key",
+        "keystore_documentation.txt",
+        ".env.example",
+        ".env.example/readme.txt",
+    ],
 )
 def test_secret_policy_does_not_block_ordinary_release_filenames(
     tmp_path: Path,

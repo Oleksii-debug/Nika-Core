@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from threading import RLock
 
 from .product_factory_coordinator import (
     CoordinatorError,
@@ -33,6 +34,8 @@ from .product_factory_incident_contracts import (
 )
 from .toolsmith.contracts import AllowedPathPolicy
 
+_TERMINAL_INCIDENT_STATES = frozenset({IncidentState.RESOLVED, IncidentState.ROLLED_BACK})
+
 
 @dataclass(frozen=True, slots=True)
 class TrustedReviewAuthority:
@@ -50,6 +53,7 @@ class IncidentRepairReleaseCoordinator:
     project_id: str
     _incidents: dict[str, IncidentRecord] = field(default_factory=dict, init=False, repr=False)
     _fingerprints: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _incident_open_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if not self.project_id.strip():
@@ -82,20 +86,25 @@ class IncidentRepairReleaseCoordinator:
                     "incident evidence is not present in approved operations evidence"
                 )
 
-        existing = self._incidents.get(incident_id)
-        if existing is not None:
-            if existing.trigger.fingerprint != trigger.fingerprint:
-                raise ProductIncidentError("incident id conflicts with prior trigger")
-            return existing
+        with self._incident_open_lock:
+            existing = self._incidents.get(incident_id)
+            if existing is not None:
+                if existing.trigger.fingerprint != trigger.fingerprint:
+                    raise ProductIncidentError("incident id conflicts with prior trigger")
+                return existing
 
-        duplicate_id = self._fingerprints.get(trigger.fingerprint)
-        if duplicate_id is not None:
-            return self._incidents[duplicate_id]
+            duplicate_id = self._fingerprints.get(trigger.fingerprint)
+            if duplicate_id is not None:
+                duplicate = self._incidents[duplicate_id]
+                if duplicate.state not in _TERMINAL_INCIDENT_STATES:
+                    return duplicate
+                if trigger.observed_at <= self._terminal_observed_at(duplicate):
+                    return duplicate
 
-        record = IncidentRecord(incident_id, trigger, IncidentState.OPEN)
-        self._incidents[incident_id] = record
-        self._fingerprints[trigger.fingerprint] = incident_id
-        return record
+            record = IncidentRecord(incident_id, trigger, IncidentState.OPEN)
+            self._incidents[incident_id] = record
+            self._fingerprints[trigger.fingerprint] = incident_id
+            return record
 
     def create_repair_work_order(self, work_order: RepairWorkOrder) -> IncidentRecord:
         record = self._require(work_order.incident_id)
@@ -352,10 +361,18 @@ class IncidentRepairReleaseCoordinator:
             raise ProductIncidentError("incident snapshot fingerprint aliases incident ids")
         for fingerprint in fingerprints:
             validate_digest(fingerprint, "incident fingerprint")
-        if set(mapped_ids) != set(incident_ids):
-            raise ProductIncidentError("incident snapshot fingerprint index is incomplete")
 
         incidents = {record.incident_id: record for record in snapshot.incidents}
+        if any(incident_id not in incidents for incident_id in mapped_ids):
+            raise ProductIncidentError("incident snapshot fingerprint maps unknown incident")
+        if snapshot.schema != INCIDENT_LIFECYCLE_SCHEMA:
+            if set(mapped_ids) != set(incident_ids):
+                raise ProductIncidentError("incident snapshot fingerprint index is incomplete")
+        else:
+            trigger_fingerprints = {record.trigger.fingerprint for record in snapshot.incidents}
+            if set(fingerprints) != trigger_fingerprints:
+                raise ProductIncidentError("incident snapshot fingerprint index is incomplete")
+
         work_ids = [
             record.work_order.work_order_id
             for record in snapshot.incidents
@@ -391,6 +408,7 @@ class IncidentRepairReleaseCoordinator:
             raise ProductIncidentError(
                 "release-bearing incident snapshot requires deployment authority"
             )
+        fingerprint_index = dict(fingerprint_pairs)
         for record in snapshot.incidents:
             self._validate_record(record)
             for candidate in record.candidates:
@@ -406,15 +424,19 @@ class IncidentRepairReleaseCoordinator:
                 self._validate_candidate_authority(record, candidate, matches[0])
             if record.trigger.project_id != self.project_id:
                 raise ProductIncidentError("incident snapshot crosses project boundary")
-            expected = record.trigger.fingerprint
-            if dict(fingerprint_pairs).get(expected) != record.incident_id:
-                raise ProductIncidentError("incident snapshot fingerprint mapping is corrupt")
+            if snapshot.schema != INCIDENT_LIFECYCLE_SCHEMA:
+                expected = record.trigger.fingerprint
+                if fingerprint_index.get(expected) != record.incident_id:
+                    raise ProductIncidentError("incident snapshot fingerprint mapping is corrupt")
             if deployments is not None:
                 for release in record.release_events:
                     self._validate_release_authority(record, release, deployments)
 
+        if snapshot.schema == INCIDENT_LIFECYCLE_SCHEMA:
+            self._validate_occurrence_families(snapshot.incidents, fingerprint_index)
+
         self._incidents = incidents
-        self._fingerprints = dict(fingerprint_pairs)
+        self._fingerprints = fingerprint_index
 
     def _validate_record(self, record: IncidentRecord) -> None:
         if record.work_order is not None:
@@ -502,6 +524,47 @@ class IncidentRepairReleaseCoordinator:
         expected_state = self._derived_state(record)
         if record.state is not expected_state:
             raise ProductIncidentError("snapshot incident state is not derivable from evidence")
+
+    def _validate_occurrence_families(
+        self,
+        records: tuple[IncidentRecord, ...],
+        fingerprint_index: dict[str, str],
+    ) -> None:
+        families: dict[str, list[IncidentRecord]] = {}
+        for record in records:
+            families.setdefault(record.trigger.fingerprint, []).append(record)
+
+        for fingerprint, family in families.items():
+            ordered = sorted(family, key=lambda item: (item.trigger.observed_at, item.incident_id))
+            observed_times = [item.trigger.observed_at for item in ordered]
+            if len(observed_times) != len(set(observed_times)):
+                raise ProductIncidentError(
+                    "repeat incident occurrences require unique observation times"
+                )
+            for index in range(1, len(ordered)):
+                previous = ordered[index - 1]
+                current = ordered[index]
+                if previous.state not in _TERMINAL_INCIDENT_STATES:
+                    raise ProductIncidentError(
+                        "repeat incident cannot follow a non-terminal predecessor"
+                    )
+                if current.trigger.observed_at <= self._terminal_observed_at(previous):
+                    raise ProductIncidentError(
+                        "repeat incident must be observed after prior terminal release"
+                    )
+            if fingerprint_index.get(fingerprint) != ordered[-1].incident_id:
+                raise ProductIncidentError(
+                    "incident fingerprint index must point to latest occurrence"
+                )
+
+    @staticmethod
+    def _terminal_observed_at(record: IncidentRecord) -> datetime:
+        if record.state not in _TERMINAL_INCIDENT_STATES or not record.release_events:
+            raise ProductIncidentError("terminal incident lacks terminal release evidence")
+        release = record.release_events[-1]
+        if release.disposition is ReleaseDisposition.UNCERTAIN:
+            raise ProductIncidentError("terminal incident cannot carry uncertain release evidence")
+        return release.observed_at
 
     def _authority_matches_candidate(
         self,
