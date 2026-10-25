@@ -11,6 +11,7 @@ WORKFLOWS = (
 )
 RELEASE_WORKFLOWS = WORKFLOWS[1:]
 M12_WORKFLOW = WORKFLOWS[2]
+POST_ASSERTION_COUNT = {WORKFLOWS[0]: 0, WORKFLOWS[1]: 1, WORKFLOWS[2]: 3}
 CANDIDATE_ENV = "NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"
 CHECKOUT_ACTION = "uses: actions/checkout@"
 CHECKOUT_REF = "ref: ${{ env.NIKA_CANDIDATE_SHA }}"
@@ -69,7 +70,7 @@ def test_every_candidate_job_fails_closed_on_checkout_identity() -> None:
         candidate_text = _candidate_job_text(path, text)
         checkout_count = len(_checkout_indexes(candidate_text))
         assertion_count = _identity_assertion_count(candidate_text)
-        assert assertion_count == checkout_count, path
+        assert assertion_count == checkout_count + POST_ASSERTION_COUNT[path], path
 
 
 def test_m12_trusted_main_attestation_checkout_is_exact_and_separate() -> None:
@@ -81,7 +82,7 @@ def test_m12_trusted_main_attestation_checkout_is_exact_and_separate() -> None:
     checkout_block = "\n".join(lines[checkout_indexes[0] : checkout_indexes[0] + 5])
     assert TRUSTED_MAIN_REF in checkout_block
     assert "persist-credentials: false" in checkout_block
-    assert _identity_assertion_count(trusted_main) == 1
+    assert _identity_assertion_count(trusted_main) == 2
     assert "if: github.event_name == 'push' && github.ref == 'refs/heads/main'" in trusted_main
 
 
@@ -110,3 +111,51 @@ def test_m12_runs_when_upstream_release_workflows_change() -> None:
 
     for workflow_path in M12_UPSTREAM_WORKFLOW_PATHS:
         assert m12.count(workflow_path) == 2, workflow_path
+
+
+
+def test_post_proof_identity_checks_follow_proofs_before_publication() -> None:
+    m11 = WORKFLOWS[1].read_text(encoding="utf-8")
+    assert (
+        m11.index("- name: Verify packaged WebView2 UI Automation")
+        < m11.index("- name: Reverify source after tests, build and packaged UIA")
+        < m11.index("- name: Create distributable ZIP")
+    )
+
+    m12 = M12_WORKFLOW.read_text(encoding="utf-8")
+    proof_steps = (
+        (
+            "- name: Re-prove browser semantic interaction",
+            "- name: Reverify source after integrated Ubuntu proofs",
+            "\n  integrated-windows:",
+        ),
+        (
+            "- name: Re-prove Windows semantic interaction",
+            "- name: Reverify source after integrated Windows proofs",
+            "\n  packaged-windows:",
+        ),
+        (
+            "- name: Verify exact final distributable evidence binding",
+            "- name: Reverify source after final ZIP and evidence checks",
+            "- name: Upload exact pre-human candidate evidence",
+        ),
+        (
+            "- name: Re-verify downloaded final distributable before signing",
+            "- name: Reverify trusted-main source before signing",
+            "- name: Attest exact final distributable",
+        ),
+    )
+    for end_step, reverify_step, next_step in proof_steps:
+        assert m12.index(end_step) < m12.index(reverify_step) < m12.index(next_step)
+
+def test_final_windows_packages_include_local_voice_runtime_dependencies() -> None:
+    install_voice = 'python -m pip install -e ".[gui,voice,qa,dev]"'
+    m11 = WORKFLOWS[1].read_text(encoding="utf-8")
+    assert install_voice in m11
+
+    m12 = M12_WORKFLOW.read_text(encoding="utf-8")
+    _, separator, package_and_attestation = m12.partition("\n  packaged-windows:\n")
+    assert separator, "M12 packaged Windows job is missing"
+    packaged, separator, _ = package_and_attestation.partition(ATTEST_MAIN_JOB)
+    assert separator, "M12 trusted-main attestation job is missing"
+    assert install_voice in packaged

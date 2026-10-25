@@ -216,42 +216,50 @@ def test_startup_lock_has_one_owner_and_is_released_on_process_scope_exit(tmp_pa
     adoption.prepare_default_database(target, [])
 
 
-@pytest.mark.parametrize("hold_open", [False, True])
-def test_late_wal_writer_is_detected_inside_restore_lock(tmp_path, monkeypatch, hold_open):
+def test_late_writer_is_blocked_while_target_guard_has_recovery_ownership(
+    tmp_path, monkeypatch
+):
     source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
     _legacy(source)
     SQLiteStore(target).initialize()
-    original = SQLiteRecoveryManager._copy_database
-    injected = False
     guard_seen = False
+    writer_blocked = False
     original_guard = adoption._require_empty_target
 
     def observe_guard(db):
-        nonlocal guard_seen
+        nonlocal guard_seen, writer_blocked
         guard_seen = True
-        return original_guard(db)
+        original_guard(db)
+        with closing(sqlite3.connect(target, timeout=0.0, isolation_level=None)) as writer:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                writer.execute("BEGIN IMMEDIATE")
+            writer_blocked = True
 
     monkeypatch.setattr(adoption, "_require_empty_target", observe_guard)
+    adoption.prepare_default_database(target, [source])
 
-    def inject(source_path, destination, **kwargs):
-        nonlocal injected
-        if destination == target and kwargs.get("target_guard") is not None:
-            injected = True
-            with closing(sqlite3.connect(target)) as writer:
-                writer.execute("PRAGMA journal_mode=WAL")
-                writer.execute("PRAGMA wal_autocheckpoint=0")
-                writer.execute("INSERT INTO keymap_overrides VALUES ('task.create', 'Ctrl+J', 't')")
-                writer.commit()
-                if hold_open:
-                    return original(source_path, destination, **kwargs)
-        return original(source_path, destination, **kwargs)
+    assert guard_seen
+    assert writer_blocked
+    assert _rows(target, "keymap_overrides") == []
+    assert len(_rows(target, "tasks")) == 1
 
-    monkeypatch.setattr(SQLiteRecoveryManager, "_copy_database", staticmethod(inject))
-    with pytest.raises(adoption.LegacyDatabaseConflict):
-        adoption.prepare_default_database(target, [source])
-    assert injected
-    if not hold_open:
-        assert guard_seen
+
+def test_preexisting_wal_writer_blocks_legacy_adoption_without_overwrite(tmp_path):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    SQLiteStore(target).initialize()
+
+    with closing(sqlite3.connect(target, timeout=0.0)) as writer:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute("INSERT INTO keymap_overrides VALUES ('task.create', 'Ctrl+J', 't')")
+
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption.prepare_default_database(target, [source])
+
+        writer.commit()
+
     assert _rows(target, "keymap_overrides") == [("task.create", "Ctrl+J", "t")]
     assert _rows(target, "tasks") == []
 

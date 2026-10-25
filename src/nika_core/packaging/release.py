@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import lzma
 import re
 import stat
 import tempfile
+import unicodedata
 import zipfile
+import zlib
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -19,6 +22,8 @@ _MAX_PRODUCT_VERSION_CHARS = 128
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|?*')
+_MAX_WINDOWS_COMPONENT_UTF16_UNITS = 255
+_UNSAFE_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 _SECRET_RELEASE_BASENAMES = frozenset({".env", "token.json", "cookies.txt"})
 _SECRET_CONTENT_SUFFIXES = frozenset(
     {".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties", ".txt", ".log"}
@@ -158,7 +163,16 @@ def _canonical_relative_path(value: object) -> bool:
     for part in path.parts:
         if part in {".", ".."} or part.endswith((" ", ".")):
             return False
-        if any(ord(character) < 32 or character in _WINDOWS_FORBIDDEN_CHARS for character in part):
+        if any(
+            character in _WINDOWS_FORBIDDEN_CHARS
+            or unicodedata.category(character) in _UNSAFE_UNICODE_CATEGORIES
+            for character in part
+        ):
+            return False
+        # NTFS counts UTF-16 code units, not Python Unicode code points.
+        # Extended-length path support never lifts the per-component limit.
+        component_units = sum(2 if ord(char) > 0xFFFF else 1 for char in part)
+        if component_units > _MAX_WINDOWS_COMPONENT_UTF16_UNITS:
             return False
         if PureWindowsPath(part).is_reserved():
             return False
@@ -178,7 +192,30 @@ def _release_path_is_secret(value: object) -> bool:
 
 
 def _canonical_release_path(value: object) -> bool:
-    return _canonical_relative_path(value) and value != _RELEASE_MANIFEST_NAME
+    return _canonical_relative_path(value) and value.casefold() != _RELEASE_MANIFEST_NAME
+
+
+def _release_file_directory_collisions(
+    file_paths: tuple[str, ...], directory_paths: tuple[str, ...] = ()
+) -> tuple[str, ...]:
+    """Reject file ancestors of files/directories under Windows path identity."""
+    file_identities = {path.casefold() for path in file_paths}
+    collisions: list[str] = []
+    for path in (*file_paths, *directory_paths):
+        parts = path.casefold().split("/")
+        if any(
+            "/".join(parts[:index]) in file_identities
+            for index in range(1, len(parts))
+        ):
+            collisions.append(path)
+    return tuple(collisions)
+
+
+def _contains_unsafe_unicode(value: str) -> bool:
+    return any(
+        unicodedata.category(character) in _UNSAFE_UNICODE_CATEGORIES
+        for character in value
+    )
 
 
 def _valid_product_version(value: object) -> bool:
@@ -187,7 +224,7 @@ def _valid_product_version(value: object) -> bool:
         and bool(value)
         and len(value) <= _MAX_PRODUCT_VERSION_CHARS
         and value == value.strip()
-        and not any(ord(character) < 32 for character in value)
+        and not _contains_unsafe_unicode(value)
     )
 
 
@@ -250,13 +287,10 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
         not isinstance(manifest.product, str)
         or not manifest.product
         or manifest.product != manifest.product.strip()
+        or _contains_unsafe_unicode(manifest.product)
     ):
         findings.append("manifest:product")
-    if (
-        not isinstance(manifest.version, str)
-        or not manifest.version
-        or manifest.version != manifest.version.strip()
-    ):
+    if not _valid_product_version(manifest.version):
         findings.append("manifest:product-version")
     if (
         not isinstance(manifest.source_sha, str)
@@ -290,6 +324,10 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
             findings.append(f"manifest:size-format:{index}")
         if not isinstance(entry.sha256, str) or not _SHA256_RE.fullmatch(entry.sha256):
             findings.append(f"manifest:sha256-format:{index}")
+    for path in _release_file_directory_collisions(
+        tuple(sorted(seen_paths | {_RELEASE_MANIFEST_NAME}))
+    ):
+        findings.append(f"manifest:file-directory-collision:{path}")
     return tuple(findings)
 
 
@@ -314,7 +352,7 @@ def build_release_manifest(
             sha256=_sha256(path),
         )
         for path in _safe_files(root)
-        if path.name != _RELEASE_MANIFEST_NAME
+        if path.relative_to(root).as_posix() != _RELEASE_MANIFEST_NAME
     )
     if not entries:
         raise ValueError("release bundle is empty")
@@ -371,7 +409,7 @@ def verify_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> tupl
     actual_paths = {
         path.relative_to(root).as_posix(): path
         for path in _safe_files(root)
-        if path.name != _RELEASE_MANIFEST_NAME
+        if path.relative_to(root).as_posix() != _RELEASE_MANIFEST_NAME
     }
     findings: list[str] = []
     for relative_path in sorted(actual_paths):
@@ -453,6 +491,17 @@ def _decode_release_manifest(content: bytes) -> ReleaseManifest | None:
     )
 
 
+_ZIP_READ_ERRORS = (
+    OSError,
+    RuntimeError,
+    NotImplementedError,
+    EOFError,
+    zipfile.BadZipFile,
+    zlib.error,
+    lzma.LZMAError,
+)
+
+
 def _sha256_archive_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> str:
     digest = hashlib.sha256()
     with archive.open(member, "r") as handle:
@@ -464,6 +513,20 @@ def _sha256_archive_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo) ->
 def _zip_member_is_symlink(member: zipfile.ZipInfo) -> bool:
     unix_mode = (member.external_attr >> 16) & 0xFFFF
     return member.create_system == 3 and stat.S_ISLNK(unix_mode)
+
+
+def _zip_member_has_invalid_type(member: zipfile.ZipInfo) -> bool:
+    # The DOS directory attribute and Unix type bits must agree with the ZIP
+    # path shape. Different extractors can otherwise materialize different trees.
+    if not member.is_dir() and member.external_attr & 0x10:
+        return True
+    if member.create_system != 3:
+        return False
+    unix_mode = (member.external_attr >> 16) & 0xFFFF
+    member_type = stat.S_IFMT(unix_mode)
+    expected_type = stat.S_IFDIR if member.is_dir() else stat.S_IFREG
+    # ZIP writers may omit the Unix type bits entirely; that is unambiguous.
+    return member_type not in (0, expected_type)
 
 
 def _zip_member_path(member: zipfile.ZipInfo) -> str:
@@ -503,6 +566,7 @@ def verify_release_archive(
             by_path: dict[str, zipfile.ZipInfo] = {}
             seen_paths: set[str] = set()
             windows_paths: set[str] = set()
+            directory_paths: list[str] = []
             for index, member in enumerate(all_members):
                 member_path = _zip_member_path(member)
                 if not _canonical_relative_path(member_path):
@@ -513,6 +577,12 @@ def verify_release_archive(
                     continue
                 if _zip_member_is_symlink(member):
                     findings.append(f"archive:symlink:{index}")
+                    continue
+                if _zip_member_has_invalid_type(member):
+                    findings.append(f"archive:member-type:{index}")
+                    continue
+                if member.is_dir() and member.file_size:
+                    findings.append(f"archive:directory-content:{index}")
                     continue
                 if member_path in seen_paths:
                     if member_path == _RELEASE_MANIFEST_NAME:
@@ -526,8 +596,16 @@ def verify_release_archive(
                     continue
                 seen_paths.add(member_path)
                 windows_paths.add(windows_identity)
-                if not member.is_dir():
+                if member.is_dir():
+                    directory_paths.append(member_path)
+                else:
                     by_path[member_path] = member
+            if findings:
+                return tuple(findings)
+            for path in _release_file_directory_collisions(
+                tuple(by_path), tuple(directory_paths)
+            ):
+                findings.append(f"archive:file-directory-collision:{path}")
             if findings:
                 return tuple(findings)
             if not by_path:
@@ -540,7 +618,7 @@ def verify_release_archive(
                 return ("archive:manifest-too-large",)
             try:
                 manifest_content = archive.read(manifest_member)
-            except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+            except _ZIP_READ_ERRORS:
                 return ("archive:invalid-manifest",)
             manifest = _decode_release_manifest(manifest_content)
             if manifest is None:
@@ -574,7 +652,7 @@ def verify_release_archive(
                     continue
                 try:
                     actual_sha256 = _sha256_archive_member(archive, member)
-                except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+                except _ZIP_READ_ERRORS:
                     findings.append(f"archive:unreadable:{relative_path}")
                     continue
                 if actual_sha256 != entry.sha256:
@@ -582,7 +660,7 @@ def verify_release_archive(
                     continue
                 try:
                     has_secret_content = _archive_member_contains_secret_assignment(archive, member)
-                except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+                except _ZIP_READ_ERRORS:
                     findings.append(f"archive:unreadable:{relative_path}")
                     continue
                 if has_secret_content:
