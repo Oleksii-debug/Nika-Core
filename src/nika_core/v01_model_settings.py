@@ -4,6 +4,7 @@ import hashlib
 import math
 import re
 import sqlite3
+import unicodedata
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -43,6 +44,7 @@ _SCHEMA_VERSION = 1
 _TASK_SELECTION_FIELD = "v01_model_selection"
 _SELECTION_ID = re.compile(r"[0-9a-f]{64}")
 _ENV_CREDENTIAL_REF = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*")
+_FORBIDDEN_IDENTITY_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 _MIGRATIONS = {
     1: (
         (
@@ -98,7 +100,14 @@ class ModelSelection(BaseModel):
     def clean_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        if value != value.strip() or not value or any(ord(char) < 32 for char in value):
+        if (
+            value != value.strip()
+            or not value
+            or any(
+                unicodedata.category(char) in _FORBIDDEN_IDENTITY_CATEGORIES
+                for char in value
+            )
+        ):
             raise ValueError("invalid model route text")
         return value
 

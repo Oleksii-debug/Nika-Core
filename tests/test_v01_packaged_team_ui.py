@@ -212,6 +212,16 @@ global.pywebview = {{
         tasks: [],
         agents: [],
         workspaces: [],
+        startup_recovery: {{
+          schema_version: 1,
+          status: "ready",
+          auto_resume_count: 0,
+          manual_resume_count: 0,
+          approval_count: 0,
+          uncertain_count: 0,
+          blocked_count: 0,
+          resume_failed_count: 0,
+        }},
         product_project: null,
         v01_team_task: PROJECTION,
       }},
@@ -313,6 +323,25 @@ def test_renderer_accepts_actual_packaged_team_and_rejects_duplicate_member_iden
                     "source_a": "А.txt",
                     "source_b": "Б.txt",
                     "revision": 0,
+                },
+            }
+        )["status"]
+        == "completed"
+    )
+    assert (
+        bridge.dispatch(
+            {
+                "request_id": "live-model",
+                "action_id": "settings.model.configure",
+                "payload": {
+                    "revision": 0,
+                    "route_kind": "deterministic",
+                    "provider_id": None,
+                    "model": None,
+                    "base_url": None,
+                    "credential_ref": None,
+                    "private_data_allowed": True,
+                    "timeout_seconds": 60,
                 },
             }
         )["status"]
