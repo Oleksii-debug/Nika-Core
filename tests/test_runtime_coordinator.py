@@ -152,10 +152,11 @@ def test_coordinator_fails_task_closed_when_runtime_raises(tmp_path) -> None:
         coordinator.start(_ExplodingRuntime(), RuntimeRequest(task_id, "thread-error"))
     )
     assert result.outcome == RuntimeOutcome.FAILED
-    assert result.error == "boom"
+    assert result.error == "runtime execution failed"
     assert _task_state(store, task_id) == TaskState.FAILED
     events = audit.list_for(entity_type="task", entity_id=task_id)
     assert events[-1].payload["outcome"] == RuntimeOutcome.FAILED.value
+    assert "boom" not in str(events)
 
 
 def test_coordinator_rejects_non_approval_resume_without_state_change(tmp_path) -> None:
