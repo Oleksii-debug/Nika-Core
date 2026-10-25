@@ -30,6 +30,7 @@ class AttemptState(StrEnum):
     PREPARED = "prepared"
     IN_FLIGHT = "in_flight"
     CONFIRMED = "confirmed"
+    FAILED = "failed"
     UNCERTAIN = "uncertain"
 
 
@@ -173,12 +174,21 @@ class BatchCursorState(BaseModel):
         return sum(item.attempt_state is AttemptState.CONFIRMED for item in self.targets)
 
     @property
+    def failed_count(self) -> int:
+        return sum(item.attempt_state is AttemptState.FAILED for item in self.targets)
+
+    @property
     def uncertain_count(self) -> int:
         return sum(item.attempt_state is AttemptState.UNCERTAIN for item in self.targets)
 
     @property
     def pending_count(self) -> int:
-        return len(self.targets) - self.confirmed_count - self.uncertain_count
+        return (
+            len(self.targets)
+            - self.confirmed_count
+            - self.failed_count
+            - self.uncertain_count
+        )
 
 
 class EffectGrant(BaseModel):
@@ -301,6 +311,192 @@ class BatchCursor:
             return None
         return self._find(intent.target_id).model_copy(deep=True)
 
+    def prepare_external_effect(self, target_id: str) -> EffectGrant:
+        """Persist workflow intent before a canonical external ToolExecutor effect.
+
+        This mode is for compositions where ToolEffectGuard is the primary external-effect
+        authority. No batch idempotency reservation is created yet, avoiding a second
+        pre-approval effect owner. After ToolExecutor durably succeeds,
+        confirm_external_effect() mirrors that completed truth into the batch cursor.
+        """
+        target = self._find(target_id)
+        if target.attempt_state is AttemptState.CONFIRMED:
+            return EffectGrant(
+                execute=False,
+                operation_key=target.operation_key,
+                reason="already_confirmed",
+            )
+        if target.attempt_state is AttemptState.FAILED:
+            return EffectGrant(
+                execute=False,
+                operation_key=target.operation_key,
+                reason="terminal_failed",
+            )
+        if self._first_uncertain() is not None:
+            raise BatchCursorBlockedError("cursor is blocked by uncertain external-effect state")
+        if not self._is_next_target(target):
+            raise BatchCursorBlockedError("target is not the next executable cursor position")
+        if target.batch_index > self._state.ready_batch_index:
+            raise BatchCursorBlockedError("target batch is waiting for scheduled release")
+        if target.attempt_state is AttemptState.IN_FLIGHT:
+            raise BatchCursorBlockedError("target already uses cursor-owned effect authority")
+        if target.attempt_state is AttemptState.PENDING:
+            target.attempt_state = AttemptState.PREPARED
+            self._state.next_scheduled_intent = _target_intent(target)
+            self._persist()
+        return EffectGrant(
+            execute=True,
+            operation_key=target.operation_key,
+            reason="external_authority_prepared",
+        )
+
+    def reset_external_prepared(self, target_id: str) -> None:
+        """Return a proven-unexecuted external-authority intent to PENDING."""
+        target = self._find(target_id)
+        if target.attempt_state is AttemptState.PENDING:
+            return
+        if target.attempt_state is not AttemptState.PREPARED:
+            raise BatchCursorBlockedError(
+                "external prepared reset requires prepared target state"
+            )
+        if self._ledger.get(target.operation_key) is not None:
+            raise BatchCursorBlockedError(
+                "external prepared reset cannot override durable batch effect evidence"
+            )
+        target.attempt_state = AttemptState.PENDING
+        target.confirmed_result = None
+        target.uncertain_result = None
+        self._state.next_scheduled_intent = _derive_intent(self._state)
+        self._persist()
+
+    def confirm_external_effect(
+        self,
+        target_id: str,
+        result: dict[str, Any],
+        *,
+        next_batch_not_before: datetime | None = None,
+    ) -> None:
+        """Mirror an already-durable canonical external-tool completion into the cursor."""
+        target = self._find(target_id)
+        if target.attempt_state is AttemptState.CONFIRMED:
+            return
+        if target.attempt_state is not AttemptState.PREPARED:
+            raise BatchCursorBlockedError("external completion requires prepared target state")
+        clean_result = _json_copy(result)
+        record, _created = self._ledger.reserve_once(
+            operation_key=target.operation_key,
+            task_id=self._state.task_id,
+            operation_type=_OPERATION_TYPE,
+            input_fingerprint=target.input_fingerprint,
+        )
+        if record.status is IdempotencyStatus.UNCERTAIN:
+            raise BatchCursorBlockedError("uncertain batch evidence requires reconciliation")
+        if record.status is IdempotencyStatus.PENDING:
+            record = self._ledger.complete(
+                target.operation_key,
+                _completion_envelope(clean_result, next_batch_not_before),
+            )
+        durable_result, durable_due = _decode_completion_result(
+            record.result,
+            fallback_result=clean_result,
+        )
+        target.attempts = max(target.attempts, 1)
+        self._confirm_from_durable(target, durable_result)
+        self._advance(durable_due)
+        self._persist()
+
+    def mark_external_uncertain(self, target_id: str, evidence: dict[str, Any]) -> None:
+        """Mirror an unresolved canonical external-tool outcome into batch durability."""
+        target = self._find(target_id)
+        if target.attempt_state is AttemptState.CONFIRMED:
+            return
+        if target.attempt_state not in {AttemptState.PENDING, AttemptState.PREPARED}:
+            raise BatchCursorBlockedError("external uncertainty requires pending/prepared target")
+        record, _created = self._ledger.reserve_once(
+            operation_key=target.operation_key,
+            task_id=self._state.task_id,
+            operation_type=_OPERATION_TYPE,
+            input_fingerprint=target.input_fingerprint,
+        )
+        if record.status is IdempotencyStatus.COMPLETED:
+            durable_result, durable_due = _decode_completion_result(record.result)
+            self._confirm_from_durable(target, durable_result)
+            self._advance(durable_due)
+        else:
+            if record.status is IdempotencyStatus.PENDING:
+                self._ledger.mark_uncertain(target.operation_key)
+            target.attempts = max(target.attempts, 1)
+            target.attempt_state = AttemptState.UNCERTAIN
+            target.confirmed_result = None
+            target.uncertain_result = _json_copy(evidence)
+            self._state.next_scheduled_intent = _reconcile_intent(target)
+        self._persist()
+
+    def mark_external_pre_effect_denial(
+        self,
+        target_id: str,
+        *,
+        next_batch_not_before: datetime | None = None,
+    ) -> None:
+        """Persist a canonical ToolExecutor denial proven to occur before handler dispatch.
+
+        Scenario-B prepares durable workflow intent before consulting ToolExecutor.  When the
+        canonical tool boundary then rejects approval or reports a missing durable effect guard,
+        no external handler has run and the PREPARED cursor must not remain replayable forever.
+        This transition is intentionally narrower than generic terminal failure: only PREPARED
+        state with no batch-ledger effect evidence may become FAILED.
+        """
+        target = self._find(target_id)
+        if target.attempt_state is AttemptState.FAILED:
+            return
+        if target.attempt_state is not AttemptState.PREPARED:
+            raise BatchCursorBlockedError(
+                "pre-effect denial requires prepared external-authority state"
+            )
+        if self._ledger.get(target.operation_key) is not None:
+            raise BatchCursorBlockedError(
+                "pre-effect denial cannot override durable batch effect evidence"
+            )
+        target.attempt_state = AttemptState.FAILED
+        target.attempts += 1
+        target.confirmed_result = None
+        target.uncertain_result = None
+        self._advance(next_batch_not_before)
+        self._persist()
+
+    def mark_terminal_failure(
+        self,
+        target_id: str,
+        *,
+        next_batch_not_before: datetime | None = None,
+    ) -> None:
+        """Persist a deterministic no-effect target failure and continue the plan.
+
+        This transition is intentionally narrow: only a still-PENDING target with no
+        batch idempotency evidence can become FAILED. PREPARED/IN_FLIGHT/UNCERTAIN
+        outcomes may already intersect external-effect authority and therefore remain
+        fail-closed instead of being converted into a retryable/terminal local failure.
+        """
+        target = self._find(target_id)
+        if target.attempt_state is AttemptState.FAILED:
+            return
+        if target.attempt_state is not AttemptState.PENDING:
+            raise BatchCursorBlockedError(
+                "terminal failure requires pending pre-effect target state"
+            )
+        if target.batch_index != self._state.ready_batch_index:
+            raise BatchCursorBlockedError("target batch is not currently admitted")
+        if self._ledger.get(target.operation_key) is not None:
+            raise BatchCursorBlockedError(
+                "terminal failure cannot override durable effect evidence"
+            )
+        target.attempt_state = AttemptState.FAILED
+        target.attempts += 1
+        target.confirmed_result = None
+        target.uncertain_result = None
+        self._advance(next_batch_not_before)
+        self._persist()
+
     def begin_effect(self, target_id: str) -> EffectGrant:
         target = self._find(target_id)
         if target.attempt_state is AttemptState.CONFIRMED:
@@ -308,6 +504,12 @@ class BatchCursor:
                 execute=False,
                 operation_key=target.operation_key,
                 reason="already_confirmed",
+            )
+        if target.attempt_state is AttemptState.FAILED:
+            return EffectGrant(
+                execute=False,
+                operation_key=target.operation_key,
+                reason="terminal_failed",
             )
         if self._first_uncertain() is not None:
             raise BatchCursorBlockedError("cursor is blocked by uncertain external-effect state")
@@ -421,6 +623,10 @@ class BatchCursor:
                         "cursor terminal/in-flight state has no idempotency evidence"
                     )
                 continue
+            if target.attempt_state is AttemptState.FAILED:
+                raise BatchCursorStateError(
+                    "failed target unexpectedly has durable effect evidence"
+                )
             if (
                 durable.task_id != self._state.task_id
                 or durable.operation_type != _OPERATION_TYPE
@@ -429,15 +635,19 @@ class BatchCursor:
                 raise BatchCursorStateError("idempotency evidence belongs to different input")
             if durable.status is IdempotencyStatus.COMPLETED:
                 result, durable_due = _decode_completion_result(durable.result)
-                prior_intent = self._state.next_scheduled_intent.model_copy(deep=True) if self._state.next_scheduled_intent is not None else None
-                if target.attempt_state is not AttemptState.CONFIRMED or (
-                    target.confirmed_result != result
-                ):
+                was_confirmed = target.attempt_state is AttemptState.CONFIRMED
+                if not was_confirmed or target.confirmed_result != result:
                     self._confirm_from_durable(target, result)
                     changed = True
-                self._advance(durable_due)
-                if self._state.next_scheduled_intent != prior_intent:
-                    changed = True
+                if not was_confirmed:
+                    prior_intent = (
+                        self._state.next_scheduled_intent.model_copy(deep=True)
+                        if self._state.next_scheduled_intent is not None
+                        else None
+                    )
+                    self._advance(durable_due)
+                    if self._state.next_scheduled_intent != prior_intent:
+                        changed = True
             elif durable.status is IdempotencyStatus.UNCERTAIN:
                 if target.attempt_state is not AttemptState.UNCERTAIN:
                     target.attempt_state = AttemptState.UNCERTAIN
@@ -521,7 +731,8 @@ class BatchCursor:
             (
                 target
                 for target in self._state.targets
-                if target.attempt_state is not AttemptState.CONFIRMED
+                if target.attempt_state
+                not in {AttemptState.CONFIRMED, AttemptState.FAILED}
             ),
             None,
         )
@@ -537,8 +748,19 @@ class BatchCursor:
         )
 
     def _is_next_target(self, target: TargetCursor) -> bool:
-        next_target = self._first_nonconfirmed()
-        return next_target is not None and next_target.target_id == target.target_id
+        """Return whether the target belongs to the currently admitted batch.
+
+        BatchCursor owns durable effect identity/order between batches, while the bounded
+        executor owns concurrency inside one admitted batch. Requiring only the first
+        non-confirmed target here silently serialized a declared max-five batch to one
+        external effect at a time. A future batch remains fail-closed until its durable
+        inter-batch wait is released.
+        """
+        return (
+            target.attempt_state
+            not in {AttemptState.CONFIRMED, AttemptState.FAILED}
+            and target.batch_index == self._state.ready_batch_index
+        )
 
     def _find(self, target_id: str) -> TargetCursor:
         target = next(
@@ -614,7 +836,12 @@ def _derive_intent(state: BatchCursorState) -> ScheduledIntent | None:
     if uncertain is not None:
         return _reconcile_intent(uncertain)
     target = next(
-        (item for item in state.targets if item.attempt_state is not AttemptState.CONFIRMED),
+        (
+            item
+            for item in state.targets
+            if item.attempt_state
+            not in {AttemptState.CONFIRMED, AttemptState.FAILED}
+        ),
         None,
     )
     if target is None:

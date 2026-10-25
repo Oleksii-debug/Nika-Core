@@ -14,6 +14,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
     IdempotencyLedger,
+    IdempotencyRecord,
     IdempotencyStatus,
 )
 
@@ -145,6 +146,7 @@ ApprovalPolicy = Callable[
     [ToolSpec, ToolCall],
     Awaitable[ToolAuthorization | bool | None],
 ]
+PreHandlerAuthority = Callable[[], bool]
 
 
 class ToolEffectConflictError(RuntimeError):
@@ -154,6 +156,7 @@ class ToolEffectConflictError(RuntimeError):
 @dataclass(frozen=True, slots=True)
 class ToolEffectReservation:
     operation_key: str
+    effect_intent_fingerprint: str
     completed_result: Mapping[str, object] | None = None
 
 
@@ -173,6 +176,7 @@ class ToolEffectGuard:
             raise ValueError("call_id must not be empty")
 
         operation_key = self._operation_key(task_id=task_id, call_id=call.call_id)
+        effect_intent_fingerprint = self.effect_intent_fingerprint(spec=spec, call=call)
         input_fingerprint = self._fingerprint(spec=spec, call=call)
         try:
             record, created = self._ledger.reserve_once(
@@ -207,16 +211,61 @@ class ToolEffectGuard:
             raise ToolEffectConflictError("tool effect reservation failed closed") from exc
 
         if created:
-            return ToolEffectReservation(operation_key=operation_key)
+            return ToolEffectReservation(
+                operation_key=operation_key,
+                effect_intent_fingerprint=effect_intent_fingerprint,
+            )
         if record.status is IdempotencyStatus.COMPLETED:
             completed = dict(record.result or {})
             return ToolEffectReservation(
                 operation_key=operation_key,
+                effect_intent_fingerprint=effect_intent_fingerprint,
                 completed_result=completed,
             )
         raise ToolEffectConflictError(
             f"tool effect is unresolved: {record.status.value}"
         )
+
+    @classmethod
+    def inspect_ledger(
+        cls,
+        ledger: IdempotencyLedger,
+        *,
+        task_id: str,
+        call_id: str,
+        expected_effect_intent_fingerprint: str,
+    ) -> IdempotencyRecord | None:
+        """Read exact durable tool-effect truth without granting execution authority.
+
+        This probe deliberately bypasses approval only for observation.  It cannot reserve,
+        replay, complete, or mutate an effect, and it validates the canonical task/call
+        operation identity before returning evidence to a recovery composition.
+        """
+        if (
+            not task_id.strip()
+            or not call_id.strip()
+            or not expected_effect_intent_fingerprint.strip()
+        ):
+            raise ValueError(
+                "tool effect observation requires task_id, call_id and effect intent fingerprint"
+            )
+        operation_key = cls._operation_key(task_id=task_id, call_id=call_id)
+        record = ledger.get(operation_key)
+        if record is None:
+            return None
+        if record.task_id != task_id or record.operation_type != cls._OPERATION_TYPE:
+            raise ToolEffectConflictError("tool effect observation identity mismatch")
+        if record.status is IdempotencyStatus.COMPLETED:
+            result = record.result
+            if (
+                not isinstance(result, Mapping)
+                or result.get("effect_intent_fingerprint")
+                != expected_effect_intent_fingerprint
+            ):
+                raise ToolEffectConflictError(
+                    "completed tool effect intent identity mismatch"
+                )
+        return record
 
     def complete(self, reservation: ToolEffectReservation, output: object) -> None:
         try:
@@ -225,15 +274,32 @@ class ToolEffectGuard:
             # Never certify a result as COMPLETED if restart cannot reproduce it.
             # ToolExecutor will convert this finalize failure into UNCERTAIN.
             raise ValueError("durable tool result must be JSON-compatible") from exc
+        if not reservation.effect_intent_fingerprint.strip():
+            raise ValueError("tool effect intent fingerprint must not be empty")
         self._ledger.complete(
             reservation.operation_key,
-            {"completed": True, "output": output},
+            {
+                "completed": True,
+                "effect_intent_fingerprint": reservation.effect_intent_fingerprint,
+                "output": output,
+            },
         )
 
     def mark_uncertain(self, reservation: ToolEffectReservation) -> None:
         record = self._ledger.require(reservation.operation_key)
         if record.status is IdempotencyStatus.PENDING:
             self._ledger.mark_uncertain(reservation.operation_key)
+
+    def release_pending(self, reservation: ToolEffectReservation) -> None:
+        """Release a proven-unexecuted reservation before handler dispatch."""
+        if reservation.completed_result is not None:
+            raise ToolEffectConflictError("completed tool effect cannot be released")
+        try:
+            self._ledger.release_pending(reservation.operation_key)
+        except (IdempotencyConflictError, KeyError, sqlite3.Error) as exc:
+            raise ToolEffectConflictError(
+                "pending tool effect release failed closed"
+            ) from exc
 
     @staticmethod
     def _operation_key(*, task_id: str, call_id: str) -> str:
@@ -244,6 +310,26 @@ class ToolEffectGuard:
             separators=(",", ":"),
         ).encode("utf-8")
         return f"tool:{hashlib.sha256(identity).hexdigest()}"
+
+    @staticmethod
+    def effect_intent_fingerprint(*, spec: ToolSpec, call: ToolCall) -> str:
+        payload = {
+            "arguments": call.arguments,
+            "risk": spec.risk.value,
+            "tool_id": spec.tool_id,
+            "version": "tool-effect-intent-v1",
+        }
+        try:
+            encoded = json.dumps(
+                payload,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("durable tool arguments must be JSON-compatible") from exc
+        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     def _fingerprint(*, spec: ToolSpec, call: ToolCall) -> str:
@@ -293,7 +379,12 @@ class ToolExecutor:
     def specs(self) -> tuple[ToolSpec, ...]:
         return tuple(spec for spec, _handler in self._tools.values())
 
-    async def execute(self, call: ToolCall) -> ToolResult:
+    async def execute(
+        self,
+        call: ToolCall,
+        *,
+        pre_handler_authority: PreHandlerAuthority | None = None,
+    ) -> ToolResult:
         registered = self._tools.get(call.tool_id)
         if registered is None:
             return ToolResult(call_id=call.call_id, tool_id=call.tool_id, error="unknown tool")
@@ -372,8 +463,89 @@ class ToolExecutor:
                     tool_id=call.tool_id,
                     output=reservation.completed_result.get("output"),
                 )
+            if pre_handler_authority is not None:
+                denial_reason = "pre_handler_authority_denied"
+                try:
+                    allowed = pre_handler_authority()
+                except asyncio.CancelledError:
+                    try:
+                        self._effect_guard.release_pending(reservation)
+                    except ToolEffectConflictError:
+                        self._audit(
+                            "tool.denied",
+                            call,
+                            spec,
+                            {
+                                "reason": "pending_release_failed",
+                                "phase": "pre_handler_authority",
+                            },
+                        )
+                    raise
+                except Exception as exc:  # noqa: BLE001 - trusted authority fails closed.
+                    allowed = False
+                    denial_reason = type(exc).__name__
+                if allowed is not True:
+                    try:
+                        self._effect_guard.release_pending(reservation)
+                    except ToolEffectConflictError as exc:
+                        self._audit(
+                            "tool.denied",
+                            call,
+                            spec,
+                            {
+                                "reason": type(exc).__name__,
+                                "phase": "pre_handler_authority_release",
+                            },
+                        )
+                        return ToolResult(
+                            call_id=call.call_id,
+                            tool_id=call.tool_id,
+                            error="tool effect not safe to execute",
+                        )
+                    self._audit(
+                        "tool.denied",
+                        call,
+                        spec,
+                        {
+                            "reason": denial_reason,
+                            "phase": "pre_handler_authority",
+                        },
+                    )
+                    return ToolResult(
+                        call_id=call.call_id,
+                        tool_id=call.tool_id,
+                        error="pre-handler authority denied",
+                    )
         else:
             reservation = None
+            # Some caller-declared local mutations also require a last-moment durable
+            # authority check (for example Scenario-B browser SET_VALUE after task pause
+            # or cancellation). This guard grants no approval/effect authority; it only
+            # vetoes handler dispatch. External replay semantics remain above and unchanged.
+            if pre_handler_authority is not None:
+                denial_reason = "pre_handler_authority_denied"
+                try:
+                    allowed = pre_handler_authority()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - trusted authority fails closed.
+                    allowed = False
+                    denial_reason = type(exc).__name__
+                if allowed is not True:
+                    self._audit(
+                        "tool.denied",
+                        call,
+                        spec,
+                        {
+                            "reason": denial_reason,
+                            "phase": "pre_handler_authority",
+                        },
+                    )
+                    return ToolResult(
+                        call_id=call.call_id,
+                        tool_id=call.tool_id,
+                        error="pre-handler authority denied",
+                    )
 
         self._audit("tool.started", call, spec, {})
         try:
