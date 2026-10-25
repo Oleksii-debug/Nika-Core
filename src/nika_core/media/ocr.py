@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import shutil
+import tempfile
 import threading
 from pathlib import Path
 from typing import Protocol
@@ -20,6 +21,7 @@ class OCRPageRequest(BaseModel):
 
     page_number: int = Field(ge=1)
     image_path: Path
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     language: str = Field(default="eng", min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_+.-]+$")
 
 
@@ -81,42 +83,92 @@ class TesseractOCRAdapter:
         timeout_seconds: float,
         cancel_event: threading.Event | None = None,
     ) -> OCRPage:
-        image = request.image_path.resolve(strict=True)
+        try:
+            image = request.image_path.resolve(strict=True)
+        except FileNotFoundError as exc:
+            raise MediaError(
+                MediaErrorCode.SOURCE_NOT_FOUND,
+                "OCR source file is missing",
+            ) from exc
         if not image.is_file():
-            raise ValueError("OCR input must be a regular file")
+            raise MediaError(
+                MediaErrorCode.INVALID_SOURCE,
+                "OCR input must be a regular file",
+            )
+
+        source_sha256 = sha256_file(image)
+        if source_sha256 != request.source_sha256:
+            raise MediaError(
+                MediaErrorCode.CHECKSUM_MISMATCH,
+                "OCR source bytes do not match the durable source identity",
+            )
+
         executable = self._resolve_executable()
-        result = self._runner.run(
-            (
-                executable,
-                str(image),
-                "stdout",
-                "-l",
-                request.language,
-                "tsv",
-            ),
-            cwd=cwd,
-            timeout_seconds=timeout_seconds,
-            cancel_event=cancel_event,
-        )
+        suffix = image.suffix if image.suffix else ".img"
+        try:
+            with tempfile.TemporaryDirectory(prefix="nika-ocr-", dir=cwd) as temp_dir:
+                snapshot = Path(temp_dir) / f"input{suffix}"
+                shutil.copyfile(image, snapshot)
+                if sha256_file(snapshot) != request.source_sha256:
+                    raise MediaError(
+                        MediaErrorCode.CHECKSUM_MISMATCH,
+                        "OCR source changed while creating the recognition snapshot",
+                    )
+                result = self._runner.run(
+                    (
+                        executable,
+                        str(snapshot),
+                        "stdout",
+                        "-l",
+                        request.language,
+                        "tsv",
+                    ),
+                    cwd=cwd,
+                    timeout_seconds=timeout_seconds,
+                    cancel_event=cancel_event,
+                )
+                if sha256_file(snapshot) != request.source_sha256:
+                    raise MediaError(
+                        MediaErrorCode.CHECKSUM_MISMATCH,
+                        "OCR recognition snapshot changed during execution",
+                    )
+        except MediaError:
+            raise
+        except OSError as exc:
+            raise MediaError(
+                MediaErrorCode.INVALID_SOURCE,
+                "OCR source could not be snapshotted for recognition",
+            ) from exc
+
+        if sha256_file(image) != request.source_sha256:
+            raise MediaError(
+                MediaErrorCode.CHECKSUM_MISMATCH,
+                "OCR source changed during recognition; result was discarded",
+            )
+
         text, confidence = _parse_tesseract_tsv(result.stdout)
         return OCRPage(
             page_number=request.page_number,
             text=text,
             confidence=confidence,
-            source_sha256=sha256_file(image),
+            source_sha256=request.source_sha256,
         )
 
     def _resolve_executable(self) -> str:
         candidate = Path(self._executable)
         if candidate.parent != Path(".") or candidate.is_absolute():
             if not candidate.resolve().is_file():
-                raise MediaError(MediaErrorCode.COMPONENT_MISSING, "Tesseract executable is missing")
+                raise MediaError(
+                    MediaErrorCode.COMPONENT_MISSING,
+                    "Tesseract executable is missing",
+                )
             return str(candidate.resolve())
         located = shutil.which(self._executable)
         if located is None:
             raise MediaError(
                 MediaErrorCode.COMPONENT_MISSING,
-                "Tesseract OCR is not installed or discoverable; Nika will not download it automatically",
+                "Tesseract OCR is not installed or discoverable; "
+                "Nika will not download it automatically",
             )
         return located
 
