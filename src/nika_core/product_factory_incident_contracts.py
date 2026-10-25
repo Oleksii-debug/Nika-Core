@@ -355,9 +355,16 @@ def _canonical(payload: object) -> bytes:
 
 
 def _aware(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ProductIncidentError("datetime must be timezone-aware")
-    return value.astimezone(UTC)
+    if type(value) is not datetime:
+        raise ProductIncidentError("datetime must be a timezone-aware datetime")
+    try:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ProductIncidentError("datetime must be timezone-aware")
+        return value.astimezone(UTC)
+    except ProductIncidentError:
+        raise
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ProductIncidentError("datetime must be representable in UTC") from exc
 
 
 def _nonempty(*values: str, label: str) -> None:
