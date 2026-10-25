@@ -7,6 +7,7 @@ from typing import Protocol
 
 from .contracts import require_aware_utc
 from .dataset import TemporalView
+from .orders import OrderIntent
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,3 +31,9 @@ class StrategyDecision:
 
 class Strategy(Protocol):
     def decide(self, context: DecisionContext) -> StrategyDecision: ...
+
+
+class OrderStrategy(Protocol):
+    """Paper-trading strategy boundary: proposes intents but cannot execute them."""
+
+    def propose(self, context: DecisionContext) -> tuple[OrderIntent, ...]: ...
