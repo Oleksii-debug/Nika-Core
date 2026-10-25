@@ -1,0 +1,296 @@
+{
+  "schema_version": 1,
+  "worker": "NIKA-S100-W092",
+  "role": "Final PF0-PF12 Acceptance Matrix Engineer",
+  "repository": "Oleksii-debug/Nika-Core",
+  "generated_date": "2026-08-26",
+  "starting_main_sha": "109829579ab4693e038e218769c23c2547defd64",
+  "evaluated_main_sha": "109829579ab4693e038e218769c23c2547defd64",
+  "binding_acceptance_document": "docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md",
+  "status_definitions": {
+    "PROVEN_EXACT": "Every binding gate requirement is integrated on evaluated_main_sha and has exact-main executable evidence, including a user-reachable Product Journey where the gate depends on product composition.",
+    "PARTIAL": "A material subset is integrated and exact-main evidence exists, but one or more binding requirements or user-reachable composition steps are absent or unproven.",
+    "BLOCKED": "The gate has integrated capability, but a known exact-main defect, unmet authority/governance dependency, or required unintegrated repair prevents acceptance.",
+    "NOT_INTEGRATED": "The gate-critical production capability is absent from evaluated_main_sha; candidate or QA-only code receives no integration credit."
+  },
+  "policy": {
+    "stale_pr_credit": false,
+    "candidate_pr_credit": false,
+    "backend_only_completion_credit_when_product_journey_missing": false,
+    "human_tested": false,
+    "nvda_verified": false,
+    "production_release_ready": false
+  },
+  "wave_i": {
+    "required": true,
+    "sealed": false,
+    "status": "BLOCKED",
+    "canonical_issue": 1,
+    "w090_comment_id": 5426824937,
+    "w088_terminal_comment_id": 5426843738,
+    "reason": "Canonical W090 records WAVE_I_SEALED=false. A later W088 terminal handoff proves exact-main Core, M11 and M12 success, but no later canonical W090 WAVE_I_SEALED=true handoff exists. W092 does not assume sealer authority."
+  },
+  "exact_main_evidence": {
+    "core_ci": {
+      "run_id": 32980430285,
+      "conclusion": "SUCCESS"
+    },
+    "m11_windows_release_candidate": {
+      "run_id": 32980430222,
+      "conclusion": "SUCCESS"
+    },
+    "m12_pre_human_release_gate": {
+      "run_id": 32980430229,
+      "conclusion": "SUCCESS",
+      "ubuntu_integrated": true,
+      "windows_integrated": true,
+      "packaged_windows": true,
+      "cryptographic_distributable_provenance": true,
+      "full_verify_py": true
+    },
+    "main_branch_protected": false
+  },
+  "product_journey": {
+    "full_pf0_pf12_representative_product_journey_integrated": false,
+    "reason": "Exact main has packaged ProductProject and pre-human Windows evidence, but the binding full Product Factory journey is not integrated end to end: formal Research-to-Product, durable team/multi-repo/build/deploy/ops composition, Business Factory, positive compliance authority, and final representative-product journey remain incomplete or blocked."
+  },
+  "summary": {
+    "PROVEN_EXACT": 0,
+    "PARTIAL": 4,
+    "BLOCKED": 8,
+    "NOT_INTEGRATED": 1,
+    "total_gates": 13,
+    "overall": "BLOCKED"
+  },
+  "pf_matrix": {
+    "PF0": "BLOCKED",
+    "PF1": "PARTIAL",
+    "PF2": "BLOCKED",
+    "PF3": "PARTIAL",
+    "PF4": "BLOCKED",
+    "PF5": "PARTIAL",
+    "PF6": "BLOCKED",
+    "PF7": "BLOCKED",
+    "PF8": "BLOCKED",
+    "PF9": "NOT_INTEGRATED",
+    "PF10": "PARTIAL",
+    "PF11": "BLOCKED",
+    "PF12": "BLOCKED"
+  },
+  "gates": [
+    {
+      "id": "PF0",
+      "name": "ProductProject durability",
+      "status": "BLOCKED",
+      "integrated_evidence": [
+        "src/nika_core/product_project.py",
+        "integrated ProductProject history/integrity layers",
+        "exact-main Core/M12 success"
+      ],
+      "blocking_reasons": [
+        "Current exact-main durability convergence remains owned by PR #296 for atomic current-row/spec/idempotency/audit mutation, commit-bound return identity, strict durable validation and restart/concurrency closure.",
+        "PR #296 is not integrated and its audit clearance is not complete; candidate evidence is not transferred to main."
+      ],
+      "owner_prs": [296],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF1",
+      "name": "Research to Product",
+      "status": "PARTIAL",
+      "integrated_evidence": [
+        "Universal Research subsystem exists on exact main.",
+        "ProductProject and ProductDecision durable primitives exist on exact main."
+      ],
+      "missing_requirements": [
+        "Formal automatic ResearchResultSet/evidence-package to ProductProject provenance handoff is not integrated: src/nika_core/research_product_handoff.py is absent on evaluated main.",
+        "The current formal handoff owner is PR #179, and QA #478 proves an unresolved requirement-link/source-refresh atomicity family on that candidate lineage."
+      ],
+      "owner_prs": [179],
+      "qa_prs": [478],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF2",
+      "name": "Dynamic Team Composer",
+      "status": "BLOCKED",
+      "integrated_evidence": [
+        "src/nika_core/product_factory_orchestration.py contains DynamicTeamComposer, TeamPlan and permission-ceiling primitives."
+      ],
+      "blocking_reasons": [
+        "PR #163 states complete durable TeamLifecycleSnapshot composition into canonical ProductProject/PF12 checkpoint authority is absent.",
+        "PF2 integration is dependency-ordered behind trusted checkpoint authority #340; neither repair is integrated on evaluated main."
+      ],
+      "owner_prs": [163, 340],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF3",
+      "name": "Repository and multi-repository graph",
+      "status": "PARTIAL",
+      "integrated_evidence": [
+        "src/nika_core/product_factory_orchestration.py contains ProductRepositoryGraph, component ownership, repository refs and lease/conflict primitives."
+      ],
+      "missing_requirements": [
+        "Durable ProductProject multi-repository graph authority, restart reconstruction and execution composition remain unintegrated in PR #310.",
+        "Stronger current-main Windows repository identity/alias hardening remains unintegrated in PR #335.",
+        "No full user-reachable Product Journey proves these backend graph primitives as one accepted flow on evaluated main."
+      ],
+      "owner_prs": [310, 335],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF4",
+      "name": "Autonomous implementation and guarded integration",
+      "status": "BLOCKED",
+      "integrated_evidence": [
+        "src/nika_core/product_factory_coordinator.py implements work/result/review/repair coordination and exact evidence identities.",
+        "Exact-main Core/M12 are green."
+      ],
+      "blocking_reasons": [
+        "The binding PF4 gate requires production/main protection from direct worker mutation, but GitHub reports main protected=false with protection disabled on evaluated main.",
+        "A green backend coordinator cannot compensate for a failed repository-governance requirement."
+      ],
+      "owner_prs": [],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF5",
+      "name": "Multi-platform build and execution",
+      "status": "PARTIAL",
+      "integrated_evidence": [
+        "src/nika_core/product_factory_deployment.py contains Windows/Linux/macOS platform identities, capability/resource-aware ExecutionNodeRegistry and NormalizedBuildEvidence.",
+        "Local Windows and Linux node contracts exist."
+      ],
+      "missing_requirements": [
+        "The actual trusted Product Factory build-execution host/port and durable effect boundary are not integrated; PR #295 adds src/nika_core/product_factory_build_execution*.py and is still open.",
+        "Therefore exact main proves scheduling/evidence primitives but not the complete two-environment build/test execution Product Journey through one accepted Nika contract."
+      ],
+      "owner_prs": [295],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF6",
+      "name": "Deployment",
+      "status": "BLOCKED",
+      "integrated_evidence": [
+        "Exact main has DeploymentFabric, staging-first enforcement, exact release SHA/artifact identity, health evidence, rollback and uncertain-result reconciliation primitives."
+      ],
+      "blocking_reasons": [
+        "In evaluated-main src/nika_core/product_factory_deployment.py, DeploymentFabric.deploy() calls provider.deploy(intent) before a crash-durable pre-dispatch UNCERTAIN checkpoint exists.",
+        "PR #477 is based on evaluated main specifically to make that pre-dispatch uncertainty crash-durable and is not integrated."
+      ],
+      "owner_prs": [477],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF7",
+      "name": "Credential and identity security",
+      "status": "BLOCKED",
+      "integrated_evidence": [
+        "CredentialBroker/protected-store primitives exist on exact main and M12 packaging remains secret-negative by policy."
+      ],
+      "blocking_reasons": [
+        "Current owner PR #162 remains INTEGRATED=false and carries AUD02-BLOCK while repairing caller-created first authority, stale opaque handle invalidation and cross-session one-owner authority.",
+        "Those security/authority repairs are not credited from the candidate branch."
+      ],
+      "owner_prs": [162],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF8",
+      "name": "Operations and maintenance",
+      "status": "BLOCKED",
+      "integrated_evidence": [
+        "Product operations/incident primitives exist on exact main."
+      ],
+      "blocking_reasons": [
+        "PR #286 remains the unintegrated PF8 lifecycle/effect-journal/maintenance-authority convergence owner.",
+        "Positive maintenance authority still depends on canonical M10/R4 authority, and PF8 also depends on exact PF6 release identity/durability composition before final acceptance."
+      ],
+      "owner_prs": [286, 477],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF9",
+      "name": "Business Factory sandbox",
+      "status": "NOT_INTEGRATED",
+      "integrated_evidence": [],
+      "missing_requirements": [
+        "No BusinessFactory/WorkOrder production surface is present in the evaluated-main tree.",
+        "PF9 production capability remains on open PR #195 and receives no candidate credit."
+      ],
+      "owner_prs": [195],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF10",
+      "name": "IP, license and compliance",
+      "status": "PARTIAL",
+      "integrated_evidence": [
+        "src/nika_core/packaging/notices.py builds and verifies runtime third-party license/notices evidence.",
+        "Exact-main release workflow includes package integrity/provenance checks."
+      ],
+      "missing_requirements": [
+        "The full trusted ProductComplianceGate/release-grant path, dependency/license/provenance decision authority and Business Factory delivery adoption remain on unintegrated PR #195.",
+        "PR #195 explicitly states no canonical authenticated positive PF10 review authority is integrated on current main, so positive release/delivery compliance remains fail-closed."
+      ],
+      "owner_prs": [195],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF11",
+      "name": "Representative packaged Product Journey",
+      "status": "BLOCKED",
+      "integrated_evidence": [
+        "Exact-main M11 and M12 Windows package flows succeed.",
+        "Exact main has packaged ProductProject creation/planning/restart and WebView2/UIA automated pre-human evidence."
+      ],
+      "blocking_reasons": [
+        "The binding PF11 full Product Factory representative-product journey is not integrated end to end across PF1-PF10.",
+        "PR #319 has exact-green C1 candidate evidence but is INTEGRATED=false and explicitly does not claim complete PF11; it receives no main credit.",
+        "main is unprotected, which violates release-governance truth required for complete PF11 acceptance.",
+        "M12 correctly records HUMAN_TESTED=false, NVDA_VERIFIED=false and PRODUCTION_RELEASE_READY=false."
+      ],
+      "owner_prs": [319],
+      "candidate_credit_applied": false
+    },
+    {
+      "id": "PF12",
+      "name": "Long-horizon multi-session reliability",
+      "status": "BLOCKED",
+      "integrated_evidence": [
+        "Exact main contains long-horizon ProductProject history/integrity layers, checkpoint primitives and broad restart/recovery tests.",
+        "Exact-main Core/M12 are green."
+      ],
+      "blocking_reasons": [
+        "Current checkpoint authority owner PR #340 documents exact predecessor/restart authority defects in the integrated lineage: stale clear authority, created_at-dependent predecessor/latest authority and missing independent durable head commitment.",
+        "PR #340 is INTEGRATED=false and AUD02-BLOCK/audit-required, so its repairs receive no main credit.",
+        "PF0 durability convergence #296 is also not integrated, preventing final multi-session authority closure."
+      ],
+      "owner_prs": [340, 296],
+      "candidate_credit_applied": false
+    }
+  ],
+  "focused_regression_execution": {
+    "exact_main_hosted": {
+      "executed": true,
+      "evidence": [
+        "Core CI 32980430285 SUCCESS",
+        "M12 32980430229 SUCCESS with full scripts/verify.py on Ubuntu and Windows plus packaged Windows proof"
+      ]
+    },
+    "local_exact_main_checkout": {
+      "executed": false,
+      "reason": "Worker runtime could not resolve github.com, so no unsupported local pytest claim is made."
+    },
+    "w092_production_repairs": {
+      "performed": false,
+      "reason": "No gate is blocked by a uniquely unowned thin exact-main production defect. Current blockers belong to explicit PF owners, shared authority/governance dependencies, or missing integration; W092 does not duplicate those lanes."
+    }
+  },
+  "finality": {
+    "matrix_status": "BLOCKED",
+    "reason": "Wave-I is required but not canonically sealed, zero PF gates qualify as PROVEN_EXACT on evaluated main, and the full Product Journey is not integrated. This matrix is an exact-main acceptance record, not a release-ready claim."
+  }
+}
