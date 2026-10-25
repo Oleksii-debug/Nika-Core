@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from nika_core.interaction import (
     PlaywrightInteractionAdapter,
     UnsupportedInteractionError,
 )
+from nika_core.interaction.playwright_adapter import _safe_download_filename
 
 
 class _FakeDialog:
@@ -176,3 +178,176 @@ def test_browser_session_is_ephemeral_by_contract(tmp_path: Path) -> None:
     assert session.registry is None
     assert session.page_ids() == ()
     assert session.downloads.approved_root == (tmp_path / "downloads").resolve()
+
+
+def test_download_broker_refuses_to_overwrite_prior_artifact(tmp_path: Path) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    broker.handle(_FakeDownload("result.txt", "first complete artifact"))
+    with pytest.raises(UnsupportedInteractionError, match="already exists"):
+        broker.handle(_FakeDownload("result.txt", "unapproved replacement"))
+    assert (broker.approved_root / "result.txt").read_text(encoding="utf-8") == (
+        "first complete artifact"
+    )
+    assert broker.saved == [broker.approved_root / "result.txt"]
+
+
+def test_download_broker_rejects_racing_destination_without_overwriting(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    destination = broker.approved_root / "race.txt"
+
+    class RacingDownload(_FakeDownload):
+        def save_as(self, staging: str) -> None:
+            destination.write_text("concurrent artifact", encoding="utf-8")
+            super().save_as(staging)
+
+    with pytest.raises(UnsupportedInteractionError, match="already exists"):
+        broker.handle(RacingDownload("race.txt", "new download"))
+    assert destination.read_text(encoding="utf-8") == "concurrent artifact"
+    assert broker.saved == []
+    assert list(broker.approved_root.glob(".nika-download-*.part")) == []
+
+
+def test_failed_download_removes_partial_staging_and_does_not_publish(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+
+    class PartialFailure(_FakeDownload):
+        def save_as(self, staging: str) -> None:
+            Path(staging).write_text("partial bytes", encoding="utf-8")
+            raise OSError("synthetic save failure")
+
+    with pytest.raises(OSError, match="synthetic save failure"):
+        broker.handle(PartialFailure("partial.txt"))
+    assert not (broker.approved_root / "partial.txt").exists()
+    assert list(broker.approved_root.glob(".nika-download-*.part")) == []
+    assert broker.saved == []
+
+
+def test_download_broker_does_not_follow_linked_destination(tmp_path: Path) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    victim = broker.approved_root / "victim.txt"
+    victim.write_text("protected", encoding="utf-8")
+    alias = broker.approved_root / "alias.txt"
+    try:
+        alias.symlink_to(victim)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted by this test host")
+    with pytest.raises(UnsupportedInteractionError, match="already exists"):
+        broker.handle(_FakeDownload("alias.txt", "unapproved replacement"))
+    assert victim.read_text(encoding="utf-8") == "protected"
+    assert broker.saved == []
+
+@pytest.mark.parametrize(
+    "suggested_filename",
+    [
+        "NUL.txt",
+        "con",
+        "COM1.log",
+        "lPt9.data",
+        "CONIN$",
+        "report.txt:private-stream",
+        "bad?.txt",
+        "bad*.txt",
+        "bad|name.txt",
+        "trailing.",
+        "trailing ",
+        "control\x01.txt",
+        "delete\x7f.txt",
+        "surrogate-\ud800.txt",
+        ("a" * 256) + ".txt",
+    ],
+)
+def test_download_broker_rejects_nonordinary_windows_component_before_save(
+    tmp_path: Path,
+    suggested_filename: str,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    download = _FakeDownload(suggested_filename, "must not be written")
+
+    with pytest.raises(UnsupportedInteractionError, match="safe filename"):
+        broker.handle(download)
+
+    assert download.destination is None
+    assert broker.saved == []
+    assert list(broker.approved_root.iterdir()) == []
+
+
+def test_download_broker_treats_backslash_parent_text_as_basename(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    download = _FakeDownload(r"..\parent\доказ.txt", "UTF-8 доказ")
+
+    broker.handle(download)
+
+    assert broker.saved == [(broker.approved_root / "доказ.txt").resolve()]
+    assert broker.saved[0].read_text(encoding="utf-8") == "UTF-8 доказ"
+
+
+def test_download_broker_stages_outside_approved_root_before_publication(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("protected", encoding="utf-8")
+
+    class ApprovedRootEntryAttacker(_FakeDownload):
+        def save_as(self, destination: str) -> None:
+            staging = Path(destination)
+            if staging.parent == broker.approved_root:
+                staging.unlink()
+                os.link(victim, staging)
+            super().save_as(destination)
+
+    download = ApprovedRootEntryAttacker("evidence.txt", "downloaded")
+    broker.handle(download)
+
+    assert victim.read_text(encoding="utf-8") == "protected"
+    assert broker.saved == [(broker.approved_root / "evidence.txt").resolve()]
+    assert broker.saved[0].read_text(encoding="utf-8") == "downloaded"
+
+
+def test_download_filename_accepts_255_utf16_unit_unicode_component() -> None:
+    filename = ("а" * 251) + ".txt"
+
+    assert _safe_download_filename(filename) == filename
+
+
+def test_download_broker_rejects_replaced_approved_root_before_save(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    original_root = broker.approved_root
+    moved_root = tmp_path / "downloads-moved"
+    original_root.rename(moved_root)
+    original_root.mkdir()
+    download = _FakeDownload("evidence.txt", "must not be written")
+
+    with pytest.raises(UnsupportedInteractionError, match="root identity"):
+        broker.handle(download)
+
+    assert download.destination is None
+    assert list(original_root.iterdir()) == []
+    assert list(moved_root.iterdir()) == []
+
+
+def test_download_filename_subclass_is_rejected_without_behavior(
+    tmp_path: Path,
+) -> None:
+    class BehavioralFilename(str):
+        def replace(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("filename subclass behavior must not execute")
+
+    broker = DownloadBroker(tmp_path / "downloads")
+    download = _FakeDownload("placeholder.txt")
+    download.suggested_filename = BehavioralFilename("evidence.txt")
+
+    with pytest.raises(UnsupportedInteractionError, match="safe filename"):
+        broker.handle(download)
+
+    assert download.destination is None
+    assert broker.saved == []
+
