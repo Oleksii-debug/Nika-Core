@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from nika_core.research.models import ResearchResultSet, SourceKind
 from nika_core.research.network_repository import NetworkResearchRepository
+from nika_core.research.query_results import ScopedResearchResultWriter
 from nika_core.research.repository import ResearchRepository
 
 
@@ -14,6 +15,10 @@ class ResearchResultService:
     ) -> None:
         self._repository = repository
         self._network = network_repository
+        self._result_writer = ScopedResearchResultWriter(
+            store=repository._store,
+            network_repository=network_repository,
+        )
 
     def search(
         self,
@@ -23,10 +28,11 @@ class ResearchResultService:
         limit: int = 20,
     ) -> ResearchResultSet:
         hits = self._repository.search(workspace_id, query, limit=limit)
-        return self._network.save_result_set(
+        return self._result_writer.save(
             workspace_id=workspace_id,
             query=query,
             hits=hits,
+            why_matched=f"Literal-token full-text match for: {query}",
         )
 
     def get(self, result_set_id: str) -> ResearchResultSet:

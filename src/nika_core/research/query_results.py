@@ -5,6 +5,10 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.research.evidence_dedupe import (
+    ResearchEvidenceDeduplicator,
+    deduplicate_search_hits,
+)
 from nika_core.research.models import (
     FreshnessState,
     ResearchEvidence,
@@ -48,6 +52,7 @@ class ScopedResearchResultWriter:
     ) -> None:
         self._store = store
         self._network = network_repository
+        self._evidence_deduplicator = ResearchEvidenceDeduplicator(store)
 
     def save(
         self,
@@ -80,8 +85,8 @@ class ScopedResearchResultWriter:
         scoped = bool(source_id_set or source_kind_set or freshness_set)
 
         prepared: list[tuple[SearchHit, tuple[ResearchEvidence, ...]]] = []
-        for hit in hits:
-            evidence = tuple(
+        for hit in deduplicate_search_hits(hits):
+            allowed_evidence = (
                 item
                 for item in self._network.evidence_for_document(hit.document_id)
                 if self._allowed(
@@ -90,6 +95,10 @@ class ScopedResearchResultWriter:
                     source_kinds=source_kind_set,
                     freshness=freshness_set,
                 )
+            )
+            evidence = self._evidence_deduplicator.deduplicate(
+                hit.document_id,
+                allowed_evidence,
             )
             if scoped and not evidence:
                 raise RuntimeError(
