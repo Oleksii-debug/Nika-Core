@@ -128,7 +128,7 @@ A Software Factory workspace turns a bounded implementation goal into acceptance
 
 For full products, the binding layer is `docs/AUTONOMOUS_PRODUCT_FACTORY.md`: ProductProject connects Research -> requirements -> architecture -> Dynamic Team Composer -> one/multi-repository implementation -> independent QA/accessibility -> build/package -> Deployment Fabric -> operations/maintenance. A product can span multiple platforms and execution nodes. Source generation alone is not completion.
 
-Manual ChatGPT Deep Research developer chats may also act as **real implementation lanes** when the user runs them: they may read live GitHub, reason over a large subsystem, code on an owned branch and drive a coherent batch toward integration. Paired auditor chats independently review live evidence. When these manual lanes are active, scheduled workers should be paused or reassigned to complementary non-colliding QA/release/integration/evidence work rather than duplicating the same source ownership.
+Dedicated contributors may deliver coherent subsystem changes on isolated branches. Independent reviewers check live repository evidence. Pause overlapping assignments or redirect them to independent QA, integration, release, or verification work.
 
 Full policy: `docs/SOFTWARE_FACTORY_AND_OFFLINE_INTELLIGENCE_REUSE.md`, `docs/FULL_PRODUCT_VISION_2026-08-19.md`, `docs/AUTONOMOUS_PRODUCT_FACTORY.md` and `docs/AUTONOMOUS_PRODUCT_FACTORY_ACCEPTANCE.md`.
 
