@@ -259,13 +259,13 @@ External communication, account actions, contracts, publishing and money movemen
 
 **Telegram is removed from the active Nika Core roadmap and active workspace catalog by user decision on 2026-08-19.** Historical documents may mention Telegram, Telethon or TDLib, but those mentions are not implementation requirements. If the user later asks Nika to build such a workspace/product, it is treated like any new optional ProductProject/workspace and goes through fresh research/reuse/security/product gates.
 
-## 15. Development acceleration model
+## 15. Parallel development and review
 
-Manual ChatGPT Deep Research developer chats are allowed to be real coding lanes, not research-only lanes. A Deep Research developer may read the complete live project, reason over a large subsystem, implement code on its owned branch, run/trigger tests and drive one large coherent batch toward integration.
+Contributors can own a coherent subsystem change on a dedicated branch through implementation, testing, and integration.
 
-For each manual developer lane, an independent auditor chat may review live GitHub evidence, architecture, tests, security/accessibility impact and request corrections. Auditors do not accept a developer's prose summary as proof when GitHub evidence is available.
+Independent reviewers inspect the available GitHub evidence, including architecture, tests, security, and accessibility, and request corrections where needed.
 
-When manual developer/auditor lanes are active, scheduled autonomous workers should be paused or reassigned to complementary low-collision work such as integration QA, release/package proof, regression hunting, architecture/evidence consistency and cross-lane conflict detection. They should not duplicate the same source ownership merely to maximize the number of running agents.
+Pause overlapping assignments or move them to independent integration QA, release verification, regression testing, or architecture review.
 
 For Product Factory development, source ownership must additionally be separated by ProductProject/component/repository. A central project coordinator owns dependency/integration truth; parallel workers own explicit non-overlapping implementation scopes.
 

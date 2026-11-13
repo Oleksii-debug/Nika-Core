@@ -168,7 +168,7 @@ Every lane uses **REUSE -> ADAPT -> CUSTOM (thin)**. Do not rebuild generic sche
 
 Source work is dependency-aware parallel-first. Independent research/adapters/tests may proceed on separate branches while integration follows actual dependencies. A blocked lane does not idle unrelated lanes. Shared contracts require an explicit compatibility decision.
 
-Manual Deep Research developer chats may be real implementation lanes. When the user starts these manual Developer/Auditor pairs, scheduled workers should be paused or reassigned to complementary integration QA, release/package verification, regression hunting and cross-lane evidence rather than duplicating the same source ownership.
+When a dedicated contributor and reviewer take ownership of a change, pause overlapping assignments or redirect them to independent integration QA, release and package verification, or regression testing.
 
 Product Factory work must additionally allocate explicit ownership by ProductProject/component/repository. Multiple automated tasks may cooperate, but they must not duplicate the same branch/component or compete to update shared canonical state.
 
