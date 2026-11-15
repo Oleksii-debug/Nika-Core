@@ -115,3 +115,10 @@ The local execution environment became unavailable before this follow-on
 patch could be locally qualified. This patch requires its own hosted exact-head
 Linux/Windows, package and final-artifact proof; prior 2921-test evidence applies
 only to source6205866.
+
+Independent review of the first isolated-build patch caught an uncontrolled
+second notice-file read in the new inspector. The inspector now stops on
+canonical verifier findings, then checks actual PYZ owners against the inventory
+whose exact license bodies were already proved by that bounded verifier. It
+does not reopen the notice file or duplicate the trusted validation logic.
+Rejected-evidence regressions prohibit an unsafe second read.

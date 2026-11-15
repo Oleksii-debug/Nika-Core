@@ -8,7 +8,7 @@ from pathlib import Path
 
 from packaging.utils import canonicalize_name
 
-from nika_core.packaging.notices import _sections, verify_third_party_notices
+from nika_core.packaging.notices import RUNTIME_DISTRIBUTIONS, verify_third_party_notices
 
 # Independently audited 32 third-party roots from exact M11 PYZ inventories.
 # Click was an unlocked runner package: an isolated build must not need it.
@@ -49,11 +49,11 @@ ROOT_DISTRIBUTIONS = {
 
 
 def module_notice_findings(
-    modules: set[str], notice_titles: set[str],
+    modules: set[str], noticed_distributions: set[str],
 ) -> tuple[str, ...]:
     roots = {name.partition(".")[0] for name in modules}
     third_party = roots - sys.stdlib_module_names - {"nika_core"}
-    noticed = {canonicalize_name(title.rsplit(" ", 1)[0]) for title in notice_titles}
+    noticed = {canonicalize_name(name) for name in noticed_distributions}
     findings = []
     for root in sorted(third_party):
         owner = ROOT_DISTRIBUTIONS.get(root)
@@ -65,26 +65,26 @@ def module_notice_findings(
 
 
 def verify_bundle(bundle: Path) -> tuple[str, ...]:
+    findings = list(verify_third_party_notices(bundle))
+    if findings:
+        return tuple(findings)
+    # The canonical verifier has proved every inventory entry and its actual
+    # license body using its bounded reader. Do not reread evidence unsafely.
     # PyInstaller is QA tooling, not a new runtime dependency.
     from PyInstaller.archive.readers import CArchiveReader
 
-    findings = list(verify_third_party_notices(bundle))
     reader = CArchiveReader(str(bundle / "NikaCore.exe"))
     pyz = reader.open_embedded_archive("PYZ.pyz")
     modules = set(pyz.toc)
     if "nika_core" not in modules:
         findings.append("missing-packaged-nika-core")
-    text = (bundle / "THIRD_PARTY_NOTICES.txt").read_text(encoding="utf-8")
-    sections, duplicates = _sections(text)
-    if duplicates:
-        findings.append("duplicate-packaged-notice-sections")
-    findings.extend(module_notice_findings(modules, set(sections)))
+    findings.extend(module_notice_findings(modules, set(RUNTIME_DISTRIBUTIONS)))
     if not findings:
         roots = {name.partition(".")[0] for name in modules}
         third_party = roots - sys.stdlib_module_names - {"nika_core"}
         print(
             f"Verified {len(third_party)} packaged third-party roots "
-            f"against {len(sections)} canonical notice sections."
+            f"against {len(RUNTIME_DISTRIBUTIONS) + 1} canonical notice sections."
         )
     return tuple(findings)
 
