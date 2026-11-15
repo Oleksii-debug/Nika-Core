@@ -57,3 +57,48 @@ def test_certifi_source_reference_binds_and_escapes_the_resolved_version() -> No
     installed = SimpleNamespace(version="2026.10.23?redirect=other", metadata=metadata, files=())
     _title, body = notices._distribution_section("certifi", installed)
     assert "certifi/2026.10.23%3Fredirect%3Dother/#files" in body
+
+
+def test_windows_path_and_descriptor_compare_creation_time_without_losing_change_time() -> None:
+    shared = {"st_dev": 7, "st_ino": 9, "st_size": 100, "st_mtime_ns": 20}
+    path = SimpleNamespace(**shared, st_ctime_ns=10, st_birthtime_ns=10)
+    descriptor = SimpleNamespace(**shared, st_ctime_ns=30, st_birthtime_ns=10)
+    assert notices._path_descriptor_identity(path, windows=True) == (
+        notices._path_descriptor_identity(descriptor, windows=True)
+    )
+    # Unix retains the full metadata-change comparison.
+    assert notices._path_descriptor_identity(path, windows=False) != (
+        notices._path_descriptor_identity(descriptor, windows=False)
+    )
+    # A descriptor mutation remains different even when birthtime is unchanged.
+    changed = SimpleNamespace(**shared, st_ctime_ns=31, st_birthtime_ns=10)
+    assert notices._snapshot_identity(changed) != notices._snapshot_identity(descriptor)
+    changed.st_birthtime_ns = 11
+    assert notices._path_descriptor_identity(changed, windows=True) != (
+        notices._path_descriptor_identity(descriptor, windows=True)
+    )
+
+
+def test_descriptor_metadata_change_still_denies_a_notice_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "LICENSE.txt"
+    target.write_text("MIT License\n", encoding="utf-8")
+    original = notices.os.fstat
+    calls = 0
+
+    def changed_fstat(fd: int) -> SimpleNamespace:
+        nonlocal calls
+        observed = original(fd)
+        calls += 1
+        return SimpleNamespace(
+            st_mode=observed.st_mode, st_dev=observed.st_dev, st_ino=observed.st_ino,
+            st_size=observed.st_size, st_mtime_ns=observed.st_mtime_ns,
+            st_ctime_ns=observed.st_ctime_ns + (1 if calls > 1 else 0),
+            st_birthtime_ns=getattr(observed, "st_birthtime_ns", 0),
+        )
+
+    monkeypatch.setattr(notices.os, "fstat", changed_fstat)
+    diagnostic: list[str] = []
+    assert notices._read_notices(target, diagnostic=diagnostic) is None
+    assert diagnostic == ["changed_during_first_read"]

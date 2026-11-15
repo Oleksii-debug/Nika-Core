@@ -55,3 +55,22 @@ combined head. Inspect the regenerated exact final ZIP for all six attribution
 sections, genuine license texts and the Certifi source link. This fixes the
 observed coverage defect; it is not blanket clearance of every optional engine,
 native component or model, and does not establish physical NVDA acceptance.
+
+## Proven Windows convergence failure and contained repair
+
+First combined head `c84e411393baefddf0d3c661869e2b0bf06f9a21` passed Core/M12
+Ubuntu but failed Windows Core, M11 and M12 while observing valid installed
+license files (jobs `132938283808`, `132938283477`, `132938283646`). The inherited
+reader compared pathname and descriptor `ctime_ns` as though their meanings
+matched. CPython 3.12's pathname stat preserves creation-time compatibility;
+descriptor fstat retains metadata ChangeTime. The official source locations are
+[pathname stat](https://github.com/python/cpython/blob/v3.12.16/Modules/posixmodule.c#L2139-L2149)
+and [descriptor stat](https://github.com/python/cpython/blob/v3.12.16/Python/fileutils.c#L1116-L1123).
+
+The same reader now compares the common Windows birthtime for path/descriptor
+identity, while retaining descriptor ctime stability across both reads. Device,
+file ID, size, mtime, content equality, no-follow/reparse and sharing restrictions
+remain enforced; POSIX comparisons remain unchanged. Sanitized failure reasons
+identify the check and canonical distribution-relative file, without exposing
+absolute environment paths or file contents. Synthetic ctime compatibility and
+descriptor-change denials complement the required actual Windows rerun.

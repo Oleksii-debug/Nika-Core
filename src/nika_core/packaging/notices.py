@@ -196,9 +196,14 @@ def _license_texts(dist: metadata.Distribution) -> tuple[tuple[str, str], ...]:
         relative_path = _canonical_distribution_file(relative_path)
         try:
             path = _located_distribution_file(dist, relative_path)
-            text = _read_notices(path)
+            diagnostic: list[str] = []
+            text = _read_notices(path, diagnostic=diagnostic)
             if text is None:
-                raise RuntimeError("Runtime distribution license evidence is invalid")
+                reason = diagnostic[-1] if diagnostic else "unavailable"
+                raise RuntimeError(
+                    "Runtime distribution license evidence is invalid "
+                    f"({relative_path}; {reason})"
+                )
             stripped = text.strip()
             if stripped:
                 evidence_bytes += len(relative_path.encode("utf-8"))
@@ -431,20 +436,43 @@ def _snapshot_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
     )
 
 
-def _read_notices(target: Path) -> str | None:
+def _path_descriptor_identity(
+    value: os.stat_result, *, windows: bool,
+) -> tuple[int, int, int, int, int]:
+    # CPython 3.12 Windows lstat preserves creation-time ctime compatibility,
+    # while fstat reports FILE_BASIC_INFO.ChangeTime. Compare their shared
+    # birthtime here, retaining descriptor ctime in all read-stability checks.
+    identity = _snapshot_identity(value)
+    return (*identity[:4], value.st_birthtime_ns) if windows else identity
+
+
+def _read_notices(target: Path, *, diagnostic: list[str] | None = None) -> str | None:
     """Admit only bounded, regular, stable UTF-8 license evidence."""
+    def reject(reason: str) -> None:
+        if diagnostic is not None:
+            diagnostic.append(reason)
+
     descriptor = -1
     try:
         before = target.lstat()
         if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_NOTICES_BYTES:
-            return None
+            return reject("not_regular_or_oversize")
         descriptor = _open_notices_descriptor(target)
         opened = os.fstat(descriptor)
+        before_identity = _path_descriptor_identity(before, windows=os.name == "nt")
+        opened_path_identity = _path_descriptor_identity(opened, windows=os.name == "nt")
         if (
             not stat.S_ISREG(opened.st_mode)
-            or _snapshot_identity(opened) != _snapshot_identity(before)
+            or opened_path_identity != before_identity
         ):
-            return None
+            timestamp = "birthtime_ns" if os.name == "nt" else "ctime_ns"
+            fields = ("device", "inode", "size", "mtime_ns", timestamp)
+            differences = ",".join(
+                field for field, left, right in zip(
+                    fields, before_identity, opened_path_identity, strict=True
+                ) if left != right
+            )
+            return reject(f"descriptor_path_identity:{differences or 'mode'}")
         with os.fdopen(descriptor, "rb", closefd=True) as source:
             descriptor = -1
             data = source.read(_MAX_NOTICES_BYTES + 1)
@@ -454,7 +482,7 @@ def _read_notices(target: Path) -> str | None:
                 or len(data) != after_first_read.st_size
                 or _snapshot_identity(after_first_read) != _snapshot_identity(opened)
             ):
-                return None
+                return reject("changed_during_first_read")
             source.seek(0)
             confirmed = source.read(_MAX_NOTICES_BYTES + 1)
             after_second_read = os.fstat(source.fileno())
@@ -465,12 +493,16 @@ def _read_notices(target: Path) -> str | None:
             or len(confirmed) != after_second_read.st_size
             or _snapshot_identity(after_second_read) != _snapshot_identity(opened)
             or not stat.S_ISREG(current.st_mode)
-            or _snapshot_identity(current) != _snapshot_identity(opened)
+            or _path_descriptor_identity(current, windows=os.name == "nt") != opened_path_identity
         ):
-            return None
+            return reject("changed_during_second_read_or_path_recheck")
         return data.decode("utf-8")
-    except (OSError, UnicodeError):
-        return None
+    except OSError as exc:
+        return reject(f"io_error:{getattr(exc, 'winerror', None) or exc.errno}")
+    except UnicodeError:
+        return reject("invalid_utf8")
+    except AttributeError:
+        return reject("timestamp_unavailable")
     finally:
         if descriptor >= 0:
             os.close(descriptor)
