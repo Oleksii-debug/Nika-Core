@@ -496,7 +496,9 @@ def _read_notices(target: Path, *, diagnostic: list[str] | None = None) -> str |
             or _path_descriptor_identity(current, windows=os.name == "nt") != opened_path_identity
         ):
             return reject("changed_during_second_read_or_path_recheck")
-        return data.decode("utf-8")
+        # Compare stable raw bytes above, then canonicalize ordinary Windows
+        # line endings for the LF section grammar and upstream-text comparison.
+        return data.decode("utf-8").replace("\r\n", "\n")
     except OSError as exc:
         return reject(f"io_error:{getattr(exc, 'winerror', None) or exc.errno}")
     except UnicodeError:

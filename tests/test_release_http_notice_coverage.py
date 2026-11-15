@@ -102,3 +102,30 @@ def test_descriptor_metadata_change_still_denies_a_notice_read(
     diagnostic: list[str] = []
     assert notices._read_notices(target, diagnostic=diagnostic) is None
     assert diagnostic == ["changed_during_first_read"]
+
+
+@pytest.mark.parametrize("ending", [b"\n", b"\r\n"])
+def test_upstream_lf_and_crlf_licenses_have_one_verified_canonical_notice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ending: bytes,
+) -> None:
+    (tmp_path / "LICENSE.txt").write_bytes(ending.join([b"Python license", b"terms", b""]))
+    dist_root = tmp_path / "installed"
+    dist_root.mkdir()
+    (dist_root / "LICENSE").write_bytes(ending.join([b"Example license", b"terms", b""]))
+    metadata = Message()
+    metadata["Name"] = "example"
+    metadata["License-Expression"] = "MIT"
+    installed = SimpleNamespace(
+        version="1.0", metadata=metadata, files=("LICENSE",),
+        locate_file=lambda item: dist_root / item,
+    )
+    monkeypatch.setattr(notices.sys, "base_prefix", str(tmp_path))
+    monkeypatch.setattr(notices, "RUNTIME_DISTRIBUTIONS", ("example",))
+    monkeypatch.setattr(notices.metadata, "distribution", lambda _: installed)
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    path = notices.build_third_party_notices(bundle)
+    assert b"\r" not in path.read_bytes()
+    assert notices.verify_third_party_notices(bundle) == ()
+    path.write_bytes(path.read_bytes().replace(b"Example license", b"Altered license"))
+    assert "notices:example" in notices.verify_third_party_notices(bundle)

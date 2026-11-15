@@ -74,3 +74,11 @@ remain enforced; POSIX comparisons remain unchanged. Sanitized failure reasons
 identify the check and canonical distribution-relative file, without exposing
 absolute environment paths or file contents. Synthetic ctime compatibility and
 descriptor-change denials complement the required actual Windows rerun.
+
+That correction admitted installed Windows licenses; M11 job `132941485163`
+then exposed a separate inherited LF/CRLF mismatch: section parsing canonicalized
+lines while upstream Python/pydantic-core/tomli license text retained CRLF.
+After both bounded raw-byte reads and all identity checks, strict UTF-8 text now
+normalizes CRLF to LF. The canonical writer and comparison agree, without
+relaxing byte integrity or UTF-8 validation. LF/CRLF generation-verification and
+subsequent altered-license rejection have explicit regressions.
