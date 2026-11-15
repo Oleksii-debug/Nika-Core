@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from scripts import verify_packaged_notices
-
 from scripts.verify_packaged_notices import module_notice_findings
 
 
