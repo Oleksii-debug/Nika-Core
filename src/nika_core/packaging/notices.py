@@ -22,6 +22,8 @@ RUNTIME_DISTRIBUTIONS = (
     "httpcore",
     "httpx",
     "idna",
+    "markdown-it-py",
+    "mdurl",
     "packaging",
     "platformdirs",
     "proxy-tools",
@@ -30,6 +32,7 @@ RUNTIME_DISTRIBUTIONS = (
     "pydantic-core",
     "pydantic-settings",
     "pygments",
+    "pytest",
     "python-dotenv",
     "pythonnet",
     "pywebview",
@@ -38,6 +41,7 @@ RUNTIME_DISTRIBUTIONS = (
     "tomli",
     "typing-extensions",
     "typing-inspection",
+    "wheel",
 )
 
 _SECTION_RE = re.compile(r"^===== (?P<title>.+?) =====$")

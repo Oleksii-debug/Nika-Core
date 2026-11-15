@@ -16,13 +16,15 @@ from nika_core.packaging import notices
 # This set deliberately does not derive from RUNTIME_DISTRIBUTIONS: doing so
 # would reproduce the original mutually agreeing producer/verifier blind spot.
 PACKAGED_HTTP_DISTRIBUTIONS = {"httpx", "httpcore", "anyio", "h11", "idna", "certifi"}
+PACKAGED_ADDITIONAL_DISTRIBUTIONS = {"markdown-it-py", "mdurl", "pytest", "wheel"}
+PACKAGED_MISSING_DISTRIBUTIONS = PACKAGED_HTTP_DISTRIBUTIONS | PACKAGED_ADDITIONAL_DISTRIBUTIONS
 
 
 def test_actual_packaged_http_transport_has_release_notice_coverage() -> None:
-    assert PACKAGED_HTTP_DISTRIBUTIONS <= set(notices.RUNTIME_DISTRIBUTIONS)
+    assert PACKAGED_MISSING_DISTRIBUTIONS <= set(notices.RUNTIME_DISTRIBUTIONS)
 
 
-@pytest.mark.parametrize("omitted", sorted(PACKAGED_HTTP_DISTRIBUTIONS))
+@pytest.mark.parametrize("omitted", sorted(PACKAGED_MISSING_DISTRIBUTIONS))
 def test_missing_bundled_http_notice_fails_and_regeneration_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, omitted: str,
 ) -> None:

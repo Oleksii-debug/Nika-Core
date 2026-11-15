@@ -82,3 +82,36 @@ After both bounded raw-byte reads and all identity checks, strict UTF-8 text now
 normalizes CRLF to LF. The canonical writer and comparison agree, without
 relaxing byte integrity or UTF-8 validation. LF/CRLF generation-verification and
 subsequent altered-license rejection have explicit regressions.
+
+## Complete bounded inventory and ambient-runner repair
+
+The subsequent exact source6205866 ZIP, SHA-256
+159b04424c889ed467b70619bca354b1ca63880d5c3cfd9bce4d301351be4330,
+confirmed all six HTTP notices, genuine license texts and the Certifi source
+reference. Its full 1377-module PYZ had 32 nonstdlib/non-Nika roots mapping
+unambiguously to 30 distributions. Four further canonical licenses were absent:
+markdown-it-py4.3.0, mdurl0.1.2, pytest8.4.2 and top-level wheel0.48.0. All four
+are pinned in the selected packaging/build exports; the latter is not satisfied
+by a different setuptools-vendored wheel0.46.3 notice. They are now inventoried
+together, with independent omission/regeneration tests.
+
+Click8.5.0 was also frozen from outside the selected packaging/build locks.
+Its separate bundled BSD license was present, so this was an acquisition/
+reproducibility gap rather than an absent-license finding. REUSE Python stdlib
+venv for fresh Core/M11/M12 profile installs; verify the active prefix and
+disabled user site before installing exact hashed dependencies. Clear inherited
+PYTHONPATH, and refuse existing environment state rather than delete or reuse it.
+This prevents undeclared runner packages entering the frozen runtime; it does
+not add Click as a new product dependency.
+
+REUSE PyInstaller's archive reader plus the existing canonical notice verifier
+to inspect actual frozen roots against the independent audited owner mapping.
+Unknown roots and missing owner notices fail closed. M11/M12 inspect the built
+bundle, and M12 repeats this on the extracted exact final ZIP. This is a narrow
+executable coverage proof, not a second SBOM/compliance format or a claim about
+absent optional engines, models or document parsers.
+
+The local execution environment became unavailable before this follow-on
+patch could be locally qualified. This patch requires its own hosted exact-head
+Linux/Windows, package and final-artifact proof; prior 2921-test evidence applies
+only to source6205866.
