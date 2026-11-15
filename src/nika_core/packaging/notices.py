@@ -9,12 +9,19 @@ import tempfile
 import unicodedata
 from importlib import metadata
 from pathlib import Path
+from urllib.parse import quote
 
 RUNTIME_DISTRIBUTIONS = (
     "annotated-types",
+    "anyio",
     "bottle",
+    "certifi",
     "cffi",
     "clr-loader",
+    "h11",
+    "httpcore",
+    "httpx",
+    "idna",
     "packaging",
     "platformdirs",
     "proxy-tools",
@@ -237,6 +244,11 @@ def _distribution_section(
 
     if declared_license:
         append_body(f"Declared license: {declared_license}")
+    if distribution_name == "certifi":
+        append_body(
+            "Unmodified upstream source for this version: "
+            f"https://pypi.org/project/certifi/{quote(version, safe='')}/#files"
+        )
     for relative_path, text in license_texts:
         if body:
             append_body("")
