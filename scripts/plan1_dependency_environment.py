@@ -18,10 +18,71 @@ from pathlib import Path
 from typing import Any
 
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+from nika_core.packaging.notices import _license_texts, _metadata_license
 
 
 def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def observe_transitive_dependencies(
+    requirements: list[str], *, lookup: Callable[[str], Any] = distribution,
+) -> dict[str, Any]:
+    """Follow active installed metadata, including extras, without importing engines.
+
+    License text collection reuses the release notice collector. No environment
+    paths, direct_url.json, credentials or unrelated installed packages are read.
+    """
+    pending = [Requirement(raw) for raw in requirements]
+    visited: set[tuple[str, frozenset[str]]] = set()
+    records: dict[str, Any] = {}
+    failures: set[str] = set()
+    while pending:
+        requirement = pending.pop()
+        name = canonicalize_name(requirement.name)
+        key = (name, frozenset(requirement.extras))
+        try:
+            installed = lookup(name)
+        except PackageNotFoundError:
+            failures.add(f"missing:{name}")
+            continue
+        # Each incoming constraint matters even when the node was already visited.
+        if not requirement.specifier.contains(installed.version, prereleases=True):
+            failures.add(f"version:{name}:{requirement.specifier}")
+        if key in visited:
+            continue
+        visited.add(key)
+        children = []
+        for raw in installed.requires or ():
+            child = Requirement(raw)
+            contexts = {"", *requirement.extras}
+            if child.marker is None or any(
+                child.marker.evaluate({"extra": extra}) for extra in contexts
+            ):
+                children.append(raw)
+                pending.append(child)
+        license_texts = _license_texts(installed)
+        previous_edges = records.get(name, {}).get("active_requires", [])
+        metadata_text = installed.read_text("METADATA")
+        records[name] = {
+            "name": name,
+            "version": installed.version,
+            "active_requires": sorted(set(previous_edges) | set(children)),
+            "declared_license": _metadata_license(installed),
+            "metadata_text_sha256": _sha256((metadata_text or "").encode("utf-8")),
+            "license_texts": [
+                {"path": path, "utf8_text_sha256": _sha256(text.encode("utf-8"))}
+                for path, text in license_texts
+            ],
+        }
+    return {
+        "evidence_class": "INSTALLED_METADATA_AND_LICENSE_TEXT_NOT_CLEARANCE",
+        "license_clearance": False,
+        "failures": sorted(failures),
+        "distributions": [records[name] for name in sorted(records)],
+    }
 
 
 def observe_dependencies(
@@ -127,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--groups", nargs="+", default=["base", "agent", "planning", "dev"])
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--include-transitive", action="store_true")
     parser.add_argument(
         "--strict",
         action="store_true",
@@ -134,11 +196,31 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     report = observe_dependencies(args.root, tuple(args.groups))
+    if args.include_transitive:
+        report["transitive"] = observe_transitive_dependencies([
+            item["requirement"] for item in report["distributions"] if item["applies"]
+        ])
+    report["source_sha"] = subprocess_source_sha(args.root)
     args.output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    return int(args.strict and bool(report["missing_or_mismatched"]))
+    failures = report["missing_or_mismatched"] or report.get("transitive", {}).get("failures")
+    return int(args.strict and bool(failures))
+
+
+def subprocess_source_sha(root: Path) -> str | None:
+    """Bind the observation to source without copying environment or Git credentials."""
+    import subprocess
+
+    try:
+        value = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return value if len(value) == 40 and all(c in "0123456789abcdef" for c in value) else None
 
 
 if __name__ == "__main__":

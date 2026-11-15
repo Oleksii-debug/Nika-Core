@@ -45,3 +45,12 @@ Prefer additive/versioned contracts, refresh main before integration, declare co
 
 ## Evidence classes
 Component source/fixtures, packaged Windows, physical NVDA, real Web/browser, real Cloud/Node and final release evidence are separate and never interchangeable.
+
+## 2026-10-16 extension — Plan 8 product lane (additive, not historical migration)
+### Plan 8 — Cinema & Voice Factory
+Canonical Drive plan: https://docs.google.com/document/d/1Cp-_1qfA69D0cZv1SAsVvkcAegA7CLnnsxJ8AkeEWqw/edit
+27 new Sections; initial status OPEN. Independent optional product-extension lane with explicit owner assignment; does not reorder or block Plans 1–7 or amend their historic section numbering/terminal evidence.
+Owns movie/series/animation workspaces, versioned script/characters/voice profiles/staged video/persona, audio/visual media orchestration, rendering, film timeline, cinema QA and lawful content rights registry. Shared broker/memory/task/security/source permission interfaces belong to the existing Plans 1–6 and must be consumed rather than forked.
+Conflict keys: cinema-project-schema, film-storyboard-timeline, voice-factory-style, licensed-digital-human, live-video-avatar, production-render-qa, film-licensing-assets.
+Before any cross-plan shared changes, coordinate exact owner/PR/conflict-key and source compatibility with incumbent. Plan 8 research/spec is not authority to rewrite deployed Nika functionality. PLAN8_DONE only for individually evidenced integrated acceptance, never from speculative capability or document prose.
+

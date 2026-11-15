@@ -80,10 +80,12 @@ runtime trust-boundary tests.
 
 ## Deliberate non-claims — currently NOT terminal DONE
 
-1. `pyproject.toml` declares ranges; this checkout has **no committed
-   resolution lock** for complete transitive dependency graphs on supported
-   Python/Windows/Linux profiles. The manifest is **not** an installable
-   deterministic lock. Exact resolved versions/hashes are not verified.
+1. `pyproject.toml` and the declared authority manifest continue to describe
+   ranges, not installation evidence. The 2026-11-15 repair adds a separate
+   universal `uv.lock`, hashed pip exports for existing Core/M11/M12 profiles,
+   pinned build dependencies and a source-bound drift check. See
+   `PLAN1_RESOLVED_DEPENDENCIES.md`. Actual exact-candidate platform installation
+   and source tests must still pass; resolution alone is not a platform PASS.
 2. Package-by-package upstream maintenance, adopted exact distribution license
    and redistributable notices require independent version-specific proof.
    Candidate/reference-only engines must not be counted as installed.

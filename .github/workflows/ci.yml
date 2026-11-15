@@ -37,7 +37,18 @@ jobs:
       - name: Verify exact candidate checkout identity
         run: python scripts/qa_assert_checkout_identity.py
       - name: Install core, agent and deterministic planning test dependencies
-        run: python -m pip install -e ".[dev,agent,planning]"
+        run: |
+          python scripts/plan1_dependency_lock.py
+          python -m pip install --require-hashes -r requirements/build.txt
+          python -m pip install --require-hashes --no-build-isolation -r requirements/core.txt
+          python -m pip install --no-deps --no-build-isolation -e .
+          python scripts/plan1_dependency_environment.py --groups base agent planning dev build-system --include-transitive --strict --output plan1-dependencies.json
+      - name: Preserve exact installed dependency and license-text evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: plan1-core-${{ runner.os }}-${{ env.NIKA_CANDIDATE_SHA }}
+          path: plan1-dependencies.json
+          if-no-files-found: error
       - name: Verify source, dependencies and tests
         run: python scripts/verify.py
 

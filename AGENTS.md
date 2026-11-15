@@ -1,8 +1,8 @@
-# 2026-10-11 OWNER MICRO-CLOSURE RULE — no prompt changes
+# Plan acceptance checkpoints (2026-10-11)
 
 Existing 7 Google Drive plans and their numbered Sections remain canonical, no historical records or terminal DONE are deleted. To prevent repeated multi-day stalls, all Plans 1–7 now explicitly partition their first actionable original Section into three **bounded independently verifiable** checkpoints inside that same Section: A=REUSE exact code/PR/SHA and positive tests, B=repair one *proven* failed CI job plus negative/recovery tests using the existing owner PR, C=qualify the full inherited acceptance, ordered integration and post-merge exact readback. Record A_VERIFIED, B_VERIFIED, C_VERIFIED separately in Drive/GitHub after actual evidence, but do not mark Section DONE before C, and don't extend the scope with speculative hardening.
 
-Priority for Plan1 is existing PR #1871 (Sections 1–2 implementation); previous head `56de6201062f07f815310f9c1630fd6e55edbbc7`: Core Ubuntu SUCCESS and M12 Ubuntu SUCCESS, Windows pending at last verified checkpoint. This is historical SHA-bound observation, not a statement that latest exact-head Windows or full release already passed. First fix current proven blocker rather than create a new nested PR. Every worker keeps its existing prompt and plan ownership. Preserve law/licensing, security, runtime no-replay and any required real Windows/NVDA final Plan7 acceptance. Plan2 Agent Builder/teams and Plan3 model/brain work are independent plan lanes; source scope is not contingent on extension/other product version.
+Priority for Plan1 is existing PR #1871 (Sections 1–2 implementation); previous head `56de6201062f07f815310f9c1630fd6e55edbbc7`: Core Ubuntu SUCCESS and M12 Ubuntu SUCCESS, Windows pending at last verified checkpoint. This is historical SHA-bound observation, not a statement that latest exact-head Windows or full release already passed. First fix current proven blocker rather than create a new nested PR. Existing assignments and plan ownership continue. Preserve law/licensing, security, runtime no-replay and any required real Windows/NVDA final Plan7 acceptance. Plan2 Agent Builder/teams and Plan3 model/brain work are independent plan lanes; source scope is not contingent on extension/other product version.
 
 # 2026-10-11 Closure-first recovery directive — binding worker selection
 
@@ -50,7 +50,7 @@ This section has highest priority for autonomous worker coordination and superse
 
 This removes orchestration throttles only. Product correctness, security, data integrity, accessibility, licensing, privacy, truthful testing/release evidence, and domain-specific safety requirements remain mandatory.
 
-This repository is the canonical source of truth. Chat history is not.
+This repository is the authoritative record for project decisions.
 
 Current operating authority: **docs/AUTONOMOUS_WORKER_ORCHESTRATION.md**, policy DELIVERY-2026-09-09. The owner requires unrestricted parallel autonomous development with no repository-defined worker or coordinator cap. This supersedes older worker counts, blanket V0.1-only/Factory-first-only scheduling and global human-gate waiting freezes. It does not weaken product scope, security, accessibility or acceptance requirements.
 
@@ -88,7 +88,7 @@ Parallel-first rule: every cycle selects genuinely independent coherent packages
 
 Large-batch rule: do not stop after one file, one function, one lint error or one small PR if the same coherent subsystem can safely be carried through implementation, error/recovery behavior, tests, docs, CI and integration in the same cycle.
 
-Manual Deep Research development: when the user creates manual Deep Research developer/auditor chats, treat developer chats as real coding lanes capable of large implementation batches, not research-only roles. Their paired auditors independently inspect live GitHub evidence. Scheduled workers should then be paused or reassigned to complementary non-colliding QA/release/integration/evidence work rather than duplicating the same source ownership.
+Dedicated implementation and review: assign a coherent implementation scope and an independent reviewer who checks the GitHub evidence. Pause or redirect overlapping work to independent QA, release, integration, or verification tasks.
 
 Accessibility: blind primary user, Windows 11 + NVDA. Web-style desktop UI uses local semantic HTML inside pywebview/WebView2; keyboard-only operation, accessible names/roles, headings/landmarks, deterministic focus and text logs are mandatory. Packaged WebView2 UI Automation discovery is a specific gate. Automated accessibility tests do not equal human NVDA verification. Products created by Product Factory receive relevant accessibility review/gates rather than inheriting false credit from Nika Core. The future real Web client has a separate browser/screen-reader accessibility gate; Windows `NVDA_VERIFIED` must never be reused as Web accessibility evidence.
 
