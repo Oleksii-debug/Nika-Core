@@ -14,7 +14,8 @@ import sys
 import tomllib
 from collections.abc import Callable
 from importlib.metadata import PackageNotFoundError, distribution
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import Any
 
 from packaging.requirements import Requirement
@@ -25,6 +26,21 @@ from nika_core.packaging.notices import _license_texts, _metadata_license
 
 def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def _observed_license_texts(installed: Any) -> tuple[tuple[str, str], ...]:
+    # The shared release collector also recognizes filenames such as
+    # litellm_license.py. Feed it document candidates only; executable/cache
+    # bytes are neither legal notices nor stable cross-installer evidence.
+    files = tuple(
+        item for item in installed.files or ()
+        if "__pycache__" not in PurePosixPath(str(item).replace("\\", "/")).parts
+        and PurePosixPath(str(item).replace("\\", "/")).suffix.casefold()
+        in {"", ".txt", ".md", ".rst", ".html", ".htm", ".markdown"}
+    )
+    if not files:
+        return ()
+    return _license_texts(SimpleNamespace(files=files, locate_file=installed.locate_file))
 
 
 def observe_transitive_dependencies(
@@ -63,7 +79,7 @@ def observe_transitive_dependencies(
             ):
                 children.append(raw)
                 pending.append(child)
-        license_texts = _license_texts(installed)
+        license_texts = _observed_license_texts(installed)
         previous_edges = records.get(name, {}).get("active_requires", [])
         metadata_text = installed.read_text("METADATA")
         records[name] = {

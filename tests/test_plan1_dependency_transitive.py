@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from email.message import Message
 from importlib.metadata import PackageNotFoundError
+from pathlib import Path
 from types import SimpleNamespace
 
 from scripts.plan1_dependency_environment import observe_transitive_dependencies
@@ -67,3 +68,24 @@ def test_extra_paths_cycles_and_inactive_markers_preserve_the_actual_graph() -> 
     assert shared["declared_license"] == "MIT"
     assert shared["license_texts"] == []
     assert report["license_clearance"] is False
+
+
+def test_license_observation_never_reads_executable_or_installer_bytecode(tmp_path: Path) -> None:
+    installed = package()
+    notice = Path("example.dist-info/licenses/LICENSE.txt")
+    (tmp_path / notice).parent.mkdir(parents=True)
+    (tmp_path / notice).write_text("MIT License\n", encoding="utf-8")
+    installed.files = (
+        notice, Path("example/license_check.py"),
+        Path("example/__pycache__/license_check.cpython-312.pyc"),
+        Path("example/license_check.dll"),
+    )
+
+    def locate_file(item: Path) -> Path:
+        assert item == notice, "Source/binary/cache data must not be read as a license"
+        return tmp_path / item
+
+    installed.locate_file = locate_file
+    report = observe_transitive_dependencies(["example"], lookup=lambda _: installed)
+    texts = report["distributions"][0]["license_texts"]
+    assert [item["path"] for item in texts] == [notice.as_posix()]
