@@ -59,6 +59,19 @@ def test_core_and_release_jobs_use_the_locked_install_and_publish_observations()
         assert "--no-deps --no-build-isolation -e ." in text
         assert "--include-transitive --strict --output plan1-dependencies.json" in text
         assert "Preserve exact installed dependency and license-text evidence" in text
+        # Actions checks LASTEXITCODE after each run step on Windows. A multiline
+        # PowerShell step could overwrite a failed native command with a later
+        # successful exit. Every admission/install/observation command is its
+        # own step so a stale lock or failed pip hash stops the entire job.
+        commands = (
+            "python scripts/plan1_dependency_lock.py",
+            "python -m pip install --require-hashes -r requirements/build.txt",
+            "python -m pip install --require-hashes --no-build-isolation -r requirements/",
+            "python -m pip install --no-deps --no-build-isolation -e .",
+            "python scripts/plan1_dependency_environment.py --groups ",
+        )
+        for command in commands:
+            assert text.count(f"run: {command}") == text.count(command)
         if filename != "ci.yml":
             assert text.count('      - "requirements/**"') == 2
             assert text.count('      - "uv.lock"') == 2
