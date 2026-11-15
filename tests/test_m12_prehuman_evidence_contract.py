@@ -31,6 +31,8 @@ REQUIRED_TRUE_FIELDS = (
     "windows_package_built",
     "manifest_verified",
     "third_party_notices_verified",
+    "machine_readable_sbom_verified",
+    "supply_chain_provenance_verified",
     "packaged_uia_keyboard_focus",
 )
 REQUIRED_FALSE_FIELDS = (
@@ -45,7 +47,7 @@ def _write_bound_evidence(tmp_path: Path) -> tuple[Path, Path, dict[str, object]
     artifact = tmp_path / "NikaCore-0.0.2-windows-x64.zip"
     artifact.write_bytes(b"controlled exact distributable bytes")
     payload: dict[str, object] = {
-        "schema_version": 3,
+        "schema_version": 4,
         "product_version": PRODUCT_VERSION,
         "commit_sha": SOURCE_SHA,
         "distributable_zip_path": ARTIFACT_REFERENCE,
@@ -80,7 +82,7 @@ def test_current_m12_prehuman_evidence_contract_is_accepted(tmp_path: Path) -> N
     assert _verify(artifact, evidence) == ()
 
 
-@pytest.mark.parametrize("schema_value", (None, 2, 4, "3", True))
+@pytest.mark.parametrize("schema_value", (None, 2, 3, 5, "4", True))
 def test_prehuman_verifier_requires_exact_schema_version(
     tmp_path: Path,
     schema_value: object,
@@ -181,6 +183,16 @@ def test_prehuman_verifier_rejects_noncanonical_trusted_product_version(
     )
 
     assert findings == ("distributable:expected-product-version-format",)
+
+
+def test_v3_evidence_with_v4_sbom_claims_is_rejected(tmp_path: Path) -> None:
+    artifact, evidence, payload = _write_bound_evidence(tmp_path)
+    payload["schema_version"] = 3
+    evidence.write_text(json.dumps(payload), encoding="utf-8")
+
+    findings = _verify(artifact, evidence)
+
+    assert "distributable:schema-version" in findings
 
 
 def test_prehuman_schema_does_not_silently_accept_unknown_fields(tmp_path: Path) -> None:
