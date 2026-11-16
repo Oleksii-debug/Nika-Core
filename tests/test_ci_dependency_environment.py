@@ -24,9 +24,13 @@ def test_ci_interpreter_excludes_runner_packages_and_refuses_reuse(tmp_path: Pat
     child_environment = dict(environment)
     child_environment.pop("PYTHONPATH", None)
     result = subprocess.run(
-        [str(interpreter), "-c", "import importlib.util,json,site,sys; "
-         "print(json.dumps([sys.prefix != sys.base_prefix,site.ENABLE_USER_SITE,"
-         "importlib.util.find_spec('pytest') is None]))"],
+        [
+            str(interpreter), "-c", (
+                "import importlib.util,json,site,sys; "
+                "print(json.dumps([sys.prefix != sys.base_prefix,site.ENABLE_USER_SITE,"
+                "importlib.util.find_spec('pytest') is None]))"
+            ),
+        ],
         cwd=root, env=child_environment, check=True, capture_output=True, text=True, timeout=30,
     )
     assert json.loads(result.stdout) == [True, False, True]
