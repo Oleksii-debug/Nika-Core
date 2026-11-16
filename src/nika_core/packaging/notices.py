@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -50,6 +51,44 @@ _MAX_DISTRIBUTION_PATH_BYTES = 4096
 _MAX_SECTION_IDENTITY_BYTES = 4096
 _MAX_NOTICE_SECTIONS = 256
 _NOTICE_PREAMBLE = "Nika Core third-party notices"
+
+# The 0.1.0 sdist omits LICENSE.txt. Its sole module is byte-identical to
+# this upstream revision and explicitly declares BSD (PyPI metadata says MIT).
+_PROXY_TOOLS_SOURCE_SHA256 = (
+    "d1539d95e1a713c068ca81d42e047b2c76568964cf277596d4e19efb22f476be"
+)
+_PROXY_TOOLS_LICENSE_SOURCE = (
+    "https://github.com/jtushman/proxy_tools/blob/"
+    "db43f1e35d4f90a65c5a4d56d9e9af88212ec6e6/LICENSE.txt"
+)
+_PROXY_TOOLS_LICENSE = (
+    "The BSD License (BSD)\n"
+    "\n"
+    "Copyright (c) 2013 Armin Ronacher\n"
+    "Copyright (c) 2014 Jonathan Tushman\n"
+    "\n"
+    "Redistribution and use in source and binary forms, with or without\n"
+    "modification, are permitted provided that the following conditions are met:\n"
+    "\n"
+    "  * Redistributions of source code must retain the above copyright\n"
+    "    notice, this list of conditions and the following disclaimer.\n"
+    "  * Redistributions in binary form must reproduce the above copyright\n"
+    "    notice, this list of conditions and the following disclaimer in the\n"
+    "    documentation and/or other materials provided with the distribution.\n"
+    "\n"
+    "THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\"\n"
+    "AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n"
+    "IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE\n"
+    "ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY\n"
+    "DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES\n"
+    "(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;\n"
+    "LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND\n"
+    "ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n"
+    "(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF\n"
+    "THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.OTHERWISE, ARISIN"
+    "G FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN "
+    "THE SOFTWARE."
+)
 
 
 def _bounded_metadata_value(value: object, *, field: str) -> str | None:
@@ -233,9 +272,19 @@ def _distribution_section(
     version = _section_identity(str(dist.version), field="version")
     declared_license = _metadata_license(dist)
     license_texts = _license_texts(dist)
-    if not declared_license and not license_texts:
+    if not license_texts and distribution_name == "proxy-tools":
+        # Use the existing bounded/no-follow reader; never execute this source.
+        source = _read_notices(_located_distribution_file(dist, "proxy_tools/__init__.py"))
+        if (
+            version != "0.1.0"
+            or source is None
+            or hashlib.sha256(source.encode("utf-8")).hexdigest() != _PROXY_TOOLS_SOURCE_SHA256
+        ):
+            raise RuntimeError("Unreviewed proxy-tools source cannot use the pinned license")
+        license_texts = ((_PROXY_TOOLS_LICENSE_SOURCE, _PROXY_TOOLS_LICENSE),)
+    if not license_texts:
         raise RuntimeError(
-            f"No license evidence found for runtime distribution: {distribution_name}"
+            f"No license text found for runtime distribution: {distribution_name}"
         )
 
     body: list[str] = []

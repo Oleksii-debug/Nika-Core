@@ -122,3 +122,114 @@ canonical verifier findings, then checks actual PYZ owners against the inventory
 whose exact license bodies were already proved by that bounded verifier. It
 does not reopen the notice file or duplicate the trusted validation logic.
 Rejected-evidence regressions prohibit an unsafe second read.
+
+## 2026-11-16 exact-package review and remaining causal repairs
+
+Source `2f92a1203a754a3e4a420b65eb0485455f499f6e` passed clean hashed local
+verification (2931 passed, 5 skipped), Core Ubuntu/Windows and M11 run
+`43782890671`. Artifact `14188774853` SHA-256
+`7c710c58d8acf4be13dc8f1f7204872c15f35a9b228b5e9dcb367067e14c7d35`
+contained final ZIP SHA-256
+`3f64d3a83dcd96a4b96078f958233a3cd3654491dbf89921ba48cc05a88d0119`.
+All 110 manifest entries matched their actual sizes/hashes and source identity.
+Independent PyInstaller inspection found 1360 PYZ modules, 31 third-party roots,
+no ambient Click and 31 notice sections. Counts alone were not acceptance:
+independent review found the proxy_tools section contained only metadata.
+
+### Missing proxy_tools license text
+
+The official [0.1.0 release](https://pypi.org/project/proxy_tools/0.1.0/) contains
+only an sdist, SHA-256
+`ccb3751f529c047e2d8a58440d86b205303cf0fe8146f784d1cbcd94f0a28010`.
+It omits LICENSE.txt and declares MIT in package metadata, while its sole module
+explicitly says BSD and attributes Armin Ronacher and Jonathan Tushman. That
+module matches upstream commit `db43f1e35d4f90a65c5a4d56d9e9af88212ec6e6`,
+SHA-256 `d1539d95e1a713c068ca81d42e047b2c76568964cf277596d4e19efb22f476be`.
+The exact [upstream license](https://github.com/jtushman/proxy_tools/blob/db43f1e35d4f90a65c5a4d56d9e9af88212ec6e6/LICENSE.txt)
+has SHA-256 `a428fb8a2e762af3eb0a6edbbb88e9b42ccfee80fd9b423958bcacf9b9abbfe4`.
+
+The canonical notice generator now retains that upstream text unaltered,
+including its historical trailing wording, copyright and redistribution
+conditions. It preserves the conflicting metadata as a declaration rather than
+inventing an MIT grant. This offline exception requires version 0.1.0 and the
+reviewed module identity through the existing bounded/no-follow reader (strict
+UTF-8 and CRLF-to-LF canonicalization); any changed version/source fails closed.
+Metadata-only notices for other packages now fail instead of passing the
+generator and verifier together. Tests cover denial, source/version mismatch,
+missing source, exact license preservation and recovery after restored source.
+The upstream's 2014 release is a retained legacy transitive pywebview dependency,
+not a claim of active upstream maintenance or a newly adopted engine.
+
+### Actual Windows UIA fixture failure
+
+M12 Windows job `133023967001` passed 2929 source tests (7 skipped) but its M9
+fixture could not find a window for the subprocess PID. The fixture was launched
+through the fresh venv redirector. CPython's maintained
+[spawn implementation](https://github.com/python/cpython/blob/v3.12.10/Lib/multiprocessing/popen_spawn_win32.py#L61-L84)
+explicitly bypasses that redirector while preserving the venv and returning the
+real child PID. The fixture now reuses `multiprocessing` with `spawn`, keeping
+process-scoped UIA and bounded terminate/join/kill cleanup. The root-cause link
+is an inference from exact failure plus upstream source until a fresh real
+Windows run passes. No global-window lookup, coordinate fallback or environment
+isolation bypass was added. Success/failure and forced-cleanup cases are tested.
+
+These repairs require new exact-head Core and complete M12/M11 qualification.
+Section 1 remains nonterminal until applicable independent provenance review,
+fresh gates and ordered main readback. Actual Python-owner notice coverage does
+not assert every native DLL/model license or physical NVDA acceptance.
+
+## Independent exact-version provenance review — 2026-11-16
+
+The 30 observed shipped distribution versions were independently queried at
+their official PyPI version endpoints and compared with the hashed build/
+packaging exports. Every version exists and every row has at least one matching
+upstream distribution SHA-256 in the lock exports. Independent review also
+found no yanked release files. License/notice texts for the actual Python owners
+were inspected separately from metadata; the proxy_tools omission/conflict above
+is the concrete repaired exception. This is a bounded dependency adoption review,
+not a claim that merely collecting metadata grants license clearance.
+
+| Distribution | Exact version | Release upload date | Reviewed license/notice family |
+|---|---|---|---|
+| [annotated-types](https://pypi.org/pypi/annotated-types/0.8.0/json) | 0.8.0 | 2026-07-23 | MIT |
+| [anyio](https://pypi.org/pypi/anyio/4.16.0/json) | 4.16.0 | 2026-11-01 | MIT |
+| [bottle](https://pypi.org/pypi/bottle/0.13.4/json) | 0.13.4 | 2025-06-15 | MIT |
+| [certifi](https://pypi.org/pypi/certifi/2026.10.23/json) | 2026.10.23 | 2026-10-23 | MPL-2.0 |
+| [cffi](https://pypi.org/pypi/cffi/2.1.1/json) | 2.1.1 | 2026-08-03 | MIT-0 |
+| [clr-loader](https://pypi.org/pypi/clr-loader/0.3.1/json) | 0.3.1 | 2026-04-18 | MIT (upstream text) |
+| [h11](https://pypi.org/pypi/h11/0.16.0/json) | 0.16.0 | 2025-04-24 | MIT |
+| [httpcore](https://pypi.org/pypi/httpcore/1.0.9/json) | 1.0.9 | 2025-04-24 | BSD-3-Clause |
+| [httpx](https://pypi.org/pypi/httpx/0.28.1/json) | 0.28.1 | 2024-12-06 | BSD-3-Clause |
+| [idna](https://pypi.org/pypi/idna/3.20/json) | 3.20 | 2026-09-17 | BSD-3-Clause |
+| [markdown-it-py](https://pypi.org/pypi/markdown-it-py/4.3.0/json) | 4.3.0 | 2026-11-10 | MIT (upstream text) |
+| [mdurl](https://pypi.org/pypi/mdurl/0.1.2/json) | 0.1.2 | 2022-08-14 | MIT (upstream text) |
+| [packaging](https://pypi.org/pypi/packaging/26.3/json) | 26.3 | 2026-08-04 | Apache-2.0 OR BSD-2-Clause |
+| [platformdirs](https://pypi.org/pypi/platformdirs/4.14.5/json) | 4.14.5 | 2026-11-04 | MIT |
+| [proxy-tools](https://pypi.org/pypi/proxy-tools/0.1.0/json) | 0.1.0 | 2014-05-05 | Upstream BSD; metadata MIT (see correction above) |
+| [pycparser](https://pypi.org/pypi/pycparser/3.12/json) | 3.12 | 2026-10-22 | BSD-3-Clause |
+| [pydantic](https://pypi.org/pypi/pydantic/2.14.3/json) | 2.14.3 | 2026-11-05 | MIT |
+| [pydantic-core](https://pypi.org/pypi/pydantic-core/2.50.4/json) | 2.50.4 | 2026-11-05 | MIT |
+| [pydantic-settings](https://pypi.org/pypi/pydantic-settings/2.16.3/json) | 2.16.3 | 2026-11-13 | MIT |
+| [pygments](https://pypi.org/pypi/pygments/2.21.0/json) | 2.21.0 | 2026-08-17 | BSD-2-Clause |
+| [pytest](https://pypi.org/pypi/pytest/8.4.2/json) | 8.4.2 | 2025-09-04 | MIT |
+| [python-dotenv](https://pypi.org/pypi/python-dotenv/1.2.4/json) | 1.2.4 | 2026-10-01 | BSD-3-Clause |
+| [pythonnet](https://pypi.org/pypi/pythonnet/3.2.1/json) | 3.2.1 | 2026-10-08 | MIT |
+| [pywebview](https://pypi.org/pypi/pywebview/6.2.1/json) | 6.2.1 | 2026-04-15 | BSD-3-Clause |
+| [rich](https://pypi.org/pypi/rich/15.0.0/json) | 15.0.0 | 2026-04-12 | MIT |
+| [setuptools](https://pypi.org/pypi/setuptools/84.2.1/json) | 84.2.1 | 2026-10-20 | MIT |
+| [tomli](https://pypi.org/pypi/tomli/2.5.0/json) | 2.5.0 | 2026-10-07 | MIT |
+| [typing-extensions](https://pypi.org/pypi/typing-extensions/4.16.0/json) | 4.16.0 | 2026-07-02 | PSF-2.0 |
+| [typing-inspection](https://pypi.org/pypi/typing-inspection/0.4.5/json) | 0.4.5 | 2026-11-04 | MIT |
+| [wheel](https://pypi.org/pypi/wheel/0.48.0/json) | 0.48.0 | 2026-08-11 | MIT |
+
+The retained mdurl release dates to 2022 and proxy_tools to 2014; release
+existence is not proof of active maintenance. These existing transitive helpers
+remain pinned and exercised through the reviewed pywebview/Markdown consumers.
+No new model/runtime engine or permissive-license claim is inferred for them.
+Certifi uses its actual upstream MPL notice plus the exact-version unmodified
+source reference. Python retains its full runtime notice. This table does not
+award optional engines/models or separate native DLLs unperformed clearance.
+
+Current repaired local source: 2938 passed, 5 skipped; pip consistency, Ruff and
+compile passed. Independent focused review: 74 tests and Ruff passed. Exact new
+hosted Windows/M12/final-ZIP qualification remains required.

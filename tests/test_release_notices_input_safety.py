@@ -551,6 +551,7 @@ def test_distribution_section_budget_includes_declared_license_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(notices, "_MAX_NOTICES_BYTES", 32)
+    monkeypatch.setattr(notices, "_license_texts", lambda _: (("LICENSE", "terms"),))
 
     class Metadata:
         def get(self, key: str) -> str | None:
