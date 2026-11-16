@@ -227,3 +227,25 @@ Focused deterministic tests cover:
 Exact-head Core CI on Ubuntu+Windows and complete M12 remain required. Owner tests do not
 self-clear AUD02/AUD03. `HUMAN_TESTED=false`; `NVDA_VERIFIED=false`;
 `PRODUCTION_RELEASE_READY=false`.
+
+
+## 2026-11-16 current-lineage convergence
+
+The same canonical #889 repair is reused on the current Core/registry/config
+candidate without replacing those implementations. Public record_audit and
+target_guard APIs are preserved. The known frozen-WAL inspection repair from
+#1070 (5bbab9476d0e182e457fb2da24aae4143f4c3c4d) is adapted into the existing
+legacy-adoption authority: completed baseline/receipt archives use immutable
+read-only inspection after the sidecar coherence guard; live source/target
+inspection continues to read real WAL state. Existing #1070 regression additions
+are retained. No sidecar, writer ownership, manifest, preview or no-clobber check
+is weakened. These are existing donor repairs, not another recovery engine.
+
+Independent remote comparison found the 13 original donor paths/API compatible
+with the current SQLiteStore/schema/legacy baseline; process-loss tests already
+use maintained multiprocessing spawn. No current local execution is available.
+Fresh hosted Ubuntu/Windows source, focused WAL/lease/process-loss/adoption
+tests and package gates must qualify the current source before integration.
+Old PASS/queued statements above describe historical evidence only.
+Strict metadata donor #977 remains an explicit subsequent acceptance item;
+this convergence alone does not mark Section 4 or the whole product DONE.

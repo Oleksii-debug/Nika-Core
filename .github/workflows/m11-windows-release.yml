@@ -3,6 +3,15 @@ name: M11 Windows Release Candidate
 on:
   pull_request:
     paths:
+      - "uv.lock"
+      - "requirements/**"
+      - "scripts/plan1_dependency*.py"
+      - "scripts/ci_dependency_environment.py"
+      - "scripts/verify_packaged_notices.py"
+      - "tests/test_ci_dependency_environment.py"
+      - "tests/test_packaged_notice_inventory.py"
+      - "tests/test_release_http_notice_coverage.py"
+      - "docs/PLAN1_DEPENDENCY_AUTHORITY.json"
       - "src/nika_core/packaging/**"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
@@ -13,12 +22,29 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_qa_workflow_lineage.py"
+      - "src/nika_core/reliability/**"
+      - "tests/test_backup_restore*.py"
+      - "tests/test_v01_legacy_database_adoption.py"
+      - "tests/test_aud02_sqlite_recovery_indirect_path.py"
+      - "src/nika_core/config.py"
+      - "tests/test_config_db_alias_conflict.py"
+      - "tests/test_v01_packaged_config_startup.py"
+      - "tests/test_v01_stable_packaged_data_location.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
   push:
     branches:
       - "main"
     paths:
+      - "uv.lock"
+      - "requirements/**"
+      - "scripts/plan1_dependency*.py"
+      - "scripts/ci_dependency_environment.py"
+      - "scripts/verify_packaged_notices.py"
+      - "tests/test_ci_dependency_environment.py"
+      - "tests/test_packaged_notice_inventory.py"
+      - "tests/test_release_http_notice_coverage.py"
+      - "docs/PLAN1_DEPENDENCY_AUTHORITY.json"
       - "src/nika_core/packaging/**"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
@@ -29,6 +55,14 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_qa_workflow_lineage.py"
+      - "src/nika_core/reliability/**"
+      - "tests/test_backup_restore*.py"
+      - "tests/test_v01_legacy_database_adoption.py"
+      - "tests/test_aud02_sqlite_recovery_indirect_path.py"
+      - "src/nika_core/config.py"
+      - "tests/test_config_db_alias_conflict.py"
+      - "tests/test_v01_packaged_config_startup.py"
+      - "tests/test_v01_stable_packaged_data_location.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
   workflow_dispatch:
@@ -59,7 +93,25 @@ jobs:
       - name: Verify exact candidate checkout identity
         run: python scripts/qa_assert_checkout_identity.py
       - name: Install GUI, packaging and test dependencies
-        run: python -m pip install -e ".[gui,qa,dev]"
+        run: python scripts/ci_dependency_environment.py
+      - name: Verify isolated CI interpreter
+        run: python scripts/ci_dependency_environment.py --verify
+      - name: Verify source-bound dependency profiles
+        run: python scripts/plan1_dependency_lock.py
+      - name: Install pinned build environment
+        run: python -m pip install --require-hashes -r requirements/build.txt
+      - name: Install hashed dependency profile
+        run: python -m pip install --require-hashes --no-build-isolation -r requirements/packaging.txt
+      - name: Install exact source without dependency resolution
+        run: python -m pip install --no-deps --no-build-isolation -e .
+      - name: Observe installed dependency graph and license texts
+        run: python scripts/plan1_dependency_environment.py --groups base gui qa dev build-system --include-transitive --strict --output plan1-dependencies.json
+      - name: Preserve exact installed dependency and license-text evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: plan1-packaging-${{ runner.os }}-${{ env.NIKA_CANDIDATE_SHA }}
+          path: plan1-dependencies.json
+          if-no-files-found: error
       - name: Resolve canonical project version
         id: release
         shell: pwsh
@@ -67,6 +119,10 @@ jobs:
           $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
           if (-not $version) { throw 'Could not resolve [project].version from pyproject.toml' }
           "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Verify configuration admission before packaging
+        run: python -m pytest -q tests/test_config_db_alias_conflict.py tests/test_v01_packaged_config_startup.py tests/test_v01_stable_packaged_data_location.py
+      - name: Verify canonical recovery before packaging
+        run: python -m pytest -q tests/test_backup_restore_wal_stale_preview.py tests/test_backup_restore_recovery_process_loss.py tests/test_v01_legacy_database_adoption.py
       - name: Run M11 M12 source regressions
         run: python -m pytest tests/test_m11_m12_release.py tests/test_qa_workflow_lineage.py -q
       - name: Build standalone one-dir Windows candidate, notices and manifest
@@ -74,6 +130,8 @@ jobs:
         run: >-
           python scripts/m11_release.py
           --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
+      - name: Verify packaged module and license notice coverage
+        run: python scripts/verify_packaged_notices.py --bundle dist/NikaCore
       - name: Verify packaged WebView2 UI Automation and keyboard focus
         shell: pwsh
         run: ./scripts/v01_autostart_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
