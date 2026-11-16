@@ -1,8 +1,58 @@
+# Plan acceptance checkpoints (2026-10-11)
+
+Existing 7 Google Drive plans and their numbered Sections remain canonical, no historical records or terminal DONE are deleted. To prevent repeated multi-day stalls, all Plans 1–7 now explicitly partition their first actionable original Section into three **bounded independently verifiable** checkpoints inside that same Section: A=REUSE exact code/PR/SHA and positive tests, B=repair one *proven* failed CI job plus negative/recovery tests using the existing owner PR, C=qualify the full inherited acceptance, ordered integration and post-merge exact readback. Record A_VERIFIED, B_VERIFIED, C_VERIFIED separately in Drive/GitHub after actual evidence, but do not mark Section DONE before C, and don't extend the scope with speculative hardening.
+
+Priority for Plan1 is existing PR #1871 (Sections 1–2 implementation); previous head `56de6201062f07f815310f9c1630fd6e55edbbc7`: Core Ubuntu SUCCESS and M12 Ubuntu SUCCESS, Windows pending at last verified checkpoint. This is historical SHA-bound observation, not a statement that latest exact-head Windows or full release already passed. First fix current proven blocker rather than create a new nested PR. Existing assignments and plan ownership continue. Preserve law/licensing, security, runtime no-replay and any required real Windows/NVDA final Plan7 acceptance. Plan2 Agent Builder/teams and Plan3 model/brain work are independent plan lanes; source scope is not contingent on extension/other product version.
+
+# 2026-10-11 Closure-first recovery directive — binding worker selection
+
+This is a narrow work-selection and convergence clarification. It does not bypass CI, licensing, security, release, owner/NVDA, or repository protection requirements. Existing accepted code/PR/evidence remains authoritative.
+
+1. For the assigned plan, read the LIVE `MULTI_PLAN_CLOSURE_STATE.md`, not just migrated Drive lines. Identify first ACTIONABLE, NOT-DONE section and its canonical PR lineage; do not start another whole-section implementation or duplicate authority while a repairable canonical candidate exists.
+2. Classify exact-head gates as **PASS / PROVEN_FAILURE / PENDING / SKIPPED / EXTERNAL** from completed run/job logs. On PROVEN_FAILURE, fix the *first causal code/test/lint issue* on the existing finisher, without downgrading checks. After each repair, refreeze a SHA, use new CI, and do not report PASS from a prior SHA.
+3. In particular, Plan 1 §§1–2 have a converged child PR #1871. Resolve actual Core/M12 Ubuntu+Windows failures there first. Other plan stacks must similarly reuse their existing PRs rather than creating another nested duplicate. Recover dependent parents in topological order before any terminal integration.
+4. Immediately after applicable exact-head gates pass: reconcile unique work with current main once, perform permitted integration, verify post-merge source/tests/status, then set **only the proved section** DONE in GitHub and its assigned Drive plan. A green isolated test, draft PR, or passing fixture alone is not DONE.
+5. External physical Windows/NVDA/Web/Cloud product acceptance remains Plan 7. Do not let this final external scope block independently qualified intermediate components, and do not invent physical PASS from mocks. If any real failure remains, record precisely and continue a nonconflicting acceptance-critical task, not speculative polish.
+6. Report each plan as `terminal_done/total`, first actionable section, exact PR/SHA, and a single independently evidenced blocker. No percentage without evidence. Never silently rewrite older DONE or create a second coordination authority.
+
+This directive takes precedence over any suggestion in older docs to maximize PR count or perform optional hardening instead of closing the currently qualified section.
+
+# Multi-Plan Parallel Closure Protocol v4 — owner directive 2026-10-08
+
+This directive overrides conflicting global-sequential work-selection rules for the new project-plan architecture.
+
+Before mutation read PROJECT_PLAN_INDEX.md, MULTI_PLAN_PARALLELISM_CONTRACT.md, MULTI_PLAN_CLOSURE_STATE.md, the assigned Drive plan and live GitHub.
+
+- Plans 1–6 are independent engineering plans; there is no global earliest Section across plans.
+- Within the assigned plan, audit/reuse existing implementation first, skip terminal DONE, and work the first ACTIONABLE unfinished Section.
+- Existing Nika code/PR/evidence is not greenfield. REUSE -> REPAIR -> CONVERGE.
+- Stable contracts/fixtures/mocks may unblock peer-plan dependencies, but they never count as whole-product/physical evidence.
+- Plan 7 is final convergence/physical acceptance/go-live and is not an ordinary parallel lane before required Plan 1–6 outputs exist.
+- Do not create duplicate persistence/runtime/security/scheduler/Capability Broker/ModelGateway/AgentRuntime authorities.
+- Human Windows/NVDA and real Web/Cloud acceptance belong to Plan 7, not intermediate blockers.
+- DONE is terminal unless demonstrated regression, invalid evidence, materially changed acceptance contract or breaking integration.
+
 # Nika Core autonomous development instructions
 
-This repository is the canonical source of truth. Chat history is not.
+## CANONICAL WORKER-AUTONOMY OVERRIDE
 
-Current operating authority: **docs/AUTONOMOUS_WORKER_ORCHESTRATION.md**, policy DELIVERY-2026-09-09. The owner requested 13 developers plus 2 coordinators and faster completion of the full product. This supersedes older worker counts, blanket V0.1-only/Factory-first-only scheduling and global human-gate waiting freezes. It does not weaken product scope, security, accessibility or acceptance requirements.
+This section has highest priority for autonomous worker coordination and supersedes older conflicting worker-count, coordinator-count, WIP, ownership/claim, serialization, exclusive-integration, PR-order, and CI-wait restrictions anywhere in this repository.
+
+- No repository-defined worker-count, coordinator-count, WIP, work-package, branch, or PR cap.
+- Claims, leases, ownership, assignments, queues, and coordinator labels are advisory only and never block useful safe work.
+- Workers may create branches, commits, PRs, fixes, tests, integration commits, and merges when GitHub permissions allow and evidence is adequate.
+- Dependency order constrains final integration only; it does not stop independent implementation, testing, hardening, research, docs, accessibility, packaging, fixtures, adapters, or prototypes.
+- Queued/pending/slow/unavailable CI is never by itself a reason to terminate. Record it and continue immediately with another valuable independent task.
+- A blocked first workline is never by itself a reason to terminate. STATUS: BLOCKED is allowed only after all reasonably available safe independent work is exhausted.
+- Do not idle because another PR, branch, worker, check, review, claim, or queue is active. If overlap occurs, switch to non-conflicting work or reconcile/rebase instead of abandoning the run.
+- There is no repository-defined exclusive integration owner. Any authorized worker may integrate verified work when GitHub permissions and product/release gates allow.
+- Use the full execution window while useful safe work remains.
+
+This removes orchestration throttles only. Product correctness, security, data integrity, accessibility, licensing, privacy, truthful testing/release evidence, and domain-specific safety requirements remain mandatory.
+
+This repository is the authoritative record for project decisions.
+
+Current operating authority: **docs/AUTONOMOUS_WORKER_ORCHESTRATION.md**, policy DELIVERY-2026-09-09. The owner requires unrestricted parallel autonomous development with no repository-defined worker or coordinator cap. This supersedes older worker counts, blanket V0.1-only/Factory-first-only scheduling and global human-gate waiting freezes. It does not weaken product scope, security, accessibility or acceptance requirements.
 
 Before each cycle read this file, the operating policy, the relevant live records in issue #553, and actual source/CI evidence for your assignment. On first adoption or relevant changes, read docs/MASTER_SPEC.md, docs/FULL_PRODUCT_VISION_2026-08-19.md, docs/ROADMAP.md and applicable Product Factory/Business Factory/Web/Cloud, reuse, UI and acceptance specifications. Reuse prior unchanged context; do not reread every historical document and branch on each hourly wake-up. coordination/AUTONOMOUS_ROUTING.md and state/PARALLEL_EXECUTION_BOARD.md are pointers to the same live control issue, not separate allocation authorities.
 
@@ -34,11 +84,11 @@ Business Factory truth: Business Agent Lab is an optional reusable orchestration
 
 IP/license truth: public competitor/product/market research may inform an independent implementation, but access to proprietary source/assets/credentials is not permission to copy them. Every adopted dependency/tool records version/license/provenance and relevant distribution obligations; missing/unacceptable provenance can block release.
 
-Parallel-first rule: every cycle selects genuinely independent coherent packages that can be completed and integrated within the current WIP limit. Initial target: six active implementation packages across all runs; other developers advance assigned review, integration repair or disjoint portions of those packages. Dependencies constrain merge/integration order, not isolated research, contract design, adapter implementation, mocks, fixtures, tests or prototypes. A blocked lane must not idle unrelated lanes. Avoid fake parallelism and shared-file collisions; prefer clear lane ownership and stable ports. Product Factory work additionally requires ownership by ProductProject/component/repository. Use PREPARED / IMPLEMENTED / GREEN / INTEGRATED / PACKAGED / HUMAN_TESTED / NVDA_VERIFIED evidence states accurately.
+Parallel-first rule: every cycle selects genuinely independent coherent packages that can be completed and integrated within the current WIP limit. There is no fixed active-package target or WIP cap; other developers advance assigned review, integration repair or disjoint portions of those packages. Dependencies constrain merge/integration order, not isolated research, contract design, adapter implementation, mocks, fixtures, tests or prototypes. A blocked lane must not idle unrelated lanes. Avoid fake parallelism and shared-file collisions; prefer clear lane ownership and stable ports. Product Factory work additionally requires ownership by ProductProject/component/repository. Use PREPARED / IMPLEMENTED / GREEN / INTEGRATED / PACKAGED / HUMAN_TESTED / NVDA_VERIFIED evidence states accurately.
 
 Large-batch rule: do not stop after one file, one function, one lint error or one small PR if the same coherent subsystem can safely be carried through implementation, error/recovery behavior, tests, docs, CI and integration in the same cycle.
 
-Manual Deep Research development: when the user creates manual Deep Research developer/auditor chats, treat developer chats as real coding lanes capable of large implementation batches, not research-only roles. Their paired auditors independently inspect live GitHub evidence. Scheduled workers should then be paused or reassigned to complementary non-colliding QA/release/integration/evidence work rather than duplicating the same source ownership.
+Dedicated implementation and review: assign a coherent implementation scope and an independent reviewer who checks the GitHub evidence. Pause or redirect overlapping work to independent QA, release, integration, or verification tasks.
 
 Accessibility: blind primary user, Windows 11 + NVDA. Web-style desktop UI uses local semantic HTML inside pywebview/WebView2; keyboard-only operation, accessible names/roles, headings/landmarks, deterministic focus and text logs are mandatory. Packaged WebView2 UI Automation discovery is a specific gate. Automated accessibility tests do not equal human NVDA verification. Products created by Product Factory receive relevant accessibility review/gates rather than inheriting false credit from Nika Core. The future real Web client has a separate browser/screen-reader accessibility gate; Windows `NVDA_VERIFIED` must never be reused as Web accessibility evidence.
 
@@ -50,4 +100,4 @@ Git discipline: `main` must remain releasable. Use feature/fix branches and cohe
 
 CI policy: coherent PR/main gates execute the shared verification harness on both Ubuntu and Windows. Focused Windows/WebView2/package/security/model-hardware/Product-Factory jobs may be added where they provide real evidence. Never weaken a check to obtain green. Stale runs for the same PR/ref may be canceled. Do not rebuild an EXE or download large models on every development push. Future Web/Cloud work adds separate API-contract, multi-tenant security, deployment and browser-accessibility gates without weakening Windows gates.
 
-Persist useful source and ownership checkpoints. At the end of a cycle with new actionable evidence, update the worker-owned GitHub checkpoint in at most eight lines: practical outcome, role/run, PR/SHA, actual checks/state, blocker and next owner/step. Details stay on the canonical PR. Do not duplicate the full report into Drive or post unchanged hourly audits. User-facing reports explain practical capabilities first. Only the designated integration owner promotes reviewed and properly verified candidates to main.
+Persist useful source and ownership checkpoints. At the end of a cycle with new actionable evidence, update the worker-owned GitHub checkpoint in at most eight lines: practical outcome, role/run, PR/SHA, actual checks/state, blocker and next owner/step. Details stay on the canonical PR. Do not duplicate the full report into Drive or post unchanged hourly audits. User-facing reports explain practical capabilities first. Any authorized worker may promote reviewed and properly verified candidates to main when GitHub permissions and applicable product/release gates allow.

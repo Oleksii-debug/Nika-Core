@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import isfinite
 from typing import Any, Protocol, runtime_checkable
+from unicodedata import category, is_normalized
 
 
 class RuntimeCapability(StrEnum):
@@ -55,6 +58,146 @@ class RuntimeUnsupportedError(RuntimeError):
     pass
 
 
+MAX_RUNTIME_STEPS = 10_000
+# Maximum exactly representable JSON integer in JavaScript and safe within SQLite int64.
+MAX_RUNTIME_EVENT_SEQUENCE = (1 << 53) - 1
+MAX_RUNTIME_TIMEOUT_SECONDS = 86_400
+MAX_RUNTIME_ID_UTF8_BYTES = 512
+MAX_RUNTIME_PROBE_REASON_UTF8_BYTES = 2048
+MAX_RUNTIME_RESULT_ERROR_UTF8_BYTES = 4096
+
+
+def _validate_runtime_identity(value: str, field_name: str) -> None:
+    """Keep durable runtime identifiers canonical, bounded, before admission or recovery."""
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be a string")
+    # Bound code points before any O(n) Unicode normalization or encoding work.
+    if len(value) > MAX_RUNTIME_ID_UTF8_BYTES:
+        raise ValueError(f"{field_name} exceeds the durable identity size limit")
+    try:
+        byte_count = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError(f"{field_name} contains invalid Unicode") from None
+    if byte_count > MAX_RUNTIME_ID_UTF8_BYTES:
+        raise ValueError(f"{field_name} exceeds the durable identity size limit")
+    if not value or value != value.strip():
+        raise ValueError(f"{field_name} must be nonempty canonical text")
+    if not is_normalized("NFC", value) or any(
+        category(character) in {"Cc", "Cf", "Cs"} or character in "\u0085\u2028\u2029"
+        for character in value
+    ):
+        raise ValueError(f"{field_name} contains noncanonical or control text")
+
+
+def _validate_probe_reason(value: str) -> None:
+    """Bound and canonicalize diagnostic text before restart/audit presentation."""
+    if type(value) is not str:
+        raise TypeError("resume probe reason must be a plain string")
+    if len(value) > MAX_RUNTIME_PROBE_REASON_UTF8_BYTES:
+        raise ValueError("resume probe reason exceeds diagnostic size limit")
+    try:
+        encoded_size = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError("resume probe reason contains invalid Unicode") from None
+    if encoded_size > MAX_RUNTIME_PROBE_REASON_UTF8_BYTES:
+        raise ValueError("resume probe reason exceeds diagnostic size limit")
+    if not value or value != value.strip():
+        raise ValueError("resume probe reason must be nonempty canonical text")
+    if not is_normalized("NFC", value) or any(
+        category(character) in {"Cc", "Cf", "Cs"} or character in "\u0085\u2028\u2029"
+        for character in value
+    ):
+        raise ValueError("resume probe reason contains noncanonical or control text")
+
+
+def _validate_runtime_result_error(value: str) -> None:
+    """Keep provider diagnostics inert, bounded and readable across durable readback."""
+    if type(value) is not str:
+        raise TypeError("runtime error must be a plain string")
+    if len(value) > MAX_RUNTIME_RESULT_ERROR_UTF8_BYTES:
+        raise ValueError("runtime error exceeds diagnostic size limit")
+    try:
+        byte_count = len(value.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise ValueError("runtime error contains invalid Unicode") from None
+    if byte_count > MAX_RUNTIME_RESULT_ERROR_UTF8_BYTES:
+        raise ValueError("runtime error exceeds diagnostic size limit")
+    # Existing multiline/tab diagnostics remain valid, but no terminal escapes,
+    # bidi overrides, carriage-return overwrites or surrogate code points.
+    if not is_normalized("NFC", value) or any(
+        (category(char) in {"Cf", "Cs", "Cc"} and char not in "\n\t")
+        or char in "\u0085\u2028\u2029"
+        for char in value
+    ):
+        raise ValueError("runtime error contains noncanonical or control text")
+
+
+MAX_RUNTIME_MAPPING_WALK_NODES = 20_000
+
+
+def _validate_runtime_mapping_keys(value: Mapping[str, Any], label: str) -> None:
+    """Reject lossy JSON keys and cycles before runtime envelope transport."""
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{label} must be a mapping")
+    # Iterate only mapping/sequence containers; leave arbitrary domain values
+    # to their existing consumers. The DFS distinguishes shared DAG subtrees
+    # from cycles, without Python recursion or invoking a serializer.
+    pending: list[tuple[Any, bool]] = [(value, False)]
+    visiting: set[int] = set()
+    completed: set[int] = set()
+    nodes = 0
+    while pending:
+        current, exiting = pending.pop()
+        nodes += 1
+        if nodes > MAX_RUNTIME_MAPPING_WALK_NODES:
+            raise ValueError(f"{label} exceeds nested container inspection limit")
+        if not isinstance(current, (Mapping, list, tuple)):
+            continue
+        identity = id(current)
+        if exiting:
+            visiting.remove(identity)
+            completed.add(identity)
+            continue
+        if identity in visiting:
+            raise ValueError(f"{label} contains a cyclic container")
+        if identity in completed:
+            continue
+        if len(current) > MAX_RUNTIME_MAPPING_WALK_NODES:
+            raise ValueError(f"{label} exceeds nested container inspection limit")
+        visiting.add(identity)
+        pending.append((current, True))
+        if isinstance(current, Mapping):
+            if any(type(key) is not str for key in current):
+                raise TypeError(f"{label} keys must be plain strings")
+            children = tuple(current.values())
+        else:
+            children = tuple(current)
+        if len(pending) + len(children) > MAX_RUNTIME_MAPPING_WALK_NODES:
+            raise ValueError(f"{label} exceeds nested container inspection limit")
+        pending.extend((child, False) for child in children)
+
+
+def _validate_limits(max_steps: int, timeout_seconds: float | None) -> None:
+    """Reject malformed budgets before they reach provider/runtime effects."""
+    if type(max_steps) is not int:
+        raise TypeError("max_steps must be a plain integer, not bool or float")
+    if not 1 <= max_steps <= MAX_RUNTIME_STEPS:
+        raise ValueError(f"max_steps must be between 1 and {MAX_RUNTIME_STEPS}")
+    if timeout_seconds is not None:
+        if type(timeout_seconds) not in (int, float):
+            raise TypeError("timeout_seconds must be a plain number when provided")
+        try:
+            finite = isfinite(timeout_seconds)
+        except OverflowError:
+            finite = False
+        if not finite or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and positive when provided")
+        if timeout_seconds > MAX_RUNTIME_TIMEOUT_SECONDS:
+            raise ValueError(
+                f"timeout_seconds must not exceed {MAX_RUNTIME_TIMEOUT_SECONDS}"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeRequest:
     task_id: str
@@ -64,14 +207,10 @@ class RuntimeRequest:
     timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
-        if not self.task_id.strip():
-            raise ValueError("task_id must not be empty")
-        if not self.thread_id.strip():
-            raise ValueError("thread_id must not be empty")
-        if self.max_steps < 1:
-            raise ValueError("max_steps must be positive")
-        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive when provided")
+        _validate_runtime_identity(self.task_id, "task_id")
+        _validate_runtime_identity(self.thread_id, "thread_id")
+        _validate_limits(self.max_steps, self.timeout_seconds)
+        _validate_runtime_mapping_keys(self.payload, "runtime request payload")
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,12 +224,12 @@ class RuntimeResumeRequest:
     timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
-        if not self.task_id.strip() or not self.thread_id.strip() or not self.resume_token.strip():
-            raise ValueError("resume identifiers must not be empty")
-        if self.max_steps < 1:
-            raise ValueError("max_steps must be positive")
-        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive when provided")
+        _validate_runtime_identity(self.task_id, "task_id")
+        _validate_runtime_identity(self.thread_id, "thread_id")
+        _validate_runtime_identity(self.resume_token, "resume_token")
+        if not isinstance(self.mode, RuntimeResumeMode):
+            raise TypeError("mode must be a RuntimeResumeMode")
+        _validate_limits(self.max_steps, self.timeout_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,15 +241,11 @@ class RuntimeResumeProbe:
     checkpoint_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.reason.strip():
-            raise ValueError("resume probe reason must not be empty")
+        if not isinstance(self.status, RuntimeResumeProbeStatus):
+            raise TypeError("resume probe status must be a RuntimeResumeProbeStatus")
+        _validate_probe_reason(self.reason)
         if self.checkpoint_id is not None:
-            if not isinstance(self.checkpoint_id, str):
-                raise TypeError("checkpoint_id must be a string when provided")
-            if not self.checkpoint_id.strip():
-                raise ValueError("checkpoint_id must not be empty")
-            if self.checkpoint_id != self.checkpoint_id.strip():
-                raise ValueError("checkpoint_id must not have surrounding whitespace")
+            _validate_runtime_identity(self.checkpoint_id, "checkpoint_id")
         if self.status == RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
             raise ValueError("ready resume probe requires checkpoint_id")
 
@@ -126,10 +261,14 @@ class RuntimeEvent:
     payload: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if type(self.sequence) is not int:
+            raise TypeError("event sequence must be a plain integer")
         if self.sequence < 0:
             raise ValueError("sequence must not be negative")
-        if not self.event_type.strip():
-            raise ValueError("event_type must not be empty")
+        if self.sequence > MAX_RUNTIME_EVENT_SEQUENCE:
+            raise ValueError("event sequence exceeds portable integer limit")
+        _validate_runtime_identity(self.event_type, "event_type")
+        _validate_runtime_mapping_keys(self.payload, "runtime event payload")
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,17 +283,146 @@ class RuntimeResult:
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, RuntimeOutcome):
             raise TypeError("outcome must be a RuntimeOutcome")
+        # Dataclass type hints alone do not validate provider-supplied event or
+        # output containers. Reject malformed carriers before durable consumers.
+        if type(self.events) is not tuple or any(
+            type(event) is not RuntimeEvent for event in self.events
+        ):
+            raise TypeError("runtime events must be a tuple of RuntimeEvent")
+        _validate_runtime_mapping_keys(self.output, "runtime output")
+        if self.resume_token is not None:
+            _validate_runtime_identity(self.resume_token, "resume_token")
         if (
             self.outcome in {RuntimeOutcome.WAITING_APPROVAL, RuntimeOutcome.PAUSED}
-            and (not isinstance(self.resume_token, str) or not self.resume_token.strip())
+            and self.resume_token is None
         ):
             raise ValueError("resumable outcome requires a usable resume token")
-        if self.outcome == RuntimeOutcome.FAILED and not self.error:
-            raise ValueError("failed outcome requires an error")
+        if self.error is not None:
+            _validate_runtime_result_error(self.error)
+        if self.outcome == RuntimeOutcome.FAILED and (
+            self.error is None or not self.error.strip()
+        ):
+            raise ValueError("failed outcome requires a nonempty error")
         if self.error_code is not None and not isinstance(self.error_code, RuntimeErrorCode):
             raise TypeError("error_code must be a RuntimeErrorCode when provided")
         if self.outcome != RuntimeOutcome.FAILED and self.error_code is not None:
             raise ValueError("error_code is only valid for failed outcomes")
+
+
+# Control/audit events are emitted only by Nika, never by an adapter result.
+# Update this set when the coordinator/recovery service adds an authoritative event.
+_NIKA_OWNED_RUNTIME_AUDIT_EVENTS = frozenset(
+    {
+        "runtime.started",
+        "runtime.session_bound",
+        "runtime.retry_blocked_unsafe_fresh_replay",
+        "runtime.retry_blocked_timeout_budget",
+        "runtime.retry_scheduled",
+        "runtime.retry_blocked_cancelled",
+        "runtime.retry_started",
+        "runtime.approval_resumed",
+        "runtime.saved_resume_started",
+        "runtime.saved_approval_resumed",
+        "runtime.cancel_requested",
+        "runtime.cancel_accepted",
+        "runtime.cancel_uncertain",
+        "runtime.cancel_not_active",
+        "runtime.crash_recovery_started",
+        "runtime.recovery_claim_acquired",
+        "runtime.recovery_claim_reclaimed",
+        "runtime.recovery_effect_started",
+        "runtime.finished_after_cancel",
+        "runtime.recovery_claim_completed",
+        "runtime.finished",
+        "runtime.recovery_inventory",
+        "runtime.recovery_checkpoint_blocked",
+        "runtime.recovery_auto_resume_requested",
+        "runtime.recovery_auto_resume_failed",
+    }
+)
+
+
+def _snapshot_json_mapping(value: Mapping[str, Any], *, field_name: str) -> dict[str, Any]:
+    """Copy adapter output into JSON-safe, detached Nika-owned values."""
+
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field_name} must be a mapping")
+    _validate_runtime_mapping_keys(value, field_name)
+    copied = dict(value)
+    if any(type(key) is not str for key in copied):
+        raise TypeError(f"{field_name} keys must be exact strings")
+    def mapping_default(item: object) -> dict[str, Any]:
+        if isinstance(item, Mapping):
+            return dict(item)
+        raise TypeError("runtime values must be JSON-compatible")
+
+    encoded = json.dumps(
+        copied, ensure_ascii=False, allow_nan=False, sort_keys=True, default=mapping_default,
+    )
+    # SQLite and the Windows JSON transport cannot store unpaired surrogates.
+    encoded.encode("utf-8")
+    return json.loads(encoded)
+
+
+def canonical_runtime_result(value: object) -> RuntimeResult:
+    """Snapshot untrusted adapter evidence before it changes Nika's durable state."""
+
+    if type(value) is not RuntimeResult:
+        raise TypeError("runtime adapter must return an exact RuntimeResult")
+    try:
+        outcome = object.__getattribute__(value, "outcome")
+        events = object.__getattribute__(value, "events")
+        output = object.__getattribute__(value, "output")
+        resume_token = object.__getattribute__(value, "resume_token")
+        error = object.__getattribute__(value, "error")
+        error_code = object.__getattribute__(value, "error_code")
+    except AttributeError:
+        raise ValueError("runtime adapter result is incomplete") from None
+
+    if type(events) is not tuple:
+        raise TypeError("runtime result events must be a tuple")
+    if not isinstance(output, Mapping):
+        raise TypeError("runtime result output must be a mapping")
+    if resume_token is not None and type(resume_token) is not str:
+        raise TypeError("runtime result resume token must be an exact string")
+    if error is not None and type(error) is not str:
+        raise TypeError("runtime result error must be an exact string")
+    if error_code is not None and type(error_code) is not RuntimeErrorCode:
+        raise TypeError("runtime result error code must be exact")
+    if resume_token is not None:
+        resume_token.encode("utf-8")
+    if error is not None:
+        error.encode("utf-8")
+    canonical_output = _snapshot_json_mapping(output, field_name="runtime result output")
+
+    canonical_events = []
+    for event in events:
+        if type(event) is not RuntimeEvent:
+            raise TypeError("runtime result contains an invalid event")
+        sequence = object.__getattribute__(event, "sequence")
+        event_type = object.__getattribute__(event, "event_type")
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError("runtime event sequence must be a non-negative integer")
+        if type(event_type) is not str or not event_type.strip():
+            raise ValueError("runtime event type must be an exact nonempty string")
+        event_type.encode("utf-8")
+        if event_type in _NIKA_OWNED_RUNTIME_AUDIT_EVENTS:
+            raise ValueError("runtime adapter cannot impersonate Nika-owned audit events")
+        event_payload = _snapshot_json_mapping(
+            object.__getattribute__(event, "payload"), field_name="runtime event payload"
+        )
+        canonical_events.append(
+            RuntimeEvent(sequence=sequence, event_type=event_type, payload=event_payload)
+        )
+
+    return RuntimeResult(
+        outcome=outcome,
+        events=tuple(canonical_events),
+        output=canonical_output,
+        resume_token=resume_token,
+        error=error,
+        error_code=error_code,
+    )
 
 
 @runtime_checkable
