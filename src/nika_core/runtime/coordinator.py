@@ -19,6 +19,7 @@ from nika_core.runtime.contracts import (
     RuntimeResumeMode,
     RuntimeResumeProbePort,
     RuntimeResumeRequest,
+    canonical_runtime_result,
 )
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
@@ -457,6 +458,8 @@ class TaskRuntimeCoordinator:
 
         try:
             accepted = await runtime.cancel(task_id=task_id, thread_id=thread_id)
+            if type(accepted) is not bool:
+                raise TypeError("runtime cancellation acknowledgement must be boolean")
         except Exception as exc:
             with self._queue.store.connection() as conn:
                 self._idempotency.mark_uncertain_with_connection(conn, operation_key)
@@ -469,7 +472,7 @@ class TaskRuntimeCoordinator:
                         "runtime_id": runtime.runtime_id,
                         "thread_id": thread_id,
                         "operation_key": operation_key,
-                        "error": str(exc),
+                        "error": type(exc).__name__,
                     },
                 )
             raise
@@ -853,11 +856,11 @@ class TaskRuntimeCoordinator:
         request: RuntimeRequest,
     ) -> RuntimeResult:
         try:
-            return await runtime.run(request)
-        except Exception as exc:  # noqa: BLE001 - runtime adapter boundary normalizes failures
+            return canonical_runtime_result(await runtime.run(request))
+        except Exception:  # noqa: BLE001 - runtime adapter boundary normalizes failures
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
-                error=str(exc),
+                error="runtime execution failed",
                 error_code=RuntimeErrorCode.INTERNAL,
             )
 
@@ -867,11 +870,11 @@ class TaskRuntimeCoordinator:
         request: RuntimeResumeRequest,
     ) -> RuntimeResult:
         try:
-            return await runtime.resume(request)
-        except Exception as exc:  # noqa: BLE001 - runtime adapter boundary normalizes failures
+            return canonical_runtime_result(await runtime.resume(request))
+        except Exception:  # noqa: BLE001 - runtime adapter boundary normalizes failures
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
-                error=str(exc),
+                error="runtime resume failed",
                 error_code=RuntimeErrorCode.INTERNAL,
             )
 
@@ -1000,7 +1003,7 @@ class TaskRuntimeCoordinator:
             event_type=event.event_type,
             entity_type="task",
             entity_id=task_id,
-            payload={"sequence": event.sequence, **dict(event.payload)},
+            payload={**dict(event.payload), "sequence": event.sequence},
         )
 
     @staticmethod

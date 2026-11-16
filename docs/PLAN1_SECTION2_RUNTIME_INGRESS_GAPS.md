@@ -62,3 +62,76 @@ Negative/compatibility tests cover nested key collisions, cycles, shared
 subtrees and oversized carriers. The broader versioned command/query,
 recovery, restart and all-client interoperability contract remains unproved
 until exact-head CI and integration evidence; **Plan 1 Section 2 NOT DONE**.
+
+## 2026-11-16 persisted event-sequence correction
+
+Read-only audit of integrated Section 2 source at `2f92a120` found a concrete
+boundary failure: the coordinator wrote `sequence` before expanding the
+adapter's payload, so a payload key could replace the validated event sequence
+in SQLite. Reproduction through `TaskRuntimeCoordinator.start` and a reopened
+store preserved forged `-99` despite the canonical event sequence being `7`.
+
+The same coordinator now writes the canonical sequence after copying ordinary
+payload fields. This preserves the existing flat audit schema and all other
+payload data, without introducing another validator or authority. Six regression
+cases exercise the ordinary payload and five collisions (negative, overflow,
+string, null and boolean), initial waiting-for-approval, resume using a fresh
+store/coordinator, and final audit readback from another store. The path includes
+Ukrainian text and spaces. Before repair, the five collision cases failed; the
+ordinary case passed. Independent review found no blocking issue and passed
+26 runtime/coordinator/recovery tests plus Ruff.
+
+The earlier audit ran 286 existing Section 2/runtime/product-command tests
+successfully on `2f92a120`; their historic "authored only" entries above describe
+the original changes, not the current test state. This repair still requires
+its own exact-head full checks and main integration. Fresh objects in one process
+prove persistence/recovery behavior here; they do not claim a physical crash,
+NVDA, live cloud or whole-product acceptance. Reuse canonical PR #1856 after
+its already integrated ancestry, with Section 1 closure preserved.
+
+
+## Canonical adapter-result snapshot convergence
+
+Independent read-only audit of candidate `4cb2fe03ee125de9eb9afe65edcf459ac1b423d5`
+completed the repository-controlled Section 2 reuse/evidence map: 386 focused
+runtime, recovery, product-command and plugin tests passed. That candidate also
+passed full hosted Core and M12 (`43908417478`, `43908417459`). Existing
+framework-neutral ports, canonical identities, versioned product/plugin
+projections and recovery authorities remain the implementation baseline.
+
+The audit reproduced one concrete remaining gap: an otherwise valid runtime
+event containing `{"value": object()}` passed DTO admission, then failed JSON
+serialization during audit finalization. Reopening SQLite left the task RUNNING
+with only runtime.started. This is an adapter-result boundary defect, not a new
+store or permission system.
+
+Reuse the existing `canonical_runtime_result` and JSON snapshot from PR #916 /
+#917 (exact source `142504f9f4b6c5ce8f8683d7461ca3236ba43e53`), adapted into the
+current contracts. Preserve every current DTO identity/budget/sequence guard,
+validate nested keys/cycles before serialization, allow readonly Mapping
+carriers through a Mapping-only JSON default, reject nonfinite/non-JSON/invalid
+Unicode leaves and reconstruct through current DTO constructors. The detached
+snapshot prevents later adapter mutations changing accepted result evidence.
+The accepted payload sequence collision remains governed by the coordinator's
+canonical-key-last rule, rather than the older branch's blanket rejection.
+
+Run/resume canonicalization occurs inside the existing adapter exception
+boundary, producing generic FAILED/INTERNAL results which can finalize durably
+without leaking adapter exception text. The same reused lineage requires an
+exact boolean cancellation acknowledgement inside the current cancellation try:
+malformed acknowledgement retains UNCERTAIN ledger state, the active session and
+the existing replay block. Ledger transactions and recovery owners are retained.
+
+Regression factories forge constructor-invalid fields explicitly so malformed
+values reach the adapter boundary; tests do not falsely pass by failing before
+adapter invocation. Run and saved-resume cases reopen SQLite, inspect terminal
+state/audit, and verify completed recovery claims; cancellation cases preserve
+uncertainty and prevent replay. Nested readonly/shared-subtree positives and
+detached Ukrainian output remain supported.
+
+The local environment became unavailable after the earlier 95 focused tests
+passed and before the final additions/lint correction could execute. No local
+PASS is claimed for this reconstructed patch. Fresh hosted Core Ubuntu/Windows,
+complete M12, independent changed-source review and integration/readback are
+required before Section 2 terminal closure. Source reuse decisions do not award
+human NVDA, physical crash or real cloud acceptance.
