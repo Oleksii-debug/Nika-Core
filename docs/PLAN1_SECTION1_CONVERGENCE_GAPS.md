@@ -78,7 +78,7 @@ runtime trust-boundary tests.
   This records static negative-drift coverage only; it is **not a test pass** or a
   terminal closure claim, and does not expand the Section into another plan.
 
-## Deliberate non-claims — currently NOT terminal DONE
+## Historical qualification gates — see verified closure below
 
 1. `pyproject.toml` and the declared authority manifest continue to describe
    ranges, not installation evidence. The 2026-11-15 repair adds a separate
@@ -95,7 +95,7 @@ runtime trust-boundary tests.
 4. Real packaged Windows/NVDA and real Web/Cloud/Node final acceptance belongs
    to Plan 7; no such evidence is asserted here.
 
-Status: **ACTIONABLE / PARTIAL**, preserving terminal truth. Do not update
+Historical status: **ACTIONABLE / PARTIAL**, before the verified closure below. Do not update
 `MULTI_PLAN_CLOSURE_STATE.md` or the assigned Drive plan to DONE until the
 remaining applicable Section 1 evidence passes and the exact integration
 commit has been read back. Section 2 remains next in order, not skipped.
@@ -119,4 +119,24 @@ metadata can be missing, inaccurate or ambiguous; independent license review
 and repeatable resolved dependency installation are still required. Unit tests
 cover missing/mismatched versions, platform marker skipping and fail-closed
 manifest drift. Exact-candidate cross-platform CI and ordered merge/readback
-remain mandatory; **Plan 1 Section 1 NOT DONE**.
+remain mandatory; this initial observation alone did not close Section 1.
+
+## Verified closure — 2026-11-16
+
+**Independent 1А / 1Б / 1В and aggregate Section 1: DONE.** #1871 supplied the
+source-bound resolved graph, hashed installs and actual platform observation.
+#1089 repaired the demonstrated distribution-notice and isolated Windows proof
+gaps; independent review checked the actual shipped Python owners against their
+exact official releases and license texts, including the version/source-bound
+proxy_tools upstream notice. Legacy maintenance exceptions and scope limits
+remain explicit in `RELEASE_HTTP_NOTICE_COVERAGE.md`.
+
+Exact candidate `d88a4ee067bcd3561b239f8187f50425c8988df4` passed Core Ubuntu and
+Windows, M11, full M12 and the extracted final Windows ZIP proof. Integration
+`34c49a2c82aad0d1813cbe535950b990c2c9b7e8` retained candidate tree
+`e862d400a66d4743eb89901f7997e7cb5597f26c` exactly. The canonical closure registry
+records run/job/artifact identities, source readback and final ZIP hash.
+Earlier nonterminal statements describe the original checkpoints; they do not
+reset this independently evidenced closure. Optional engines/models, distinct
+native-component obligations and final physical Windows/NVDA/Web/Cloud acceptance
+are not silently certified by this bounded architecture/dependency closure.
