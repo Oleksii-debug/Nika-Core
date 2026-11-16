@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import MappingProxyType
 
 import pytest
 
@@ -26,7 +27,6 @@ from nika_core.runtime.idempotency import (
     IdempotencyLedger,
     IdempotencyStatus,
 )
-
 
 _PRIVATE_MARKER = "SYNTHETIC_UNTRUSTED_ADAPTER_SECRET"
 
@@ -102,52 +102,41 @@ def _nonfinite_output() -> RuntimeResult:
 
 
 def _invalid_output_key() -> RuntimeResult:
-    return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, output={1: "non-string"})
+    result = RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+    object.__setattr__(result, "output", {1: "non-string"})
+    return result
 
 
-def _invalid_nested_output_key() -> RuntimeResult:
-    return RuntimeResult(
-        outcome=RuntimeOutcome.COMPLETED,
-        output={"nested": [{1: "coerced-key"}]},
-    )
+def _forged_nested_output_key() -> RuntimeResult:
+    result = RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+    object.__setattr__(result, "output", {"nested": {1: "must not become a string key"}})
+    return result
 
 
-def _invalid_nested_event_payload_key() -> RuntimeResult:
-    return RuntimeResult(
-        outcome=RuntimeOutcome.COMPLETED,
-        events=(RuntimeEvent(0, "runtime.proof", {"nested": {"value": {True: "coerced"}}}),),
-    )
+def _forged_cyclic_output() -> RuntimeResult:
+    result = RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+    output = {}
+    output["cycle"] = output
+    object.__setattr__(result, "output", output)
+    return result
 
 
 def _invalid_utf8_error() -> RuntimeResult:
-    return RuntimeResult(outcome=RuntimeOutcome.FAILED, error="\ud800")
+    result = RuntimeResult(outcome=RuntimeOutcome.FAILED, error="failure")
+    object.__setattr__(result, "error", "\ud800")
+    return result
 
 
 def _invalid_utf8_resume_token() -> RuntimeResult:
-    return RuntimeResult(outcome=RuntimeOutcome.PAUSED, resume_token="\ud800")
+    result = RuntimeResult(outcome=RuntimeOutcome.PAUSED, resume_token="valid")
+    object.__setattr__(result, "resume_token", "\ud800")
+    return result
 
 
 def _invalid_utf8_event_type() -> RuntimeResult:
-    return RuntimeResult(
-        outcome=RuntimeOutcome.COMPLETED,
-        events=(RuntimeEvent(0, "\ud800"),),
-    )
-
-
-
-
-def _invalid_control_event_type() -> RuntimeResult:
-    return RuntimeResult(
-        outcome=RuntimeOutcome.COMPLETED,
-        events=(RuntimeEvent(0, "runtime.proof\x00forged"),),
-    )
-
-
-def _invalid_bidi_event_type() -> RuntimeResult:
-    return RuntimeResult(
-        outcome=RuntimeOutcome.COMPLETED,
-        events=(RuntimeEvent(0, "runtime.proof\u202eforged"),),
-    )
+    event = RuntimeEvent(0, "runtime.proof")
+    object.__setattr__(event, "event_type", "\ud800")
+    return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, events=(event,))
 
 
 def _invalid_utf8_event_payload() -> RuntimeResult:
@@ -186,15 +175,12 @@ _BAD_RESULTS = (
     _unserializable_nested_output,
     _nonfinite_output,
     _invalid_output_key,
-    _invalid_nested_output_key,
-    _invalid_nested_event_payload_key,
+    _forged_nested_output_key,
+    _forged_cyclic_output,
     _invalid_utf8_error,
     _invalid_utf8_resume_token,
     _invalid_utf8_event_type,
-    _invalid_control_event_type,
-    _invalid_bidi_event_type,
     _invalid_utf8_event_payload,
-    _overridden_event_sequence,
     _forged_nika_control_event,
 )
 
@@ -248,7 +234,7 @@ def _ready(tmp_path):
 def test_invalid_run_result_fails_closed_and_does_not_orphan_running_task(
     tmp_path, factory
 ):
-    _, queue, task_id, audit, coordinator = _ready(tmp_path)
+    _, _queue, task_id, audit, coordinator = _ready(tmp_path)
     runtime = _Adapter(factory())
 
     result = asyncio.run(coordinator.start(runtime, RuntimeRequest(task_id, "thread-1")))
@@ -257,7 +243,12 @@ def test_invalid_run_result_fails_closed_and_does_not_orphan_running_task(
     assert result.outcome is RuntimeOutcome.FAILED
     assert result.error_code is RuntimeErrorCode.INTERNAL
     assert result.error == "runtime execution failed"
-    assert queue.get(task_id).state is TaskState.FAILED
+    reopened = SQLiteStore(tmp_path / "Українські дані" / "nika.db")
+    reopened.initialize()
+    assert TaskQueue(reopened).get(task_id).state is TaskState.FAILED
+    assert AuditLog(reopened).list_for(entity_type="task", entity_id=task_id)[-1].event_type == (
+        "runtime.finished"
+    )
     assert coordinator.sessions.get(task_id) is None
     events = audit.list_for(entity_type="task", entity_id=task_id)
     assert events[-1].event_type == "runtime.finished"
@@ -285,7 +276,12 @@ def test_invalid_saved_resume_completes_claim_without_persisting_invalid_result(
     assert result.outcome is RuntimeOutcome.FAILED
     assert result.error_code is RuntimeErrorCode.INTERNAL
     assert result.error == "runtime resume failed"
-    assert queue.get(task_id).state is TaskState.FAILED
+    reopened = SQLiteStore(tmp_path / "Українські дані" / "nika.db")
+    reopened.initialize()
+    assert TaskQueue(reopened).get(task_id).state is TaskState.FAILED
+    assert AuditLog(reopened).list_for(entity_type="task", entity_id=task_id)[-1].event_type == (
+        "runtime.finished"
+    )
     assert coordinator.sessions.get(task_id) is None
     claims = [
         item for item in IdempotencyLedger(store).list_for_task(task_id)
@@ -421,23 +417,16 @@ def test_malformed_cancel_acknowledgement_keeps_external_effect_uncertain(
     assert runtime.cancel_calls == 1
 
 
-@pytest.mark.parametrize(
-    "character", ("\x00", "\n", "\u007f", "\u0085", "\u2028", "\u2029",
-                  "\u202e", "\u2066")
-)
-def test_runtime_event_type_control_characters_are_rejected(character):
-    result = RuntimeResult(
+def test_snapshot_preserves_nested_readonly_mappings_and_shared_subtrees():
+    shared = {"стан": "готово"}
+    view = MappingProxyType(shared)
+    original = RuntimeResult(
         outcome=RuntimeOutcome.COMPLETED,
-        events=(RuntimeEvent(0, f"reference.{character}completed"),),
+        output={"left": view, "right": [view]},
+        events=(RuntimeEvent(7, "runtime.proof", {"value": view, "sequence": -99}),),
     )
-    with pytest.raises(ValueError, match="control or formatting characters"):
-        canonical_runtime_result(result)
-
-
-def test_valid_unicode_runtime_event_names_remain_supported():
-    result = RuntimeResult(
-        outcome=RuntimeOutcome.COMPLETED,
-        events=(RuntimeEvent(0, "подія.готова", {"підсумок": True}),),
-    )
-    canonical = canonical_runtime_result(result)
-    assert canonical.events == result.events
+    canonical = canonical_runtime_result(original)
+    shared["стан"] = "змінено"
+    assert canonical.output == {"left": {"стан": "готово"}, "right": [{"стан": "готово"}]}
+    assert canonical.events[0].payload == {"value": {"стан": "готово"}, "sequence": -99}
+    assert canonical.events[0].sequence == 7

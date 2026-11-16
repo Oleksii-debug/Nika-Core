@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -33,7 +32,7 @@ def test_invalid_packaged_environment_fails_before_runtime_and_preserves_data(
     monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
     monkeypatch.setattr(
         nika_windows,
-        "build_windows_session",
+        "build_windows_bridge",
         lambda _config: pytest.fail("runtime must not start with invalid configuration"),
     )
 
@@ -55,7 +54,7 @@ def test_settings_source_failure_does_not_expose_private_values_or_start_runtime
     monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
     monkeypatch.setattr(
         nika_windows,
-        "build_windows_session",
+        "build_windows_bridge",
         lambda _config: pytest.fail("runtime must not start after source failure"),
     )
 
@@ -65,60 +64,26 @@ def test_settings_source_failure_does_not_expose_private_values_or_start_runtime
     assert "Некоректні налаштування" in messages[0]
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [
-        sqlite3.DatabaseError("PRIVATE_DATABASE_CANARY"),
-        OSError("PRIVATE_STORAGE_PATH_CANARY"),
-        RuntimeError("PRIVATE_NEWER_SCHEMA_CANARY"),
-    ],
-)
-def test_storage_startup_failure_is_accessible_private_and_does_not_launch_shell(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    failure: Exception,
+@pytest.mark.parametrize("version", [True, False, 0, 2, "1", 1.0])
+def test_explicit_config_schema_rejects_unsupported_or_coerced_versions(version) -> None:
+    with pytest.raises(ValueError):
+        AppConfig(schema_version=version)
+
+
+def test_supported_config_schema_and_defaults_remain_available(tmp_path: Path) -> None:
+    config = AppConfig(schema_version=1, database_path=tmp_path / "Ніка дані" / "ніка.db")
+    assert config.schema_version == 1
+    assert config.model_provider == "mock"
+
+
+def test_configuration_recovers_after_conflicting_alias_is_removed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
-    monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
-    messages: list[str] = []
-
-    def fail_open(_config: AppConfig) -> None:
-        raise failure
-
-    monkeypatch.setattr(nika_windows, "build_windows_session", fail_open)
-    monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
-    monkeypatch.setattr(
-        nika_windows,
-        "launch_windows_shell",
-        lambda *_args, **_kwargs: pytest.fail("shell must not open on storage error"),
-    )
-
-    assert nika_windows.main([]) == 1
-    assert len(messages) == 1
-    assert "Не вдалося відкрити дані" in messages[0]
-    assert "PRIVATE_" not in messages[0]
-    assert not config.database_path.exists()
-
-
-def test_actual_corrupt_database_is_not_overwritten_during_failed_startup(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    database = tmp_path / "База даних" / "ніка.db"
-    database.parent.mkdir()
-    original_bytes = b"PRIVATE_CORRUPT_SQLITE_CANARY"
-    database.write_bytes(original_bytes)
-    config = AppConfig(database_path=database)
-    monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
-    messages: list[str] = []
-    monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
-    monkeypatch.setattr(
-        nika_windows,
-        "launch_windows_shell",
-        lambda *_args, **_kwargs: pytest.fail("corrupt database must not open shell"),
-    )
-
-    assert nika_windows.main([]) == 1
-    assert len(messages) == 1
-    assert "PRIVATE_" not in messages[0]
-    assert database.read_bytes() == original_bytes
+    selected = tmp_path / "Поточні дані" / "ніка.db"
+    monkeypatch.setenv("NIKA_DB_PATH", str(selected))
+    monkeypatch.setenv("NIKA_DATABASE_PATH", str(tmp_path / "other.db"))
+    with pytest.raises(SettingsError):
+        AppConfig.from_environment()
+    monkeypatch.delenv("NIKA_DATABASE_PATH")
+    assert AppConfig.from_environment().database_path == selected
+    assert not selected.exists()

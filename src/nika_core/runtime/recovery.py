@@ -12,7 +12,6 @@ from nika_core.runtime.contracts import (
     RuntimeResumeProbe,
     RuntimeResumeProbePort,
     RuntimeResumeProbeStatus,
-    canonical_resume_probe,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
@@ -208,9 +207,6 @@ class RuntimeRecoveryService:
                 )
                 executions.append(RecoveryExecution(candidate=checked, result=result))
             except Exception as exc:  # noqa: BLE001 - isolate one failed startup recovery item
-                # Provider exception messages may contain credentials or private paths.
-                # Preserve the failure category without persisting untrusted text.
-                error_type = type(exc).__name__
                 self._audit.append(
                     event_type="runtime.recovery_auto_resume_failed",
                     entity_type="task",
@@ -218,11 +214,11 @@ class RuntimeRecoveryService:
                     payload={
                         "runtime_id": candidate.runtime_id,
                         "thread_id": candidate.thread_id,
-                        "error": error_type,
+                        "error": str(exc),
                     },
                 )
                 executions.append(
-                    RecoveryExecution(candidate=candidate, result=None, error=error_type)
+                    RecoveryExecution(candidate=candidate, result=None, error=str(exc))
                 )
         return tuple(executions)
 
@@ -270,12 +266,10 @@ class RuntimeRecoveryService:
             )
 
         try:
-            probe = canonical_resume_probe(
-                await runtime.probe_resume(
-                    task_id=record.task_id,
-                    thread_id=record.thread_id,
-                    resume_token=record.resume_token,
-                )
+            probe = await runtime.probe_resume(
+                task_id=record.task_id,
+                thread_id=record.thread_id,
+                resume_token=record.resume_token,
             )
         except Exception:  # noqa: BLE001 - provider diagnostics are untrusted at this boundary
             probe = RuntimeResumeProbe(

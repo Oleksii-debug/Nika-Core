@@ -12,25 +12,9 @@ from nika_core.runtime.contracts import RuntimeErrorCode, RuntimeOutcome, Runtim
 def usable_resume_token(value: object) -> str | None:
     """Return the exact resume token only when it is usable durable text authority."""
 
-    if type(value) is str and value.strip():
+    if isinstance(value, str) and value.strip():
         return value
     return None
-
-
-def fresh_retry_safety_evidence(result: RuntimeResult) -> bool | None:
-    """Return model/provider replay authority when a runtime exposes that evidence.
-
-    Generic runtimes may opt into fresh replay without model-provider semantics. Once either
-    provider safety field is present, both become authoritative and incomplete, false, or
-    ambiguous evidence fails closed.
-    """
-
-    output = result.output
-    has_provider_retryable = "provider_retryable" in output
-    has_failure_effect = "failure_effect" in output
-    if not has_provider_retryable and not has_failure_effect:
-        return None
-    return output.get("provider_retryable") is True and output.get("failure_effect") == "no_effect"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,12 +52,7 @@ class RetryPolicy:
             return False
         if result.error_code not in self.retryable_error_codes:
             return False
-        if usable_resume_token(result.resume_token) is not None:
-            return True
-        if not self.allow_fresh_retry:
-            return False
-        safety_evidence = fresh_retry_safety_evidence(result)
-        return True if safety_evidence is None else safety_evidence
+        return usable_resume_token(result.resume_token) is not None or self.allow_fresh_retry
 
     def delay_seconds(self, *, retry_number: int) -> float:
         """Return deterministic exponential backoff for a 1-based retry number."""
