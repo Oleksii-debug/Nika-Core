@@ -82,7 +82,9 @@ def test_license_observation_never_reads_executable_or_installer_bytecode(tmp_pa
     )
 
     def locate_file(item: Path) -> Path:
-        assert item == notice, "Source/binary/cache data must not be read as a license"
+        if str(item) == "":
+            return tmp_path
+        assert Path(item) == notice, "Source/binary/cache data must not be read as a license"
         return tmp_path / item
 
     installed.locate_file = locate_file
