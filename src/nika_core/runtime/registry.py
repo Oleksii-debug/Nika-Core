@@ -10,6 +10,7 @@ from nika_core.runtime.contracts import (
     _validate_runtime_identity,
 )
 
+
 @dataclass(frozen=True, slots=True)
 class RuntimeDescriptor:
     runtime_id: str
