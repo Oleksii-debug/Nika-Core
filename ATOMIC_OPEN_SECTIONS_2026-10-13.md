@@ -4,7 +4,7 @@
 
 **Робочий контракт:** NА/NБ/NВ — нові самостійні розділи; старий N у PR, CI, історичній документації — агрегат усіх трьох. Статус DONE можливий лише після доказового DONE окремих нових розділів та final integration. Відкладені і WAITING плани не запускаються без необхідних залежностей; наявні source/PR застосовувати повторно, не переписувати. No second agent model/router, no false real-product evidence.
 
-**Разом:** 147; DONE: 0; відкриті або очікують: 147.
+**Історичний стан міграції на 2026-10-13:** разом 147; DONE: 0; відкриті або очікують: 147. Поточні доказові закриття див. [MULTI_PLAN_CLOSURE_STATE.md](MULTI_PLAN_CLOSURE_STATE.md); наведені нижче рядки Плану 1 оновлено за підтвердженою інтеграцією 2026-11-16.
 
 ## План 1: 30 самостійних розділів
 
@@ -12,9 +12,9 @@
 
 | Розділ | Зміст | Статус |
 | --- | --- | --- |
-| 1А | Успадкувати повний acceptance scope старого Розділу 1; спочатку перевірити live implementation/tests/PR/evidence і не переписувати вже правильне. | Статус міграції: AUDIT_EXISTING / PARTIAL_EXISTING |
-| 1Б | Закрити лише missing production gaps, integration, failure/recovery/security/accessibility cases, які належать цьому scope. | Статус: AUDIT_EXISTING / PARTIAL_EXISTING |
-| 1В | Зафіксувати exact evidence/commit/PR, інтегрувати у canonical lineage та оновити live GitHub multi-plan closure registry. | Статус: AUDIT_EXISTING / PARTIAL_EXISTING |
+| 1А | Успадкувати повний acceptance scope старого Розділу 1; спочатку перевірити live implementation/tests/PR/evidence і не переписувати вже правильне. | **DONE — 2026-11-16, #1089 / main 34c49a2c; див. реєстр доказів** |
+| 1Б | Закрити лише missing production gaps, integration, failure/recovery/security/accessibility cases, які належать цьому scope. | **DONE — 2026-11-16, #1089 / main 34c49a2c; див. реєстр доказів** |
+| 1В | Зафіксувати exact evidence/commit/PR, інтегрувати у canonical lineage та оновити live GitHub multi-plan closure registry. | **DONE — 2026-11-16, #1089 / main 34c49a2c; див. реєстр доказів** |
 | 2А | Успадкувати повний acceptance scope старого Розділу 2; спочатку перевірити live implementation/tests/PR/evidence і не переписувати вже правильне. | Статус міграції: AUDIT_EXISTING / PARTIAL_EXISTING |
 | 2Б | Закрити лише missing production gaps, integration, failure/recovery/security/accessibility cases, які належать цьому scope. | Статус: AUDIT_EXISTING / PARTIAL_EXISTING |
 | 2В | Зафіксувати exact evidence/commit/PR, інтегрувати у canonical lineage та оновити live GitHub multi-plan closure registry. | Статус: AUDIT_EXISTING / PARTIAL_EXISTING |

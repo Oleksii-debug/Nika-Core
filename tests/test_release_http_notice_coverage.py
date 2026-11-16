@@ -29,6 +29,7 @@ def test_missing_bundled_http_notice_fails_and_regeneration_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, omitted: str,
 ) -> None:
     monkeypatch.setattr(notices, "_python_license", lambda: "Python license")
+    monkeypatch.setattr(notices, "_license_texts", lambda _: (("LICENSE", "Fixture license"),))
 
     def distribution(name: str) -> SimpleNamespace:
         metadata = Message()
@@ -52,7 +53,10 @@ def test_missing_bundled_http_notice_fails_and_regeneration_recovers(
     assert notices.verify_third_party_notices(tmp_path) == ()
 
 
-def test_certifi_source_reference_binds_and_escapes_the_resolved_version() -> None:
+def test_certifi_source_reference_binds_and_escapes_the_resolved_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(notices, "_license_texts", lambda _: (("LICENSE", "MPL notice"),))
     metadata = Message()
     metadata["Name"] = "certifi"
     metadata["License-Expression"] = "MPL-2.0"
