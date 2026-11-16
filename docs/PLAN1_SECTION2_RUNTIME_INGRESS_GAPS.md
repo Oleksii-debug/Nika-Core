@@ -62,3 +62,29 @@ Negative/compatibility tests cover nested key collisions, cycles, shared
 subtrees and oversized carriers. The broader versioned command/query,
 recovery, restart and all-client interoperability contract remains unproved
 until exact-head CI and integration evidence; **Plan 1 Section 2 NOT DONE**.
+
+## 2026-11-16 persisted event-sequence correction
+
+Read-only audit of integrated Section 2 source at `2f92a120` found a concrete
+boundary failure: the coordinator wrote `sequence` before expanding the
+adapter's payload, so a payload key could replace the validated event sequence
+in SQLite. Reproduction through `TaskRuntimeCoordinator.start` and a reopened
+store preserved forged `-99` despite the canonical event sequence being `7`.
+
+The same coordinator now writes the canonical sequence after copying ordinary
+payload fields. This preserves the existing flat audit schema and all other
+payload data, without introducing another validator or authority. Six regression
+cases exercise the ordinary payload and five collisions (negative, overflow,
+string, null and boolean), initial waiting-for-approval, resume using a fresh
+store/coordinator, and final audit readback from another store. The path includes
+Ukrainian text and spaces. Before repair, the five collision cases failed; the
+ordinary case passed. Independent review found no blocking issue and passed
+26 runtime/coordinator/recovery tests plus Ruff.
+
+The earlier audit ran 286 existing Section 2/runtime/product-command tests
+successfully on `2f92a120`; their historic "authored only" entries above describe
+the original changes, not the current test state. This repair still requires
+its own exact-head full checks and main integration. Fresh objects in one process
+prove persistence/recovery behavior here; they do not claim a physical crash,
+NVDA, live cloud or whole-product acceptance. Reuse canonical PR #1856 after
+its already integrated ancestry, with Section 1 closure preserved.
