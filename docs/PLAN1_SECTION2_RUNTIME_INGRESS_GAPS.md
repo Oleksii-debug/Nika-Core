@@ -135,3 +135,18 @@ PASS is claimed for this reconstructed patch. Fresh hosted Core Ubuntu/Windows,
 complete M12, independent changed-source review and integration/readback are
 required before Section 2 terminal closure. Source reuse decisions do not award
 human NVDA, physical crash or real cloud acceptance.
+
+
+## Verified terminal closure — 2026-11-16
+
+**Independent 2А / 2Б / 2В and aggregate Section 2: DONE.** Exact candidate
+`17bbeecc2fd9266bc39e004470cd3855f8faf7e8` passed Core Ubuntu/Windows and
+complete M12, including the extracted final Windows ZIP proof. Independent
+review preserved every incumbent validator and confirmed the reused snapshot/
+cancellation boundaries. Linux: 3003 passed / 5 skipped; M12 Windows: 3001
+passed / 7 skipped. Canonical #1856 integration `7ea95d888e17a9fe4aff847404f8840c1ed7acea`
+retained the qualified tree `4e28289e664fb5e182ecc89bcd22512f8084868b` exactly.
+Run/job/artifact/hash details are in MULTI_PLAN_CLOSURE_STATE.md. Earlier
+nonterminal statements document historical checkpoints; they do not reset this
+qualified closure. Human NVDA and whole-product/real-cloud acceptance remain
+separate and unclaimed.
