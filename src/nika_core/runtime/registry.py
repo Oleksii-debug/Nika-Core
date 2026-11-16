@@ -4,10 +4,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from inspect import getattr_static
 
-from nika_core.runtime.contracts import AgentRuntimePort, RuntimeCapability
-
-MAX_RUNTIME_ID_CHARS = 128
-
+from nika_core.runtime.contracts import (
+    AgentRuntimePort,
+    RuntimeCapability,
+    _validate_runtime_identity,
+)
 
 @dataclass(frozen=True, slots=True)
 class RuntimeDescriptor:
@@ -23,18 +24,8 @@ class _RegisteredRuntime:
 
 
 def _canonical_runtime_id(value: object) -> str:
-    if type(value) is not str:
-        raise TypeError("runtime_id must be an exact string")
-    if not value:
-        raise ValueError("runtime_id must not be empty")
-    if value != value.strip():
-        raise ValueError("runtime_id must not contain surrounding whitespace")
-    if len(value) > MAX_RUNTIME_ID_CHARS:
-        raise ValueError(
-            f"runtime_id must contain at most {MAX_RUNTIME_ID_CHARS} characters"
-        )
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise ValueError("runtime_id must not contain control characters")
+    # Registry admission and durable runtime envelopes share one identity authority.
+    _validate_runtime_identity(value, "runtime_id")
     return value
 
 

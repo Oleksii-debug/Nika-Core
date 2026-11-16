@@ -1,0 +1,5 @@
+# Byte-bound dependency inputs must have identical contents on Windows and Linux.
+/pyproject.toml text eol=lf
+/docs/PLAN1_DEPENDENCY_AUTHORITY.json text eol=lf
+/uv.lock text eol=lf
+/requirements/* text eol=lf
