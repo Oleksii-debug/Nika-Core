@@ -22,6 +22,10 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_qa_workflow_lineage.py"
+      - "src/nika_core/reliability/**"
+      - "tests/test_backup_restore*.py"
+      - "tests/test_v01_legacy_database_adoption.py"
+      - "tests/test_aud02_sqlite_recovery_indirect_path.py"
       - "src/nika_core/config.py"
       - "tests/test_config_db_alias_conflict.py"
       - "tests/test_v01_packaged_config_startup.py"
@@ -51,6 +55,10 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_qa_workflow_lineage.py"
+      - "src/nika_core/reliability/**"
+      - "tests/test_backup_restore*.py"
+      - "tests/test_v01_legacy_database_adoption.py"
+      - "tests/test_aud02_sqlite_recovery_indirect_path.py"
       - "src/nika_core/config.py"
       - "tests/test_config_db_alias_conflict.py"
       - "tests/test_v01_packaged_config_startup.py"
@@ -113,6 +121,8 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
       - name: Verify configuration admission before packaging
         run: python -m pytest -q tests/test_config_db_alias_conflict.py tests/test_v01_packaged_config_startup.py tests/test_v01_stable_packaged_data_location.py
+      - name: Verify canonical recovery before packaging
+        run: python -m pytest -q tests/test_backup_restore_wal_stale_preview.py tests/test_backup_restore_recovery_process_loss.py tests/test_v01_legacy_database_adoption.py
       - name: Run M11 M12 source regressions
         run: python -m pytest tests/test_m11_m12_release.py tests/test_qa_workflow_lineage.py -q
       - name: Build standalone one-dir Windows candidate, notices and manifest
