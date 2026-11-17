@@ -35,7 +35,7 @@ def test_usable_resume_token_requires_exact_builtin_text() -> None:
 
 
 def test_runtime_result_rejects_spoofed_resume_token() -> None:
-    with pytest.raises(TypeError, match="resume_token must be an exact string"):
+    with pytest.raises(TypeError, match="resume_token must be a string"):
         RuntimeResult(
             outcome=RuntimeOutcome.FAILED,
             resume_token=_SpoofingResumeToken("attacker-controlled"),
@@ -57,19 +57,20 @@ def test_runtime_resume_request_requires_exact_identity_strings() -> None:
             "resume_token": "persisted-session-token",
             **overrides,
         }
-        with pytest.raises(TypeError, match="resume identifiers must be exact strings"):
+        with pytest.raises(TypeError, match="must be a string"):
             RuntimeResumeRequest(**request)
 
 
 @pytest.mark.parametrize("malformed", (b"opaque", 7))
-def test_failed_result_keeps_nontext_token_for_fail_closed_or_explicit_fresh_policy(
+def test_failed_result_rejects_nontext_token_before_retry_policy(
     malformed: object,
 ) -> None:
-    result = RuntimeResult(
-        outcome=RuntimeOutcome.FAILED,
-        resume_token=malformed,  # type: ignore[arg-type]
-        error="temporary runtime failure",
-        error_code=RuntimeErrorCode.TRANSIENT,
-    )
-
-    assert usable_resume_token(result.resume_token) is None
+    # Current runtime contracts reject malformed carriers at admission already.
+    with pytest.raises(TypeError, match="resume_token must be a string"):
+        RuntimeResult(
+            outcome=RuntimeOutcome.FAILED,
+            resume_token=malformed,  # type: ignore[arg-type]
+            error="temporary runtime failure",
+            error_code=RuntimeErrorCode.TRANSIENT,
+        )
+    assert usable_resume_token(malformed) is None
