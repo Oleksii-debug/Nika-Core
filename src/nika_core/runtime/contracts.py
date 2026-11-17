@@ -254,6 +254,24 @@ class RuntimeResumeProbe:
         return self.status == RuntimeResumeProbeStatus.READY
 
 
+def canonical_resume_probe(value: object) -> RuntimeResumeProbe:
+    """Snapshot untrusted adapter probe evidence through Nika's canonical constructor."""
+
+    if type(value) is not RuntimeResumeProbe:
+        raise TypeError("runtime resume probe must be an exact RuntimeResumeProbe")
+    try:
+        status = object.__getattribute__(value, "status")
+        reason = object.__getattribute__(value, "reason")
+        checkpoint_id = object.__getattribute__(value, "checkpoint_id")
+    except AttributeError as exc:
+        raise ValueError("runtime resume probe is incomplete") from exc
+    return RuntimeResumeProbe(
+        status=status,
+        reason=reason,
+        checkpoint_id=checkpoint_id,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeEvent:
     sequence: int
