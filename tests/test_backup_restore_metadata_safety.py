@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.reliability import backup as backup_module
 from nika_core.reliability.backup import (
     BackupVerificationError,
     RestoreSafetyError,
@@ -154,6 +156,68 @@ def test_duplicate_restore_marker_field_fails_before_effects(
     assert marker_path.exists()
 
 
+@pytest.mark.parametrize("kind", ["symlink", "broken_symlink", "directory"])
+def test_restore_marker_path_must_be_direct_regular_file(tmp_path: Path, kind: str) -> None:
+    target = tmp_path / "live.db"
+    manager = _manager(target)
+    before_sha = _digest(target)
+    marker_path = manager._restore_marker_path(target)
+
+    if kind == "directory":
+        marker_path.mkdir()
+    else:
+        source = tmp_path / ("marker-source.json" if kind == "symlink" else "missing.json")
+        if kind == "symlink":
+            source.write_text(json.dumps(_marker(manager, target)), encoding="utf-8")
+        try:
+            marker_path.symlink_to(source)
+        except (NotImplementedError, OSError):
+            pytest.skip("filesystem does not allow creation of this symlink")
+
+    with pytest.raises(RestoreSafetyError, match="direct regular file"):
+        manager.recover_interrupted_restore()
+    assert _digest(target) == before_sha
+    if kind == "broken_symlink":
+        assert marker_path.is_symlink()
+        assert not marker_path.exists()
+    else:
+        assert marker_path.exists()
+
+
+def test_broken_restore_marker_blocks_new_restore_preview(tmp_path: Path) -> None:
+    target = tmp_path / "live.db"
+    manager = _manager(target)
+    before_sha = _digest(target)
+    artifact = manager.create_backup(tmp_path / "backup.sqlite3", record_audit=False)
+    marker_path = manager._restore_marker_path(target)
+    try:
+        marker_path.symlink_to(tmp_path / "missing-marker.json")
+    except (NotImplementedError, OSError):
+        pytest.skip("filesystem does not allow creation of this symlink")
+
+    with pytest.raises(RestoreSafetyError, match="direct regular file"):
+        manager.prepare_restore(artifact.database_path)
+    assert marker_path.is_symlink()
+    assert _digest(target) == before_sha
+
+
+def test_json_metadata_reader_rejects_indirect_file_even_without_caller_precheck(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "live.db"
+    manager = _manager(target)
+    source = tmp_path / "metadata-source.json"
+    source.write_text('{"format_version": 1}', encoding="utf-8")
+    link = tmp_path / "metadata-link.json"
+    try:
+        link.symlink_to(source)
+    except (NotImplementedError, OSError):
+        pytest.skip("filesystem does not allow creation of this symlink")
+
+    with pytest.raises(BackupVerificationError, match="JSON recovery metadata"):
+        manager._read_json(link)
+
+
 @pytest.mark.parametrize("kind", ["backup", "marker"])
 def test_recovery_metadata_size_is_bounded_even_with_json_whitespace(
     tmp_path: Path, kind: str
@@ -242,3 +306,42 @@ def test_marker_rejects_nonregular_stage_before_effects(tmp_path: Path) -> None:
         manager.recover_interrupted_restore()
     assert _digest(target) == before_sha
     assert marker_path.exists()
+
+
+def test_windows_metadata_path_and_descriptor_use_the_same_time_identity() -> None:
+    shared = {"st_dev": 7, "st_ino": 9, "st_size": 100, "st_mtime_ns": 20}
+    path = SimpleNamespace(**shared, st_ctime_ns=10, st_birthtime_ns=10)
+    descriptor = SimpleNamespace(**shared, st_ctime_ns=30, st_birthtime_ns=10)
+    identity = backup_module._metadata_path_descriptor_identity
+    assert identity(path, windows=True) == identity(descriptor, windows=True)
+    assert identity(path, windows=False) != identity(descriptor, windows=False)
+    descriptor.st_birthtime_ns = 11
+    assert identity(path, windows=True) != identity(descriptor, windows=True)
+    del descriptor.st_birthtime_ns
+    with pytest.raises(ValueError, match="creation-time identity is unavailable"):
+        identity(descriptor, windows=True)
+
+
+def test_descriptor_change_time_mutation_still_rejects_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = tmp_path / "metadata.json"
+    metadata.write_bytes(b'{"format_version":1}')
+    original = backup_module.os.fstat
+    calls = 0
+
+    def changed(fd: int) -> SimpleNamespace:
+        nonlocal calls
+        actual = original(fd)
+        calls += 1
+        return SimpleNamespace(
+            st_dev=actual.st_dev, st_ino=actual.st_ino, st_size=actual.st_size,
+            st_mtime_ns=actual.st_mtime_ns, st_ctime_ns=actual.st_ctime_ns + (calls > 1),
+            st_mode=actual.st_mode, st_file_attributes=getattr(actual, "st_file_attributes", 0),
+            st_birthtime_ns=getattr(actual, "st_birthtime_ns", 0),
+        )
+
+    monkeypatch.setattr(backup_module.os, "fstat", changed)
+    with pytest.raises(BackupVerificationError, match="JSON recovery metadata"):
+        SQLiteRecoveryManager._read_json(metadata)
+    assert metadata.read_bytes() == b'{"format_version":1}'
