@@ -22,6 +22,10 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_qa_workflow_lineage.py"
+      - "src/nika_core/config.py"
+      - "tests/test_config_db_alias_conflict.py"
+      - "tests/test_v01_packaged_config_startup.py"
+      - "tests/test_v01_stable_packaged_data_location.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
   push:
@@ -47,6 +51,10 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_qa_workflow_lineage.py"
+      - "src/nika_core/config.py"
+      - "tests/test_config_db_alias_conflict.py"
+      - "tests/test_v01_packaged_config_startup.py"
+      - "tests/test_v01_stable_packaged_data_location.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
   workflow_dispatch:
@@ -103,6 +111,8 @@ jobs:
           $version = python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])"
           if (-not $version) { throw 'Could not resolve [project].version from pyproject.toml' }
           "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Verify configuration admission before packaging
+        run: python -m pytest -q tests/test_config_db_alias_conflict.py tests/test_v01_packaged_config_startup.py tests/test_v01_stable_packaged_data_location.py
       - name: Run M11 M12 source regressions
         run: python -m pytest tests/test_m11_m12_release.py tests/test_qa_workflow_lineage.py -q
       - name: Build standalone one-dir Windows candidate, notices and manifest

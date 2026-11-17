@@ -340,8 +340,12 @@ def test_unsupported_configuration_schema_fails_without_echoing_provider(tmp_pat
     _write_healthy_database(database)
     provider = f"local://{_SECRET_CANARY}"
 
+    config = _config(database, model_provider=provider)
+    # Constructor admission now rejects future versions. Keep the independent
+    # health defense exercised against a corrupted post-admission configuration.
+    object.__setattr__(config, "schema_version", 2)
     report = _run(
-        _config(database, model_provider=provider, schema_version=2),
+        config,
         _StaticObserver(ResourceSnapshot(10.0, 20.0, 1024)),
     )
 
