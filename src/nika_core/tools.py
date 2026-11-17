@@ -92,7 +92,12 @@ def _normalize_tool_json(value: object, *, path: str = "arguments") -> object:
             raise ValueError(f"{path} must not contain NaN or infinity")
         return value
     if isinstance(value, str):
-        return unicodedata.normalize("NFC", value)
+        normalized = unicodedata.normalize("NFC", value)
+        try:
+            normalized.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"{path} must be valid UTF-8 text") from exc
+        return normalized
     if isinstance(value, (list, tuple)):
         return [
             _normalize_tool_json(item, path=f"{path}[{index}]")
@@ -104,6 +109,10 @@ def _normalize_tool_json(value: object, *, path: str = "arguments") -> object:
             if not isinstance(raw_key, str):
                 raise TypeError(f"{path} keys must be strings")
             key = unicodedata.normalize("NFC", raw_key)
+            try:
+                key.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError(f"{path} key must be valid UTF-8 text") from exc
             if key in normalized:
                 raise ValueError(f"{path} contains duplicate normalized key {key!r}")
             normalized[key] = _normalize_tool_json(raw_value, path=f"{path}.{key}")
