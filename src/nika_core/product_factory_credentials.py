@@ -36,12 +36,27 @@ class SecretRef:
             for value in (self.secret_ref, self.project_id, self.provider, self.purpose)
         ):
             raise CredentialBrokerError("secret reference identity fields must not be empty")
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+            raise CredentialBrokerError("secret generation must be a positive integer")
         if self.generation < 1:
-            raise CredentialBrokerError("secret generation must be positive")
+            raise CredentialBrokerError("secret generation must be a positive integer")
+        try:
+            object.__setattr__(self, "state", CredentialState(self.state))
+        except (ValueError, TypeError):
+            raise CredentialBrokerError("secret credential state is invalid") from None
+        if not isinstance(self.scopes, (set, frozenset)) or not isinstance(
+            self.allowed_audiences, (set, frozenset)
+        ):
+            raise CredentialBrokerError("secret scopes and audiences must be sets")
         if not self.scopes or not self.allowed_audiences:
             raise CredentialBrokerError("secret scopes and audiences must not be empty")
-        if any(not value.strip() for value in self.scopes | self.allowed_audiences):
-            raise CredentialBrokerError("secret scopes and audiences must not contain empty values")
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in self.scopes | self.allowed_audiences
+        ):
+            raise CredentialBrokerError("secret scopes and audiences must contain text values")
+        object.__setattr__(self, "scopes", frozenset(self.scopes))
+        object.__setattr__(self, "allowed_audiences", frozenset(self.allowed_audiences))
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +73,13 @@ class IdentityRef:
             for value in (self.identity_ref, self.project_id, self.provider, self.subject_ref)
         ):
             raise CredentialBrokerError("identity reference fields must not be empty")
-        if not self.secret_refs or any(not value.strip() for value in self.secret_refs):
+        if not isinstance(self.secret_refs, (list, tuple)) or not self.secret_refs:
             raise CredentialBrokerError("identity must bind at least one secret reference")
+        if any(not isinstance(value, str) or not value.strip() for value in self.secret_refs):
+            raise CredentialBrokerError("identity must bind text secret references")
         if len(self.secret_refs) != len(set(self.secret_refs)):
             raise CredentialBrokerError("identity contains duplicate secret references")
+        object.__setattr__(self, "secret_refs", tuple(self.secret_refs))
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,6 +99,12 @@ class CredentialLease:
         _aware(self.expires_at)
         if self.expires_at <= self.issued_at:
             raise CredentialBrokerError("credential lease must expire after issuance")
+        if (
+            isinstance(self.generation, bool)
+            or not isinstance(self.generation, int)
+            or self.generation < 1
+        ):
+            raise CredentialBrokerError("credential lease generation must be a positive integer")
         if not all(
             value.strip()
             for value in (
@@ -92,8 +116,11 @@ class CredentialLease:
             )
         ):
             raise CredentialBrokerError("credential lease identity fields must not be empty")
-        if not self.scopes:
-            raise CredentialBrokerError("credential lease scopes must not be empty")
+        if not isinstance(self.scopes, (set, frozenset)) or not self.scopes:
+            raise CredentialBrokerError("credential lease scopes must be a nonempty set")
+        if any(not isinstance(value, str) or not value.strip() for value in self.scopes):
+            raise CredentialBrokerError("credential lease scopes must contain text values")
+        object.__setattr__(self, "scopes", frozenset(self.scopes))
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,10 +244,17 @@ class CredentialBroker:
         now: datetime | None = None,
         ttl_seconds: int = 300,
     ) -> CredentialLease:
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+            raise CredentialBrokerError("credential lease ttl must be an integer")
         if ttl_seconds <= 0:
             raise CredentialBrokerError("credential lease ttl must be positive")
         if ttl_seconds > _MAX_CREDENTIAL_LEASE_TTL_SECONDS:
             raise CredentialBrokerError("credential lease ttl exceeds maximum")
+        if not isinstance(scopes, (set, frozenset)):
+            raise CredentialBrokerError("credential lease scopes must be a set")
+        if any(not isinstance(value, str) or not value.strip() for value in scopes):
+            raise CredentialBrokerError("credential lease scopes must contain text values")
+        scopes = frozenset(scopes)
         instant = _aware(now or datetime.now(UTC))
         secret = self._authorized_secret(project_id, secret_ref)
         if secret.state is CredentialState.REVOKED:
@@ -270,6 +304,8 @@ class CredentialBroker:
             raise CredentialBrokerError("unknown or invalidated credential lease")
         if lease.project_id != project_id:
             raise CredentialBrokerError("credential lease belongs to another project")
+        if instant < lease.issued_at:
+            raise CredentialBrokerError("credential lease cannot be used before issuance")
         if lease.expires_at <= instant:
             del self._leases[lease_id]
             raise CredentialBrokerError("credential lease has expired")
@@ -279,6 +315,9 @@ class CredentialBroker:
             raise CredentialBrokerError("credential lease generation is revoked or superseded")
         if scope not in lease.scopes:
             raise CredentialBrokerError("credential lease does not authorize requested scope")
+        if not self.store.contains(secret.secret_ref, lease.generation):
+            self._leases.pop(lease_id, None)
+            raise CredentialBrokerError("credential lease material is unavailable")
         evidence = CredentialUseEvidence(
             self._new_event_id(),
             lease.lease_id,
