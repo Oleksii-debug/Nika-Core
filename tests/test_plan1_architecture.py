@@ -1,0 +1,771 @@
+"""Plan 1 / Section 1: keep Nika-owned contracts independent of replaceable engines.
+
+This guards direct and common dynamic imports; it does not assert
+that plugins/providers are safe to execute or that a packaged UI is accessible.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+
+import pytest
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+# The provider/runtime/web/desktop engines may be imported in their adapters,
+# not in these stable domain/port contracts.
+OWNED_BOUNDARIES = (
+    "src/nika_core/runtime/contracts.py",
+    "src/nika_core/intelligence/contracts.py",
+    "src/nika_core/model_gateway/contracts.py",
+    "src/nika_core/scheduler/contracts.py",
+    "src/nika_core/product_command/contracts.py",
+    "src/nika_core/plugins/sdk.py",
+    # Core trust, storage, chronology and action authorities must likewise
+    # never import replaceable runtime/host SDKs directly.
+    "src/nika_core/security/policy.py",
+    "src/nika_core/kernel/audit.py",
+    "src/nika_core/data/schema.py",
+    "src/nika_core/kernel/action_registry.py",
+)
+
+FOREIGN_ENGINE_ROOTS = frozenset(
+    {
+        "langgraph",
+        "langchain",
+        "langchain_core",
+        "foundry_local_sdk",
+        "litellm",
+        "openai",
+        "httpx",
+        "apscheduler",
+        "playwright",
+        "webview",
+        "pywebview",
+        "pywinauto",
+        "fastapi",
+        "starlette",
+        "qdrant_client",
+        "sqlalchemy",
+        "mcp",
+    }
+)
+
+
+def direct_engine_imports(source: str) -> tuple[str, ...]:
+    """Return direct provider/host imports; malformed source fails rather than passing."""
+    tree = ast.parse(source)
+    # Only an immediately invoked getattr is covered by the dynamic-call check.
+    # A fetched importer can otherwise be stored and called later unnoticed.
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    imports: set[str] = set()
+    importlib_names = {"importlib"}
+    builtins_names = {"builtins"}
+    getattr_names = {"getattr"}
+    vars_names = {"vars"}
+    dynamic_function_names = {"__import__"}
+    dynamic_source_names = {"exec", "eval", "compile"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = (alias.name for alias in node.names)
+            for alias in node.names:
+                if alias.name == "importlib":
+                    importlib_names.add(alias.asname or "importlib")
+                if alias.name == "builtins":
+                    builtins_names.add(alias.asname or "builtins")
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            names = (node.module,)
+            # Importing module namespace dictionaries directly bypasses the
+            # attribute/getattr/vars drift fence. Wildcard imports from the
+            # builtin/loader authorities can likewise expose evaluators and
+            # dynamic importers without a distinct imported symbol.
+            if node.module in {"builtins", "importlib"}:
+                for alias in node.names:
+                    if alias.name == "__dict__":
+                        imports.add("<dynamic-authority-namespace>")
+                    elif alias.name == "*":
+                        imports.add("<wildcard-authority-import>")
+            if node.module == "importlib":
+                dynamic_function_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "import_module"
+                )
+            if node.module == "builtins":
+                getattr_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "getattr"
+                )
+                vars_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "vars"
+                )
+                dynamic_function_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name == "__import__"
+                )
+                dynamic_source_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name in {"exec", "eval", "compile"}
+                )
+        else:
+            continue
+        for name in names:
+            if name.split(".", 1)[0] in FOREIGN_ENGINE_ROOTS:
+                imports.add(name)
+    def is_tracked_getattr(func: ast.expr) -> bool:
+        """Recognize builtins.getattr as well as its direct/aliased function."""
+        return (
+            (isinstance(func, ast.Name) and func.id in getattr_names)
+            or (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id in builtins_names
+                and func.attr == "getattr"
+            )
+        )
+
+    # The implicit Python __builtins__ namespace may be a dict or module.
+    # Retaining it exposes an importer/evaluator without any explicit import,
+    # so stable Core authorities must not acquire this implicit namespace.
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Load)
+            and node.id == "__builtins__"
+        ):
+            imports.add("<dynamic-authority-namespace>")
+    # Importer/evaluator references can be stored and invoked later. Block the
+    # acquisition in Core contracts, without losing precise diagnostics for
+    # an immediate direct call such as importlib.import_module("mcp").
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+            continue
+        # Direct authority namespace access can return dynamic import/eval
+        # handles without a named attribute and bypass the ordinary drift gate.
+        if node.attr == "__dict__" and node.value.id in builtins_names | importlib_names:
+            imports.add("<dynamic-authority-namespace>")
+        if node.value.id in builtins_names and node.attr in {"exec", "eval", "compile"}:
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                imports.add("<dynamic-source-execution>")
+        if (
+            (node.value.id in builtins_names and node.attr == "__import__")
+            or (node.value.id in importlib_names and node.attr == "import_module")
+        ):
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                imports.add("<hoisted-dynamic-import>")
+    # Import/evaluation handles can be *referenced* without an immediate call:
+    # from importlib import import_module as load; deferred = load
+    # or evaluator = eval. Reject acquisition rather than relying only on
+    # the later invocation, which may occur in a different module.
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Name) or not isinstance(node.ctx, ast.Load):
+            continue
+        if node.id not in dynamic_function_names | dynamic_source_names:
+            continue
+        parent = parents.get(node)
+        if isinstance(parent, ast.Call) and parent.func is node:
+            # The immediate invocation is handled below with precise vendor
+            # diagnostics and nonliteral-source failure.
+            continue
+        imports.add(
+            "<dynamic-source-execution>"
+            if node.id in dynamic_source_names
+            else "<hoisted-dynamic-import>"
+        )
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        # vars(module), builtins.vars(module) and getattr(module, "__dict__")
+        # leak an unrestricted loader/evaluator namespace. These are forbidden
+        # only for tracked imported authority modules, not ordinary objects.
+        via_vars = (
+            (isinstance(func, ast.Name) and func.id in vars_names)
+            or (
+                isinstance(func, ast.Attribute)
+                and isinstance(func.value, ast.Name)
+                and func.value.id in builtins_names
+                and func.attr == "vars"
+            )
+        )
+        if (
+            via_vars
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in builtins_names | importlib_names
+        ):
+            imports.add("<dynamic-authority-namespace>")
+        if (
+            is_tracked_getattr(func)
+            and len(node.args) in (2, 3)
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in builtins_names | importlib_names
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "__dict__"
+        ):
+            imports.add("<dynamic-authority-namespace>")
+        # A computed attribute name on the importlib/builtins authorities could
+        # select __import__, import_module or an evaluator without a literal
+        # attribute in the AST. Stable Nika ports must not resolve such names.
+        if (
+            is_tracked_getattr(func)
+            and len(node.args) in (2, 3)
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in builtins_names | importlib_names
+            and (
+                not isinstance(node.args[1], ast.Constant)
+                or type(node.args[1].value) is not str
+            )
+        ):
+            imports.add("<nonliteral-dynamic-attribute>")
+        # A stored importer bypasses the immediate-call import guard:
+        # loader = getattr(builtins, "__import__"); loader("vendor")
+        # or loader = getattr(importlib, "import_module"). Refuse its
+        # acquisition in stable Core authorities, but retain precise
+        # vendor-name reporting for immediately invoked wrappers.
+        if (
+            is_tracked_getattr(func)
+            and len(node.args) in (2, 3)
+            and isinstance(node.args[0], ast.Name)
+            and isinstance(node.args[1], ast.Constant)
+            and (
+                (
+                    node.args[0].id in builtins_names
+                    and node.args[1].value == "__import__"
+                )
+                or (
+                    node.args[0].id in importlib_names
+                    and node.args[1].value == "import_module"
+                )
+            )
+        ):
+            parent = parents.get(node)
+            if not (isinstance(parent, ast.Call) and parent.func is node):
+                imports.add("<hoisted-dynamic-import>")
+        # Refuse acquisition of dangerous builtin source evaluators, including
+        # when the retrieved callable is stored and invoked in a later statement.
+        if (
+            is_tracked_getattr(func)
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id in builtins_names
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in {"exec", "eval", "compile"}
+        ):
+            imports.add("<dynamic-source-execution>")
+        # Core ports have no reason to evaluate dynamically supplied Python code.
+        # Otherwise a vendor import can be hidden inside a string and evade the
+        # import AST walk. This is a drift fence, not a Python sandbox.
+        if (
+            isinstance(func, ast.Name)
+            and func.id in dynamic_source_names
+        ) or (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id in builtins_names
+            and func.attr in {"exec", "eval", "compile"}
+        ):
+            imports.add("<dynamic-source-execution>")
+        direct = isinstance(func, ast.Name) and func.id in dynamic_function_names
+        via_importlib = (
+            isinstance(func, ast.Attribute)
+            and func.attr == "import_module"
+            and isinstance(func.value, ast.Name)
+            and func.value.id in importlib_names
+        )
+        via_builtins = (
+            isinstance(func, ast.Attribute)
+            and func.attr == "__import__"
+            and isinstance(func.value, ast.Name)
+            and func.value.id in builtins_names
+        )
+        # Resolve builtin getattr wrappers around source evaluation. Dynamic
+        # string execution is prohibited in stable Core contracts, even when
+        # the builtin is accessed indirectly rather than as builtins.exec.
+        via_builtin_source_getattr = (
+            isinstance(func, ast.Call)
+            and is_tracked_getattr(func.func)
+            and len(func.args) in (2, 3)
+            and isinstance(func.args[0], ast.Name)
+            and func.args[0].id in builtins_names
+            and isinstance(func.args[1], ast.Constant)
+            and func.args[1].value in {"exec", "eval", "compile"}
+        )
+        if via_builtin_source_getattr:
+            imports.add("<dynamic-source-execution>")
+            continue
+        via_getattr = (
+            isinstance(func, ast.Call)
+            and is_tracked_getattr(func.func)
+            and len(func.args) in (2, 3)
+            and isinstance(func.args[0], ast.Name)
+            and isinstance(func.args[1], ast.Constant)
+            and (
+                (
+                    func.args[0].id in importlib_names
+                    and func.args[1].value == "import_module"
+                )
+                or (
+                    func.args[0].id in builtins_names
+                    and func.args[1].value == "__import__"
+                )
+            )
+        )
+        if not (direct or via_importlib or via_builtins or via_getattr):
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(
+            node.args[0].value, str
+        ):
+            imports.add("<nonliteral-dynamic-import>")
+            continue
+        module = node.args[0].value
+        if module.split(".", 1)[0] in FOREIGN_ENGINE_ROOTS:
+            imports.add(module)
+    return tuple(sorted(imports))
+
+
+@pytest.mark.parametrize("path", OWNED_BOUNDARIES)
+def test_nika_owned_ports_remain_adapter_and_presentation_neutral(path: str) -> None:
+    source = (REPOSITORY_ROOT / path).read_text(encoding="utf-8")
+    assert direct_engine_imports(source) == (), path
+
+
+def test_architecture_guard_rejects_aliased_and_nested_vendor_imports() -> None:
+    source = (
+        "import langgraph.graph as orchestration\n"
+        "from webview import Window\n"
+        "def leak():\n"
+        "    from foundry_local_sdk import FoundryLocalManager\n"
+    )
+    assert direct_engine_imports(source) == (
+        "foundry_local_sdk",
+        "langgraph.graph",
+        "webview",
+    )
+
+
+def test_architecture_guard_rejects_direct_and_aliased_dynamic_engine_imports() -> None:
+    source = (
+        "import importlib as importer\n"
+        "from importlib import import_module as load\n"
+        "__import__('langgraph.graph')\n"
+        "importer.import_module('mcp')\n"
+        "load('httpx')\n"
+        "load('nika_core.runtime.contracts')\n"
+    )
+    assert direct_engine_imports(source) == ("httpx", "langgraph.graph", "mcp")
+
+
+def test_architecture_guard_fails_closed_on_nonliteral_dynamic_import() -> None:
+    source = "from importlib import import_module as load\nload(provider_name)\n"
+    assert direct_engine_imports(source) == ("<nonliteral-dynamic-import>",)
+
+
+def test_architecture_guard_does_not_flag_documentation_or_internal_ports() -> None:
+    source = (
+        '"""import langgraph should not count as an actual import"""\n'
+        "from nika_core.runtime.contracts import AgentRuntimePort\n"
+        "from pydantic import BaseModel\n"
+    )
+    assert direct_engine_imports(source) == ()
+
+
+def test_architecture_guard_fails_on_invalid_python_instead_of_silently_skipping() -> None:
+    with pytest.raises(SyntaxError):
+        direct_engine_imports("def broken(:\n")
+
+
+def test_architecture_guard_blocks_builtins_import_alias_escape() -> None:
+    source = (
+        "import builtins as engine_loader\n"
+        "from builtins import __import__ as import_engine\n"
+        "engine_loader.__import__('langgraph.graph')\n"
+        "import_engine('litellm')\n"
+        "import_engine('nika_core.runtime.contracts')\n"
+    )
+    assert direct_engine_imports(source) == ("langgraph.graph", "litellm")
+
+
+def test_architecture_guard_rejects_nonliteral_builtins_import() -> None:
+    source = "from builtins import __import__ as load\nload(unknown_engine)\n"
+    assert direct_engine_imports(source) == ("<nonliteral-dynamic-import>",)
+
+
+def test_architecture_guard_rejects_getattr_dynamic_engine_imports() -> None:
+    source = (
+        "import importlib as loader\n"
+        "import builtins as standard\n"
+        "getattr(loader, 'import_module')('langgraph.graph')\n"
+        "getattr(standard, '__import__')('mcp')\n"
+    )
+    assert direct_engine_imports(source) == ("langgraph.graph", "mcp")
+
+
+def test_architecture_guard_rejects_getattr_nonliteral_provider_name() -> None:
+    source = (
+        "import importlib\n"
+        "getattr(importlib, 'import_module')(user_supplied_module)\n"
+    )
+    assert direct_engine_imports(source) == ("<nonliteral-dynamic-import>",)
+
+
+def test_architecture_guard_rejects_dynamic_python_code_escape() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import exec as run_source\n"
+        "exec('import langgraph')\n"
+        "host.eval('1 + 1')\n"
+        "run_source(untrusted_code)\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
+
+
+def test_architecture_guard_rejects_compilation_with_unknown_source() -> None:
+    source = (
+        "from builtins import compile as compile_code\n"
+        "compile_code(source, '<port>', 'exec')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
+
+
+def test_architecture_guard_rejects_getattr_wrapped_builtin_execution() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "resolve(host, 'exec')('import langgraph')\n"
+        "getattr(host, 'eval')('1 + 1')\n"
+        "resolve(host, 'compile')(source, '<core>', 'exec')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
+
+
+def test_architecture_guard_rejects_aliased_getattr_dynamic_import() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "resolve(host, '__import__')('mcp')\n"
+        "resolve(host, 'repr')('safe')\n"
+    )
+    assert direct_engine_imports(source) == ("mcp",)
+
+
+def test_architecture_guard_rejects_hoisted_builtin_source_loader() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "runner = resolve(host, 'exec')\n"
+        "runner('import langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
+
+
+def test_architecture_guard_allows_hoisted_safe_builtin_getattr() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "runner = resolve(host, 'repr')\n"
+        "runner('safe')\n"
+    )
+    assert direct_engine_imports(source) == ()
+
+def test_architecture_guard_rejects_stored_builtin_importer() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "loader = resolve(host, '__import__')\n"
+        "loader('litellm')\n"
+    )
+    assert direct_engine_imports(source) == ("<hoisted-dynamic-import>",)
+
+
+def test_architecture_guard_rejects_stored_importlib_loader() -> None:
+    source = (
+        "import importlib as importer\n"
+        "loader = getattr(importer, 'import_module')\n"
+        "loader('langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<hoisted-dynamic-import>",)
+
+
+def test_architecture_guard_keeps_safe_getattr_and_direct_call_results() -> None:
+    source = (
+        "import builtins as host\n"
+        "from builtins import getattr as resolve\n"
+        "safe = resolve(host, 'repr')\n"
+        "safe(1)\n"
+        "resolve(host, '__import__')('mcp')\n"
+    )
+    assert direct_engine_imports(source) == ("mcp",)
+
+
+def test_architecture_guard_rejects_stored_attribute_importers() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "one = host.__import__\n"
+        "two = importer.import_module\n"
+        "one('litellm')\n"
+        "two('langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<hoisted-dynamic-import>",)
+
+
+def test_architecture_guard_rejects_stored_attribute_evaluators() -> None:
+    source = (
+        "import builtins as host\n"
+        "runner = host.exec\n"
+        "evaluator = host.eval\n"
+        "compiler = host.compile\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-source-execution>",)
+
+
+def test_architecture_guard_keeps_precise_immediate_attribute_calls() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "host.__import__('mcp')\n"
+        "importer.import_module('httpx')\n"
+    )
+    assert direct_engine_imports(source) == ("httpx", "mcp")
+
+
+
+def test_architecture_guard_rejects_getattr_default_argument_import_escape() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "loader = getattr(host, '__import__', None)\n"
+        "other = getattr(importer, 'import_module', None)\n"
+        "loader('langgraph')\n"
+        "other('mcp')\n"
+    )
+    assert direct_engine_imports(source) == ("<hoisted-dynamic-import>",)
+
+
+def test_architecture_guard_catches_immediate_defaulted_import_and_evaluator() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "getattr(host, '__import__', None)('litellm')\n"
+        "getattr(importer, 'import_module', None)('playwright')\n"
+        "getattr(host, 'exec', None)('import langgraph')\n"
+    )
+    assert direct_engine_imports(source) == (
+        "<dynamic-source-execution>", "litellm", "playwright"
+    )
+
+
+def test_architecture_guard_preserves_safe_defaulted_getattr() -> None:
+    source = (
+        "import builtins as host\n"
+        "present = getattr(host, 'repr', None)\n"
+        "present(42)\n"
+    )
+    assert direct_engine_imports(source) == ()
+
+
+def test_architecture_guard_rejects_computed_builtin_loader_name() -> None:
+    source = (
+        "import builtins as host\n"
+        "selected = '__import__'\n"
+        "loader = getattr(host, selected)\n"
+        "loader('langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<nonliteral-dynamic-attribute>",)
+
+
+def test_architecture_guard_rejects_computed_importlib_loader_name() -> None:
+    source = (
+        "import importlib as importer\n"
+        "loader = getattr(importer, 'import_' + 'module')\n"
+        "loader('mcp')\n"
+    )
+    assert direct_engine_imports(source) == ("<nonliteral-dynamic-attribute>",)
+
+
+def test_architecture_guard_rejects_builtin_namespace_dictionary_escape() -> None:
+    source = (
+        "import builtins as host\n"
+        "loader = host.__dict__['__import__']\n"
+        "loader('langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-authority-namespace>",)
+
+
+def test_architecture_guard_rejects_aliased_vars_namespace_escape() -> None:
+    source = (
+        "import importlib as importer\n"
+        "from builtins import vars as get_namespace\n"
+        "loader = get_namespace(importer)['import_module']\n"
+        "loader('mcp')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-authority-namespace>",)
+
+
+def test_architecture_guard_rejects_getattr_namespace_escape() -> None:
+    source = (
+        "import builtins as host\n"
+        "namespace = getattr(host, '__dict__')\n"
+        "namespace['exec']('import langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<dynamic-authority-namespace>",)
+
+
+def test_architecture_guard_keeps_safe_unrelated_namespace_reads() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "class Local: pass\n"
+        "value = Local()\n"
+        "fields = vars(value)\n"
+        "package_name = getattr(importer, '__name__')\n"
+        "formatter = getattr(host, 'repr')\n"
+    )
+    assert direct_engine_imports(source) == ()
+
+
+def test_architecture_guard_rejects_builtins_getattr_immediate_import_and_eval() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "host.getattr(importer, 'import_module')('mcp')\n"
+        "host.getattr(host, '__import__')('litellm')\n"
+        "host.getattr(host, 'eval')('1 + 1')\n"
+    )
+    assert direct_engine_imports(source) == (
+        "<dynamic-source-execution>", "litellm", "mcp"
+    )
+
+
+def test_architecture_guard_rejects_builtins_getattr_stored_importers() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "loader = host.getattr(importer, 'import_module')\n"
+        "loader('langgraph')\n"
+    )
+    assert direct_engine_imports(source) == ("<hoisted-dynamic-import>",)
+
+
+def test_architecture_guard_rejects_builtins_getattr_namespace_and_computed_name() -> None:
+    source = (
+        "import builtins as host\n"
+        "import importlib as importer\n"
+        "namespace = host.getattr(importer, '__dict__')\n"
+        "dynamic = host.getattr(host, unknown_name)\n"
+    )
+    assert direct_engine_imports(source) == (
+        "<dynamic-authority-namespace>", "<nonliteral-dynamic-attribute>"
+    )
+
+
+def test_architecture_guard_allows_safe_builtins_getattr_on_inert_objects() -> None:
+    source = (
+        "import builtins as host\n"
+        "class Local: pass\n"
+        "safe = host.getattr(host, 'repr')\n"
+        "value = host.getattr(Local(), '__class__')\n"
+    )
+    assert direct_engine_imports(source) == ()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        (
+            "from builtins import __dict__ as exported\n"
+            "loader = exported['__import__']\n"
+            "loader('langgraph')\n"
+        ),
+        (
+            "from importlib import __dict__ as exported\n"
+            "loader = exported['import_module']\n"
+            "loader('mcp')\n"
+        ),
+    ],
+)
+def test_architecture_guard_rejects_exported_authority_namespaces(source: str) -> None:
+    assert direct_engine_imports(source) == ("<dynamic-authority-namespace>",)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "from builtins import *\n",
+        "from importlib import *\n",
+    ],
+)
+def test_architecture_guard_rejects_wildcard_authority_imports(source: str) -> None:
+    assert direct_engine_imports(source) == ("<wildcard-authority-import>",)
+
+
+def test_architecture_guard_preserves_explicit_safe_authority_imports() -> None:
+    source = (
+        "from builtins import repr as safe_repr\n"
+        "from importlib import util as package_util\n"
+        "safe_repr(package_util)\n"
+    )
+    assert direct_engine_imports(source) == ()
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "from importlib import import_module as loader\n"
+            + "deferred = loader\n",
+            ("<hoisted-dynamic-import>",),
+        ),
+        (
+            "from builtins import __import__ as get_module\n"
+            + "deferred = get_module\n",
+            ("<hoisted-dynamic-import>",),
+        ),
+        (
+            "from builtins import eval as run_expr\n"
+            + "handler = run_expr\n",
+            ("<dynamic-source-execution>",),
+        ),
+        (
+            "handler = eval\n",
+            ("<dynamic-source-execution>",),
+        ),
+        (
+            "from builtins import repr as safe_repr\n"
+            + "handler = safe_repr\n",
+            (),
+        ),
+    ],
+)
+def test_architecture_guard_rejects_hoisted_function_authorities(
+    source: str, expected: tuple[str, ...]
+) -> None:
+    assert direct_engine_imports(source) == expected
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "__builtins__['__import__']('mcp')\n",
+        "loader = __builtins__.__import__\nloader('langgraph')\n",
+        "authority = __builtins__\n",
+    ],
+)
+def test_architecture_guard_blocks_implicit_builtin_authority(source: str) -> None:
+    assert direct_engine_imports(source) == ("<dynamic-authority-namespace>",)
+
+
+def test_architecture_guard_ignores_quoted_implicit_builtin_name() -> None:
+    assert direct_engine_imports('label = "__builtins__"\n') == ()

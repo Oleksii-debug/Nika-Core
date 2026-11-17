@@ -1655,6 +1655,86 @@ def test_explicit_inter_batch_schedule_survives_restore_as_scheduler_authority(
     assert restored_intent.not_before == due.isoformat()
 
 
+@pytest.mark.parametrize("source", ("scheduler", None))
+@pytest.mark.parametrize("offset", (-1, None))
+def test_restored_scheduler_or_legacy_wait_cannot_bypass_completion_floor(
+    tmp_path: Path, source: str | None, offset: int | None,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    cursor = BatchCursor.create(
+        memory, ledger, task_id="task", cursor_id="cursor",
+        targets=_targets(2), batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True}, next_batch_not_before=due)
+    cursor.schedule_inter_batch_wait(due + timedelta(hours=1))
+    value = _state_value(memory, "task")
+    intent = value["next_scheduled_intent"]
+    assert isinstance(intent, dict)
+    intent["not_before"] = (
+        (due + timedelta(hours=offset)).isoformat() if offset is not None else None
+    )
+    if source is None:
+        intent.pop("deadline_source")
+    else:
+        intent["deadline_source"] = source
+    _replace_state(memory, "task", value)
+    before = ledger.require(grant.operation_key)
+
+    with pytest.raises(BatchCursorStateError):
+        BatchCursor.restore(
+            memory, ledger, task_id="task", cursor_id="cursor",
+            targets=_targets(2), batch_size=1,
+        )
+
+    assert _state_value(memory, "task") == value
+    assert ledger.require(grant.operation_key) == before
+    assert ledger.get(cursor.state.targets[1].operation_key) is None
+
+
+@pytest.mark.parametrize("has_completion_due", (True, False))
+def test_legacy_scheduler_wait_survives_restore_and_still_blocks_early_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, has_completion_due: bool,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    later = due + timedelta(hours=1)
+    cursor = BatchCursor.create(
+        memory, ledger, task_id="task", cursor_id="cursor",
+        targets=_targets(2), batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm(
+        "target-0", {"ok": True},
+        next_batch_not_before=due if has_completion_due else None,
+    )
+    cursor.schedule_inter_batch_wait(later)
+    value = _state_value(memory, "task")
+    intent = value["next_scheduled_intent"]
+    assert isinstance(intent, dict)
+    intent.pop("deadline_source")  # Original persisted schema predates provenance.
+    _replace_state(memory, "task", value)
+    before = ledger.require(grant.operation_key)
+    monkeypatch.setattr(batch_cursor_module, "_utc_now", lambda: due)
+
+    for _ in range(2):
+        restored = BatchCursor.restore(
+            memory, ledger, task_id="task", cursor_id="cursor",
+            targets=_targets(2), batch_size=1,
+        )
+        restored_intent = restored.state.next_scheduled_intent
+        assert restored_intent is not None
+        assert restored_intent.not_before == later.isoformat()
+        with pytest.raises(BatchCursorBlockedError, match="deadline has not been reached"):
+            restored.release_inter_batch_wait()
+        assert ledger.get(restored.state.targets[1].operation_key) is None
+    assert ledger.require(grant.operation_key) == before
+    monkeypatch.setattr(batch_cursor_module, "_utc_now", lambda: later)
+    restored.release_inter_batch_wait()
+    assert restored.begin_effect("target-1").execute is True
+
+
 def test_idempotent_confirm_rejects_conflicting_replay_result_without_mutation(
     tmp_path: Path,
 ) -> None:

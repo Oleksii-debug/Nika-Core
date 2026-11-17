@@ -691,14 +691,23 @@ class BatchCursor:
             target_index == frontier_index - 1
             and intent is not None
             and intent.kind is IntentKind.INTER_BATCH_WAIT
-            and intent.deadline_source != "scheduler"
         ):
             durable_not_before = (
                 _as_utc(durable_due).isoformat()
                 if durable_due is not None
                 else None
             )
-            if intent.not_before != durable_not_before:
+            # Completion owns the minimum wait, including after a scheduler
+            # override or restoration of a pre-provenance cursor. Legacy
+            # snapshots may legitimately contain a later scheduler deadline.
+            if intent.deadline_source == "completion":
+                contradicts = intent.not_before != durable_not_before
+            else:
+                contradicts = durable_due is not None and (
+                    intent.not_before is None
+                    or _parse_utc(intent.not_before) < _as_utc(durable_due)
+                )
+            if contradicts:
                 raise BatchCursorStateError(
                     "confirmed cursor deadline contradicts idempotency evidence"
                 )
