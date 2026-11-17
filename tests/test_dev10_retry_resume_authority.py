@@ -168,7 +168,7 @@ def test_retry_dispatch_uses_one_usable_token_decision(
         assert runtime.run_calls == 1
         assert runtime.resume_calls == 1
         assert _task_state(store, task_id) == TaskState.COMPLETED
-    elif allow_fresh_retry:
+    elif allow_fresh_retry and resume_token is None:
         assert result.outcome == RuntimeOutcome.COMPLETED
         assert runtime.run_calls == 2
         assert runtime.resume_calls == 0
@@ -181,7 +181,9 @@ def test_retry_dispatch_uses_one_usable_token_decision(
 
     events = audit.list_for(entity_type="task", entity_id=task_id)
     retry_started = [event for event in events if event.event_type == "runtime.retry_started"]
-    expected_retry = usable or allow_fresh_retry
+    # Invalid nonempty/nontext token carriers are rejected by current DTO
+    # admission before a TRANSIENT result can authorize any fresh retry.
+    expected_retry = usable or (allow_fresh_retry and resume_token is None)
     assert bool(retry_started) is expected_retry
     if retry_started:
         assert retry_started[0].payload["resume"] is usable

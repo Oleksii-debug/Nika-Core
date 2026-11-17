@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.runtime.contracts import RuntimeOutcome, RuntimeResult
+from nika_core.runtime.contracts import RuntimeOutcome, RuntimeResult, _validate_runtime_identity
 
 _ACTIVE_MARKER = "__ACTIVE__"
 _RESUMABLE_OUTCOMES = frozenset(
@@ -28,6 +28,8 @@ def _require_exact_text(
         raise TypeError(f"{field_name} must be exact text")
     if non_empty and not value.strip():
         raise ValueError(f"{field_name} must not be empty")
+    if value:
+        _validate_runtime_identity(value, field_name)
     return value
 
 
@@ -39,6 +41,7 @@ def _resume_token_for_storage(value: object) -> str | None:
     snapshot = str.__str__(value)
     if not snapshot.strip():
         return None
+    _validate_runtime_identity(snapshot, "resume_token")
     return snapshot
 
 
@@ -59,6 +62,13 @@ def _stored_text(row: sqlite3.Row, field_name: str, *, non_empty: bool = True) -
         )
     if non_empty and not value.strip():
         raise RuntimeError(f"persisted runtime session field {field_name} is empty")
+    if field_name in {"task_id", "runtime_id", "thread_id", "resume_token"}:
+        try:
+            _validate_runtime_identity(value, field_name)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"persisted runtime session field {field_name} is not canonical"
+            ) from exc
     return value
 
 
@@ -111,11 +121,10 @@ class RuntimeSessionStore:
             # non-resumable candidate instead of aborting classification for every
             # persisted session. Never coerce BLOB/blank storage into usable authority.
             raw_resume_token = row["resume_token"]
-            resume_token = (
-                raw_resume_token
-                if type(raw_resume_token) is str and raw_resume_token.strip()
-                else ""
-            )
+            try:
+                resume_token = _resume_token_for_storage(raw_resume_token) or ""
+            except (TypeError, ValueError):
+                resume_token = ""
         else:
             resume_token = _stored_text(row, "resume_token")
         raw_outcome = _stored_text(row, "outcome")

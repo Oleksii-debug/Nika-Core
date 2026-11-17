@@ -1,10 +1,10 @@
 # Global Coordinator Bridge
 
-Nika Core participates in the owner's cross-project autonomous development control plane.
+Nika Core participates in cross-project release and development planning.
 
 ## Purpose
 
-Workers, Codex Cloud and Work must not rely on stale prompt text as the current project plan. Before substantive work, reconstruct the newest Nika state and read current coordination surfaces. The coordinator changes the shared plan; Oleksii should not have to manually rewrite worker prompts after every major development run.
+Before starting work, verify the current Nika plan and live assignments. Record priority changes in the shared plan.
 
 ## Coordination hierarchy
 
@@ -14,17 +14,15 @@ Workers, Codex Cloud and Work must not rely on stale prompt text as the current 
 
 ## Audit cadence
 
-Do not depend on exact hours such as 06:00/12:00/18:00. If the configured audit interval has expired, the first available coordinator-capable run performs the audit and refreshes the plan. A missed run because of usage/credits is recovered by the next successful run.
+Do not depend on exact hours such as 06:00/12:00/18:00. If the configured audit interval has expired, the first available coordinator-capable run performs the audit and refreshes the plan. The next available reviewer resumes a missed audit.
 
 Suggested active-project audit interval: 4–6 hours, plus refresh after a major integration or release-gate change.
 
-## Codex Cloud
+## Implementation and architecture review
 
-Codex reads the current Nika project plan before choosing work. It must avoid packages already assigned to scheduled workers, take a large unowned package, persist progress after coherent milestones and update project direction when its work materially changes the next critical path.
+Select unassigned, non-overlapping implementation work. Record milestones and update the project plan when the critical path changes.
 
-## Work
-
-Work is the periodic high-capability architect/auditor. It can re-evaluate the whole product, find stale directions, and update the shared plan. It should not require Oleksii to copy new prompts into every scheduled worker.
+Periodically review product architecture, release readiness, and current priorities. Record decisions in the shared plan.
 
 ## Nika current product priority
 

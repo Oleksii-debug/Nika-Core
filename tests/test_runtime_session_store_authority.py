@@ -87,8 +87,9 @@ def test_record_result_rejects_laundered_resumable_token_without_rebinding_sessi
 
     hostile_result = RuntimeResult(
         outcome=RuntimeOutcome.PAUSED,
-        resume_token=_BehavioralText(""),
+        resume_token="valid",
     )
+    object.__setattr__(hostile_result, "resume_token", _BehavioralText(""))
     with pytest.raises(ValueError, match="usable resume token"):
         sessions.record_result(
             task_id=task_id,
@@ -115,16 +116,14 @@ def test_record_result_rejects_nontext_resume_token_without_rebinding_session(
         resume_token="resume-1",
     )
 
+    hostile_result = RuntimeResult(outcome=RuntimeOutcome.FAILED, error="retry later")
+    object.__setattr__(hostile_result, "resume_token", b"resume-2")
     with pytest.raises(TypeError, match="resume token"):
         sessions.record_result(
             task_id=task_id,
             runtime_id="runtime",
             thread_id="thread",
-            result=RuntimeResult(
-                outcome=RuntimeOutcome.FAILED,
-                resume_token=b"resume-2",
-                error="retry later",
-            ),
+            result=hostile_result,
         )
 
     raw = _raw_session(store, task_id)
@@ -469,3 +468,48 @@ def test_recovery_inventory_keeps_corrupt_resume_token_unusable_without_rewrite(
     assert raw is not None
     assert raw["resume_token"] == b"corrupt-resume"
 
+
+
+@pytest.mark.parametrize("field_name", ["runtime_id", "thread_id", "resume_token"])
+@pytest.mark.parametrize("value", ["e\u0301", "route\u202eforged", "r" * 513, "я" * 257])
+def test_session_route_reuses_canonical_runtime_identity_before_writing(
+    tmp_path, field_name: str, value: str,
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    values = {"task_id": task_id, "runtime_id": "runtime", "thread_id": "thread",
+              "resume_token": "resume"}
+    values[field_name] = value
+    with pytest.raises(ValueError):
+        RuntimeSessionStore(store).record_active(**values)
+    assert _raw_session(store, task_id) is None
+
+
+def test_session_unicode_identity_boundary_survives_sqlite_reopen(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    route = "я" * 256
+    RuntimeSessionStore(store).record_active(
+        task_id=task_id, runtime_id=route, thread_id=route, resume_token=route,
+    )
+    reopened = SQLiteStore(tmp_path / "nika.db")
+    reopened.initialize()
+    record = RuntimeSessionStore(reopened).get(task_id)
+    assert record is not None
+    assert (record.runtime_id, record.thread_id, record.resume_token) == (route, route, route)
+
+
+def test_corrupt_unicode_resume_token_is_unusable_in_recovery_inventory_without_rewrite(
+    tmp_path,
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id, runtime_id="runtime", thread_id="thread", resume_token="resume",
+    )
+    corrupt = "resume\u202eforged"
+    with store.connection() as conn:
+        conn.execute("UPDATE runtime_sessions SET resume_token = ? WHERE task_id = ?",
+                     (corrupt, task_id))
+    assert sessions.list_resumable()[0].resume_token == ""
+    with pytest.raises(RuntimeError, match="not canonical"):
+        sessions.get(task_id)
+    assert _raw_session(store, task_id)["resume_token"] == corrupt
