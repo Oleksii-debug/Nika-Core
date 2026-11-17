@@ -18,9 +18,9 @@
 | 2А | Успадкувати повний acceptance scope старого Розділу 2; спочатку перевірити live implementation/tests/PR/evidence і не переписувати вже правильне. | **DONE — 2026-11-16, #1856; див. реєстр доказів** |
 | 2Б | Закрити лише missing production gaps, integration, failure/recovery/security/accessibility cases, які належать цьому scope. | **DONE — 2026-11-16, #1856; див. реєстр доказів** |
 | 2В | Зафіксувати exact evidence/commit/PR, інтегрувати у canonical lineage та оновити live GitHub multi-plan closure registry. | **DONE — 2026-11-16, #1856; див. реєстр доказів** |
-| 3А | Успадкувати повний acceptance scope старого Розділу 3; спочатку перевірити live implementation/tests/PR/evidence і не переписувати вже правильне. | Статус міграції: AUDIT_EXISTING / PARTIAL_EXISTING |
-| 3Б | Закрити лише missing production gaps, integration, failure/recovery/security/accessibility cases, які належать цьому scope. | Статус: AUDIT_EXISTING / PARTIAL_EXISTING |
-| 3В | Зафіксувати exact evidence/commit/PR, інтегрувати у canonical lineage та оновити live GitHub multi-plan closure registry. | Статус: AUDIT_EXISTING / PARTIAL_EXISTING |
+| 3А | Успадкувати повний acceptance scope старого Розділу 3; спочатку перевірити live implementation/tests/PR/evidence і не переписувати вже правильне. | **DONE — 2026-11-17, #847 / #1103; див. реєстр доказів** |
+| 3Б | Закрити лише missing production gaps, integration, failure/recovery/security/accessibility cases, які належать цьому scope. | **DONE — 2026-11-17, #847 / #1103; див. реєстр доказів** |
+| 3В | Зафіксувати exact evidence/commit/PR, інтегрувати у canonical lineage та оновити live GitHub multi-plan closure registry. | **DONE — 2026-11-17, #847 / #1103; див. реєстр доказів** |
 | 4А | Успадкувати повний acceptance scope старого Розділу 4; спочатку перевірити live implementation/tests/PR/evidence і не переписувати вже правильне. | Статус міграції: AUDIT_EXISTING / PARTIAL_EXISTING |
 | 4Б | Закрити лише missing production gaps, integration, failure/recovery/security/accessibility cases, які належать цьому scope. | Статус: AUDIT_EXISTING / PARTIAL_EXISTING |
 | 4В | Зафіксувати exact evidence/commit/PR, інтегрувати у canonical lineage та оновити live GitHub multi-plan closure registry. | Статус: AUDIT_EXISTING / PARTIAL_EXISTING |
