@@ -384,4 +384,3 @@ def test_sqlite_max_concurrency_boundary_round_trips(tmp_path) -> None:
     manager.set_budget(budget)
 
     assert manager.get_budget(scope="agent", owner_id="worker") == budget
-
