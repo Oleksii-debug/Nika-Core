@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -43,8 +42,6 @@ class PackagedProductJourneyError(ValueError):
 
 
 def product_project_identity(normalized_goal: str) -> str:
-    if type(normalized_goal) is not str:
-        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     goal = " ".join(normalized_goal.split())
     if not goal:
         raise PackagedProductJourneyError("product goal must not be empty")
@@ -59,19 +56,9 @@ def packaged_product_reopen_target(command: str) -> str | None:
     existing command classifier authoritative unless the user explicitly asks to open/reopen a
     ProductProject. The accepted id is canonicalized to lowercase before durable lookup.
     """
-    if type(command) is not str:
-        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split())
     lowered = normalized.casefold()
-    prefix = next(
-        (
-            item
-            for item in _REOPEN_PREFIXES
-            if lowered.startswith(item)
-            and lowered[len(item) : len(item) + 1] in ("", " ", ":", "#")
-        ),
-        None,
-    )
+    prefix = next((item for item in _REOPEN_PREFIXES if lowered.startswith(item)), None)
     if prefix is None:
         return None
     remainder = normalized[len(prefix) :].strip(" :#")
@@ -84,23 +71,8 @@ def packaged_product_reopen_target(command: str) -> str | None:
 
 def packaged_current_product_command(command: str) -> bool:
     """Recognize an exact keyboard command that reports the durable presentation selection."""
-    if type(command) is not str:
-        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split()).casefold().strip(" :")
     return normalized in _CURRENT_PROJECT_COMMANDS
-
-
-def _valid_selection_id(value: object) -> bool:
-    if type(value) is not str or not value or value != value.strip():
-        return False
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError:
-        return False
-    return not any(
-        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
-        for character in value
-    )
 
 
 class PackagedProductSelectionStore:
@@ -122,24 +94,17 @@ class PackagedProductSelectionStore:
     def load(self) -> str | None:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT typeof(project_id) AS id_type, "
-                "CAST(project_id AS BLOB) AS raw_id "
-                "FROM packaged_product_selection WHERE slot = 1"
+                "SELECT project_id FROM packaged_product_selection WHERE slot = 1"
             ).fetchone()
-        if row is None or row["id_type"] != "text":
+        if row is None:
             return None
-        try:
-            project_id = row["raw_id"].decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-        return project_id if _valid_selection_id(project_id) else None
+        project_id = str(row["project_id"]).strip()
+        return project_id or None
 
     def select(self, project_id: str) -> None:
-        if type(project_id) is not str:
-            raise PackagedProductJourneyError("selected ProductProject id must be text")
         normalized = project_id.strip()
-        if not _valid_selection_id(normalized):
-            raise PackagedProductJourneyError("selected ProductProject id contains invalid text")
+        if not normalized:
+            raise PackagedProductJourneyError("selected ProductProject id must not be empty")
         with self._store.connection() as conn:
             conn.execute(
                 "INSERT INTO packaged_product_selection(slot, project_id) VALUES (1, ?) "
@@ -235,22 +200,11 @@ class PackagedProductCommandRouter:
         )
 
     def create(self, payload: Mapping[str, Any]) -> UIResult:
-        raw_command = payload.get("command", "")
-        if type(raw_command) is not str:
-            raise PackagedProductJourneyError("Команда повинна бути текстом.")
-        command = raw_command.strip()
+        command = str(payload.get("command", "")).strip()
         if not command:
             raise PackagedProductJourneyError(
                 "Введіть команду перед створенням завдання."
             )
-        if "\x00" in command:
-            raise PackagedProductJourneyError("Команда містить недопустимий NUL-символ.")
-        try:
-            command.encode("utf-8")
-        except UnicodeEncodeError:
-            raise PackagedProductJourneyError(
-                "Команда містить некоректний текст Unicode."
-            ) from None
 
         if packaged_current_product_command(command):
             return self._describe_current_project()

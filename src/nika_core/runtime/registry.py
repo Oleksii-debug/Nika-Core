@@ -3,11 +3,12 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from inspect import getattr_static
-import unicodedata
 
-from nika_core.runtime.contracts import AgentRuntimePort, RuntimeCapability
-
-MAX_RUNTIME_ID_CHARS = 128
+from nika_core.runtime.contracts import (
+    AgentRuntimePort,
+    RuntimeCapability,
+    _validate_runtime_identity,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,27 +25,8 @@ class _RegisteredRuntime:
 
 
 def _canonical_runtime_id(value: object) -> str:
-    if type(value) is not str:
-        raise TypeError("runtime_id must be an exact string")
-    if not value:
-        raise ValueError("runtime_id must not be empty")
-    if value != value.strip():
-        raise ValueError("runtime_id must not contain surrounding whitespace")
-    if len(value) > MAX_RUNTIME_ID_CHARS:
-        raise ValueError(
-            f"runtime_id must contain at most {MAX_RUNTIME_ID_CHARS} characters"
-        )
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise ValueError("runtime_id must be valid UTF-8") from exc
-    if any(
-        unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
-        for char in value
-    ):
-        raise ValueError(
-            "runtime_id must not contain control, format, or line-separator characters"
-        )
+    # Registry admission and durable runtime envelopes share one identity authority.
+    _validate_runtime_identity(value, "runtime_id")
     return value
 
 
@@ -134,13 +116,7 @@ class RuntimeRegistry:
         )
         for item in registered:
             self._verified_runtime(item)
-        return tuple(
-            RuntimeDescriptor(
-                runtime_id=item.descriptor.runtime_id,
-                capabilities=item.descriptor.capabilities,
-            )
-            for item in registered
-        )
+        return tuple(item.descriptor for item in registered)
 
     @staticmethod
     def _verified_runtime(registered: _RegisteredRuntime) -> AgentRuntimePort:
