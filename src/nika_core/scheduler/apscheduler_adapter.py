@@ -100,6 +100,32 @@ class APSchedulerAdapter(SchedulerPort):
             effective_job = self._required_job(job_id)
         self._audit_change("scheduler.job_upserted", effective_job)
 
+    def activate_existing(self, expected: ScheduledJob) -> bool:
+        """Activate an already-persisted snapshot without writing it back to SQLite.
+
+        The ordinary upsert() is for new/replacement writes. Callers that have
+        already committed a job must use this path, so a delayed activation
+        cannot overwrite a newer snapshot belonging to another process.
+        Successful installation is only an observation; dispatch still requires
+        the canonical transactional authorization fence.
+        """
+        if type(expected) is not ScheduledJob:
+            raise TypeError("expected must be an exact ScheduledJob")
+        _require_job_id(expected.job_id)
+        with self._runtime_sync_lock:
+            # Canonicalize and bind enabled/task authority under SQLite's
+            # existing writer-serialized boundary before runtime installation.
+            current = self._jobs.authorize_dispatch(expected)
+            if current is None:
+                return False
+            if self._started or self._starting:
+                installed = self._sync_runtime_job(current.job_id)
+                if installed != current:
+                    return False
+            # A different process may have replaced this job during _install.
+            # Report no activation of the expected snapshot in that case.
+            return self._jobs.get(current.job_id) == current
+
     def remove(self, job_id: str) -> bool:
         job_id = _require_job_id(job_id)
         removed = self._jobs.delete(job_id)
