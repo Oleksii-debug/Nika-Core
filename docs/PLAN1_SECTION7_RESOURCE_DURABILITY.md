@@ -98,8 +98,12 @@ mixed generations, current telemetry, optional metrics and actual desktop
 start/resume/cancel/failure behavior. This is not full locked-repository CI or
 physical Windows/NVDA evidence.
 
-The dependency owner must promote the already-reviewed psutil runtime into the GUI/
-packaged lock profile and its required runtime notice inventory before qualification.
+The already-reviewed psutil runtime is now declared in the GUI/packaged lock
+profile and its required runtime notice inventory. The explicit frozen module
+owner mapping is covered by independent missing-notice and unknown-root oracles.
+Full isolated local verification passed 3868 tests after installing the existing
+locked pysubs2 package to execute optional media cases. This is source evidence,
+not the final Windows package gate.
 Fresh final-head Core Ubuntu/Windows, M12 integrated Ubuntu/Windows, packaged Windows,
 and independent review are required. Prior SHA results are lineage only.
 
