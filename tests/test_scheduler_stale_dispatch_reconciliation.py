@@ -171,3 +171,23 @@ def test_reassignment_between_runtime_check_and_last_durable_read_is_reconciled(
         resolver.assert_not_called()
     finally:
         adapter.shutdown()
+
+
+
+@pytest.mark.parametrize("installed_value,durable_value", [(True, 1), (1, 1.0)])
+def test_runtime_fast_path_uses_typed_snapshot_identity(
+    tmp_path: Path, installed_value, durable_value
+) -> None:
+    jobs, adapter, resolver, old = _started(tmp_path)
+    installed = replace(old, payload={"typed": installed_value})
+    durable = replace(old, payload={"typed": durable_value})
+    try:
+        adapter.upsert(installed)
+        jobs.upsert(durable)
+        adapter._dispatch(old.job_id, old)
+        runtime = adapter._scheduler.get_job(old.job_id)
+        assert runtime is not None
+        assert type(runtime.args[1].payload["typed"]) is type(durable_value)
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()

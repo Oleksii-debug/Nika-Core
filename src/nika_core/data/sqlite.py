@@ -10,6 +10,7 @@ from nika_core.data.multi_agent_state_schema import (
     MULTI_AGENT_STATE_MIGRATIONS,
     MULTI_AGENT_STATE_SCHEMA_VERSION,
 )
+from nika_core.data.resource_durability_schema import initialize_resource_durability_schema
 from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
 from nika_core.product_project_schema import (
     PRODUCT_PROJECT_MIGRATIONS,
@@ -38,6 +39,7 @@ class SQLiteStore:
 
     def initialize(self) -> None:
         with self.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS schema_migrations ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
@@ -60,6 +62,7 @@ class SQLiteStore:
                 )
             self._initialize_multi_agent_state_schema(conn)
             self._initialize_product_project_schema(conn)
+            initialize_resource_durability_schema(conn)
 
     @staticmethod
     def _initialize_multi_agent_state_schema(conn: sqlite3.Connection) -> None:

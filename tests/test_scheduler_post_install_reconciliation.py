@@ -217,3 +217,38 @@ def test_current_install_failure_remains_visible_without_successor(
         resolver.assert_not_called()
     finally:
         adapter.shutdown()
+
+
+
+@pytest.mark.parametrize("old_value,new_value", [(True, 1), (1, 1.0)])
+@pytest.mark.parametrize("fail_old", [False, True])
+def test_typed_payload_successor_is_reconciled_after_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old_value, new_value, fail_old: bool
+) -> None:
+    jobs, adapter, resolver = _setup(tmp_path)
+    old = replace(_job(), payload={"typed": old_value})
+    successor = replace(old, payload={"typed": new_value})
+    jobs.upsert(old)
+    original_install = adapter._install
+    installed: list[ScheduledJob] = []
+
+    def replace_once(snapshot: ScheduledJob) -> None:
+        original_install(snapshot)
+        installed.append(snapshot)
+        if len(installed) == 1:
+            jobs.upsert(successor)
+            if fail_old:
+                raise ValueError("obsolete typed snapshot failed")
+
+    monkeypatch.setattr(adapter, "_install", replace_once)
+    try:
+        result = adapter._sync_runtime_job(old.job_id)
+        assert result is not None
+        assert type(result.payload["typed"]) is type(new_value)
+        assert len(installed) == 2
+        runtime = adapter._scheduler.get_job(old.job_id)
+        assert runtime is not None
+        assert type(runtime.args[1].payload["typed"]) is type(new_value)
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()

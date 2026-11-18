@@ -12,7 +12,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.contracts import ScheduledJob, SchedulerPort, TriggerKind
-from nika_core.scheduler.store import ScheduledJobStore
+from nika_core.scheduler.store import ScheduledJobStore, _same_job_snapshot
 
 ActionHandler = Callable[[dict[str, Any]], None]
 HandlerResolver = Callable[[str], ActionHandler]
@@ -181,7 +181,7 @@ class APSchedulerAdapter(SchedulerPort):
                     return None
                 if not self._task_authority_allows(job):
                     current = self._jobs.get(job_id)
-                    if current is not None and current != job:
+                    if current is not None and not _same_job_snapshot(current, job):
                         continue
                     self._remove_runtime_job(job_id)
                     return None
@@ -189,15 +189,15 @@ class APSchedulerAdapter(SchedulerPort):
                 if current is None or not current.enabled:
                     self._remove_runtime_job(job_id)
                     return None
-                if current != job:
+                if not _same_job_snapshot(current, job):
                     continue
                 if not self._task_authority_allows(current):
                     after_authority = self._jobs.get(job_id)
-                    if after_authority is not None and after_authority != current:
+                    if after_authority is not None and not _same_job_snapshot(after_authority, current):
                         continue
                     self._remove_runtime_job(job_id)
                     return None
-                if self._jobs.get(job_id) != current:
+                if not _same_job_snapshot(self._jobs.get(job_id), current):
                     continue
                 try:
                     self._install(current)
@@ -206,7 +206,7 @@ class APSchedulerAdapter(SchedulerPort):
                     # Failure of an obsolete trigger must not strand a valid
                     # successor committed concurrently by another process.
                     # Preserve the original failure if identity is unchanged.
-                    if self._jobs.get(job_id) != current:
+                    if not _same_job_snapshot(self._jobs.get(job_id), current):
                         continue
                     raise
                 # Another process may replace or disable the durable snapshot
@@ -214,14 +214,14 @@ class APSchedulerAdapter(SchedulerPort):
                 # instead of leaving a stale runtime job until its old trigger
                 # fires (whose dispatch authority would correctly reject it).
                 after_install = self._jobs.get(job_id)
-                if after_install != current:
+                if not _same_job_snapshot(after_install, current):
                     continue
                 if not self._task_authority_allows(after_install):
-                    if self._jobs.get(job_id) != after_install:
+                    if not _same_job_snapshot(self._jobs.get(job_id), after_install):
                         continue
                     self._remove_runtime_job(job_id)
                     return None
-                if self._jobs.get(job_id) != after_install:
+                if not _same_job_snapshot(self._jobs.get(job_id), after_install):
                     continue
                 return after_install
             self._remove_runtime_job(job_id)
@@ -260,7 +260,7 @@ class APSchedulerAdapter(SchedulerPort):
             if self._started or self._starting:
                 self._sync_runtime_job(job_id)
             return
-        if installed_job is not None and job != installed_job:
+        if installed_job is not None and not _same_job_snapshot(job, installed_job):
             # A stale occurrence may be the successor's only wakeup. Avoid
             # reinstalling an already-correct interval/cron trigger, because
             # doing so can shift its next scheduled execution.
@@ -268,8 +268,10 @@ class APSchedulerAdapter(SchedulerPort):
                 runtime = self._scheduler.get_job(job_id)
                 if (
                     runtime is None
-                    or runtime.args != (job_id, job)
-                    or self._jobs.get(job_id) != job
+                    or len(runtime.args) != 2
+                    or runtime.args[0] != job_id
+                    or not _same_job_snapshot(runtime.args[1], job)
+                    or not _same_job_snapshot(self._jobs.get(job_id), job)
                 ):
                     self._sync_runtime_job(job_id)
             return
