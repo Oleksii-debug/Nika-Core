@@ -48,6 +48,30 @@ def _focus(focus_id: str, message: str) -> UIResult:
     )
 
 
+def _recover_machine_resources(resources: ResourceManager, audit: AuditLog) -> None:
+    """Reconcile only process-proven dead owners; never replay tasks or sessions."""
+    released = 0
+    blocked = 0
+    for owner in resources.stale_lease_owners():
+        try:
+            released += resources.recover_after_restart(stale_manager_id=owner)
+        except (RuntimeError, ValueError):
+            # Live, unknown or corrupt ownership is not evidence of death.
+            # Neither owner identifiers nor private probe exceptions enter logs.
+            blocked += 1
+    if released or blocked:
+        audit.append(
+            event_type="desktop.resource_recovery",
+            entity_type="resource_pool",
+            entity_id="local_machine",
+            payload={
+                "outcome": "blocked" if blocked else "recovered",
+                "released_leases": released,
+                "unverified_owners": blocked,
+            },
+        )
+
+
 def build_windows_bridge(
     config: AppConfig,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
@@ -56,12 +80,15 @@ def build_windows_bridge(
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
+    audit = AuditLog(store)
+    resources = ResourceManager(store, PsutilResourceObserver())
+    _recover_machine_resources(resources, audit)
     backend = DesktopBackend(
         queue=TaskQueue(store),
-        resources=ResourceManager(store, PsutilResourceObserver()),
+        resources=resources,
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
-        audit=AuditLog(store),
+        audit=audit,
         runtime=V01PackagedThreeAgentRuntime(
             store=store, config=config, source_settings=source_settings
         ),

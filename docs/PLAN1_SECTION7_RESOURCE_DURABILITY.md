@@ -5,7 +5,7 @@ Status: IMPLEMENTED candidate; not Section DONE, integrated, packaged, human tes
 ## Canonical reuse and compatibility
 
 This is the resource-only continuation of owner PR #357. Source baseline is exact
-Section 6 candidate #1107 `2d688ce453efa83b145b05a448d37af683449250`
+typed scheduler candidate #1107 `2d688ce453efa83b145b05a448d37af683449250`
 (tree `f1d597668e9a5989b4bb754aee5dbcfcabf334cd`). It adapts the durable
 resource request/FIFO/process-generation semantics from historical #357
 `add292566e15c5d8b6944ced7b03ea3b8ec82bf5`; it does not import that branch's
@@ -61,6 +61,14 @@ persisted PID and creation-time generation dead. Caller stale_manager_id is only
 selector. No probe, live owner, inspection failure, non-bool proof, missing/corrupt
 generation or mixed generations preserve capacity and fail closed. AccessDenied
 means alive; PID reuse is distinguished by process creation time.
+
+The packaged builder now invokes that guarded reconciliation before creating the
+desktop backend. A real child-process grant followed by os._exit reproduced a
+startup capacity leak before this composition was added. Startup recovery never
+replays tasks or sessions; live, unknown and corrupt owners keep their leases.
+Recovery audit contains bounded outcome/count fields, without private owner IDs
+or probe exception text. Fresh-start execution is verified after actual process
+loss, and live/unknown/corrupt negative startup paths remain nonexecuting.
 
 The audited production source baseline has no ResourceManager constructor:
 MediaResourceCoordinator accepts an injected manager, while the packaged builder
