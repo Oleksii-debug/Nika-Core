@@ -36,7 +36,7 @@ class SecretRef:
             for value in (self.secret_ref, self.project_id, self.provider, self.purpose)
         ):
             raise CredentialBrokerError("secret reference identity fields must not be empty")
-        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+        if type(self.generation) is not int:
             raise CredentialBrokerError("secret generation must be a positive integer")
         if self.generation < 1:
             raise CredentialBrokerError("secret generation must be a positive integer")
@@ -100,8 +100,7 @@ class CredentialLease:
         if self.expires_at <= self.issued_at:
             raise CredentialBrokerError("credential lease must expire after issuance")
         if (
-            isinstance(self.generation, bool)
-            or not isinstance(self.generation, int)
+            type(self.generation) is not int
             or self.generation < 1
         ):
             raise CredentialBrokerError("credential lease generation must be a positive integer")
@@ -244,7 +243,7 @@ class CredentialBroker:
         now: datetime | None = None,
         ttl_seconds: int = 300,
     ) -> CredentialLease:
-        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+        if type(ttl_seconds) is not int:
             raise CredentialBrokerError("credential lease ttl must be an integer")
         if ttl_seconds <= 0:
             raise CredentialBrokerError("credential lease ttl must be positive")

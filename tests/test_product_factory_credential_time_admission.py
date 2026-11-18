@@ -16,6 +16,17 @@ from nika_core.product_factory_credentials import (
 _NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 
 
+class _IntegerCarrier(int):
+    def __lt__(self, _other: object) -> bool:
+        return False
+
+    def __le__(self, _other: object) -> bool:
+        return False
+
+    def __gt__(self, _other: object) -> bool:
+        return False
+
+
 class _Store:
     def __init__(self) -> None:
         self.issued = 0
@@ -71,7 +82,9 @@ def _issue(broker: CredentialBroker, ttl_seconds: int = 5):
     )
 
 
-@pytest.mark.parametrize("ttl", [True, False, 1.0, 1.5, "5", None, float("nan")])
+@pytest.mark.parametrize(
+    "ttl", [True, False, 1.0, 1.5, "5", None, float("nan"), _IntegerCarrier(901)]
+)
 def test_invalid_ttl_rejected_before_protected_handle_or_audit(ttl: object) -> None:
     broker, store = _broker()
     initial = broker.snapshot()
@@ -265,7 +278,9 @@ def test_malformed_lease_scope_carrier_rejected_before_handle(scopes: object) ->
     assert broker.snapshot() == initial
 
 
-@pytest.mark.parametrize("generation", [True, False, 0, -1, 1.5, "1"])
+@pytest.mark.parametrize(
+    "generation", [True, False, 0, -1, 1.5, "1", _IntegerCarrier(0), _IntegerCarrier(1)]
+)
 def test_ambiguous_secret_generation_is_rejected(generation: object) -> None:
     with pytest.raises(CredentialBrokerError, match="positive integer"):
         SecretRef(
@@ -311,7 +326,9 @@ def test_serialized_revoked_state_is_normalized_before_lease_admission() -> None
     assert store.issued == 0
 
 
-@pytest.mark.parametrize("generation", [True, False, 0, -1, 1.5, "1"])
+@pytest.mark.parametrize(
+    "generation", [True, False, 0, -1, 1.5, "1", _IntegerCarrier(0), _IntegerCarrier(1)]
+)
 def test_ambiguous_direct_lease_generation_is_rejected(generation: object) -> None:
     with pytest.raises(CredentialBrokerError, match="lease generation must be"):
         CredentialLease(
