@@ -15,25 +15,12 @@ class ChunkPolicy:
             raise ValueError("overlap_chars must be between 0 and max_chars - 1")
 
 
-@dataclass(frozen=True, slots=True)
-class TextChunk:
-    text: str
-    start_char: int
-    end_char: int
-
-    def __post_init__(self) -> None:
-        if self.start_char < 0 or self.end_char < self.start_char:
-            raise ValueError("invalid chunk boundaries")
-        if self.end_char - self.start_char != len(self.text):
-            raise ValueError("chunk boundaries must describe the exact chunk text")
-
-
-def chunk_text_spans(text: str, *, policy: ChunkPolicy | None = None) -> tuple[TextChunk, ...]:
+def chunk_text(text: str, *, policy: ChunkPolicy | None = None) -> tuple[str, ...]:
     active = policy or ChunkPolicy()
     if not text:
         return ()
 
-    chunks: list[TextChunk] = []
+    chunks: list[str] = []
     start = 0
     length = len(text)
     while start < length:
@@ -46,14 +33,9 @@ def chunk_text_spans(text: str, *, policy: ChunkPolicy | None = None) -> tuple[T
             if boundary > start:
                 end = boundary
 
-        raw_chunk = text[start:end]
-        leading = len(raw_chunk) - len(raw_chunk.lstrip())
-        trailing = len(raw_chunk) - len(raw_chunk.rstrip())
-        chunk_start = start + leading
-        chunk_end = end - trailing
-        if chunk_start < chunk_end:
-            chunk = text[chunk_start:chunk_end]
-            chunks.append(TextChunk(text=chunk, start_char=chunk_start, end_char=chunk_end))
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
         if end >= length:
             break
 
@@ -63,7 +45,3 @@ def chunk_text_spans(text: str, *, policy: ChunkPolicy | None = None) -> tuple[T
         start = next_start
 
     return tuple(chunks)
-
-
-def chunk_text(text: str, *, policy: ChunkPolicy | None = None) -> tuple[str, ...]:
-    return tuple(chunk.text for chunk in chunk_text_spans(text, policy=policy))

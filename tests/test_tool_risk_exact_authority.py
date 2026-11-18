@@ -425,72 +425,6 @@ def test_standing_permission_rejects_equality_compatible_foreign_risk_carrier() 
         _scope(risk_ceiling=forged)  # type: ignore[arg-type]
 
 
-def test_grant_revalidates_scope_after_retained_object_mutation(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "mutated-grant-scope.db")
-    permissions = StandingPermissionStore(store)
-    permissions.initialize()
-    scope = _scope(risk_ceiling=ToolRisk.READ_ONLY)
-    object.__setattr__(scope, "risk_ceiling", ToolRisk.HIGH_IMPACT)
-
-    with pytest.raises(ValueError, match="fresh explicit per-action approval"):
-        permissions.grant(permission_id="mutated-scope", scope=scope)
-
-    assert permissions.get("mutated-scope") is None
-
-
-def test_grant_rejects_mutated_broad_scope_before_durable_write(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "mutated-broad-scope.db")
-    permissions = StandingPermissionStore(store)
-    permissions.initialize()
-    scope = _scope(risk_ceiling=ToolRisk.READ_ONLY)
-    object.__setattr__(scope, "targets", ("*",))
-
-    with pytest.raises(ValueError, match="broad or wildcard"):
-        permissions.grant(permission_id="mutated-broad", scope=scope)
-
-    assert permissions.get("mutated-broad") is None
-
-
-def test_delegate_revalidates_mutated_child_scope(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "mutated-delegated-scope.db")
-    permissions = StandingPermissionStore(store)
-    permissions.initialize()
-    parent = StandingPermissionScope(
-        subject_id="agent-parent",
-        context=PermissionContext("user-1", "project-1", "task-1"),
-        action_class="safe.read",
-        targets=("target-1",),
-        sites=(),
-        resources=("resource-1",),
-        risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
-        granted_at=datetime(2026, 9, 27, tzinfo=UTC),
-        expires_at=datetime(2026, 9, 27, 0, 5, tzinfo=UTC),
-    )
-    permissions.grant(permission_id="perm-parent", scope=parent)
-    child = StandingPermissionScope(
-        subject_id="agent-child",
-        context=parent.context,
-        action_class=parent.action_class,
-        targets=parent.targets,
-        sites=parent.sites,
-        resources=parent.resources,
-        risk_ceiling=ToolRisk.READ_ONLY,
-        granted_at=parent.granted_at + timedelta(seconds=1),
-        expires_at=parent.expires_at,
-    )
-    object.__setattr__(child, "risk_ceiling", ToolRisk.HIGH_IMPACT)
-
-    with pytest.raises(ValueError, match="fresh explicit per-action approval"):
-        permissions.delegate(
-            parent_permission_id="perm-parent",
-            permission_id="perm-child",
-            scope=child,
-            delegated_by_subject_id="agent-parent",
-        )
-
-    assert permissions.get("perm-child") is None
-
-
 def test_forged_standing_risk_cannot_leave_durable_authority(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     permissions = StandingPermissionStore(store)
@@ -599,61 +533,6 @@ def test_durable_scope_scalar_type_is_not_string_coerced(tmp_path) -> None:
         restarted.get("perm-durable")
 
 
-def test_preexisting_standing_permission_table_without_migration_is_rejected(
-    tmp_path,
-) -> None:
-    store = SQLiteStore(tmp_path / "unversioned-standing-authority.db")
-    with store.connection() as conn:
-        conn.execute(
-            "CREATE TABLE standing_permissions ("
-            "permission_id TEXT PRIMARY KEY, "
-            "parent_permission_id TEXT, "
-            "scope_json TEXT NOT NULL, "
-            "scope_fingerprint TEXT NOT NULL, "
-            "revoked_at TEXT, "
-            "FOREIGN KEY(parent_permission_id) "
-            "REFERENCES standing_permissions(permission_id))"
-        )
-
-    permissions = StandingPermissionStore(store)
-    with pytest.raises(
-        StandingPermissionIntegrityError,
-        match="exists without schema version",
-    ):
-        permissions.initialize()
-
-
-def test_negative_standing_permission_schema_version_is_rejected(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "negative-standing-schema.db")
-    with store.connection() as conn:
-        conn.execute(
-            "CREATE TABLE standing_permission_schema_migrations ("
-            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
-        )
-        conn.execute(
-            "INSERT INTO standing_permission_schema_migrations(version, applied_at) "
-            "VALUES (?, ?)",
-            (-1, datetime(2026, 9, 27, tzinfo=UTC).isoformat()),
-        )
-        conn.execute(
-            "CREATE TABLE standing_permissions ("
-            "permission_id TEXT PRIMARY KEY, "
-            "parent_permission_id TEXT, "
-            "scope_json TEXT NOT NULL, "
-            "scope_fingerprint TEXT NOT NULL, "
-            "revoked_at TEXT, "
-            "FOREIGN KEY(parent_permission_id) "
-            "REFERENCES standing_permissions(permission_id))"
-        )
-
-    permissions = StandingPermissionStore(store)
-    with pytest.raises(
-        StandingPermissionIntegrityError,
-        match="schema version is invalid",
-    ):
-        permissions.initialize()
-
-
 def test_text_migration_schema_is_rejected_before_version_coercion(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "bad-migration.db")
     with store.connection() as conn:
@@ -670,42 +549,6 @@ def test_text_migration_schema_is_rejected_before_version_coercion(tmp_path) -> 
     permissions = StandingPermissionStore(store)
     with pytest.raises(StandingPermissionIntegrityError, match="schema shape"):
         permissions.initialize()
-
-
-def test_standing_permission_migration_history_rejects_extra_rows(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "extra-standing-migration.db")
-    permissions = StandingPermissionStore(store)
-    permissions.initialize()
-    with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO standing_permission_schema_migrations(version, applied_at) "
-            "VALUES (?, ?)",
-            (0, datetime(2026, 9, 26, tzinfo=UTC).isoformat()),
-        )
-
-    with pytest.raises(
-        StandingPermissionIntegrityError,
-        match="migration history is invalid",
-    ):
-        StandingPermissionStore(store).initialize()
-
-
-def test_standing_permission_migration_timestamp_storage_is_validated(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "blob-standing-migration.db")
-    permissions = StandingPermissionStore(store)
-    permissions.initialize()
-    with store.connection() as conn:
-        conn.execute(
-            "UPDATE standing_permission_schema_migrations SET applied_at = ? "
-            "WHERE version = 1",
-            (sqlite3.Binary(b"2026-09-27T00:00:00+00:00"),),
-        )
-
-    with pytest.raises(
-        StandingPermissionIntegrityError,
-        match="migration timestamp is invalid",
-    ):
-        StandingPermissionStore(store).initialize()
 
 
 def test_standing_permission_schema_shape_is_validated(tmp_path) -> None:

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
-import unicodedata
 from dataclasses import dataclass
 
 from nika_core.intelligence.contracts import (
@@ -14,12 +12,10 @@ from nika_core.intelligence.contracts import (
     DeterministicGoal,
     DeterministicPlan,
     DeterministicPlanner,
-    PlanStep,
     DeterministicPlanningError,
     WorldState,
     WorldStateObserver,
 )
-from nika_core.intelligence.plan_provenance import seal_plan_provenance
 from nika_core.tools import ToolCall, ToolExecutor, ToolRisk, ToolSpec
 
 
@@ -56,82 +52,6 @@ class _StateObservationFailure:
     message: str
 
 
-def _require_run_identity(value: object, *, name: str) -> None:
-    """Reject ambiguous or non-UTF-8 task/call identities before durable effects."""
-    if type(value) is not str or not value or len(value) > 512 or value != value.strip():
-        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
-    if unicodedata.normalize("NFC", value) != value:
-        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
-    if any(
-        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
-        for character in value
-    ):
-        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
-    try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise ValueError(f"{name} must be canonical bounded UTF-8 text") from exc
-    if len(encoded) > 512:
-        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
-
-
-def _positive_finite_seconds(value: object, *, name: str) -> float:
-    """Normalize time budgets before scheduling any work."""
-    if type(value) not in (int, float):
-        raise ValueError(f"{name} must be a positive finite number")
-    try:
-        seconds = float(value)
-    except OverflowError as exc:
-        raise ValueError(f"{name} must be a positive finite number") from exc
-    if not math.isfinite(seconds):
-        raise ValueError(f"{name} must be a positive finite number")
-    if seconds <= 0:
-        raise ValueError(f"{name} must be greater than zero")
-    return seconds
-
-
-def _snapshot_fact_set(value: object, *, name: str) -> frozenset[str]:
-    if type(value) is not frozenset:
-        raise TypeError(f"{name} must be an exact frozenset")
-    if any(type(item) is not str for item in value):
-        raise TypeError(f"{name} must contain exact text values")
-    return frozenset(value)
-
-
-def _snapshot_world_state(value: object, *, name: str) -> WorldState:
-    if type(value) is not WorldState:
-        raise TypeError(f"{name} must use the exact WorldState carrier")
-    facts = _snapshot_fact_set(value.facts, name=f"{name}.facts")
-    return WorldState(facts=facts)
-
-
-def _snapshot_goal(value: object) -> DeterministicGoal:
-    if type(value) is not DeterministicGoal:
-        raise TypeError("goal must use the exact DeterministicGoal carrier")
-    required = _snapshot_fact_set(value.required, name="goal.required")
-    forbidden = _snapshot_fact_set(value.forbidden, name="goal.forbidden")
-    return DeterministicGoal(required=required, forbidden=forbidden)
-
-
-def _snapshot_plan(value: object) -> DeterministicPlan:
-    if type(value) is not DeterministicPlan:
-        raise TypeError("planner must return the exact DeterministicPlan carrier")
-    if type(value.steps) is not tuple:
-        raise TypeError("deterministic plan steps must be an exact tuple")
-    steps: list[PlanStep] = []
-    for step in value.steps:
-        if type(step) is not PlanStep:
-            raise TypeError("deterministic plan step must use the exact PlanStep carrier")
-        action_id = step.action_id
-        tool_id = step.tool_id
-        if type(action_id) is not str or not action_id.strip():
-            raise TypeError("deterministic plan action_id must be exact non-empty text")
-        if tool_id is not None and type(tool_id) is not str:
-            raise TypeError("deterministic plan tool_id must be exact text or None")
-        steps.append(PlanStep(action_id=action_id, tool_id=tool_id))
-    return DeterministicPlan(steps=tuple(steps))
-
-
 class DeterministicBrain:
     """Plan, validate, re-plan and execute explicit workflows without a language model."""
 
@@ -162,42 +82,22 @@ class DeterministicBrain:
         planning_timeout_seconds: float = 30.0,
         observation_timeout_seconds: float = 10.0,
     ) -> DeterministicBrainResult:
-        _require_run_identity(run_id, name="run_id")
-        if task_id is not None:
-            _require_run_identity(task_id, name="task_id")
-        if type(max_steps) is not int or max_steps <= 0:
-            raise ValueError("max_steps must be a positive integer")
-        if type(max_replans) is not int or max_replans < 0:
-            raise ValueError("max_replans must be a non-negative integer")
-        planning_timeout_seconds = _positive_finite_seconds(
-            planning_timeout_seconds, name="planning_timeout_seconds"
-        )
-        observation_timeout_seconds = _positive_finite_seconds(
-            observation_timeout_seconds, name="observation_timeout_seconds"
-        )
-        if self._effect_journal is not None:
-            if task_id is None:
-                raise ValueError("task_id is required when effect_journal is configured")
+        if not run_id.strip():
+            raise ValueError("run_id must not be empty")
+        if max_steps <= 0:
+            raise ValueError("max_steps must be greater than zero")
+        if max_replans < 0:
+            raise ValueError("max_replans must be non-negative")
+        if planning_timeout_seconds <= 0:
+            raise ValueError("planning_timeout_seconds must be greater than zero")
+        if observation_timeout_seconds <= 0:
+            raise ValueError("observation_timeout_seconds must be greater than zero")
+        if self._effect_journal is not None and (task_id is None or not task_id.strip()):
+            raise ValueError("task_id is required when effect_journal is configured")
 
         # Kept for source compatibility only. A planner-selected action ID is not approval
         # evidence and must never turn into ToolCall.approved=True.
         del approved_action_ids
-
-        state = _snapshot_world_state(state, name="state")
-        goal = _snapshot_goal(goal)
-        if type(actions) is not tuple:
-            raise TypeError("actions must be an exact tuple")
-        actions = tuple(DeterministicAction.detached_copy(action) for action in actions)
-        for index, action in enumerate(actions):
-            _require_run_identity(
-                action.action_id,
-                name=f"actions[{index}].action_id",
-            )
-        if type(previously_completed_action_ids) is not tuple:
-            raise TypeError("previously_completed_action_ids must be an exact tuple")
-        if any(type(action_id) is not str for action_id in previously_completed_action_ids):
-            raise TypeError("previously_completed_action_ids must contain exact text values")
-        previously_completed_action_ids = tuple(previously_completed_action_ids)
 
         action_map = {action.action_id: action for action in actions}
         if len(action_map) != len(actions):
@@ -220,7 +120,7 @@ class DeterministicBrain:
         completed_set = set(previously_completed_action_ids)
         history: list[DeterministicPlan] = []
         replans = 0
-        executed_steps = len(previously_completed_action_ids)
+        executed_steps = 0
 
         journal = self._effect_journal
         if journal is not None:
@@ -230,13 +130,7 @@ class DeterministicBrain:
                 unresolved = journal.unresolved_operation_keys(task_id=task_id)
             except Exception as exc:  # noqa: BLE001 - fail closed before planning or effects.
                 return self._failure(
-                    plan=self._seal_plan(
-                        DeterministicPlan(steps=()),
-                        state=current_state,
-                        goal=goal,
-                        actions=actions,
-                        planner_invoked=False,
-                    ),
+                    plan=DeterministicPlan(steps=()),
                     completed=completed,
                     state=current_state,
                     history=history,
@@ -249,13 +143,7 @@ class DeterministicBrain:
                 )
             if unresolved:
                 return self._failure(
-                    plan=self._seal_plan(
-                        DeterministicPlan(steps=()),
-                        state=current_state,
-                        goal=goal,
-                        actions=actions,
-                        planner_invoked=False,
-                    ),
+                    plan=DeterministicPlan(steps=()),
                     completed=completed,
                     state=current_state,
                     history=history,
@@ -273,31 +161,8 @@ class DeterministicBrain:
         while True:
             remaining_steps = max_steps - executed_steps
             if remaining_steps <= 0:
-                plan = (
-                    history[-1]
-                    if history
-                    else self._seal_plan(
-                        DeterministicPlan(steps=()),
-                        state=current_state,
-                        goal=goal,
-                        actions=actions,
-                        planner_invoked=False,
-                    )
-                )
-                if (
-                    remaining_steps == 0
-                    and previously_completed_action_ids
-                    and self._goal_satisfied(current_state, goal)
-                ):
-                    return DeterministicBrainResult(
-                        plan=plan,
-                        completed_actions=tuple(completed),
-                        final_state=current_state,
-                        planning_history=tuple(history),
-                        replans=replans,
-                    )
                 return self._failure(
-                    plan=plan,
+                    plan=history[-1] if history else DeterministicPlan(steps=()),
                     completed=completed,
                     state=current_state,
                     history=history,
@@ -309,28 +174,11 @@ class DeterministicBrain:
             available_actions = tuple(
                 action for action in actions if action.action_id not in completed_set
             )
-            # Planner adapters are not execution authority. Give them detached context so
-            # re-entrant or hostile mutation cannot rewrite the state/rules used afterward.
-            planner_state = _snapshot_world_state(current_state, name="planner state")
-            planner_goal = _snapshot_goal(goal)
-            planner_actions = tuple(
-                action.detached_copy() for action in available_actions
-            )
-            plan = _snapshot_plan(
-                await self._plan(
-                    state=planner_state,
-                    goal=planner_goal,
-                    actions=planner_actions,
-                    planning_deadline=planning_deadline,
-                )
-            )
-            # Treat planner-provided provenance as untrusted input. Recompute it from Nika-owned
-            # state/goal/rule contracts and the exact returned steps before validation/execution.
-            plan = self._seal_plan(
-                plan,
+            plan = await self._plan(
                 state=current_state,
                 goal=goal,
-                actions=actions,
+                actions=available_actions,
+                planning_deadline=planning_deadline,
             )
             history.append(plan)
 
@@ -509,24 +357,6 @@ class DeterministicBrain:
                 message="plan completed without satisfying the goal",
             )
 
-    def _seal_plan(
-        self,
-        plan: DeterministicPlan,
-        *,
-        state: WorldState,
-        goal: DeterministicGoal,
-        actions: tuple[DeterministicAction, ...],
-        planner_invoked: bool = True,
-    ) -> DeterministicPlan:
-        return seal_plan_provenance(
-            plan,
-            state=state,
-            goal=goal,
-            actions=actions,
-            planner=self._planner,
-            planner_invoked=planner_invoked,
-        )
-
     async def _execute_tool_action(
         self,
         *,
@@ -564,7 +394,7 @@ class DeterministicBrain:
         try:
             reservation = journal.reserve(
                 task_id=task_id,
-                action=action.detached_copy(),
+                action=action,
             )
         except DeterministicEffectConflictError as exc:
             return _ToolExecutionFailure(
@@ -606,11 +436,6 @@ class DeterministicBrain:
             if result.error in {"approval required", "unknown tool"}:
                 try:
                     journal.release_pending(reservation.operation_key)
-                except DeterministicEffectConflictError as exc:
-                    return _ToolExecutionFailure(
-                        DeterministicErrorCode.SIDE_EFFECT_IDENTITY_CONFLICT,
-                        str(exc),
-                    )
                 except Exception as exc:  # noqa: BLE001 - do not hide a broken durable ledger.
                     return _ToolExecutionFailure(
                         DeterministicErrorCode.SIDE_EFFECT_RECORD_FAILED,
@@ -623,18 +448,10 @@ class DeterministicBrain:
 
             try:
                 journal.mark_uncertain(reservation.operation_key)
-            except DeterministicEffectConflictError as exc:
-                return _ToolExecutionFailure(
-                    DeterministicErrorCode.SIDE_EFFECT_IDENTITY_CONFLICT,
-                    str(exc),
-                )
             except Exception as exc:  # noqa: BLE001 - PENDING still blocks replay fail-closed.
                 return _ToolExecutionFailure(
                     DeterministicErrorCode.SIDE_EFFECT_RECORD_FAILED,
-                    (
-                        "tool failed and durable uncertainty could not be recorded: "
-                        f"{type(exc).__name__}"
-                    ),
+                    f"tool failed and durable uncertainty could not be recorded: {type(exc).__name__}",
                 )
             return _ToolExecutionFailure(
                 DeterministicErrorCode.SIDE_EFFECT_RECONCILIATION_REQUIRED,
@@ -643,11 +460,6 @@ class DeterministicBrain:
 
         try:
             journal.complete(reservation.operation_key)
-        except DeterministicEffectConflictError as exc:
-            return _ToolExecutionFailure(
-                DeterministicErrorCode.SIDE_EFFECT_IDENTITY_CONFLICT,
-                str(exc),
-            )
         except Exception as exc:  # noqa: BLE001 - effect happened; reservation remains fail-closed.
             return _ToolExecutionFailure(
                 DeterministicErrorCode.SIDE_EFFECT_RECORD_FAILED,
@@ -744,14 +556,12 @@ class DeterministicBrain:
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
                 f"world-state observation failed: {type(exc).__name__}",
             )
-        try:
-            observed_state = _snapshot_world_state(observed, name="observed state")
-        except (TypeError, ValueError):
+        if not isinstance(observed, WorldState):
             return None, _StateObservationFailure(
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
-                "world-state observer returned an invalid state carrier",
+                "world-state observer returned an invalid state type",
             )
-        return observed_state, None
+        return observed, None
 
     async def _plan(
         self,

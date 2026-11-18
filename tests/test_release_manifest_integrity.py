@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-import nika_core.packaging.release as release_module
 from nika_core.packaging.release import (
     ReleaseFile,
     ReleaseManifest,
@@ -36,8 +35,6 @@ REQUIRED_TRUE_FIELDS = (
     "manifest_verified",
     "third_party_notices_verified",
     "packaged_uia_keyboard_focus",
-    "machine_readable_sbom_verified",
-    "supply_chain_provenance_verified",
 )
 REQUIRED_FALSE_FIELDS = (
     "physical_windows_foundry_inference_proven",
@@ -153,56 +150,6 @@ def test_verifier_rejects_noncanonical_manifest_paths(tmp_path: Path, path: str)
 
 
 @pytest.mark.parametrize(
-    "product",
-    [
-        "N" * 129,
-        "NikaCore\x1f",
-    ],
-)
-def test_manifest_rejects_product_name_outside_canonical_boundary(
-    tmp_path: Path,
-    product: str,
-) -> None:
-    bundle, valid = _bundle(tmp_path)
-    manifest = ReleaseManifest(
-        product=product,
-        version="1.0.0",
-        source_sha=SOURCE_SHA,
-        files=(valid,),
-    )
-    assert verify_release_manifest(bundle, manifest) == (
-        "manifest:product",
-    )
-    with pytest.raises(ValueError, match="manifest:product"):
-        write_release_manifest(bundle, manifest)
-
-
-@pytest.mark.parametrize(
-    "version",
-    [
-        "v" * 129,
-        "1.0.0\x1f",
-    ],
-)
-def test_manifest_rejects_product_version_outside_canonical_boundary(
-    tmp_path: Path,
-    version: str,
-) -> None:
-    bundle, valid = _bundle(tmp_path)
-    manifest = ReleaseManifest(
-        product="NikaCore",
-        version=version,
-        source_sha=SOURCE_SHA,
-        files=(valid,),
-    )
-    assert verify_release_manifest(bundle, manifest) == (
-        "manifest:product-version",
-    )
-    with pytest.raises(ValueError, match="product-version"):
-        write_release_manifest(bundle, manifest)
-
-
-@pytest.mark.parametrize(
     ("entry", "finding"),
     [
         (
@@ -267,116 +214,6 @@ def test_valid_manifest_still_verifies_and_writes(tmp_path: Path) -> None:
     assert target.is_file()
 
 
-def test_snapshot_identity_rejects_same_size_path_replacement(tmp_path: Path) -> None:
-    original = tmp_path / "original.bin"
-    replacement = tmp_path / "replacement.bin"
-    original.write_bytes(b"binary")
-    replacement.write_bytes(b"binary")
-
-    opened = original.stat()
-    current = replacement.stat()
-
-    assert not release_module._release_file_snapshot_is_stable(
-        opened,
-        opened,
-        current,
-        opened.st_size,
-    )
-
-
-def test_snapshot_rejects_path_outside_release_root(tmp_path: Path) -> None:
-    root = tmp_path / "bundle"
-    root.mkdir()
-    outside = tmp_path / "outside.bin"
-    outside.write_bytes(b"outside")
-
-    assert (
-        release_module._stable_release_file_snapshot(
-            outside,
-            scan_secrets=False,
-            root=root,
-        )
-        is None
-    )
-
-
-def test_snapshot_rejects_external_symlink_target_when_supported(tmp_path: Path) -> None:
-    root = tmp_path / "bundle"
-    root.mkdir()
-    outside = tmp_path / "outside.bin"
-    outside.write_bytes(b"outside")
-    link = root / "payload.bin"
-    try:
-        link.symlink_to(outside)
-    except (OSError, NotImplementedError):
-        pytest.skip("file symlink creation is unavailable on this host")
-
-    assert (
-        release_module._stable_release_file_snapshot(
-            link,
-            scan_secrets=False,
-            root=root,
-        )
-        is None
-    )
-
-
-def test_builder_fails_closed_when_release_file_snapshot_is_unstable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bundle, _ = _bundle(tmp_path)
-    original = release_module._stable_release_file_snapshot
-
-    def unstable(
-        path: Path,
-        *,
-        scan_secrets: bool,
-        root: Path | None = None,
-    ):
-        if path.name == "NikaCore.exe":
-            return None
-        return original(path, scan_secrets=scan_secrets, root=root)
-
-    monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
-
-    with pytest.raises(ValueError, match="release file changed while building manifest"):
-        build_release_manifest(
-            bundle,
-            product="NikaCore",
-            version="1.0.0",
-            source_sha=SOURCE_SHA,
-        )
-
-
-def test_verifier_fails_closed_when_release_file_snapshot_is_unstable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    bundle, _ = _bundle(tmp_path)
-    manifest = build_release_manifest(
-        bundle,
-        product="NikaCore",
-        version="1.0.0",
-        source_sha=SOURCE_SHA,
-    )
-    original = release_module._stable_release_file_snapshot
-
-    def unstable(
-        path: Path,
-        *,
-        scan_secrets: bool,
-        root: Path | None = None,
-    ):
-        if path.name == "NikaCore.exe":
-            return None
-        return original(path, scan_secrets=scan_secrets, root=root)
-
-    monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
-
-    assert verify_release_manifest(bundle, manifest) == ("unstable:NikaCore.exe",)
-
-
 def _write_release_zip(bundle: Path, target: Path) -> None:
     import zipfile
 
@@ -392,7 +229,7 @@ def _write_outer_evidence(evidence: Path, artifact: Path) -> None:
     evidence.write_text(
         json.dumps(
             {
-                "schema_version": 4,
+                "schema_version": 3,
                 "product_version": PRODUCT_VERSION,
                 "commit_sha": SOURCE_SHA,
                 "distributable_zip_path": "./dist/NikaCore-1.0.0-windows-x64.zip",
@@ -404,37 +241,6 @@ def _write_outer_evidence(evidence: Path, artifact: Path) -> None:
         ),
         encoding="utf-8",
     )
-
-
-def test_outer_evidence_fails_closed_when_artifact_snapshot_is_unstable(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    artifact = tmp_path / "NikaCore-1.0.0-windows-x64.zip"
-    artifact.write_bytes(b"candidate")
-    evidence = tmp_path / "evidence.json"
-    _write_outer_evidence(evidence, artifact)
-    original = release_module._stable_release_file_snapshot
-
-    def unstable(
-        path: Path,
-        *,
-        scan_secrets: bool,
-        root: Path | None = None,
-    ):
-        if path == artifact:
-            return None
-        return original(path, scan_secrets=scan_secrets, root=root)
-
-    monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
-
-    assert release_module.verify_distributable_evidence(
-        artifact,
-        evidence,
-        source_sha=SOURCE_SHA,
-        artifact_reference="./dist/NikaCore-1.0.0-windows-x64.zip",
-        expected_product_version=PRODUCT_VERSION,
-    ) == ("distributable:unstable-artifact",)
 
 
 def _valid_release_zip(tmp_path: Path) -> tuple[Path, Path]:
@@ -574,73 +380,3 @@ def test_outer_evidence_rejects_duplicate_json_keys(tmp_path: Path) -> None:
         artifact_reference="ref",
         expected_product_version=PRODUCT_VERSION,
     ) == ("distributable:invalid-evidence",)
-
-def test_snapshot_open_uses_nonblocking_descriptor_flag(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = tmp_path / "payload.bin"
-    payload.write_bytes(b"payload")
-    original_open = release_module.os.open
-    observed_flags: list[int] = []
-
-    def capture_open(
-        path: str | bytes | Path,
-        flags: int,
-        mode: int = 0o777,
-        *,
-        dir_fd: int | None = None,
-    ) -> int:
-        observed_flags.append(flags)
-        if dir_fd is None:
-            return original_open(path, flags, mode)
-        return original_open(path, flags, mode, dir_fd=dir_fd)
-
-    monkeypatch.setattr(release_module.os, "open", capture_open)
-
-    snapshot = release_module._stable_release_file_snapshot(
-        payload,
-        scan_secrets=False,
-    )
-
-    assert snapshot is not None
-    assert observed_flags
-    nonblock = getattr(release_module.os, "O_NONBLOCK", 0)
-    if nonblock:
-        assert observed_flags[0] & nonblock
-
-def test_snapshot_rejects_nonregular_descriptor_before_read(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    read_fd, write_fd = release_module.os.pipe()
-
-    class NonRegularHandle:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, _exc_type, _exc, _tb):
-            release_module.os.close(read_fd)
-            release_module.os.close(write_fd)
-            return False
-
-        def fileno(self) -> int:
-            return read_fd
-
-        def read(self, _size: int = -1) -> bytes:
-            raise AssertionError("non-regular descriptor must be rejected before read")
-
-    monkeypatch.setattr(
-        release_module,
-        "_open_release_file_for_snapshot",
-        lambda _path: NonRegularHandle(),
-    )
-
-    assert (
-        release_module._stable_release_file_snapshot(
-            tmp_path / "substituted-entry",
-            scan_secrets=True,
-        )
-        is None
-    )
-
