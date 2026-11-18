@@ -6,6 +6,10 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from nika_core.data.multi_agent_state_schema import (
+    MULTI_AGENT_STATE_MIGRATIONS,
+    MULTI_AGENT_STATE_SCHEMA_VERSION,
+)
 from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
 from nika_core.product_project_schema import (
     PRODUCT_PROJECT_MIGRATIONS,
@@ -54,7 +58,44 @@ class SQLiteStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (version, datetime.now(UTC).isoformat()),
                 )
+            self._initialize_multi_agent_state_schema(conn)
             self._initialize_product_project_schema(conn)
+
+    @staticmethod
+    def _initialize_multi_agent_state_schema(conn: sqlite3.Connection) -> None:
+        """Apply the ordered V0.1 member-state extension through the canonical store."""
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS multi_agent_state_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT MAX(version) AS version FROM multi_agent_state_schema_migrations"
+        ).fetchone()
+        current = int(row["version"] or 0)
+        if current > MULTI_AGENT_STATE_SCHEMA_VERSION:
+            raise RuntimeError(
+                "multi-agent state database schema "
+                f"{current} is newer than supported schema {MULTI_AGENT_STATE_SCHEMA_VERSION}"
+            )
+        legacy_members_exist = (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'multi_agent_members'"
+            ).fetchone()
+            is not None
+        )
+        if not legacy_members_exist:
+            return
+        for version in range(current + 1, MULTI_AGENT_STATE_SCHEMA_VERSION + 1):
+            statements = MULTI_AGENT_STATE_MIGRATIONS.get(version)
+            if statements is None:
+                raise RuntimeError(f"missing multi-agent state migration {version}")
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO multi_agent_state_schema_migrations(version, applied_at) "
+                "VALUES (?, ?)",
+                (version, datetime.now(UTC).isoformat()),
+            )
 
     @staticmethod
     def _initialize_product_project_schema(conn: sqlite3.Connection) -> None:

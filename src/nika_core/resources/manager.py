@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.resources.contracts import ResourceBudget, ResourceObserverPort
+from nika_core.resources.contracts import (
+    ResourceBudget,
+    ResourceCapacityStatus,
+    ResourceObserverPort,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +63,43 @@ class ResourceManager:
             max_concurrent=int(row["max_concurrent"]),
             max_cpu_percent=row["max_cpu_percent"],
             max_memory_percent=row["max_memory_percent"],
+        )
+
+    def status(self, *, scope: str, owner_id: str) -> ResourceCapacityStatus:
+        """Return deterministic read-only capacity telemetry without changing admission state."""
+        budget = self.get_budget(scope=scope, owner_id=owner_id)
+        snapshot = self._observer.snapshot()
+        active_count = self.active_count(scope=scope, owner_id=owner_id)
+        queued_count = len(self.queued(scope=scope, owner_id=owner_id))
+        pressure_reasons: list[str] = []
+
+        if active_count >= budget.max_concurrent:
+            pressure_reasons.append("concurrency_limit")
+        if budget.max_cpu_percent is not None and snapshot.cpu_percent > budget.max_cpu_percent:
+            pressure_reasons.append("cpu_limit")
+        if (
+            budget.max_memory_percent is not None
+            and snapshot.memory_percent > budget.max_memory_percent
+        ):
+            pressure_reasons.append("memory_limit")
+
+        return ResourceCapacityStatus(
+            budget=budget,
+            snapshot=snapshot,
+            active_count=active_count,
+            queued_count=queued_count,
+            concurrency_headroom=max(0, budget.max_concurrent - active_count),
+            cpu_headroom_percent=(
+                None
+                if budget.max_cpu_percent is None
+                else budget.max_cpu_percent - snapshot.cpu_percent
+            ),
+            memory_headroom_percent=(
+                None
+                if budget.max_memory_percent is None
+                else budget.max_memory_percent - snapshot.memory_percent
+            ),
+            pressure_reasons=tuple(pressure_reasons),
         )
 
     def request(self, *, scope: str, owner_id: str, request_id: str) -> ResourceDecision:

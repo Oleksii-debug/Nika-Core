@@ -3,7 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from nika_core.security import ActionIntent, ExecutionBudget, SandboxPolicy, SecurityPolicy
+from nika_core.security import (
+    ActionIntent,
+    ApprovalVerifier,
+    ExecutionBudget,
+    SandboxPolicy,
+    SecurityPolicy,
+)
 from nika_core.tools import ToolRisk
 from nika_core.toolsmith import AllowedPathPolicy, CodingJob, IsolationClass, NetworkMode
 
@@ -53,6 +59,8 @@ class ToolsmithSecurityEnvelope:
     """M9/M10 adapter around the canonical durable Toolsmith CodingJob contract."""
 
     job_id: str
+    task_id: str
+    project_id: str
     workspace_root: Path
     isolation_class: IsolationClass
     allowed_paths: AllowedPathPolicy
@@ -116,6 +124,10 @@ class ToolsmithSecurityEnvelope:
                 approval_required
                 or risk in {ToolRisk.EXTERNAL_SIDE_EFFECT, ToolRisk.HIGH_IMPACT}
             ),
+            task_id=self.task_id,
+            project_id=self.project_id,
+            effect_id=f"{self.job_id}:{action_id}",
+            scope=(("job_id", self.job_id), ("permission", permission)),
         )
 
     def _binding(self, permission: str) -> CapabilityToolBinding:
@@ -131,6 +143,7 @@ def build_toolsmith_security_envelope(
     bindings: tuple[CapabilityToolBinding, ...],
     budget: DownstreamBudgetLimits,
     require_untrusted_execution: bool = False,
+    approval_verifier: ApprovalVerifier | None = None,
 ) -> ToolsmithSecurityEnvelope:
     """Adapt a canonical Toolsmith job into downstream M10 guardrails.
 
@@ -184,9 +197,12 @@ def build_toolsmith_security_envelope(
             allowed_executables=job.process_policy.allowed_executables,
         ),
         budget=execution_budget,
+        approval_verifier=approval_verifier,
     )
     return ToolsmithSecurityEnvelope(
         job_id=job.job_id,
+        task_id=job.task_id,
+        project_id=job.repository.repository_id,
         workspace_root=policy.sandbox.workspace_root,
         isolation_class=job.lease.isolation_class,
         allowed_paths=job.allowed_paths,

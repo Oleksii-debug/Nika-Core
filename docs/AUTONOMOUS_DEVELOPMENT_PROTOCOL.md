@@ -1,22 +1,14 @@
-# Autonomous hourly development protocol
+# Autonomous development cycle
 
-Repository: Oleksii-debug/Nika-Core
+Repository: Oleksii-debug/Nika-Core. Policy: DELIVERY-2026-09-09.
 
-## Read first every cycle
-AGENTS.md; docs/MASTER_SPEC.md; docs/ROADMAP.md; docs/THIRD_PARTY_ADOPTION.md; docs/ACCEPTANCE_GATES.md; state/PROJECT_STATUS.md; LIVE DASHBOARD and latest comments; open PRs and exact CI.
+1. Read AGENTS.md, docs/AUTONOMOUS_WORKER_ORCHESTRATION.md, relevant #553 records and changed specifications for the assignment. Refresh actual PR/head/base/checks; avoid rereading the historical corpus hourly.
+2. Verify worker/run identity, real execution capability and exclusive assigned source ownership. Reuse existing canonical PRs and maintained implementations. Justify REUSE/ADAPT/CUSTOM for a new subsystem.
+3. Select the next usable Windows or actual development-factory outcome. Prefer finishing an existing blocker; respect WIP and dependencies.
+4. Complete a coherent package through source, actual application wiring, relevant recovery/error behavior, necessary checks, PR update and durable checkpoint.
+5. Keep meaningful regression/acceptance checks for changed risks. Do not mirror implementation with tests or repeat unchanged audits to generate activity. Existing gates remain until a verified replacement is adopted.
+6. Report at most eight lines with result, role/run, PR/SHA, evidence/state, blocker and next owner/step. Avoid no-change public reports.
 
-## Cycle
-1. Refresh GitHub state; chat memory is not source of truth.
-2. Identify current milestone and highest-value unmet acceptance gate.
-3. Before subsystem code, search maintained upstream/official docs and classify REUSE/ADAPT/CUSTOM.
-4. Select the largest safe coherent batch that can be completed and verified.
-5. Use a dedicated branch; do not force-push main.
-6. Add/update tests and docs in the same batch.
-7. Run cheap tests first. Spend Windows runner minutes only for Windows-specific or milestone gates.
-8. Commit/push exact coherent changes and open/update PR when appropriate.
-9. Update canonical status with branch/SHA, implemented vs integrated vs packaged vs human-tested, evidence, blocker, weighted progress and next batch.
-10. If regression exists, restore the last green contract before future work.
+Development may use Python; end users must not need it. A standalone executable is necessary but not sufficient for product acceptance.
 
-Development normally runs from Python. Build standalone EXE/ZIP only for milestone/user/release candidates or when packaging itself is the current gate. Final users must not need Python.
-
-Autonomy limits: no destructive external action without policy; no real-money action; no secrets in repo; no bypass of CI/release gates; no direct runtime self-modification of production source. Self-code proposals go through isolated branch/sandbox + tests + integration/release gates.
+No secrets in prompts/repo/logs, permission expansion, direct runtime self-modification of production, failed-candidate promotion, or destructive external/money action outside existing authorization. Generated code retains isolation and independent review. Human NVDA evidence cannot be automated into existence.

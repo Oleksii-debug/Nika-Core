@@ -77,6 +77,8 @@ Path-scoped allowlists are stricter:
 - POSIX absolute paths compare case-sensitively;
 - an exact path-scoped grant never falls back to basename matching;
 - a name-scoped grant never widens into a path-scoped request;
+- bare executable names compare exactly, including case, because this generic authority has no
+  trusted target-platform field; absolute Windows path grants retain case-insensitive matching;
 - malformed or reserved requested executable strings fail as `PermissionError` rather than being
   treated as a different policy shape;
 - an empty executable allowlist authorizes no process.

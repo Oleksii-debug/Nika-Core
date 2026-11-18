@@ -15,6 +15,8 @@ from nika_core.runtime.contracts import (
     RuntimeRequest,
     RuntimeResult,
     RuntimeResumeMode,
+    RuntimeResumeProbe,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
@@ -47,6 +49,16 @@ class _ApprovalRuntime:
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         return False
+
+    async def probe_resume(self, *, task_id: str, thread_id: str, resume_token: str):
+        del task_id
+        if resume_token != thread_id:
+            raise ValueError("test resume token must match thread")
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="approval checkpoint exists",
+            checkpoint_id=f"checkpoint:{thread_id}",
+        )
 
 
 class _ExplodingRuntime(_ApprovalRuntime):
@@ -140,10 +152,59 @@ def test_coordinator_fails_task_closed_when_runtime_raises(tmp_path) -> None:
         coordinator.start(_ExplodingRuntime(), RuntimeRequest(task_id, "thread-error"))
     )
     assert result.outcome == RuntimeOutcome.FAILED
-    assert result.error == "boom"
+    assert result.error == "runtime execution failed"
     assert _task_state(store, task_id) == TaskState.FAILED
     events = audit.list_for(entity_type="task", entity_id=task_id)
     assert events[-1].payload["outcome"] == RuntimeOutcome.FAILED.value
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{}, {"sequence": -99}, {"sequence": 2**63}, {"sequence": "forged"},
+     {"sequence": None}, {"sequence": True}],
+)
+def test_event_sequence_survives_payload_collision_resume_and_reopen(tmp_path, extra) -> None:
+    class EventRuntime(_ApprovalRuntime):
+        async def run(self, request: RuntimeRequest) -> RuntimeResult:
+            return RuntimeResult(
+                outcome=RuntimeOutcome.WAITING_APPROVAL,
+                resume_token=request.thread_id,
+                events=(RuntimeEvent(7, "adapter.progress", {"value": "початок", **extra}),),
+            )
+
+        async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
+            return RuntimeResult(
+                outcome=RuntimeOutcome.COMPLETED,
+                events=(RuntimeEvent(8, "adapter.progress", {"value": "продовження", **extra}),),
+            )
+
+    root = tmp_path / "Ніка перевірка"
+    root.mkdir()
+    store, queue, task_id = _ready_task(root)
+    runtime = EventRuntime()
+    started = asyncio.run(TaskRuntimeCoordinator(queue, AuditLog(store)).start(
+        runtime, RuntimeRequest(task_id, "thread-sequence"),
+    ))
+    assert started.outcome == RuntimeOutcome.WAITING_APPROVAL
+
+    # A fresh store/coordinator resumes the persisted cursor, then a second
+    # fresh reader verifies the actual SQLite evidence rather than DTOs alone.
+    reopened = SQLiteStore(root / "nika.db")
+    reopened.initialize()
+    resumer = TaskRuntimeCoordinator(TaskQueue(reopened), AuditLog(reopened))
+    resumed = asyncio.run(resumer.resume_approval(runtime, RuntimeResumeRequest(
+        task_id=task_id, thread_id="thread-sequence", resume_token="thread-sequence",
+        mode=RuntimeResumeMode.APPROVAL, value=True,
+    )))
+    assert resumed.outcome == RuntimeOutcome.COMPLETED
+    final_store = SQLiteStore(root / "nika.db")
+    final_store.initialize()
+    events = AuditLog(final_store).list_for(entity_type="task", entity_id=task_id)
+    assert [event.payload for event in events if event.event_type == "adapter.progress"] == [
+        {"sequence": 7, "value": "початок"},
+        {"sequence": 8, "value": "продовження"},
+    ]
+    assert _task_state(final_store, task_id) == TaskState.COMPLETED
 
 
 def test_coordinator_rejects_non_approval_resume_without_state_change(tmp_path) -> None:

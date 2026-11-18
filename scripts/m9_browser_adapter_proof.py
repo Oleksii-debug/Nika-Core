@@ -11,6 +11,8 @@ from nika_core.interaction import (
     FrameScope,
     InteractionAction,
     PlaywrightInteractionAdapter,
+    StaleSnapshotError,
+    UnsupportedInteractionError,
     resolve_strict,
 )
 
@@ -56,6 +58,76 @@ def _exercise_form_and_spa(adapter: PlaywrightInteractionAdapter) -> None:
     assert resolve_strict(after, ControlLocator(role="button", name="Готово"))
 
 
+def _set_and_verify(
+    adapter: PlaywrightInteractionAdapter,
+    locator: ControlLocator,
+    value: str,
+) -> None:
+    before = adapter.observe()
+    node = resolve_strict(before, locator)
+    adapter.focus(node)
+    adapter.act(node, InteractionAction.SET_VALUE, value)
+    after = adapter.observe()
+    assert adapter.verify(before, after, node, InteractionAction.SET_VALUE, value)
+
+
+def _prove_text_entry(adapter: PlaywrightInteractionAdapter) -> None:
+    secret_canary = "NIKA_SECRET_CANARY_TEXT_ENTRY_71f04d"
+    adapter.load_inline_fixture(
+        "<main><h1>Semantic text entry</h1>"
+        "<label for='short'>Коротке поле</label>"
+        "<input id='short' value='Старий вміст'>"
+        "<label for='notes'>Багаторядкові нотатки</label>"
+        "<textarea id='notes'>Стара нотатка</textarea>"
+        "<div role='textbox' aria-label='Редактор' contenteditable='true'>Стара чернетка</div>"
+        "<label for='disabled'>Заблоковане поле</label>"
+        "<input id='disabled' value='Не змінювати' disabled>"
+        "<label for='readonly'>Лише читання</label>"
+        "<textarea id='readonly' readonly>Не змінювати</textarea>"
+        "</main>"
+    )
+
+    replacement = "Український текст: їжак, ґанок, єдність."
+    _set_and_verify(adapter, ControlLocator(role="textbox", label="Коротке поле"), replacement)
+    snapshot = adapter.observe()
+    short = resolve_strict(snapshot, ControlLocator(role="textbox", name="Коротке поле"))
+    assert short.value == replacement
+    assert "Старий вміст" not in (short.value or "")
+
+    _set_and_verify(adapter, ControlLocator(label="Коротке поле"), "")
+    snapshot = adapter.observe()
+    assert resolve_strict(snapshot, ControlLocator(role="textbox", name="Коротке поле")).value in {
+        "",
+        None,
+    }
+
+    multiline = "Перший рядок\nДругий рядок\nТретій рядок"
+    _set_and_verify(
+        adapter,
+        ControlLocator(role="textbox", name="Багаторядкові нотатки"),
+        multiline,
+    )
+
+    editor_value = "Редактор: український Unicode — готово"
+    _set_and_verify(adapter, ControlLocator(role="textbox", name="Редактор"), editor_value)
+
+    for locator in (
+        ControlLocator(role="textbox", name="Заблоковане поле"),
+        ControlLocator(role="textbox", name="Лише читання"),
+    ):
+        before = adapter.observe()
+        node = resolve_strict(before, locator)
+        try:
+            adapter.act(node, InteractionAction.SET_VALUE, secret_canary)
+        except UnsupportedInteractionError as exc:
+            assert "not editable" in str(exc)
+            assert secret_canary not in str(exc)
+        else:  # pragma: no cover - physical proof assertion
+            raise AssertionError("non-editable semantic text target accepted SET_VALUE")
+        after = adapter.observe()
+        assert secret_canary not in str(resolve_strict(after, locator).value)
+
+
 def _prove_ambiguity_and_scope(adapter: PlaywrightInteractionAdapter) -> None:
     adapter.load_inline_fixture(
         "<main>"
@@ -94,7 +166,10 @@ def _prove_frame(adapter: PlaywrightInteractionAdapter) -> None:
         "srcdoc=\"<main><button>Кнопка у фреймі</button></main>\"></iframe></main>"
     )
     assert adapter.session.registry is not None
-    adapter.session.registry.get(adapter.page_id).page.wait_for_load_state("load")
+    page = adapter.session.registry.get(adapter.page_id).page
+    page.frame_locator("iframe[name='details']").get_by_role(
+        "button", name="Кнопка у фреймі", exact=True
+    ).wait_for()
     framed = PlaywrightInteractionAdapter(
         session=adapter.session,
         page_id=adapter.page_id,
@@ -102,6 +177,109 @@ def _prove_frame(adapter: PlaywrightInteractionAdapter) -> None:
     )
     snapshot = framed.observe()
     assert resolve_strict(snapshot, ControlLocator(role="button", name="Кнопка у фреймі"))
+
+
+def _prove_stale_frame_and_dom_identity(adapter: PlaywrightInteractionAdapter) -> None:
+    """Physical Chromium proof for the #592/#593 stale-target families."""
+    assert adapter.session.registry is not None
+    page = adapter.session.registry.get(adapter.page_id).page
+
+    adapter.load_inline_fixture(
+        "<main><button id='stable' aria-label='Стабільна дія' "
+        "onclick=\"window.__nikaDomEffects=(window.__nikaDomEffects||0)+1\">"
+        "Стабільна дія</button></main>"
+    )
+    page.evaluate("() => { window.__nikaDomEffects = 0; }")
+    stale_snapshot = adapter.observe()
+    stale_node = resolve_strict(
+        stale_snapshot,
+        ControlLocator(role="button", name="Стабільна дія"),
+    )
+    page.evaluate(
+        """
+        () => {
+          const oldNode = document.getElementById('stable');
+          const replacement = oldNode.cloneNode(true);
+          oldNode.replaceWith(replacement);
+        }
+        """
+    )
+    try:
+        adapter.act(stale_node, InteractionAction.INVOKE, None)
+    except StaleSnapshotError:
+        pass
+    else:  # pragma: no cover - physical proof assertion
+        raise AssertionError("same-semantics replacement reused stale DOM authority")
+    assert page.evaluate("() => window.__nikaDomEffects") == 0
+
+    fresh_node = resolve_strict(
+        adapter.observe(),
+        ControlLocator(role="button", name="Стабільна дія"),
+    )
+    adapter.act(fresh_node, InteractionAction.INVOKE, None)
+    assert page.evaluate("() => window.__nikaDomEffects") == 1
+
+    adapter.load_inline_fixture(
+        "<main><button>Спільна дія</button>"
+        "<iframe name='duplicate' "
+        "srcdoc=\"<main><button>Спільна дія</button></main>\"></iframe></main>"
+    )
+    page.frame_locator("iframe[name='duplicate']").get_by_role(
+        "button", name="Спільна дія", exact=True
+    ).wait_for()
+    try:
+        resolve_strict(adapter.observe(), ControlLocator(role="button", name="Спільна дія"))
+    except AmbiguousTargetError:
+        pass
+    else:  # pragma: no cover - physical proof assertion
+        raise AssertionError("root/child identical semantics did not fail ambiguous")
+
+    adapter.load_inline_fixture(
+        "<main><iframe name='stale-frame' "
+        "srcdoc=\"<main><button onclick='parent.__nikaFrameEffects=(parent.__nikaFrameEffects||0)+1'>"
+        "Frame action</button></main>\"></iframe></main>"
+    )
+    page.evaluate("() => { window.__nikaFrameEffects = 0; }")
+    page.frame_locator("iframe[name='stale-frame']").get_by_role(
+        "button", name="Frame action", exact=True
+    ).wait_for()
+    framed = PlaywrightInteractionAdapter(
+        session=adapter.session,
+        page_id=adapter.page_id,
+        frame_scope=FrameScope(name="stale-frame"),
+    )
+    old_node = resolve_strict(
+        framed.observe(),
+        ControlLocator(role="button", name="Frame action"),
+    )
+    page.evaluate(
+        """
+        () => {
+          const oldFrame = document.querySelector("iframe[name='stale-frame']");
+          const replacement = document.createElement('iframe');
+          replacement.name = 'stale-frame';
+          replacement.srcdoc = "<main><button onclick='parent.__nikaFrameEffects=(parent.__nikaFrameEffects||0)+1'>Frame action</button></main>";
+          oldFrame.replaceWith(replacement);
+        }
+        """
+    )
+    page.frame_locator("iframe[name='stale-frame']").get_by_role(
+        "button", name="Frame action", exact=True
+    ).wait_for()
+    try:
+        framed.act(old_node, InteractionAction.INVOKE, None)
+    except StaleSnapshotError:
+        pass
+    else:  # pragma: no cover - physical proof assertion
+        raise AssertionError("replacement frame reused stale child-frame authority")
+    assert page.evaluate("() => window.__nikaFrameEffects") == 0
+
+    fresh_frame_node = resolve_strict(
+        framed.observe(),
+        ControlLocator(role="button", name="Frame action"),
+    )
+    framed.act(fresh_frame_node, InteractionAction.INVOKE, None)
+    assert page.evaluate("() => window.__nikaFrameEffects") == 1
 
 
 def _prove_dialog(adapter: PlaywrightInteractionAdapter) -> None:
@@ -163,8 +341,10 @@ def main() -> None:
             page_id = session.new_page()
             adapter = PlaywrightInteractionAdapter(session=session, page_id=page_id)
             _exercise_form_and_spa(adapter)
+            _prove_text_entry(adapter)
             _prove_ambiguity_and_scope(adapter)
             _prove_frame(adapter)
+            _prove_stale_frame_and_dom_identity(adapter)
             _prove_dialog(adapter)
             _prove_download(adapter, root)
             _prove_navigation(adapter)

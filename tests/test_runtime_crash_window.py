@@ -13,6 +13,8 @@ from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
+    RuntimeResumeProbe,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
@@ -33,6 +35,21 @@ class _CrashRecoverableRuntime:
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         raise _SimulatedProcessLoss()
+
+    async def probe_resume(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        resume_token: str,
+    ) -> RuntimeResumeProbe:
+        del task_id
+        assert resume_token == thread_id
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="checkpoint readable",
+            checkpoint_id=f"checkpoint:{thread_id}",
+        )
 
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
         return RuntimeResult(
