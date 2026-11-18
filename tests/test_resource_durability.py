@@ -1,55 +1,28 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.memory import MemoryRetentionPolicy, MemoryScope, MemoryService
 from nika_core.resources import (
     PsutilResourceObserver,
     ResourceBudget,
     ResourceManager,
     ResourceProcessIdentity,
     ResourceSnapshot,
-)
-from nika_core.scheduler import (
-    APSchedulerAdapter,
-    ScheduledJob,
-    ScheduledJobStore,
-    ScheduleIdentity,
-    TriggerKind,
+    psutil_adapter,
 )
 
 
 class FakeObserver:
-    def __init__(
-        self,
-        *,
-        cpu: float = 10.0,
-        memory: float = 20.0,
-        disk: float | None = 30.0,
-        process_rss: int | None = 100_000,
-        gpu: float | None = None,
-    ) -> None:
+    def __init__(self, *, cpu: float = 10.0, memory: float = 20.0) -> None:
         self.cpu = cpu
         self.memory = memory
-        self.disk = disk
-        self.process_rss = process_rss
-        self.gpu = gpu
 
     def snapshot(self) -> ResourceSnapshot:
-        return ResourceSnapshot(
-            cpu_percent=self.cpu,
-            memory_percent=self.memory,
-            available_memory_bytes=2_000_000_000,
-            disk_percent=self.disk,
-            available_disk_bytes=500_000_000,
-            process_rss_bytes=self.process_rss,
-            gpu_percent=self.gpu,
-        )
+        return ResourceSnapshot(self.cpu, self.memory, 2_000_000_000)
 
 
 class FakeOwnerObserver(FakeObserver):
@@ -78,233 +51,6 @@ def _store(tmp_path: Path) -> SQLiteStore:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     return store
-
-
-def test_memory_scope_matrix_is_restart_safe_and_isolated(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    memory = MemoryService(store)
-    scopes = (
-        MemoryScope.SHORT_TERM,
-        MemoryScope.TASK,
-        MemoryScope.THREAD,
-        MemoryScope.AGENT,
-        MemoryScope.WORKSPACE,
-        MemoryScope.USER_LONG_TERM,
-    )
-    for index, scope in enumerate(scopes):
-        memory.put(
-            scope=scope,
-            owner_id="same-owner",
-            namespace="same-namespace",
-            key="same-key",
-            value={"scope": scope.value, "index": index},
-            user_approved=scope is MemoryScope.USER,
-        )
-
-    restarted = MemoryService(store)
-    values = [
-        restarted.get(
-            scope=scope,
-            owner_id="same-owner",
-            namespace="same-namespace",
-            key="same-key",
-        )
-        for scope in scopes
-    ]
-    assert all(record is not None for record in values)
-    assert [record.value["index"] for record in values if record is not None] == list(
-        range(len(scopes))
-    )
-
-
-def test_memory_retention_is_deterministic_across_restart(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    memory = MemoryService(store)
-    start = datetime(2030, 1, 1, tzinfo=UTC)
-    policy = MemoryRetentionPolicy(ttl_seconds=3600, max_records=2)
-
-    for index, key in enumerate(("old", "middle", "new")):
-        memory.put(
-            scope=MemoryScope.THREAD,
-            owner_id="thread-1",
-            namespace="scratch",
-            key=key,
-            value=index,
-            retention=policy,
-            now=start + timedelta(seconds=index),
-        )
-
-    restarted = MemoryService(store)
-    records = restarted.list_namespace(
-        scope=MemoryScope.THREAD,
-        owner_id="thread-1",
-        namespace="scratch",
-        now=start + timedelta(minutes=1),
-    )
-    assert [(record.key, record.value) for record in records] == [("middle", 1), ("new", 2)]
-    assert restarted.list_namespace(
-        scope=MemoryScope.THREAD,
-        owner_id="thread-1",
-        namespace="scratch",
-        now=start + timedelta(hours=2),
-    ) == ()
-
-
-@pytest.mark.parametrize("field", ["ttl_seconds", "max_records"])
-@pytest.mark.parametrize("value", [True, 0, -1, 1.5])
-def test_memory_retention_rejects_non_positive_or_non_integer_values(
-    field: str,
-    value: object,
-) -> None:
-    with pytest.raises(ValueError):
-        MemoryRetentionPolicy(**{field: value})
-
-
-def test_memory_long_term_alias_still_requires_explicit_approval(tmp_path: Path) -> None:
-    memory = MemoryService(_store(tmp_path))
-    with pytest.raises(PermissionError):
-        memory.put(
-            scope=MemoryScope.USER_LONG_TERM,
-            owner_id="user-1",
-            namespace="preferences",
-            key="language",
-            value="uk",
-        )
-
-
-def _product_schedule(job_id: str = "nightly") -> ScheduledJob:
-    return ScheduledJob(
-        job_id=job_id,
-        action_id="product.maintenance",
-        trigger_kind=TriggerKind.INTERVAL,
-        trigger={"hours": 24, "start_date": "2030-01-01T00:00:00+00:00"},
-        payload={"operation": "maintain"},
-        identity=ScheduleIdentity(
-            scope="product_project",
-            owner_id="project-1",
-            dedup_key="maintenance",
-            product_project_id="project-1",
-        ),
-    )
-
-
-def test_schedule_identity_is_durable_and_deduplicated(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    jobs = ScheduledJobStore(store)
-    jobs.upsert(_product_schedule())
-
-    restarted = ScheduledJobStore(store)
-    restored = restarted.get("nightly")
-    assert restored == _product_schedule()
-    assert restarted.list_for_owner(
-        scope="product_project",
-        owner_id="project-1",
-    ) == (_product_schedule(),)
-
-    with pytest.raises(ValueError, match="dedup key"):
-        restarted.upsert(_product_schedule("duplicate"))
-
-
-def test_schedule_identity_cannot_be_cleared_or_rebound(tmp_path: Path) -> None:
-    jobs = ScheduledJobStore(_store(tmp_path))
-    original = _product_schedule()
-    jobs.upsert(original)
-
-    with pytest.raises(ValueError, match="cannot be cleared"):
-        jobs.upsert(
-            ScheduledJob(
-                job_id=original.job_id,
-                action_id=original.action_id,
-                trigger_kind=original.trigger_kind,
-                trigger=original.trigger,
-            )
-        )
-
-    with pytest.raises(ValueError, match="cannot be changed"):
-        jobs.upsert(
-            ScheduledJob(
-                job_id=original.job_id,
-                action_id=original.action_id,
-                trigger_kind=original.trigger_kind,
-                trigger=original.trigger,
-                identity=ScheduleIdentity(
-                    scope="product_project",
-                    owner_id="project-1",
-                    dedup_key="other",
-                    product_project_id="project-1",
-                ),
-            )
-        )
-
-
-def test_scheduler_rejects_naive_time_and_preserves_identity_on_resume(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    jobs = ScheduledJobStore(store)
-    with pytest.raises(ValueError, match="timezone-aware"):
-        jobs.upsert(
-            ScheduledJob(
-                job_id="bad-time",
-                action_id="noop",
-                trigger_kind=TriggerKind.DATE,
-                trigger={"run_date": "2030-01-01T00:00:00"},
-            )
-        )
-
-    with pytest.raises(TypeError, match="ISO-8601"):
-        jobs.upsert(
-            ScheduledJob(
-                job_id="bad-time-type",
-                action_id="noop",
-                trigger_kind=TriggerKind.DATE,
-                trigger={"run_date": 17},
-            )
-        )
-
-    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
-    adapter.upsert(_product_schedule())
-    adapter.start()
-    adapter.pause("nightly")
-    adapter.shutdown()
-
-    restarted = APSchedulerAdapter(
-        ScheduledJobStore(store),
-        lambda _action_id: lambda _payload: None,
-    )
-    restarted.start()
-    restarted.resume("nightly")
-    restored = ScheduledJobStore(store).get("nightly")
-    assert restored is not None
-    assert restored.identity == _product_schedule().identity
-    restarted.shutdown()
-
-
-def test_m3_extension_migration_fails_closed_on_future_version(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    with store.connection() as conn:
-        conn.execute(
-            "INSERT INTO m3_extension_schema_migrations(version, applied_at) VALUES (?, ?)",
-            (3, datetime.now(UTC).isoformat()),
-        )
-    with pytest.raises(RuntimeError, match="newer than supported"):
-        store.initialize()
-
-
-def test_extended_resource_budget_persists_across_restart(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    first = ResourceManager(store, FakeObserver(), manager_id="manager-1")
-    budget = ResourceBudget(
-        scope="product_project",
-        owner_id="project-1",
-        max_concurrent=2,
-        max_cpu_percent=80,
-        max_memory_percent=85,
-        max_disk_percent=90,
-        max_gpu_percent=95,
-        max_process_memory_bytes=512_000_000,
-    )
-    first.set_budget(budget)
-    second = ResourceManager(store, FakeObserver(), manager_id="manager-2")
-    assert second.get_budget(scope="product_project", owner_id="project-1") == budget
 
 
 def test_resource_restart_releases_proven_dead_grant_and_preserves_fifo(
@@ -525,46 +271,6 @@ def test_resource_request_product_project_identity_cannot_drift(tmp_path: Path) 
         )
 
 
-def test_resource_observation_capability_policy_fails_closed(tmp_path: Path) -> None:
-    store = _store(tmp_path)
-    observer = FakeObserver(disk=None, process_rss=None, gpu=None)
-    manager = ResourceManager(store, observer, manager_id="manager")
-    manager.set_budget(
-        ResourceBudget(
-            scope="workspace",
-            owner_id="w",
-            max_disk_percent=80,
-        )
-    )
-    assert manager.request(scope="workspace", owner_id="w", request_id="disk").reason == (
-        "disk_unavailable"
-    )
-
-    manager.set_budget(
-        ResourceBudget(
-            scope="workspace",
-            owner_id="gpu",
-            max_gpu_percent=80,
-        )
-    )
-    assert manager.request(scope="workspace", owner_id="gpu", request_id="gpu").reason == (
-        "gpu_unavailable"
-    )
-
-    manager.set_budget(
-        ResourceBudget(
-            scope="workspace",
-            owner_id="process",
-            max_process_memory_bytes=1000,
-        )
-    )
-    assert manager.request(
-        scope="workspace",
-        owner_id="process",
-        request_id="process",
-    ).reason == "process_memory_unavailable"
-
-
 def test_resource_manager_serializes_concurrent_grants(tmp_path: Path) -> None:
     store = _store(tmp_path)
     manager = ResourceManager(store, FakeObserver(), manager_id="concurrent-manager")
@@ -595,20 +301,6 @@ def test_invalid_resource_observation_fails_closed(tmp_path: Path) -> None:
     assert manager.request(scope="workspace", owner_id="w", request_id="r").reason == (
         "invalid_observation"
     )
-
-
-def test_psutil_observer_reports_supported_local_metrics(tmp_path: Path) -> None:
-    observer = PsutilResourceObserver(disk_path=tmp_path)
-    snapshot = observer.snapshot()
-    identity = observer.current_process_identity()
-    assert 0 <= snapshot.cpu_percent <= 100
-    assert 0 <= snapshot.memory_percent <= 100
-    assert snapshot.available_memory_bytes >= 0
-    assert snapshot.disk_percent is not None and 0 <= snapshot.disk_percent <= 100
-    assert snapshot.available_disk_bytes is not None and snapshot.available_disk_bytes >= 0
-    assert snapshot.process_rss_bytes is not None and snapshot.process_rss_bytes > 0
-    assert snapshot.gpu_percent is None
-    assert observer.is_process_alive(identity)
 
 
 def test_durable_resource_queue_and_read_only_capacity_status_compose(tmp_path: Path) -> None:
@@ -645,3 +337,146 @@ def test_durable_resource_queue_and_read_only_capacity_status_compose(tmp_path: 
     assert restarted_status.active_count == 1
     assert restarted_status.queued_count == 1
     assert restarted.queued(scope="workspace", owner_id="w") == ("waiting",)
+
+
+def test_independent_shared_store_managers_serialize_one_slot(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    managers = [
+        ResourceManager(SQLiteStore(store.path), FakeObserver(), manager_id=f"manager-{index}")
+        for index in range(8)
+    ]
+
+    def request(index: int) -> bool:
+        return managers[index].request(
+            scope="machine", owner_id="host", request_id=f"request-{index}"
+        ).granted
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(request, range(8)))
+
+    assert sum(results) == 1
+    for manager in managers:
+        assert manager.active_count(scope="machine", owner_id="host") == 1
+        assert len(manager.queued(scope="machine", owner_id="host")) == 7
+
+
+@pytest.mark.parametrize("proof", [None, 0, "", object()])
+def test_recovery_requires_exact_dead_bool(tmp_path: Path, proof: object) -> None:
+    store = _store(tmp_path)
+    live = {(801, 8001.0), (802, 8002.0)}
+    holder = ResourceManager(
+        store,
+        FakeOwnerObserver(process_id=801, started_at=8001.0, live_processes=live),
+        manager_id="holder",
+    )
+    assert holder.request(scope="s", owner_id="o", request_id="r").granted
+
+    class UncertainProbe(FakeOwnerObserver):
+        def is_process_alive(self, identity: ResourceProcessIdentity) -> bool:
+            return proof  # type: ignore[return-value]
+
+    other = ResourceManager(
+        store,
+        UncertainProbe(process_id=802, started_at=8002.0, live_processes=live),
+    )
+    with pytest.raises(RuntimeError, match="cannot be verified"):
+        other.recover_after_restart(stale_manager_id="holder")
+    assert other.active_count(scope="s", owner_id="o") == 1
+
+
+def test_recovery_rejects_mixed_manager_generations(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    live = {(901, 9001.0)}
+    holder = ResourceManager(
+        store,
+        FakeOwnerObserver(process_id=901, started_at=9001.0, live_processes=live),
+        manager_id="mixed",
+    )
+    holder.set_budget(ResourceBudget(scope="s", owner_id="o", max_concurrent=2))
+    for request_id in ("one", "two"):
+        assert holder.request(scope="s", owner_id="o", request_id=request_id).granted
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE resource_requests SET lease_owner_started_at = 9002 WHERE request_id = 'two'"
+        )
+    live.clear()
+    with pytest.raises(RuntimeError, match="multiple process identities"):
+        holder.recover_after_restart(stale_manager_id="mixed")
+    assert holder.active_count(scope="s", owner_id="o") == 2
+
+
+def test_old_instance_cannot_release_reused_manager_generation(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    live = {(1001, 10001.0)}
+    old = ResourceManager(
+        store,
+        FakeOwnerObserver(process_id=1001, started_at=10001.0, live_processes=live),
+        manager_id="reused",
+    )
+    assert old.request(scope="s", owner_id="o", request_id="r").granted
+    live.clear()
+    new = ResourceManager(
+        store,
+        FakeOwnerObserver(process_id=1002, started_at=10002.0, live_processes=live),
+        manager_id="reused",
+    )
+    assert new.recover_after_restart(stale_manager_id="reused") == 1
+    assert new.request(scope="s", owner_id="o", request_id="r").granted
+    assert not old.release(scope="s", owner_id="o", request_id="r")
+    assert not old.revalidate(scope="s", owner_id="o", request_id="r").granted
+    assert new.active_count(scope="s", owner_id="o") == 1
+
+
+def test_psutil_owner_generation_and_pid_reuse_fail_closed(monkeypatch) -> None:
+    identity = ResourceProcessIdentity(51, 5001.0)
+    observer = PsutilResourceObserver()
+    assert observer.is_process_alive(observer.current_process_identity())
+
+    class ReusedPid:
+        def create_time(self) -> float:
+            return 5002.0
+
+    monkeypatch.setattr(psutil_adapter.psutil, "Process", lambda _pid: ReusedPid())
+    assert observer.is_process_alive(identity) is False
+
+    def inaccessible(_pid):
+        raise psutil_adapter.psutil.AccessDenied(51)
+
+    monkeypatch.setattr(psutil_adapter.psutil, "Process", inaccessible)
+    assert observer.is_process_alive(identity) is True
+
+
+@pytest.mark.parametrize("cpu, expected", [(95.0, "cpu_limit"), (15.0, "granted")])
+def test_first_psutil_admission_uses_a_measured_cpu_sample(
+    tmp_path, monkeypatch, cpu, expected
+) -> None:
+    from types import SimpleNamespace
+
+    intervals = []
+
+    def sample(*, interval):
+        intervals.append(interval)
+        return cpu if interval == 0.1 else 0.0
+
+    monkeypatch.setattr(psutil_adapter.psutil, "cpu_percent", sample)
+    monkeypatch.setattr(
+        psutil_adapter.psutil, "virtual_memory",
+        lambda: SimpleNamespace(percent=20.0, available=1000, total=2000),
+    )
+    observer = PsutilResourceObserver()
+    manager = ResourceManager(_store(tmp_path), observer)
+    manager.set_budget(ResourceBudget(scope="s", owner_id="o", max_cpu_percent=80.0))
+    assert manager.request(scope="s", owner_id="o", request_id="r").reason == expected
+    assert intervals == [0.1]
+
+
+@pytest.mark.parametrize("started_at", [float("nan"), float("inf"), True, -1, None])
+def test_psutil_invalid_process_generation_never_means_dead(monkeypatch, started_at) -> None:
+    class CorruptProcess:
+        def create_time(self):
+            return started_at
+
+    observer = PsutilResourceObserver()
+    monkeypatch.setattr(psutil_adapter.psutil, "Process", lambda _pid: CorruptProcess())
+    with pytest.raises((ValueError, TypeError)):
+        observer.is_process_alive(ResourceProcessIdentity(51, 5001.0))

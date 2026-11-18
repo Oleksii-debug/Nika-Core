@@ -11,7 +11,11 @@ from nika_core.resources.contracts import (
     ResourceRequestIdentity,
     ResourceSnapshot,
 )
-from nika_core.resources.manager import ResourceDecision, ResourceManager
+from nika_core.resources.manager import (
+    ResourceDecision,
+    ResourceManager,
+    ResourceTelemetryError,
+)
 
 if TYPE_CHECKING:
     from nika_core.resources.psutil_adapter import PsutilResourceObserver
@@ -27,6 +31,7 @@ __all__ = [
     "ResourceProcessIdentity",
     "ResourceRequestIdentity",
     "ResourceSnapshot",
+    "ResourceTelemetryError",
 ]
 
 

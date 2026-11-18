@@ -19,10 +19,13 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VERSION
+from nika_core.data.resource_durability_schema import (
+    RESOURCE_DURABILITY_SCHEMA_VERSION,
+    validate_resource_durability_schema,
+)
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
-from nika_core.m3_extension_schema import M3_EXTENSION_SCHEMA_VERSION
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 from nika_core.reliability.backup import BackupRecoveryError, SQLiteRecoveryManager
 
@@ -30,8 +33,8 @@ _RECEIPT_TABLE = "legacy_database_adoption_v1"
 _EMPTY_TABLES = {
     "schema_migrations",
     "multi_agent_state_schema_migrations",
-    "m3_extension_schema_migrations",
     "product_project_schema_migrations",
+    "resource_durability_schema_migrations",
     "sqlite_sequence",
     "audit_events",
     # FTS5 bookkeeping exists even with zero indexed documents. The actual
@@ -80,15 +83,26 @@ def _require_empty_target(db: sqlite3.Connection) -> None:
         raise LegacyDatabaseConflict(_MESSAGE)
 
 
-def _inspect(path: Path, *, canonical: bool = False) -> _State | None:
+def _inspect(
+    path: Path, *, canonical: bool = False, immutable: bool = False
+) -> _State | None:
     if not path.exists():
         return None
     if not path.is_file() or path.is_symlink():
         raise LegacyDatabaseConflict(_MESSAGE)
+    # Live sources retain real WAL visibility; frozen archives must have no sidecars.
+    SQLiteRecoveryManager._ensure_restore_family_coherent(path)
+    if immutable:
+        if canonical:
+            raise ValueError("canonical database inspection cannot be immutable")
+        SQLiteRecoveryManager._ensure_backup_artifact_coherent(path)
     # rw permits SQLite's own hot-journal recovery on the canonical database;
     # it does not create a missing file. Legacy inspection is strictly read-only.
     mode = "rw" if canonical else "ro"
-    with closing(sqlite3.connect(path.as_uri() + f"?mode={mode}", uri=True, timeout=2)) as db:
+    suffix = "&immutable=1" if immutable else ""
+    with closing(
+        sqlite3.connect(path.as_uri() + f"?mode={mode}{suffix}", uri=True, timeout=2)
+    ) as db:
         db.execute("PRAGMA query_only = ON")
         db.execute("PRAGMA trusted_schema = OFF")
         db.execute("BEGIN")
@@ -111,8 +125,8 @@ def _inspect(path: Path, *, canonical: bool = False) -> _State | None:
         ]
         for name, supported in (
             ("multi_agent_state_schema_migrations", MULTI_AGENT_STATE_SCHEMA_VERSION),
-            ("m3_extension_schema_migrations", M3_EXTENSION_SCHEMA_VERSION),
             ("product_project_schema_migrations", PRODUCT_PROJECT_SCHEMA_VERSION),
+            ("resource_durability_schema_migrations", RESOURCE_DURABILITY_SCHEMA_VERSION),
         ):
             if name in tables:
                 history = [
@@ -124,6 +138,14 @@ def _inspect(path: Path, *, canonical: bool = False) -> _State | None:
                     and (history != list(range(1, history[-1] + 1)) or history[-1] > supported)
                 ):
                     raise LegacyDatabaseConflict(_MESSAGE)
+        try:
+            # The validator uses named rows; restore the inspection row mode afterwards.
+            db.row_factory = sqlite3.Row
+            validate_resource_durability_schema(db)
+        except (RuntimeError, sqlite3.DatabaseError):
+            raise LegacyDatabaseConflict(_MESSAGE) from None
+        finally:
+            db.row_factory = None
         has_data = any(
             name not in _EMPTY_TABLES
             and db.execute(f"SELECT 1 FROM {_quoted(name)} LIMIT 1").fetchone() is not None
@@ -166,8 +188,8 @@ def _validate_receipt(receipt: dict[str, str]) -> None:
         raise LegacyDatabaseConflict(_MESSAGE)
 
 
-def _source_unchanged(path: Path, digest: str) -> bool:
-    state = _inspect(path)
+def _source_unchanged(path: Path, digest: str, *, immutable: bool = False) -> bool:
+    state = _inspect(path, immutable=immutable)
     return state is not None and state.digest == digest
 
 
@@ -318,8 +340,9 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
         with TemporaryDirectory(prefix="prepare-", dir=backup_root) as folder:
             baseline = backup_root / f"{adoption_id}.original.sqlite3"
             SQLiteRecoveryManager(SQLiteStore(source)).create_backup(baseline, record_audit=False)
-            if not _source_unchanged(baseline, state.digest) or not _source_unchanged(
-                source, state.digest
+            if (
+                not _source_unchanged(baseline, state.digest, immutable=True)
+                or not _source_unchanged(source, state.digest)
             ):
                 raise LegacyDatabaseConflict(_MESSAGE)
             staged = SQLiteStore(Path(folder) / "prepared.sqlite3")
@@ -354,7 +377,7 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
         _publish_pending(pending_path, pending)
     backup = target.parent / "legacy-adoption-backups" / f"{adoption_id}.sqlite3"
     manager.verify_backup(backup)
-    backup_receipt = _inspect(backup).receipt
+    backup_receipt = _inspect(backup, immutable=True).receipt
     if not backup_receipt or any(backup_receipt[key] != pending[key] for key in backup_receipt):
         raise LegacyDatabaseConflict(_MESSAGE)
     if not _source_unchanged(source, state.digest):

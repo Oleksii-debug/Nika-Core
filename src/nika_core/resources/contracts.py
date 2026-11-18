@@ -12,10 +12,7 @@ class ResourceSnapshot:
     available_memory_bytes: int
     logical_cpu_count: int | None = None
     total_memory_bytes: int | None = None
-    disk_percent: float | None = None
-    available_disk_bytes: int | None = None
     process_rss_bytes: int | None = None
-    gpu_percent: float | None = None
     battery_percent: float | None = None
     power_plugged: bool | None = None
 
@@ -27,9 +24,6 @@ class ResourceBudget:
     max_concurrent: int = 1
     max_cpu_percent: float | None = None
     max_memory_percent: float | None = None
-    max_disk_percent: float | None = None
-    max_gpu_percent: float | None = None
-    max_process_memory_bytes: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,9 +39,11 @@ class ResourceRequestIdentity:
             ("owner_id", self.owner_id),
             ("request_id", self.request_id),
         ):
-            if not value.strip():
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{name} must not be empty")
-        if self.product_project_id is not None and not self.product_project_id.strip():
+        if self.product_project_id is not None and (
+            type(self.product_project_id) is not str or not self.product_project_id.strip()
+        ):
             raise ValueError("product_project_id must not be empty when provided")
 
 
@@ -59,8 +55,8 @@ class ResourceProcessIdentity:
     def __post_init__(self) -> None:
         if isinstance(self.process_id, bool) or not isinstance(self.process_id, int):
             raise TypeError("process_id must be an integer")
-        if self.process_id <= 0:
-            raise ValueError("process_id must be positive")
+        if not 1 <= self.process_id <= (1 << 63) - 1:
+            raise ValueError("process_id must be a positive SQLite-sized integer")
         if isinstance(self.started_at, bool) or not isinstance(self.started_at, (int, float)):
             raise TypeError("started_at must be a number")
         normalized_started_at = float(self.started_at)

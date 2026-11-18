@@ -18,6 +18,12 @@ from nika_core.resources.contracts import (
     ResourceSnapshot,
 )
 
+_SQLITE_MAX_INT64 = (1 << 63) - 1
+
+
+class ResourceTelemetryError(RuntimeError):
+    """Raised when host resource telemetry cannot be trusted."""
+
 
 @dataclass(frozen=True, slots=True)
 class ResourceDecision:
@@ -37,8 +43,8 @@ class ResourceManager:
     ) -> None:
         self._store = store
         self._observer = observer
-        self._manager_id = manager_id or uuid.uuid4().hex
-        if not self._manager_id.strip():
+        self._manager_id = uuid.uuid4().hex if manager_id is None else manager_id
+        if type(self._manager_id) is not str or not self._manager_id.strip():
             raise ValueError("manager_id must not be empty")
         if owner_probe is None and isinstance(observer, ResourceOwnerProbePort):
             owner_probe = observer
@@ -46,6 +52,12 @@ class ResourceManager:
         self._process_identity = (
             owner_probe.current_process_identity() if owner_probe is not None else None
         )
+        if self._process_identity is not None:
+            if type(self._process_identity) is not ResourceProcessIdentity:
+                raise ValueError("resource owner probe returned an invalid process identity")
+            ResourceProcessIdentity(
+                self._process_identity.process_id, self._process_identity.started_at
+            )
         self._owned_requests: set[tuple[str, str, str]] = set()
         self._lock = threading.RLock()
 
@@ -53,21 +65,24 @@ class ResourceManager:
     def manager_id(self) -> str:
         return self._manager_id
 
+    def _read_snapshot(self) -> object:
+        try:
+            return self._observer.snapshot()
+        except Exception:  # noqa: BLE001 - untrusted telemetry adapter boundary
+            # Adapter exception text can contain private host/process details.
+            return None
+
     def set_budget(self, budget: ResourceBudget) -> None:
         _validate_budget(budget)
         with self._store.connection() as conn:
             conn.execute(
                 """INSERT INTO resource_budgets(
-                    scope, owner_id, max_concurrent, max_cpu_percent, max_memory_percent,
-                    max_disk_percent, max_gpu_percent, max_process_memory_bytes, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    scope, owner_id, max_concurrent, max_cpu_percent, max_memory_percent, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scope, owner_id) DO UPDATE SET
                     max_concurrent = excluded.max_concurrent,
                     max_cpu_percent = excluded.max_cpu_percent,
                     max_memory_percent = excluded.max_memory_percent,
-                    max_disk_percent = excluded.max_disk_percent,
-                    max_gpu_percent = excluded.max_gpu_percent,
-                    max_process_memory_bytes = excluded.max_process_memory_bytes,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -76,36 +91,20 @@ class ResourceManager:
                     budget.max_concurrent,
                     budget.max_cpu_percent,
                     budget.max_memory_percent,
-                    budget.max_disk_percent,
-                    budget.max_gpu_percent,
-                    budget.max_process_memory_bytes,
                     datetime.now(UTC).isoformat(),
                 ),
             )
 
     def get_budget(self, *, scope: str, owner_id: str) -> ResourceBudget:
         with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM resource_budgets WHERE scope = ? AND owner_id = ?",
-                (scope, owner_id),
-            ).fetchone()
-        if row is None:
-            return ResourceBudget(scope=scope, owner_id=owner_id)
-        return ResourceBudget(
-            scope=row["scope"],
-            owner_id=row["owner_id"],
-            max_concurrent=int(row["max_concurrent"]),
-            max_cpu_percent=row["max_cpu_percent"],
-            max_memory_percent=row["max_memory_percent"],
-            max_disk_percent=row["max_disk_percent"],
-            max_gpu_percent=row["max_gpu_percent"],
-            max_process_memory_bytes=row["max_process_memory_bytes"],
-        )
+            return _get_budget_with_connection(conn, scope, owner_id)
 
     def status(self, *, scope: str, owner_id: str) -> ResourceCapacityStatus:
         """Return deterministic read-only capacity telemetry without changing admission state."""
         budget = self.get_budget(scope=scope, owner_id=owner_id)
-        snapshot = self._observer.snapshot()
+        snapshot = self._read_snapshot()
+        if not _valid_snapshot(snapshot):
+            raise ResourceTelemetryError("resource telemetry invalid")
         active_count = self.active_count(scope=scope, owner_id=owner_id)
         queued_count = len(self.queued(scope=scope, owner_id=owner_id))
         pressure_reasons: list[str] = []
@@ -182,12 +181,13 @@ class ResourceManager:
                 _validate_persisted_identity(row, identity)
                 state = row["state"]
                 if state == "granted":
-                    if (
-                        row["lease_owner_id"] == self._manager_id
-                        and request_key in self._owned_requests
-                    ):
+                    if self._owns_grant(row, request_key):
                         return ResourceDecision(True, "already_granted")
                     return ResourceDecision(False, "recovery_required")
+                if state not in {
+                    "waiting", "released", "cancelled", "released_after_restart"
+                }:
+                    raise RuntimeError("resource request state is corrupt")
                 if state in {"released", "cancelled", "released_after_restart"}:
                     created_at = row["created_at"]
                     conn.execute(
@@ -234,7 +234,7 @@ class ResourceManager:
             if int(active["count"]) >= budget.max_concurrent:
                 return ResourceDecision(False, "concurrency_limit", position)
 
-            snapshot = self._observer.snapshot()
+            snapshot = self._read_snapshot()
             reason = _resource_pressure_reason(budget, snapshot)
             if reason is not None:
                 return ResourceDecision(False, reason, position)
@@ -269,6 +269,45 @@ class ResourceManager:
             self._owned_requests.add(request_key)
             return ResourceDecision(True, "granted")
 
+    def revalidate(self, *, scope: str, owner_id: str, request_id: str) -> ResourceDecision:
+        """Recheck only this instance's durable grant; retain ownership on pressure."""
+        ResourceRequestIdentity(scope=scope, owner_id=owner_id, request_id=request_id)
+        key = (scope, owner_id, request_id)
+        with self._lock, self._store.connection() as conn:
+            conn.execute("BEGIN")
+            row = conn.execute(
+                """SELECT * FROM resource_requests
+                WHERE scope = ? AND owner_id = ? AND request_id = ?""",
+                key,
+            ).fetchone()
+            if row is None or row["state"] != "granted" or not self._owns_grant(row, key):
+                return ResourceDecision(False, "not_granted")
+            budget = _get_budget_with_connection(conn, scope, owner_id)
+            active = conn.execute(
+                """SELECT COUNT(*) AS count FROM resource_requests
+                WHERE scope = ? AND owner_id = ? AND state = 'granted'""",
+                (scope, owner_id),
+            ).fetchone()
+            if int(active["count"]) > budget.max_concurrent:
+                return ResourceDecision(False, "concurrency_limit")
+            reason = _resource_pressure_reason(budget, self._read_snapshot())
+            if reason is not None:
+                return ResourceDecision(False, reason)
+            return ResourceDecision(True, "still_granted")
+
+    def _owns_grant(self, row: Any, key: tuple[str, str, str]) -> bool:
+        process = self._process_identity
+        return (
+            key in self._owned_requests
+            and row["lease_owner_id"] == self._manager_id
+            and row["lease_owner_process_id"] == (
+                process.process_id if process is not None else None
+            )
+            and row["lease_owner_started_at"] == (
+                process.started_at if process is not None else None
+            )
+        )
+
     def release(self, *, scope: str, owner_id: str, request_id: str) -> bool:
         ResourceRequestIdentity(scope=scope, owner_id=owner_id, request_id=request_id)
         request_key = (scope, owner_id, request_id)
@@ -282,13 +321,22 @@ class ResourceManager:
                         lease_owner_process_id = NULL, lease_owner_started_at = NULL,
                         updated_at = ?
                     WHERE scope = ? AND owner_id = ? AND request_id = ?
-                      AND state = 'granted' AND lease_owner_id = ?""",
+                      AND state = 'granted' AND lease_owner_id = ?
+                      AND lease_owner_process_id IS ? AND lease_owner_started_at IS ?""",
                     (
                         datetime.now(UTC).isoformat(),
                         scope,
                         owner_id,
                         request_id,
                         self._manager_id,
+                        (
+                            self._process_identity.process_id
+                            if self._process_identity is not None else None
+                        ),
+                        (
+                            self._process_identity.started_at
+                            if self._process_identity is not None else None
+                        ),
                     ),
                 )
             if cursor.rowcount > 0:
@@ -321,8 +369,7 @@ class ResourceManager:
 
     def recover_after_restart(self, *, stale_manager_id: str) -> int:
         """Release leases only after independent process-liveness proof says the owner is dead."""
-        stale_manager_id = stale_manager_id.strip()
-        if not stale_manager_id:
+        if type(stale_manager_id) is not str or not stale_manager_id.strip():
             raise ValueError("stale_manager_id must not be empty")
         if self._owner_probe is None:
             raise RuntimeError("resource owner liveness cannot be verified")
@@ -338,8 +385,14 @@ class ResourceManager:
             if not rows:
                 return 0
             owner_identity = _persisted_process_identity(rows)
-            if self._owner_probe.is_process_alive(owner_identity):
+            try:
+                alive = self._owner_probe.is_process_alive(owner_identity)
+            except Exception:  # noqa: BLE001 - uncertain liveness never authorizes release
+                raise RuntimeError("resource owner liveness cannot be verified") from None
+            if alive is True:
                 raise RuntimeError("resource lease owner is still alive")
+            if alive is not False:
+                raise RuntimeError("resource owner liveness cannot be verified")
             cursor = conn.execute(
                 """UPDATE resource_requests
                 SET state = 'released_after_restart', lease_owner_id = NULL,
@@ -379,12 +432,12 @@ class ResourceManager:
 
     def _has_unowned_same_manager_lease(self, conn: Any) -> bool:
         rows = conn.execute(
-            """SELECT scope, owner_id, request_id FROM resource_requests
+            """SELECT * FROM resource_requests
             WHERE state = 'granted' AND lease_owner_id = ?""",
             (self._manager_id,),
         ).fetchall()
         return any(
-            (row["scope"], row["owner_id"], row["request_id"]) not in self._owned_requests
+            not self._owns_grant(row, (row["scope"], row["owner_id"], row["request_id"]))
             for row in rows
         )
 
@@ -435,19 +488,15 @@ def _get_budget_with_connection(conn: Any, scope: str, owner_id: str) -> Resourc
         "SELECT * FROM resource_budgets WHERE scope = ? AND owner_id = ?",
         (scope, owner_id),
     ).fetchone()
-    if row is None:
-        return ResourceBudget(scope=scope, owner_id=owner_id)
-    return ResourceBudget(
+    budget = ResourceBudget(scope=scope, owner_id=owner_id) if row is None else ResourceBudget(
         scope=row["scope"],
         owner_id=row["owner_id"],
-        max_concurrent=int(row["max_concurrent"]),
+        max_concurrent=row["max_concurrent"],
         max_cpu_percent=row["max_cpu_percent"],
         max_memory_percent=row["max_memory_percent"],
-        max_disk_percent=row["max_disk_percent"],
-        max_gpu_percent=row["max_gpu_percent"],
-        max_process_memory_bytes=row["max_process_memory_bytes"],
     )
-
+    _validate_budget(budget)
+    return budget
 
 def _validate_persisted_identity(row: Any, identity: ResourceRequestIdentity) -> None:
     if row["product_project_id"] != identity.product_project_id:
@@ -456,7 +505,7 @@ def _validate_persisted_identity(row: Any, identity: ResourceRequestIdentity) ->
 
 def _resource_pressure_reason(
     budget: ResourceBudget,
-    snapshot: ResourceSnapshot,
+    snapshot: object,
 ) -> str | None:
     if not _valid_snapshot(snapshot):
         return "invalid_observation"
@@ -467,70 +516,71 @@ def _resource_pressure_reason(
         and snapshot.memory_percent > budget.max_memory_percent
     ):
         return "memory_limit"
-    if budget.max_disk_percent is not None:
-        if snapshot.disk_percent is None:
-            return "disk_unavailable"
-        if snapshot.disk_percent > budget.max_disk_percent:
-            return "disk_limit"
-    if budget.max_gpu_percent is not None:
-        if snapshot.gpu_percent is None:
-            return "gpu_unavailable"
-        if snapshot.gpu_percent > budget.max_gpu_percent:
-            return "gpu_limit"
-    if budget.max_process_memory_bytes is not None:
-        if snapshot.process_rss_bytes is None:
-            return "process_memory_unavailable"
-        if snapshot.process_rss_bytes > budget.max_process_memory_bytes:
-            return "process_memory_limit"
     return None
 
 
-def _valid_snapshot(snapshot: ResourceSnapshot) -> bool:
-    percent_values = (
-        snapshot.cpu_percent,
-        snapshot.memory_percent,
-        snapshot.disk_percent,
-        snapshot.gpu_percent,
-    )
-    for value in percent_values:
-        if value is not None and (not math.isfinite(value) or not 0 <= value <= 100):
+def _valid_snapshot(snapshot: object) -> bool:
+    if type(snapshot) is not ResourceSnapshot:
+        return False
+    try:
+        cpu_percent = snapshot.cpu_percent
+        memory_percent = snapshot.memory_percent
+        available_memory_bytes = snapshot.available_memory_bytes
+        logical_cpu_count = snapshot.logical_cpu_count
+        total_memory_bytes = snapshot.total_memory_bytes
+        process_rss_bytes = snapshot.process_rss_bytes
+        battery_percent = snapshot.battery_percent
+        power_plugged = snapshot.power_plugged
+    except AttributeError:
+        return False
+
+    for value in (cpu_percent, memory_percent):
+        if (
+            type(value) not in (int, float)
+            or not 0 <= value <= 100
+            or not math.isfinite(value)
+        ):
             return False
-    byte_values = (
-        snapshot.available_memory_bytes,
-        snapshot.available_disk_bytes,
-        snapshot.process_rss_bytes,
-    )
-    return all(
-        value is None
-        or (isinstance(value, int) and not isinstance(value, bool) and value >= 0)
-        for value in byte_values
-    )
+    if type(available_memory_bytes) is not int or available_memory_bytes < 0:
+        return False
+    if logical_cpu_count is not None and (
+        type(logical_cpu_count) is not int or logical_cpu_count <= 0
+    ):
+        return False
+    for value in (total_memory_bytes, process_rss_bytes):
+        if value is not None and (type(value) is not int or value < 0):
+            return False
+    if battery_percent is not None and (
+        type(battery_percent) not in (int, float)
+        or not 0 <= battery_percent <= 100
+        or not math.isfinite(battery_percent)
+    ):
+        return False
+    return power_plugged is None or type(power_plugged) is bool
 
 
 def _validate_budget(budget: ResourceBudget) -> None:
-    if not budget.scope.strip() or not budget.owner_id.strip():
+    if type(budget) is not ResourceBudget:
+        raise ValueError("resource budget must be an exact ResourceBudget")
+    if (
+        type(budget.scope) is not str
+        or not budget.scope.strip()
+        or type(budget.owner_id) is not str
+        or not budget.owner_id.strip()
+    ):
         raise ValueError("resource budget scope and owner_id must not be empty")
     if (
-        isinstance(budget.max_concurrent, bool)
-        or not isinstance(budget.max_concurrent, int)
-        or budget.max_concurrent <= 0
+        type(budget.max_concurrent) is not int
+        or not 1 <= budget.max_concurrent <= _SQLITE_MAX_INT64
     ):
-        raise ValueError("max_concurrent must be a positive integer")
+        raise ValueError("max_concurrent must be a positive SQLite-sized integer")
     for name, value in (
         ("max_cpu_percent", budget.max_cpu_percent),
         ("max_memory_percent", budget.max_memory_percent),
-        ("max_disk_percent", budget.max_disk_percent),
-        ("max_gpu_percent", budget.max_gpu_percent),
     ):
         if value is not None and (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or not 0 < float(value) <= 100
+            type(value) not in (int, float)
+            or not 0 < value <= 100
+            or not math.isfinite(value)
         ):
             raise ValueError(f"{name} must be a finite number in the range (0, 100]")
-    memory_bytes = budget.max_process_memory_bytes
-    if memory_bytes is not None and (
-        isinstance(memory_bytes, bool) or not isinstance(memory_bytes, int) or memory_bytes <= 0
-    ):
-        raise ValueError("max_process_memory_bytes must be a positive integer or None")

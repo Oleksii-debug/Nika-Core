@@ -12,6 +12,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue, TaskRecord
 from nika_core.kernel.task_state import TaskState
 from nika_core.kernel.workspace_registry import WorkspaceDefinition, WorkspaceRegistry
+from nika_core.resources import ResourceManager
 from nika_core.runtime.contracts import (
     AgentRuntimePort,
     RuntimeCapability,
@@ -26,6 +27,8 @@ from nika_core.windows_autostart import WindowsAutostartService
 _LOGGER = logging.getLogger(__name__)
 _DEFAULT_AGENT_ID = "nika.default"
 _DEFAULT_WORKSPACE_ID = "default"
+_RESOURCE_SCOPE = "desktop_runtime"
+_RESOURCE_OWNER = "local_machine"
 _TERMINAL_STATES = frozenset(
     {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED, TaskState.ARCHIVED}
 )
@@ -93,8 +96,12 @@ class DesktopBackend:
         runtime: AgentRuntimePort | None = None,
         prepare_task_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         autostart_service: WindowsAutostartService | None = None,
+        resources: ResourceManager | None = None,
     ) -> None:
         self._queue = queue
+        # None is reserved for explicitly isolated/unit composition. The packaged
+        # Windows builder always injects the canonical SQLite-backed manager.
+        self._resources = resources
         self._agents = agents
         self._workspaces = workspaces
         self._audit = audit
@@ -175,7 +182,7 @@ class DesktopBackend:
             self._submit_runtime(
                 record.task_id,
                 session.thread_id,
-                self._coordinator.resume_saved(self._runtime, task_id=record.task_id),
+                self._resume_with_resources(record.task_id),
             )
             return UIResult(
                 request_id="desktop-handler",
@@ -241,6 +248,7 @@ class DesktopBackend:
                             "збереженої або локально активної runtime-сесії."
                         )
                     self._queue.transition(record.task_id, TaskState.CANCELLED)
+                    self._cancel_resource_wait(record.task_id)
 
         if cancel_future is not None:
             cancel_future.add_done_callback(
@@ -261,9 +269,18 @@ class DesktopBackend:
         )
 
     def snapshot(self) -> dict[str, Any]:
+        waiting = (
+            set(self._resources.queued(scope=_RESOURCE_SCOPE, owner_id=_RESOURCE_OWNER))
+            if self._resources is not None else set()
+        )
         return {
             "autostart": self.autostart_settings.snapshot(),
-            "tasks": [self._task_view(record) for record in self._queue.list_recent(limit=50)],
+            "tasks": [
+                self._task_view(record, resource_waiting=(
+                    record.task_id in waiting and record.state == TaskState.PAUSED
+                ))
+                for record in self._queue.list_recent(limit=50)
+            ],
             "agents": [
                 {
                     "agent_id": item.agent_id,
@@ -333,14 +350,67 @@ class DesktopBackend:
 
     async def _start_if_ready(self, request: RuntimeRequest) -> object | None:
         if self._queue.get(request.task_id).state != TaskState.READY:
+            self._cancel_resource_wait(request.task_id)
             return None
         try:
-            return await self._coordinator.start(self._runtime, request)
+            return await self._with_resources(
+                request.task_id,
+                lambda: self._coordinator.start(self._runtime, request),
+            )
         except ValueError:
             current = self._queue.get(request.task_id)
             if current.state in {TaskState.PAUSED, TaskState.CANCELLED}:
                 return None
             raise
+
+    async def _resume_with_resources(self, task_id: str) -> object | None:
+        return await self._with_resources(
+            task_id,
+            lambda: self._coordinator.resume_saved(self._runtime, task_id=task_id),
+        )
+
+    async def _with_resources(
+        self,
+        task_id: str,
+        operation: Callable[[], Coroutine[Any, Any, Any]],
+    ) -> object | None:
+        if self._resources is None:
+            return await operation()
+        decision = self._resources.request(
+            scope=_RESOURCE_SCOPE, owner_id=_RESOURCE_OWNER, request_id=task_id
+        )
+        if not decision.granted:
+            current = self._queue.get(task_id)
+            if current.state == TaskState.READY:
+                try:
+                    self._queue.transition(task_id, TaskState.PAUSED)
+                except ValueError:
+                    if self._queue.get(task_id).state != TaskState.CANCELLED:
+                        raise
+            if self._queue.get(task_id).state == TaskState.CANCELLED:
+                self._cancel_resource_wait(task_id)
+            self._audit.append(
+                event_type="desktop.resource_wait",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"reason": decision.reason},
+            )
+            return None
+        try:
+            # Task cancellation/pause may have won while SQLite admission ran.
+            if self._queue.get(task_id).state == TaskState.CANCELLED:
+                return None
+            return await operation()
+        finally:
+            self._resources.release(
+                scope=_RESOURCE_SCOPE, owner_id=_RESOURCE_OWNER, request_id=task_id
+            )
+
+    def _cancel_resource_wait(self, task_id: str) -> None:
+        if self._resources is not None:
+            self._resources.cancel_waiting(
+                scope=_RESOURCE_SCOPE, owner_id=_RESOURCE_OWNER, request_id=task_id
+            )
 
     def _schedule_cancel_locked(self, task_id: str, thread_id: str) -> Future[bool]:
         if RuntimeCapability.CANCELLATION not in self._runtime.capabilities:
@@ -468,7 +538,9 @@ class DesktopBackend:
         return records[0] if records else None
 
     @staticmethod
-    def _task_view(record: TaskRecord) -> dict[str, Any]:
+    def _task_view(
+        record: TaskRecord, *, resource_waiting: bool = False
+    ) -> dict[str, Any]:
         command = str(record.payload.get("command", "")).strip()
         return {
             "task_id": record.task_id,
@@ -476,4 +548,8 @@ class DesktopBackend:
             "agent_id": record.agent_id,
             "state": record.state.value,
             "command": command,
+            "resource_message": (
+                "Очікування ресурсів. Після звільнення ресурсів натисніть «Продовжити»."
+                if resource_waiting else ""
+            ),
         }

@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
-from nika_core.memory.contracts import MemoryRecord, MemoryRetentionPolicy, MemoryScope
+from nika_core.memory.contracts import MemoryRecord, MemoryScope
 
 
 class MemoryService:
@@ -24,23 +24,15 @@ class MemoryService:
         value: Any,
         user_approved: bool = False,
         expires_at: datetime | None = None,
-        retention: MemoryRetentionPolicy | None = None,
-        now: datetime | None = None,
     ) -> MemoryRecord:
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)
         key = _required("key", key)
-        if not isinstance(user_approved, bool):
-            raise TypeError("user_approved must be a boolean")
         if scope is MemoryScope.USER and not user_approved:
             raise PermissionError("user long-term memory requires explicit approval")
-        current = _as_utc(now) if now else datetime.now(UTC)
         if expires_at is not None:
             expires_at = _as_utc(expires_at)
-        if retention is not None and retention.ttl_seconds is not None:
-            if expires_at is not None:
-                raise ValueError("expires_at and retention.ttl_seconds are mutually exclusive")
-            expires_at = current + timedelta(seconds=retention.ttl_seconds)
+        now = datetime.now(UTC)
         body = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         with self._store.connection() as conn:
             existing = conn.execute(
@@ -48,7 +40,7 @@ class MemoryService:
                 "AND namespace = ? AND memory_key = ?",
                 (scope.value, owner_id, namespace, key),
             ).fetchone()
-            created_at = existing["created_at"] if existing else current.isoformat()
+            created_at = existing["created_at"] if existing else now.isoformat()
             conn.execute(
                 """INSERT INTO memory_records(
                     scope, owner_id, namespace, memory_key, value_json, user_approved,
@@ -69,25 +61,9 @@ class MemoryService:
                     int(user_approved),
                     expires_at.isoformat() if expires_at else None,
                     created_at,
-                    current.isoformat(),
+                    now.isoformat(),
                 ),
             )
-            conn.execute(
-                """DELETE FROM memory_records
-                WHERE scope = ? AND owner_id = ? AND namespace = ?
-                  AND expires_at IS NOT NULL AND expires_at <= ?""",
-                (scope.value, owner_id, namespace, current.isoformat()),
-            )
-            trimmed = 0
-            if retention is not None and retention.max_records is not None:
-                trimmed = _trim_namespace(
-                    conn,
-                    scope=scope,
-                    owner_id=owner_id,
-                    namespace=namespace,
-                    protected_key=key,
-                    max_records=retention.max_records,
-                )
             if self._audit is not None:
                 self._audit.append_with_connection(
                     conn,
@@ -101,17 +77,12 @@ class MemoryService:
                         "key": key,
                         "expires": expires_at is not None,
                         "user_approved": user_approved,
-                        "retention_trimmed": trimmed,
                     },
                 )
-            committed_row = conn.execute(
-                "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
-                "AND namespace = ? AND memory_key = ?",
-                (scope.value, owner_id, namespace, key),
-            ).fetchone()
-        if committed_row is None:
-            raise RuntimeError("memory record expired or was removed by retention during write")
-        return _record_from_row(committed_row)
+        record = self.get(scope=scope, owner_id=owner_id, namespace=namespace, key=key)
+        if record is None:
+            raise RuntimeError("memory record expired during write")
+        return record
 
     def get(
         self,
@@ -202,43 +173,14 @@ def _parse_optional(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
-def _trim_namespace(
-    conn: Any,
-    *,
-    scope: MemoryScope,
-    owner_id: str,
-    namespace: str,
-    protected_key: str,
-    max_records: int,
-) -> int:
-    cursor = conn.execute(
-        """DELETE FROM memory_records
-        WHERE rowid IN (
-            SELECT rowid
-            FROM memory_records
-            WHERE scope = ? AND owner_id = ? AND namespace = ? AND memory_key != ?
-            ORDER BY updated_at DESC, rowid DESC
-            LIMIT -1 OFFSET ?
-        )""",
-        (scope.value, owner_id, namespace, protected_key, max_records - 1),
-    )
-    return int(cursor.rowcount)
-
-
 def _record_from_row(row: Any) -> MemoryRecord:
-    scope = MemoryScope(row["scope"])
-    approved = row["user_approved"]
-    if isinstance(approved, bool) or not isinstance(approved, int) or approved not in {0, 1}:
-        raise RuntimeError("memory user approval flag is corrupt")
-    if scope is MemoryScope.USER and approved != 1:
-        raise RuntimeError("user long-term memory record lacks explicit approval")
     return MemoryRecord(
-        scope=scope,
+        scope=MemoryScope(row["scope"]),
         owner_id=row["owner_id"],
         namespace=row["namespace"],
         key=row["memory_key"],
         value=json.loads(row["value_json"]),
-        user_approved=bool(approved),
+        user_approved=bool(row["user_approved"]),
         expires_at=_parse_optional(row["expires_at"]),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),

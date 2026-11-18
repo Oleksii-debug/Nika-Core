@@ -7,6 +7,9 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+from pydantic_settings import SettingsError
+
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import Keymap
@@ -25,6 +28,7 @@ from nika_core.product_factory_packaged_journey import (
     product_project_identity,
 )
 from nika_core.product_project import ProductProjectRepository
+from nika_core.resources import PsutilResourceObserver, ResourceManager
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
@@ -54,6 +58,7 @@ def build_windows_bridge(
     source_settings = V01SourceSettings(store, config)
     backend = DesktopBackend(
         queue=TaskQueue(store),
+        resources=ResourceManager(store, PsutilResourceObserver()),
         agents=AgentRegistry(store),
         workspaces=WorkspaceRegistry(store),
         audit=AuditLog(store),
@@ -253,6 +258,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = AppConfig.from_environment()
     except LegacyDatabaseConflict as exc:
         show_recovery_error(str(exc))
+        return 1
+    except (ValidationError, SettingsError):
+        # Validation details can contain private paths or environment values.
+        show_recovery_error(
+            "Некоректні налаштування Nika (NIKA_*). Перевірте конфігурацію "
+            "та перезапустіть програму. Дані не змінено."
+        )
         return 1
     if args.pf11_proof:
         return _run_pf11_proof(
