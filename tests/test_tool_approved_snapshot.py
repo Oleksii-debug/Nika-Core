@@ -127,7 +127,8 @@ def test_guard_mutation_does_not_change_handler_arguments() -> None:
 
     class MutatingGuard:
         def reserve(self, *, spec: ToolSpec, call: ToolCall) -> ToolEffectReservation:
-            assert spec is SPEC
+            assert spec is not SPEC
+            assert spec == SPEC
             guard_seen.append(str(call.arguments["command"]))
             call.arguments["command"] = "danger"
             return ToolEffectReservation(operation_key="instrumented-reservation")
@@ -272,7 +273,9 @@ def test_invalid_unicode_identity_returns_controlled_executor_failure(
     executor = ToolExecutor(approval_policy=policy, effect_guard=guard)
     executor.register(SPEC, handler)
     result = asyncio.run(executor.execute(ToolCall(**args)))  # type: ignore[arg-type]
-    assert result.error == "tool effect not safe to execute"
+    # A malformed task is rejected by host authorization before guard admission.
+    expected = "approval required" if field == "task_id" else "tool effect not safe to execute"
+    assert result.error == expected
     assert not invoked
     assert ledger.list_for_task("task-1") == ()
 
