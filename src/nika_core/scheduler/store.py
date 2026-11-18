@@ -29,6 +29,37 @@ class ScheduledJobStore:
             conn.execute("BEGIN IMMEDIATE")
             self.upsert_with_connection(conn, job)
 
+    def replace_if_current(
+        self,
+        expected_job: ScheduledJob | None,
+        job: ScheduledJob,
+        *,
+        require_terminal_task: bool = False,
+    ) -> bool:
+        """Replace one exact durable snapshot, or insert only while still absent.
+
+        Compare and write share the canonical SQLite writer transaction. Runtime
+        installation remains outside it and must use persisted-only activation.
+        """
+        incoming = _canonical_job(job)
+        expected = _canonical_job(expected_job) if expected_job is not None else None
+        if expected is not None and expected.job_id != incoming.job_id:
+            raise ValueError("conditional scheduled job replacement must retain job_id")
+        if type(require_terminal_task) is not bool:
+            raise TypeError("require_terminal_task must be an exact bool")
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self.get_with_connection(conn, incoming.job_id)
+            if not _same_job_snapshot(current, expected):
+                return False
+            if require_terminal_task:
+                task_id = incoming.payload.get("task_id")
+                task_state = self.task_state_with_connection(conn, task_id)
+                if task_state is not None and task_state not in _TERMINAL_TASK_STATES:
+                    return False
+            self.upsert_with_connection(conn, incoming)
+        return True
+
     def upsert_with_connection(self, conn: sqlite3.Connection, job: ScheduledJob) -> None:
         """Upsert one job inside a caller-owned SQLite transaction."""
         job = _canonical_job(job)

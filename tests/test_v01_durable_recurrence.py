@@ -48,7 +48,9 @@ class PersistingScheduler:
         del wait
 
     def upsert(self, job: ScheduledJob) -> None:
-        self.jobs.upsert(job)
+        raise AssertionError("recurrence writes must use the transactional store CAS")
+
+    def activate_persisted(self, job: ScheduledJob) -> None:
         self.upserts.append(job)
 
     def remove(self, job_id: str) -> bool:

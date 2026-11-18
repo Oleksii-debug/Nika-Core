@@ -19,6 +19,7 @@ _TASK_ID_KEY = "task_id"
 _RECURRENCE_VERSION = 2
 _MAX_PAYLOAD_DEPTH = 32
 _MAX_PAYLOAD_JSON_BYTES = 262_144
+_TRANSITION_RETRY_LIMIT = 3
 _IRREVERSIBLY_TERMINAL_TASK_STATES = frozenset(
     {TaskState.CANCELLED, TaskState.COMPLETED, TaskState.ARCHIVED}
 )
@@ -135,35 +136,6 @@ class DurableRecurrenceService:
             next_due = anchor
 
         user_payload = _canonical_payload(payload)
-        job_id = _job_id(recurrence_key)
-        existing = self._jobs.get(job_id)
-        if existing is not None:
-            state, existing_payload = self._decode_with_task_authority(
-                existing,
-                expected_recurrence_id=recurrence_key,
-            )
-            requested_binding = _definition_fingerprint(
-                recurrence_id=recurrence_key,
-                task_id=task_key,
-                action_id=target_action,
-                interval_seconds=interval,
-                anchor_at=anchor,
-                deadline_at=deadline,
-                target_payload=user_payload,
-            )
-            existing_binding = _definition_fingerprint(
-                recurrence_id=state.recurrence_id,
-                task_id=state.task_id,
-                action_id=state.action_id,
-                interval_seconds=state.interval_seconds,
-                anchor_at=state.anchor_at,
-                deadline_at=state.deadline_at,
-                target_payload=existing_payload,
-            )
-            if existing_binding != requested_binding:
-                raise ValueError("recurrence_id is already bound to a different recurrence")
-            return state
-
         state = RecurrenceState(
             recurrence_id=recurrence_key,
             task_id=task_key,
@@ -181,62 +153,65 @@ class DurableRecurrenceService:
             last_completed_occurrence_id=None,
             terminal_reason=terminal_reason,
         )
-        self._persist(state, user_payload)
-        return state
+        requested_binding = self._job_for_state(state, user_payload).payload[
+            IMMUTABLE_JOB_BINDING_KEY
+        ]
+        for _ in range(_TRANSITION_RETRY_LIMIT):
+            existing = self._read_snapshot(recurrence_key)
+            if existing is not None:
+                job, current, _ = existing
+                if job.payload[IMMUTABLE_JOB_BINDING_KEY] != requested_binding:
+                    raise ValueError("recurrence_id is already bound to a different recurrence")
+                return current
+            if self._persist(state, user_payload, expected_job=None):
+                return state
+        raise RuntimeError("recurrence changed concurrently; retry the command")
 
     def get(self, recurrence_id: str) -> RecurrenceState | None:
         recurrence_key = _required_text(recurrence_id, "recurrence_id")
-        job = self._jobs.get(_job_id(recurrence_key))
-        if job is None:
-            return None
-        state, _ = self._decode_with_task_authority(
-            job,
-            expected_recurrence_id=recurrence_key,
-        )
-        return state
+        snapshot = self._read_snapshot(recurrence_key)
+        return snapshot[1] if snapshot is not None else None
 
     def pause(self, recurrence_id: str) -> RecurrenceState:
-        state, payload = self._required(recurrence_id)
-        if state.status is not RecurrenceStatus.ACTIVE:
-            return state
-        paused = replace(state, status=RecurrenceStatus.PAUSED)
-        self._persist(paused, payload)
-        return paused
+        def paused(state: RecurrenceState) -> RecurrenceState:
+            if state.status is not RecurrenceStatus.ACTIVE:
+                return state
+            return replace(state, status=RecurrenceStatus.PAUSED)
+
+        return self._transition(recurrence_id, paused)
 
     def resume(self, recurrence_id: str) -> RecurrenceState:
-        state, payload = self._required(recurrence_id)
-        if state.status is not RecurrenceStatus.PAUSED:
-            return state
-        now = self._now()
-        if state.deadline_at is not None and now >= state.deadline_at:
-            completed = replace(
-                state,
-                status=RecurrenceStatus.COMPLETED,
-                next_due_at=None,
-                next_occurrence_id=None,
-                terminal_reason=RecurrenceTerminalReason.DEADLINE,
-            )
-            self._persist(completed, payload)
-            return completed
-        if state.next_due_at is None:
-            raise ValueError("paused recurrence is missing its next durable intent")
-        resumed = replace(state, status=RecurrenceStatus.ACTIVE)
-        self._persist(resumed, payload)
-        return resumed
+        def resumed(state: RecurrenceState) -> RecurrenceState:
+            if state.status is not RecurrenceStatus.PAUSED:
+                return state
+            now = self._now()
+            if state.deadline_at is not None and now >= state.deadline_at:
+                return replace(
+                    state,
+                    status=RecurrenceStatus.COMPLETED,
+                    next_due_at=None,
+                    next_occurrence_id=None,
+                    terminal_reason=RecurrenceTerminalReason.DEADLINE,
+                )
+            if state.next_due_at is None:
+                raise ValueError("paused recurrence is missing its next durable intent")
+            return replace(state, status=RecurrenceStatus.ACTIVE)
+
+        return self._transition(recurrence_id, resumed)
 
     def cancel(self, recurrence_id: str) -> RecurrenceState:
-        state, payload = self._required(recurrence_id)
-        if state.status in {RecurrenceStatus.CANCELLED, RecurrenceStatus.COMPLETED}:
-            return state
-        cancelled = replace(
-            state,
-            status=RecurrenceStatus.CANCELLED,
-            next_due_at=None,
-            next_occurrence_id=None,
-            terminal_reason=None,
-        )
-        self._persist(cancelled, payload)
-        return cancelled
+        def cancelled(state: RecurrenceState) -> RecurrenceState:
+            if state.status in {RecurrenceStatus.CANCELLED, RecurrenceStatus.COMPLETED}:
+                return state
+            return replace(
+                state,
+                status=RecurrenceStatus.CANCELLED,
+                next_due_at=None,
+                next_occurrence_id=None,
+                terminal_reason=None,
+            )
+
+        return self._transition(recurrence_id, cancelled)
 
     def action_handler(self, payload: dict[str, Any]) -> None:
         if type(payload) is not dict:
@@ -246,7 +221,7 @@ class DurableRecurrenceService:
             label="recurrence action payload",
         )
         recurrence_id = _required_text(payload.get("recurrence_id"), "recurrence_id")
-        state, target_payload = self._required(recurrence_id)
+        initial_job, state, target_payload = self._required_snapshot(recurrence_id)
         if state.status is not RecurrenceStatus.ACTIVE:
             return
         if state.next_due_at is None or state.next_occurrence_id is None:
@@ -269,8 +244,13 @@ class DurableRecurrenceService:
             return
 
         handler = self._handler_resolver(state.action_id)
-        current, current_payload = self._required(recurrence_id)
+        current_job, current, current_payload = self._required_snapshot(recurrence_id)
         if current.status is not RecurrenceStatus.ACTIVE:
+            return
+        if (
+            current_job.payload[IMMUTABLE_JOB_BINDING_KEY]
+            != initial_job.payload[IMMUTABLE_JOB_BINDING_KEY]
+        ):
             return
         if (
             current.next_due_at != state.next_due_at
@@ -306,6 +286,7 @@ class DurableRecurrenceService:
             state.recurrence_id,
             invocation,
             stop=stop,
+            expected_binding=current_job.payload[IMMUTABLE_JOB_BINDING_KEY],
         )
 
     def _finish_occurrence(
@@ -314,72 +295,71 @@ class DurableRecurrenceService:
         invocation: RecurrenceInvocation,
         *,
         stop: bool,
+        expected_binding: str,
     ) -> RecurrenceState:
-        current, payload = self._required(recurrence_id)
-        if current.status in {RecurrenceStatus.CANCELLED, RecurrenceStatus.COMPLETED}:
-            return current
-        if current.last_completed_occurrence_id == invocation.occurrence_id:
-            return current
-        if (
-            current.next_occurrence_id != invocation.occurrence_id
-            or current.next_due_at != invocation.scheduled_for
-        ):
-            raise ValueError("stale recurrence occurrence cannot advance durable state")
+        def finished(current: RecurrenceState) -> RecurrenceState:
+            if current.status in {RecurrenceStatus.CANCELLED, RecurrenceStatus.COMPLETED}:
+                return current
+            if current.last_completed_occurrence_id == invocation.occurrence_id:
+                return current
+            if (
+                current.next_occurrence_id != invocation.occurrence_id
+                or current.next_due_at != invocation.scheduled_for
+            ):
+                raise ValueError("stale recurrence occurrence cannot advance durable state")
 
-        now = self._now()
-        if stop:
-            completed = replace(
+            now = self._now()
+            if stop:
+                completed = replace(
+                    current,
+                    status=RecurrenceStatus.COMPLETED,
+                    next_due_at=None,
+                    next_occurrence_id=None,
+                    last_completed_due_at=invocation.scheduled_for,
+                    last_completed_occurrence_id=invocation.occurrence_id,
+                    terminal_reason=RecurrenceTerminalReason.CONDITION_MET,
+                )
+                return completed
+
+            try:
+                next_due = _first_future_slot(
+                    invocation.scheduled_for,
+                    interval_seconds=current.interval_seconds,
+                    now=now,
+                )
+            except OverflowError:
+                completed = replace(
+                    current,
+                    status=RecurrenceStatus.COMPLETED,
+                    next_due_at=None,
+                    next_occurrence_id=None,
+                    last_completed_due_at=invocation.scheduled_for,
+                    last_completed_occurrence_id=invocation.occurrence_id,
+                    terminal_reason=RecurrenceTerminalReason.RANGE_EXHAUSTED,
+                )
+                return completed
+            if current.deadline_at is not None and next_due >= current.deadline_at:
+                completed = replace(
+                    current,
+                    status=RecurrenceStatus.COMPLETED,
+                    next_due_at=None,
+                    next_occurrence_id=None,
+                    last_completed_due_at=invocation.scheduled_for,
+                    last_completed_occurrence_id=invocation.occurrence_id,
+                    terminal_reason=RecurrenceTerminalReason.DEADLINE,
+                )
+                return completed
+
+            next_state = replace(
                 current,
-                status=RecurrenceStatus.COMPLETED,
-                next_due_at=None,
-                next_occurrence_id=None,
+                next_due_at=next_due,
+                next_occurrence_id=_occurrence_id(current.recurrence_id, next_due),
                 last_completed_due_at=invocation.scheduled_for,
                 last_completed_occurrence_id=invocation.occurrence_id,
-                terminal_reason=RecurrenceTerminalReason.CONDITION_MET,
             )
-            self._persist(completed, payload)
-            return completed
+            return next_state
 
-        try:
-            next_due = _first_future_slot(
-                invocation.scheduled_for,
-                interval_seconds=current.interval_seconds,
-                now=now,
-            )
-        except OverflowError:
-            completed = replace(
-                current,
-                status=RecurrenceStatus.COMPLETED,
-                next_due_at=None,
-                next_occurrence_id=None,
-                last_completed_due_at=invocation.scheduled_for,
-                last_completed_occurrence_id=invocation.occurrence_id,
-                terminal_reason=RecurrenceTerminalReason.RANGE_EXHAUSTED,
-            )
-            self._persist(completed, payload)
-            return completed
-        if current.deadline_at is not None and next_due >= current.deadline_at:
-            completed = replace(
-                current,
-                status=RecurrenceStatus.COMPLETED,
-                next_due_at=None,
-                next_occurrence_id=None,
-                last_completed_due_at=invocation.scheduled_for,
-                last_completed_occurrence_id=invocation.occurrence_id,
-                terminal_reason=RecurrenceTerminalReason.DEADLINE,
-            )
-            self._persist(completed, payload)
-            return completed
-
-        next_state = replace(
-            current,
-            next_due_at=next_due,
-            next_occurrence_id=_occurrence_id(current.recurrence_id, next_due),
-            last_completed_due_at=invocation.scheduled_for,
-            last_completed_occurrence_id=invocation.occurrence_id,
-        )
-        self._persist(next_state, payload)
-        return next_state
+        return self._transition(recurrence_id, finished, expected_binding=expected_binding)
 
     def _complete_terminal(
         self,
@@ -388,66 +368,102 @@ class DurableRecurrenceService:
         *,
         reason: RecurrenceTerminalReason,
     ) -> RecurrenceState:
-        completed = replace(
-            state,
-            status=RecurrenceStatus.COMPLETED,
-            next_due_at=None,
-            next_occurrence_id=None,
-            terminal_reason=reason,
-        )
-        self._persist(completed, payload)
-        return completed
-
-    def _required(self, recurrence_id: str) -> tuple[RecurrenceState, dict[str, Any]]:
-        recurrence_key = _required_text(recurrence_id, "recurrence_id")
-        job = self._jobs.get(_job_id(recurrence_key))
-        if job is None:
-            raise KeyError(f"unknown recurrence: {recurrence_key}")
-        return self._decode_with_task_authority(
-            job,
-            expected_recurrence_id=recurrence_key,
-        )
-
-    def _decode_with_task_authority(
-        self,
-        job: ScheduledJob,
-        *,
-        expected_recurrence_id: str,
-    ) -> tuple[RecurrenceState, dict[str, Any]]:
-        state, payload = _decode_job(
-            job,
-            expected_recurrence_id=expected_recurrence_id,
-            allow_disabled_active=True,
-        )
-        expected_enabled = (
-            state.status is RecurrenceStatus.ACTIVE and state.next_due_at is not None
-        )
-        if job.enabled == expected_enabled:
-            return state, payload
-
-        task_state = self._jobs.task_state(state.task_id)
-        if (
-            task_state is not None
-            and task_state not in _IRREVERSIBLY_TERMINAL_TASK_STATES
-        ):
-            raise ValueError(
-                "durable recurrence enabled state does not match lifecycle state"
+        def completed(current: RecurrenceState) -> RecurrenceState:
+            if current.status is not RecurrenceStatus.ACTIVE:
+                return current
+            if reason is RecurrenceTerminalReason.DEADLINE and (
+                current.deadline_at is None or self._now() < current.deadline_at
+            ):
+                return current
+            return replace(
+                current,
+                status=RecurrenceStatus.COMPLETED,
+                next_due_at=None,
+                next_occurrence_id=None,
+                terminal_reason=reason,
             )
 
-        cancelled = replace(
-            state,
-            status=RecurrenceStatus.CANCELLED,
-            next_due_at=None,
-            next_occurrence_id=None,
-            terminal_reason=None,
+        return self._transition(
+            state.recurrence_id,
+            completed,
+            expected_binding=self._job_for_state(state, payload).payload[
+                IMMUTABLE_JOB_BINDING_KEY
+            ],
         )
-        self._persist(cancelled, payload)
-        return cancelled, payload
 
-    def _persist(self, state: RecurrenceState, target_payload: dict[str, Any]) -> None:
+    def _transition(
+        self,
+        recurrence_id: str,
+        transform: Callable[[RecurrenceState], RecurrenceState],
+        *,
+        expected_binding: str | None = None,
+    ) -> RecurrenceState:
+        for _ in range(_TRANSITION_RETRY_LIMIT):
+            job, current, payload = self._required_snapshot(recurrence_id)
+            binding = job.payload[IMMUTABLE_JOB_BINDING_KEY]
+            if expected_binding is None:
+                expected_binding = binding
+            elif binding != expected_binding:
+                raise ValueError("recurrence_id is already bound to a different recurrence")
+            successor = transform(current)
+            if successor is current:
+                return current
+            if self._persist(successor, payload, expected_job=job):
+                return successor
+        raise RuntimeError("recurrence changed concurrently; retry the command")
+
+    def _required(self, recurrence_id: str) -> tuple[RecurrenceState, dict[str, Any]]:
+        _, state, payload = self._required_snapshot(recurrence_id)
+        return state, payload
+
+    def _required_snapshot(
+        self, recurrence_id: str
+    ) -> tuple[ScheduledJob, RecurrenceState, dict[str, Any]]:
+        recurrence_key = _required_text(recurrence_id, "recurrence_id")
+        snapshot = self._read_snapshot(recurrence_key)
+        if snapshot is None:
+            raise KeyError(f"unknown recurrence: {recurrence_key}")
+        return snapshot
+
+    def _read_snapshot(
+        self, recurrence_key: str
+    ) -> tuple[ScheduledJob, RecurrenceState, dict[str, Any]] | None:
+        for _ in range(_TRANSITION_RETRY_LIMIT):
+            job = self._jobs.get(_job_id(recurrence_key))
+            if job is None:
+                return None
+            state, payload = _decode_job(
+                job, expected_recurrence_id=recurrence_key, allow_disabled_active=True
+            )
+            expected_enabled = (
+                state.status is RecurrenceStatus.ACTIVE and state.next_due_at is not None
+            )
+            if job.enabled == expected_enabled:
+                return job, state, payload
+            task_state = self._jobs.task_state(state.task_id)
+            if (
+                task_state is not None
+                and task_state not in _IRREVERSIBLY_TERMINAL_TASK_STATES
+            ):
+                raise ValueError(
+                    "durable recurrence enabled state does not match lifecycle state"
+                )
+            cancelled = replace(
+                state, status=RecurrenceStatus.CANCELLED,
+                next_due_at=None, next_occurrence_id=None, terminal_reason=None,
+            )
+            if self._persist(
+                cancelled, payload, expected_job=job, require_terminal_task=True
+            ):
+                return self._job_for_state(cancelled, payload), cancelled, payload
+        raise RuntimeError("recurrence changed concurrently; retry the command")
+
+    def _job_for_state(
+        self, state: RecurrenceState, target_payload: dict[str, Any]
+    ) -> ScheduledJob:
         enabled = state.status is RecurrenceStatus.ACTIVE and state.next_due_at is not None
         run_date = state.next_due_at or state.last_completed_due_at or state.anchor_at
-        job = ScheduledJob(
+        return ScheduledJob(
             job_id=_job_id(state.recurrence_id),
             action_id=self.ACTION_ID,
             trigger_kind=TriggerKind.DATE,
@@ -472,14 +488,32 @@ class DurableRecurrenceService:
             max_instances=1,
             misfire_grace_seconds=None,
         )
+
+    def _persist(
+        self,
+        state: RecurrenceState,
+        target_payload: dict[str, Any],
+        *,
+        expected_job: ScheduledJob | None,
+        require_terminal_task: bool = False,
+    ) -> bool:
+        activate = getattr(self._scheduler, "activate_persisted", None)
+        if not callable(activate):
+            raise TypeError("recurrence scheduler must support persisted-only activation")
+        job = self._job_for_state(state, target_payload)
         try:
-            self._scheduler.upsert(job)
+            changed = self._jobs.replace_if_current(
+                expected_job, job, require_terminal_task=require_terminal_task
+            )
         except ValueError as exc:
             if "immutable binding conflict" in str(exc):
                 raise ValueError(
                     "recurrence_id is already bound to a different recurrence"
                 ) from exc
             raise
+        if changed:
+            activate(job)
+        return changed
 
     def _now(self) -> datetime:
         return _require_aware_utc(self._clock(), "clock value")

@@ -7,7 +7,7 @@ The scheduler finisher reuses existing PR #994, dependent on Resource #357 exact
 `3464f48246d03dad10c4e087533e22c28351f41f`. Local baseline commit
 `a063b91cfd125917c52856e2b771d5d43e67bbd9` has the identical tree.
 The aggregate tree adds only scheduler source, its narrow connectivity caller,
-associated tests, and this evidence document to that frozen baseline.
+associated tests, and this evidence document to that frozen baseline (15 paths).
 
 This is implementation/qualification preparation, not Section 7 DONE. Resource
 budgets and profiles retain their own canonical implementation. No database schema,
@@ -64,7 +64,7 @@ live reconciliation. No production safety or error gate was weakened.
 
 ## Qualification state
 
-Local full pytest passed **3925 passed, 5 skipped, 11 warnings (106.32 seconds)**.
+The pre-CAS aggregate local full pytest passed **3925 passed, 5 skipped, 11 warnings**.
 The normal `python -m nika_core` startup also passed against a new temporary
 database in a Unicode/space-containing directory. This is Linux source evidence.
 Exact hosted Core/M12 Ubuntu and Windows, packaged Windows proof, independent
@@ -74,6 +74,45 @@ resulting aggregate SHA. Earlier donor CI does not qualify this tree.
 Repository Ruff, compile of source/tests/scripts, `pip check`, and `git diff --check`
 passed using the existing isolated hashed Core/build interpreter. No dependencies
 or shared interpreter metadata were modified. Skipped tests are not awarded PASS.
+
+## Independent review repair: recurrence lifecycle compare-and-swap
+
+Independent review demonstrated that a delayed post-effect CONTINUE write could
+overwrite a concurrently committed CANCELLED recurrence. Four new deterministic
+tests reproduced the same underlying problem before repair: finish versus cancel,
+finish versus pause, pause versus cancel, and resume versus cancel. Each uses two
+separate services/stores/real stopped APScheduler adapters over the same SQLite DB.
+
+All lifecycle writers now use the incumbent store's transactional
+`replace_if_current`: exact expected raw snapshot comparison and replacement share
+one `BEGIN IMMEDIATE` transaction, using `_same_job_snapshot` and preserving the
+existing immutable-binding check. Creation requires expected absence. Pause,
+resume, cancel, post-effect completion and deadline completion retry at most three
+times against current state; terminal cancellation wins, paused completion remains
+disabled, and a recreated different definition cannot be advanced by the old effect.
+Suppression recovery also rechecks missing/terminal task authority inside that same
+transaction. There is no Python-lock-only substitute or unconditional-write fallback.
+
+Only a successful committed CAS is activated, through `activate_persisted`, outside
+the transaction. An unsupported adapter fails before any write. Runtime activation
+failure after completion cannot roll back the durable occurrence cursor or replay
+the effect. A later cancellation between CAS and activation remains authoritative.
+The same audit reproduced resolver-side deletion/recreation under the same
+recurrence ID and occurrence time: the old handler could receive the new immutable
+definition's payload. The existing pre-effect reread now also compares the initial
+validated definition binding, so a recreated definition receives no old-handler
+effect and retains its own unadvanced cursor.
+
+The focused regression module also checks conflicting create/cancel, advanced
+completion versus delayed cancel, typed JSON identity, exactly one winner from two
+simultaneous store CAS writers, immutable binding, bounded churn, newly appeared
+task rejection, and successful recovery on the last allowed retry. The existing
+recurrence scheduler fixture now records activation without persisting a second
+time; it raises if recurrence code calls ordinary scheduler upsert.
+
+Fresh final-CAS local and hosted qualification is recorded against the resulting
+SHA in canonical PR #994. The earlier aggregate's PASS is not transferred to this
+changed source tree. Section 7 remains NOT DONE.
 
 `IMPLEMENTED=true; INTEGRATED=false; PACKAGED=false; HUMAN_TESTED=false;`
 `NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false; SECTION7_DONE=false`.
