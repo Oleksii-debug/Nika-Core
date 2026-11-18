@@ -98,8 +98,12 @@ class ScheduledJobStore:
 
     def list_enabled(self) -> tuple[ScheduledJob, ...]:
         with self._store.connection() as conn:
+            # Filter valid disabled rows in SQLite, before materializing any JSON.
+            # Keep malformed enabled carriers visible to _stored_bool so they fail closed.
             rows = conn.execute(
-                "SELECT * FROM scheduled_jobs ORDER BY job_id"
+                "SELECT * FROM scheduled_jobs "
+                "WHERE enabled IS NOT 0 OR typeof(enabled) != 'integer' "
+                "ORDER BY job_id"
             ).fetchall()
         enabled_jobs: list[ScheduledJob] = []
         for row in rows:
