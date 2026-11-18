@@ -212,3 +212,40 @@ def test_concurrent_identical_subtitle_bytes_reuse_one_verified_asset(tmp_path: 
     assert not list(tmp_path.glob("*.partial"))
     assert not list(tmp_path.glob(".*.partial"))
     assert not list(tmp_path.glob(".*.subtitle-staging-*"))
+
+
+@pytest.mark.parametrize("winner", ("matching", "different", "absent"))
+def test_windows_publication_denial_reuses_only_verified_existing_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, winner: str,
+) -> None:
+    pytest.importorskip("pysubs2")
+    targets: list[Path] = []
+    published: list[bytes] = []
+
+    def deny_replace(partial_path: Path, final_path: Path, **_kwargs):
+        targets.append(final_path)
+        data = partial_path.read_bytes()
+        if winner != "absent":
+            if winner == "different":
+                data = data[:-1] + bytes([data[-1] ^ 1])
+            final_path.write_bytes(data)
+            published.append(data)
+        raise PermissionError("simulated Windows sharing denial")
+
+    monkeypatch.setattr(subtitle_acquisition, "promote_partial_file", deny_replace)
+    runner = _BarrierSubtitleRunner(_payload("same"), threading.Barrier(1))
+    if winner == "matching":
+        result = _acquire_with_runner(tmp_path, runner)
+        assert sha256_file(targets[0]) == result.asset.sha256
+        assert result.asset.size_bytes == len(published[0])
+    elif winner == "different":
+        with pytest.raises(MediaError) as caught:
+            _acquire_with_runner(tmp_path, runner)
+        assert caught.value.code is MediaErrorCode.CHECKSUM_MISMATCH
+        assert targets[0].read_bytes() == published[0]
+    else:
+        with pytest.raises(PermissionError, match="sharing denial"):
+            _acquire_with_runner(tmp_path, runner)
+        assert not targets[0].exists()
+    assert not list(tmp_path.glob(".*.partial"))
+    assert not list(tmp_path.glob(".*.subtitle-staging-*"))

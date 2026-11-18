@@ -22,6 +22,11 @@ def test_frozen_runtime_inventory_is_independent_of_the_notice_producer() -> Non
     assert module_notice_findings({"click"}, set()) == (
         "missing-packaged-distribution-notice:click",
     )
+    # Actual newly shipped resource-observer root, independently of the producer.
+    assert module_notice_findings({"psutil._pswindows"}, set()) == (
+        "missing-packaged-distribution-notice:psutil",
+    )
+    assert module_notice_findings({"psutil._pswindows"}, {"psutil"}) == ()
 
 
 def test_exact_package_jobs_prove_module_notice_coverage() -> None:

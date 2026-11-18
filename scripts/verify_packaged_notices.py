@@ -10,7 +10,8 @@ from packaging.utils import canonicalize_name
 
 from nika_core.packaging.notices import RUNTIME_DISTRIBUTIONS, verify_third_party_notices
 
-# Independently audited 32 third-party roots from exact M11 PYZ inventories.
+# Independently audited third-party roots from exact M11 PYZ inventories.
+# psutil was observed in the resource candidate's Windows frozen inventory.
 # Click was an unlocked runner package: an isolated build must not need it.
 ROOT_DISTRIBUTIONS = {
     "_distutils_hack": "setuptools",
@@ -33,6 +34,7 @@ ROOT_DISTRIBUTIONS = {
     "packaging": "packaging",
     "platformdirs": "platformdirs",
     "proxy_tools": "proxy-tools",
+    "psutil": "psutil",
     "pycparser": "pycparser",
     "pydantic": "pydantic",
     "pydantic_core": "pydantic-core",

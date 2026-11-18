@@ -30,3 +30,17 @@ On earlier source00de, M11 failed importing packaged startup because the packagi
 profile omitted psutil. M12 then timed out starting the frozen proof process; no
 timeout was enlarged. New exact-head gates are required after the profile repair.
 Section7 remains NOT DONE until applicable source, integration and release gates.
+
+The next Windows M11 build did boot successfully and its inventory observed the
+new psutil root, but the independent verifier still lacked its explicit owner
+mapping. That mapping now names the actual psutil distribution; missing notices
+and unknown module roots still fail. No inventory finding is waived.
+
+The triggered DEV05 Windows job separately exposed an inherited same-byte subtitle
+publication race (existing6fb2f14e lineage). Windows can report PermissionError
+when another writer has atomically published the same content-addressed asset and
+a reader still holds it open. The narrow compatibility repair reuses that file
+only through the existing path/regular-file/size/hash checks. Missing winners
+retain PermissionError, and different bytes fail CHECKSUM_MISMATCH. Three injected
+sharing-denial oracles and the original concurrent test preserve these boundaries;
+no parser, contract, download policy or media runtime is replaced.
