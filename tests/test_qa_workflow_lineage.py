@@ -110,3 +110,18 @@ def test_m12_runs_when_upstream_release_workflows_change() -> None:
 
     for workflow_path in M12_UPSTREAM_WORKFLOW_PATHS:
         assert m12.count(workflow_path) == 2, workflow_path
+
+
+def test_config_admission_is_exercised_before_windows_freezing() -> None:
+    source = (Path(__file__).resolve().parents[1] / ".github" / "workflows"
+              / "m11-windows-release.yml").read_text(encoding="utf-8")
+    for path in (
+        "src/nika_core/config.py",
+        "tests/test_config_db_alias_conflict.py",
+        "tests/test_v01_packaged_config_startup.py",
+        "tests/test_v01_stable_packaged_data_location.py",
+    ):
+        assert source.count(f'- "{path}"') == 2
+    assert source.index("name: Verify configuration admission before packaging") < source.index(
+        "name: Build standalone one-dir Windows candidate"
+    )
