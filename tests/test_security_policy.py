@@ -117,7 +117,7 @@ def test_network_and_process_require_explicit_allowlist(tmp_path: Path) -> None:
             tool_id="process.test",
             risk=ToolRisk.LOCAL_WRITE,
             target="tests",
-            executable="/usr/bin/pytest",
+            executable="pytest",
         ),
         policy,
         ledger,
@@ -248,6 +248,9 @@ def test_executable_denial_precedes_approval_and_budget_consumption(tmp_path: Pa
         risk=ToolRisk.HIGH_IMPACT,
         target="approved process",
         executable="/untrusted/bin/pytest",
+        task_id="task-security",
+        project_id="project-nika-core",
+        effect_id="danger-process-1",
     )
     authority = ApprovalAuthority(issuer_id="process-scope-test", secret=b"s" * 32)
     approval = _approval(authority, intent)
