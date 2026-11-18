@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from threading import RLock
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -11,13 +12,14 @@ from apscheduler.triggers.interval import IntervalTrigger
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.contracts import ScheduledJob, SchedulerPort, TriggerKind
-from nika_core.scheduler.store import ScheduledJobStore
+from nika_core.scheduler.store import ScheduledJobStore, _same_job_snapshot
 
 ActionHandler = Callable[[dict[str, Any]], None]
 HandlerResolver = Callable[[str], ActionHandler]
 _TERMINAL_TASK_STATES = frozenset(
     {TaskState.CANCELLED, TaskState.COMPLETED, TaskState.ARCHIVED}
 )
+_SYNC_RETRY_LIMIT = 3
 
 
 class APSchedulerAdapter(SchedulerPort):
@@ -33,39 +35,99 @@ class APSchedulerAdapter(SchedulerPort):
         self._audit = audit
         self._scheduler = BackgroundScheduler(timezone="UTC")
         self._started = False
+        self._starting = False
+        self._lifecycle_lock = RLock()
+        self._runtime_sync_lock = RLock()
+        self._shutdown_requested = False
+        self._shutdown_wait = True
 
     def start(self) -> None:
-        if self._started:
-            return
-        for job in self._jobs.list_enabled():
-            if self._task_authority_allows(job):
-                self._install(job)
-        self._scheduler.start()
-        self._started = True
+        with self._lifecycle_lock:
+            if self._started or self._starting:
+                return
+            self._starting = True
+            self._shutdown_requested = False
+            self._shutdown_wait = True
+            try:
+                try:
+                    for job in self._jobs.list_enabled():
+                        self._sync_runtime_job(job.job_id)
+                except Exception:
+                    self._scheduler = BackgroundScheduler(timezone="UTC")
+                    raise
+                if self._shutdown_requested:
+                    self._scheduler = BackgroundScheduler(timezone="UTC")
+                    return
+                try:
+                    self._scheduler.start()
+                except Exception:
+                    self._scheduler = BackgroundScheduler(timezone="UTC")
+                    raise
+                if self._shutdown_requested:
+                    replacement = BackgroundScheduler(timezone="UTC")
+                    self._scheduler.shutdown(wait=self._shutdown_wait)
+                    self._scheduler = replacement
+                    return
+                self._started = True
+            finally:
+                self._starting = False
+                self._shutdown_requested = False
+                self._shutdown_wait = True
 
     def shutdown(self, *, wait: bool = True) -> None:
-        if not self._started:
-            return
-        self._scheduler.shutdown(wait=wait)
-        self._started = False
+        with self._lifecycle_lock:
+            if self._starting:
+                self._shutdown_requested = True
+                self._shutdown_wait = wait
+                return
+            if not self._started:
+                return
+            # Publish stopped state while holding the same lock as runtime
+            # reconciliation. A dispatch that observed _started before shutdown
+            # must not install a job into the new (stopped) scheduler afterward.
+            with self._runtime_sync_lock:
+                retiring_scheduler = self._scheduler
+                self._scheduler = BackgroundScheduler(timezone="UTC")
+                self._started = False
+            # Do not hold _runtime_sync_lock while waiting for running handlers:
+            # a handler may itself call upsert()/activate_persisted().
+            retiring_scheduler.shutdown(wait=wait)
 
     def upsert(self, job: ScheduledJob) -> None:
+        if type(job) is not ScheduledJob:
+            raise TypeError("job must be an exact ScheduledJob")
+        job_id = _require_job_id(job.job_id)
         self._jobs.upsert(job)
-        effective_job = job
-        if self._started:
-            allowed = job.enabled and self._task_authority_allows(job)
-            effective_job = self._required_job(job.job_id)
-            if allowed:
-                self._install(effective_job)
-            elif self._scheduler.get_job(job.job_id) is not None:
-                self._scheduler.remove_job(job.job_id)
+        effective_job = self._required_job(job_id)
+        if self._started or self._starting:
+            self._sync_runtime_job(job_id)
+            effective_job = self._required_job(job_id)
+        elif not self._task_authority_allows(effective_job):
+            effective_job = self._required_job(job_id)
         self._audit_change("scheduler.job_upserted", effective_job)
 
+    def activate_persisted(self, job: ScheduledJob) -> None:
+        """Reconcile an already-durable job without overwriting newer SQLite state.
+
+        ConnectivityWaitService atomically commits its task, job and audit before
+        runtime installation. Calling upsert() here would write a stale snapshot
+        if another process replaced the job between commit and activation.
+        The existing runtime synchronizer reads the latest durable authority
+        and installs only that snapshot; start() rehydrates when not running.
+        """
+        if type(job) is not ScheduledJob:
+            raise TypeError("job must be an exact ScheduledJob")
+        job_id = _require_job_id(job.job_id)
+        if self._started or self._starting:
+            self._sync_runtime_job(job_id)
+
     def remove(self, job_id: str) -> bool:
+        job_id = _require_job_id(job_id)
         removed = self._jobs.delete(job_id)
-        if self._started and self._scheduler.get_job(job_id) is not None:
-            self._scheduler.remove_job(job_id)
-        if removed and self._audit is not None:
+        if self._started or self._starting:
+            self._sync_runtime_job(job_id)
+        remaining = self._jobs.get(job_id)
+        if removed and remaining is None and self._audit is not None:
             self._audit.append(
                 event_type="scheduler.job_removed",
                 entity_type="scheduled_job",
@@ -74,58 +136,168 @@ class APSchedulerAdapter(SchedulerPort):
         return removed
 
     def pause(self, job_id: str) -> None:
-        job = self._required_job(job_id)
-        self._jobs.set_enabled(job_id, False)
-        if self._started and self._scheduler.get_job(job_id) is not None:
-            self._scheduler.remove_job(job_id)
-        self._audit_change("scheduler.job_paused", job)
+        job = self._required_job(_require_job_id(job_id))
+        self._jobs.set_enabled(job.job_id, False)
+        if self._started or self._starting:
+            self._sync_runtime_job(job.job_id)
+        paused_job = self._required_job(job.job_id)
+        if paused_job.enabled:
+            return
+        self._audit_change("scheduler.job_paused", paused_job)
 
     def resume(self, job_id: str) -> None:
-        job = self._required_job(job_id)
-        self._jobs.set_enabled(job_id, True)
-        enabled_job = ScheduledJob(
-            job_id=job.job_id,
-            action_id=job.action_id,
-            trigger_kind=job.trigger_kind,
-            trigger=job.trigger,
-            payload=job.payload,
-            enabled=True,
-            coalesce=job.coalesce,
-            max_instances=job.max_instances,
-            misfire_grace_seconds=job.misfire_grace_seconds,
-        )
-        allowed = self._task_authority_allows(enabled_job)
-        if not allowed:
+        job = self._required_job(_require_job_id(job_id))
+        self._jobs.set_enabled(job.job_id, True)
+        enabled_job = self._required_job(job.job_id)
+        if not enabled_job.enabled:
             return
-        if self._started:
-            self._install(enabled_job)
+        if self._started or self._starting:
+            installed_job = self._sync_runtime_job(enabled_job.job_id)
+            if installed_job is None:
+                return
+            enabled_job = installed_job
+        elif not self._task_authority_allows(enabled_job):
+            return
         self._audit_change("scheduler.job_resumed", enabled_job)
 
     def has_runtime_job(self, job_id: str) -> bool:
+        job_id = _require_job_id(job_id)
         return self._scheduler.get_job(job_id) is not None
+
+    def _sync_runtime_job(self, job_id: str) -> ScheduledJob | None:
+        job_id = _require_job_id(job_id)
+        # Durable writers may commit while another caller reconciles live APScheduler
+        # state. Serialize only live reconciliation so an older in-flight install
+        # cannot overwrite the runtime state of a newer canonical adapter mutation.
+        with self._runtime_sync_lock:
+            # Callers may have observed a running adapter before shutdown
+            # acquired this lock. Never populate the replacement scheduler.
+            if not self._started and not self._starting:
+                return None
+            for _ in range(_SYNC_RETRY_LIMIT):
+                job = self._jobs.get(job_id)
+                if job is None or not job.enabled:
+                    self._remove_runtime_job(job_id)
+                    return None
+                if not self._task_authority_allows(job):
+                    current = self._jobs.get(job_id)
+                    if current is not None and not _same_job_snapshot(current, job):
+                        continue
+                    self._remove_runtime_job(job_id)
+                    return None
+                current = self._jobs.get(job_id)
+                if current is None or not current.enabled:
+                    self._remove_runtime_job(job_id)
+                    return None
+                if not _same_job_snapshot(current, job):
+                    continue
+                if not self._task_authority_allows(current):
+                    after_authority = self._jobs.get(job_id)
+                    if after_authority is not None and not _same_job_snapshot(after_authority, current):
+                        continue
+                    self._remove_runtime_job(job_id)
+                    return None
+                if not _same_job_snapshot(self._jobs.get(job_id), current):
+                    continue
+                try:
+                    self._install(current)
+                except Exception:
+                    self._remove_runtime_job(job_id)
+                    # Failure of an obsolete trigger must not strand a valid
+                    # successor committed concurrently by another process.
+                    # Preserve the original failure if identity is unchanged.
+                    if not _same_job_snapshot(self._jobs.get(job_id), current):
+                        continue
+                    raise
+                # Another process may replace or disable the durable snapshot
+                # while APScheduler is installing it. Reconcile the successor
+                # instead of leaving a stale runtime job until its old trigger
+                # fires (whose dispatch authority would correctly reject it).
+                after_install = self._jobs.get(job_id)
+                if not _same_job_snapshot(after_install, current):
+                    continue
+                if not self._task_authority_allows(after_install):
+                    if not _same_job_snapshot(self._jobs.get(job_id), after_install):
+                        continue
+                    self._remove_runtime_job(job_id)
+                    return None
+                if not _same_job_snapshot(self._jobs.get(job_id), after_install):
+                    continue
+                return after_install
+            self._remove_runtime_job(job_id)
+            return None
+
+    def _remove_runtime_job(self, job_id: str) -> None:
+        if self._scheduler.get_job(job_id) is not None:
+            self._scheduler.remove_job(job_id)
 
     def _install(self, job: ScheduledJob) -> None:
         self._scheduler.add_job(
             self._dispatch,
             trigger=_make_trigger(job),
             id=job.job_id,
-            args=(job.job_id,),
+            args=(job.job_id, job),
             replace_existing=True,
             coalesce=job.coalesce,
             max_instances=job.max_instances,
             misfire_grace_time=job.misfire_grace_seconds,
         )
 
-    def _dispatch(self, job_id: str) -> None:
-        job = self._required_job(job_id)
-        if not job.enabled or not self._task_authority_allows(job):
+    def _dispatch(
+        self,
+        job_id: str,
+        installed_job: ScheduledJob | None = None,
+    ) -> None:
+        job_id = _require_job_id(job_id)
+        if installed_job is not None:
+            if type(installed_job) is not ScheduledJob:
+                raise TypeError("installed_job must be an exact ScheduledJob or None")
+            if _require_job_id(installed_job.job_id) != job_id:
+                return
+        job = self._jobs.get(job_id)
+        if job is None or not job.enabled:
+            # Cross-process disable/delete may leave an obsolete live trigger.
+            if self._started or self._starting:
+                self._sync_runtime_job(job_id)
             return
-        handler = self._handler_resolver(job.action_id)
-        # Authority can change after a due job is loaded/resolved. Re-read the
-        # canonical durable task state at the last scheduler-owned boundary
-        # before any handler (and therefore any external effect) is invoked.
+        if installed_job is not None and not _same_job_snapshot(job, installed_job):
+            # A stale occurrence may be the successor's only wakeup. Avoid
+            # reinstalling an already-correct interval/cron trigger, because
+            # doing so can shift its next scheduled execution.
+            if self._started or self._starting:
+                runtime = self._scheduler.get_job(job_id)
+                if (
+                    runtime is None
+                    or len(runtime.args) != 2
+                    or runtime.args[0] != job_id
+                    or not _same_job_snapshot(runtime.args[1], job)
+                    or not _same_job_snapshot(self._jobs.get(job_id), job)
+                ):
+                    self._sync_runtime_job(job_id)
+            return
         if not self._task_authority_allows(job):
+            if self._started or self._starting:
+                self._sync_runtime_job(job_id)
             return
+        # Linearize durable scheduler + task authority before touching the
+        # resolver or any external handler surface. A stale occurrence that lost
+        # authority must have zero resolver/effect observations.
+        dispatch_snapshot = installed_job if installed_job is not None else job
+        job = self._jobs.authorize_dispatch(dispatch_snapshot)
+        if job is None:
+            if self._started or self._starting:
+                self._sync_runtime_job(job_id)
+            else:
+                current = self._jobs.get(job_id)
+                if current is not None:
+                    self._task_authority_allows(current)
+            return
+        action_id = job.action_id
+        try:
+            handler = self._handler_resolver(action_id)
+        except Exception as exc:
+            self._audit_failure(job_id, action_id, exc)
+            raise
         if self._audit is not None:
             self._audit.append(
                 event_type="scheduler.job_started",
@@ -136,13 +308,7 @@ class APSchedulerAdapter(SchedulerPort):
         try:
             handler(dict(job.payload))
         except Exception as exc:
-            if self._audit is not None:
-                self._audit.append(
-                    event_type="scheduler.job_failed",
-                    entity_type="scheduled_job",
-                    entity_id=job_id,
-                    payload={"action_id": job.action_id, "error_type": type(exc).__name__},
-                )
+            self._audit_failure(job_id, job.action_id, exc)
             raise
         if self._audit is not None:
             self._audit.append(
@@ -179,9 +345,8 @@ class APSchedulerAdapter(SchedulerPort):
         reason: str,
         task_state: TaskState | None = None,
     ) -> None:
-        self._jobs.set_enabled(job.job_id, False)
-        if self._started and self._scheduler.get_job(job.job_id) is not None:
-            self._scheduler.remove_job(job.job_id)
+        if not self._jobs.disable_if_current(job):
+            return
         if self._audit is not None:
             payload: dict[str, Any] = {
                 "action_id": job.action_id,
@@ -196,7 +361,17 @@ class APSchedulerAdapter(SchedulerPort):
                 payload=payload,
             )
 
+    def _audit_failure(self, job_id: str, action_id: str, exc: Exception) -> None:
+        if self._audit is not None:
+            self._audit.append(
+                event_type="scheduler.job_failed",
+                entity_type="scheduled_job",
+                entity_id=job_id,
+                payload={"action_id": action_id, "error_type": type(exc).__name__},
+            )
+
     def _required_job(self, job_id: str) -> ScheduledJob:
+        job_id = _require_job_id(job_id)
         job = self._jobs.get(job_id)
         if job is None:
             raise KeyError(f"unknown scheduled job: {job_id}")
@@ -214,6 +389,14 @@ class APSchedulerAdapter(SchedulerPort):
                     "enabled": job.enabled,
                 },
             )
+
+
+def _require_job_id(value: object) -> str:
+    if type(value) is not str:
+        raise TypeError("job_id must be an exact string")
+    if not value or value != value.strip():
+        raise ValueError("job_id must be non-empty and whitespace-stable")
+    return value
 
 
 def _make_trigger(job: ScheduledJob) -> object:

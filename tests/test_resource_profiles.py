@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import replace
-from math import nan
+from dataclasses import fields, replace
+from math import isnan, nan
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.resource_profiles import (
     ResourceProfileName,
     ResourceProfilePolicy,
     WorkloadClass,
     budget_for_profile,
 )
+from nika_core.resource_profiles import policy as profile_policy
 from nika_core.resources.contracts import ResourceSnapshot
+from nika_core.resources.manager import ResourceManager
 
 _GIB = 1024 * 1024 * 1024
 _HUGE_INT = 10**1000
@@ -114,6 +119,55 @@ def test_invalid_telemetry_fails_closed(snapshot: ResourceSnapshot, reason: str)
     assert decision.reason == reason
 
 
+def test_behavioral_telemetry_is_rejected_without_reading_it() -> None:
+    class ChangingSnapshot:
+        reads = 0
+        memory_percent = 30.0
+        available_memory_bytes = 8 * _GIB
+
+        @property
+        def cpu_percent(self) -> float:
+            self.reads += 1
+            return 20.0 if self.reads == 1 else nan
+
+    snapshot = ChangingSnapshot()
+    decision = ResourceProfilePolicy().evaluate(
+        profile="normal", snapshot=snapshot, requested_workload="general"
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "invalid_resource_snapshot"
+    assert snapshot.reads == 0
+
+
+def test_missing_telemetry_is_a_controlled_denial() -> None:
+    decision = ResourceProfilePolicy().evaluate(
+        profile="normal", snapshot=None, requested_workload="general"
+    )
+    assert decision.allowed is False
+    assert decision.reason == "invalid_resource_snapshot"
+
+
+def test_validated_telemetry_is_detached_from_retained_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = _snapshot(cpu=99.0)
+    validate = profile_policy._valid_snapshot
+
+    def validate_then_mutate(candidate: ResourceSnapshot) -> bool:
+        result = validate(candidate)
+        object.__setattr__(snapshot, "cpu_percent", nan)
+        return result
+
+    monkeypatch.setattr(profile_policy, "_valid_snapshot", validate_then_mutate)
+    decision = ResourceProfilePolicy().evaluate(
+        profile="normal", snapshot=snapshot, requested_workload="general"
+    )
+    assert decision.allowed is False
+    assert decision.reason == "cpu_pressure"
+    assert isnan(snapshot.cpu_percent)
+
+
 @pytest.mark.parametrize(
     ("field_name", "value"),
     [
@@ -171,6 +225,30 @@ def test_profile_recommendation_flag_requires_boolean() -> None:
         ResourceProfilePolicy({ResourceProfileName.NORMAL: malformed})
 
 
+def test_profile_authority_rejects_mutable_structural_spec() -> None:
+    baseline = ResourceProfilePolicy().profile_spec(ResourceProfileName.NORMAL)
+    mutable = SimpleNamespace(**{field.name: getattr(baseline, field.name) for field in fields(baseline)})
+
+    with pytest.raises(ValueError, match="ResourceProfileSpec"):
+        ResourceProfilePolicy({ResourceProfileName.NORMAL: mutable})
+
+
+@pytest.mark.parametrize("mutation_target", ("input", "readback"))
+def test_profile_authority_is_detached_from_caller_owned_spec(mutation_target: str) -> None:
+    baseline = ResourceProfilePolicy().profile_spec(ResourceProfileName.NORMAL)
+    policy = ResourceProfilePolicy({ResourceProfileName.NORMAL: baseline})
+    target = baseline if mutation_target == "input" else policy.profile_spec("normal")
+    object.__setattr__(target, "max_cpu_percent", 100.0)
+
+    decision = policy.evaluate(
+        profile="normal", snapshot=_snapshot(cpu=99.0), requested_workload="general"
+    )
+
+    assert decision.allowed is False
+    assert decision.reason == "cpu_pressure"
+    assert policy.profile_spec("normal").max_cpu_percent == 95.0
+
+
 def test_unknown_profile_and_workload_fail_closed() -> None:
     policy = ResourceProfilePolicy()
 
@@ -221,6 +299,7 @@ def test_profile_projects_to_existing_resource_budget_contract() -> None:
         {"scope": "workspace", "owner_id": " ", "max_concurrent": 1},
         {"scope": "workspace", "owner_id": "project-1", "max_concurrent": 0},
         {"scope": "workspace", "owner_id": "project-1", "max_concurrent": True},
+        {"scope": "workspace", "owner_id": "project-1", "max_concurrent": 1 << 63},
         {"scope": 1, "owner_id": "project-1", "max_concurrent": 1},
         {"scope": "workspace", "owner_id": 1, "max_concurrent": 1},
     ],
@@ -228,3 +307,39 @@ def test_profile_projects_to_existing_resource_budget_contract() -> None:
 def test_budget_adapter_rejects_invalid_identity_or_concurrency(kwargs: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         budget_for_profile(profile="normal", **kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("field_name", ("scope", "owner_id", "max_concurrent"))
+def test_budget_adapter_rejects_carriers_the_canonical_manager_rejects(field_name: str) -> None:
+    class Text(str):
+        pass
+
+    class Count(int):
+        pass
+
+    kwargs = {"scope": "workspace", "owner_id": "project-1", "max_concurrent": 1}
+    kwargs[field_name] = Count(1) if field_name == "max_concurrent" else Text("workspace")
+
+    with pytest.raises(ValueError):
+        budget_for_profile(profile="normal", **kwargs)
+
+
+@pytest.mark.parametrize("profile", tuple(ResourceProfileName))
+def test_projected_profile_roundtrips_through_canonical_sqlite_manager(
+    tmp_path: Path, profile: ResourceProfileName,
+) -> None:
+    class Observer:
+        def snapshot(self) -> ResourceSnapshot:
+            return _snapshot()
+
+    store = SQLiteStore(tmp_path / "Профілі ресурсів.sqlite3")
+    store.initialize()
+    manager = ResourceManager(store, Observer())
+    budget = budget_for_profile(
+        profile=profile, scope="робоча область", owner_id="проєкт", max_concurrent=(1 << 63) - 1
+    )
+    manager.set_budget(budget)
+    assert manager.get_budget(scope=budget.scope, owner_id=budget.owner_id) == budget
+    decision = manager.request(scope=budget.scope, owner_id=budget.owner_id, request_id="запит")
+    assert decision.granted is True
+    assert manager.release(scope=budget.scope, owner_id=budget.owner_id, request_id="запит") is True

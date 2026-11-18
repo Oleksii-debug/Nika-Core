@@ -9,6 +9,7 @@ import httpx
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.intelligence.modes import IntelligenceModePolicy
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.runtime.contracts import RuntimeOutcome, RuntimeRequest
 from nika_core.v01_model_settings import V01BoundModelRuntimeFactory, V01ModelSettings
@@ -118,6 +119,10 @@ def _runtime(
         definitions=definitions,
         credential_resolver=resolver,
         client_factory=client_factory,
+        intelligence_policy=IntelligenceModePolicy(
+            external_api_enabled=True,
+            external_provider_id="configured-api",
+        ),
     )
     return V01PackagedThreeAgentRuntime(
         store=store,

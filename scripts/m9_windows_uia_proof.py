@@ -1,21 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
-import sys
+import multiprocessing
 import time
 
 from nika_core.workspaces.semantic_adapters import PywinautoUIAAdapter
 
-APP = r'''
-import tkinter as tk
-root = tk.Tk()
-root.title("Nika M9 UIA Proof")
-tk.Label(root, text="Accessibility repair").pack()
-tk.Entry(root, name="problem").pack()
-tk.Button(root, text="Repair now").pack()
-root.mainloop()
-'''
+
+def run_fixture() -> None:
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.title("Nika M9 UIA Proof")
+    tk.Label(root, text="Accessibility repair").pack()
+    tk.Entry(root, name="problem").pack()
+    tk.Button(root, text="Repair now").pack()
+    root.mainloop()
 
 
 async def inspect_until_ready(process_id: int) -> None:
@@ -45,17 +45,22 @@ async def inspect_until_ready(process_id: int) -> None:
 
 
 def main() -> None:
-    process = subprocess.Popen([sys.executable, "-c", APP])
+    # CPython's spawn implementation preserves the venv while bypassing its
+    # Windows redirector, so pid belongs to the process that owns the window.
+    process = multiprocessing.get_context("spawn").Process(target=run_fixture)
+    process.start()
     try:
         time.sleep(0.5)
+        if process.pid is None or not process.is_alive():
+            raise RuntimeError("UIA fixture did not start")
         asyncio.run(inspect_until_ready(process.pid))
     finally:
         process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+        process.join(timeout=5)
+        if process.is_alive():
             process.kill()
-            process.wait(timeout=5)
+            process.join(timeout=5)
+        process.close()
 
 
 if __name__ == "__main__":

@@ -85,12 +85,12 @@ def test_invalid_writable_roots_fail_at_policy_construction(tmp_path: Path, root
         _sandbox(tmp_path, writable_roots=(root,))
 
 
-def test_bare_executable_name_preserves_explicit_basename_semantics(tmp_path: Path) -> None:
+def test_bare_executable_name_cannot_authorize_path_or_case_aliases(tmp_path: Path) -> None:
     sandbox = _sandbox(tmp_path, allowed_executables=("pytest",))
-    sandbox.authorize_executable("/usr/bin/pytest")
-    sandbox.authorize_executable(r"C:\tools\PYTEST")
-    with pytest.raises(PermissionError, match="process executable"):
-        sandbox.authorize_executable("/usr/bin/python")
+    sandbox.authorize_executable("pytest")
+    for alias in ("/usr/bin/pytest", r"C:\tools\PYTEST", "PYTEST", "/usr/bin/python"):
+        with pytest.raises(PermissionError, match="process executable"):
+            sandbox.authorize_executable(alias)
 
 
 def test_posix_path_scoped_executable_is_exact_and_case_sensitive(tmp_path: Path) -> None:

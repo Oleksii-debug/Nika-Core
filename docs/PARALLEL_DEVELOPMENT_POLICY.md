@@ -2,7 +2,7 @@
 
 Authority: [autonomous delivery](AUTONOMOUS_WORKER_ORCHESTRATION.md), DELIVERY-2026-09-09.
 
-Choose independent packages that can be completed and integrated. Start with six active implementation packages across 13 developers and long Codex runs. Assign remaining capacity to disjoint parts of existing packages, ready-candidate review and concrete integration defects. Increase WIP only when throughput and queue age justify it.
+Choose independent packages that can be completed and integrated. Use the six-package starting point to assess implementation and review capacity. Assign remaining capacity to disjoint parts of existing packages, ready-candidate review and concrete integration defects. Increase WIP only when throughput and queue age justify it.
 
 Each package has one source owner, explicit scope, one independent reviewer, a canonical PR and a user-visible acceptance result. Dependencies constrain integration order, not unrelated progress. Honor current ownership and recorded handoffs.
 

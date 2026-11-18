@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from threading import Barrier, Lock
 
@@ -19,7 +20,7 @@ from nika_core.runtime.retry import (
     ScriptRetryIntent,
     plan_script_retry,
 )
-from nika_core.scheduler import ScheduledJob, ScheduledJobStore, TriggerKind
+from nika_core.scheduler import APSchedulerAdapter, ScheduledJob, ScheduledJobStore, TriggerKind
 
 
 class _ConnectivityProbe:
@@ -44,6 +45,9 @@ class _RecordingScheduler:
         del wait
 
     def upsert(self, job: ScheduledJob) -> None:
+        raise AssertionError("connectivity activation must not persist its snapshot again")
+
+    def activate_persisted(self, job: ScheduledJob) -> None:
         if self.fail:
             raise RuntimeError("injected runtime scheduler failure")
         self.jobs.append(job)
@@ -438,3 +442,77 @@ def test_malformed_wait_payload_fails_closed_without_secret_leak(tmp_path) -> No
     assert events
     assert events[-1].event_type == "runtime.connectivity_wait_rejected"
     assert "НЕ_ЛОГУВАТИ" not in repr(events)
+
+
+@pytest.mark.parametrize("started", [False, True])
+def test_defer_runtime_activation_preserves_committed_successor(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, started: bool
+) -> None:
+    store = SQLiteStore(tmp_path / "Ніка safe activation" / "core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    task_id = _running_task(queue)
+    adapter = APSchedulerAdapter(jobs, lambda _: lambda payload: None)
+    original_activate = adapter.activate_persisted
+    successors: list[ScheduledJob] = []
+
+    def concurrent_successor(snapshot: ScheduledJob) -> None:
+        successor = replace(snapshot, action_id="runtime.successor", payload={"new": True})
+        jobs.upsert(successor)
+        successors.append(successor)
+        original_activate(snapshot)
+
+    monkeypatch.setattr(adapter, "activate_persisted", concurrent_successor)
+    service = ConnectivityWaitService(
+        queue=queue, jobs=jobs, audit=AuditLog(store),
+        probe=_ConnectivityProbe(available=False), scheduler=adapter,
+    )
+    if started:
+        adapter.start()
+    try:
+        service.defer(
+            task_id=task_id, job_id="committed-wait", action_id="runtime.old",
+            intent=_network_intent(RetryPolicy(max_retries=1), operation_id="activation",
+                                   now=datetime(2035, 1, 1, tzinfo=UTC)),
+        )
+        assert queue.get(task_id).state is TaskState.WAITING_TOOL
+        assert jobs.get("committed-wait") == successors[0]
+        if not started:
+            assert not adapter.has_runtime_job("committed-wait")
+            adapter.start()
+        runtime = adapter._scheduler.get_job("committed-wait")
+        assert runtime is not None and runtime.args == ("committed-wait", successors[0])
+    finally:
+        adapter.shutdown(wait=False)
+
+
+def test_old_scheduler_port_fails_closed_without_rewriting_durable_wait(tmp_path) -> None:
+    class OldScheduler:
+        def upsert(self, job: ScheduledJob) -> None:
+            raise AssertionError("unsafe fallback must never run")
+
+    store = SQLiteStore(tmp_path / "Ніка incompatible scheduler" / "core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    task_id = _running_task(queue)
+    service = ConnectivityWaitService(
+        queue=queue, jobs=jobs, audit=AuditLog(store),
+        probe=_ConnectivityProbe(available=False), scheduler=OldScheduler(),
+    )
+    with pytest.raises(TypeError, match="persisted-only activation"):
+        service.defer(
+            task_id=task_id, job_id="durable-no-fallback", action_id="runtime.wait",
+            intent=_network_intent(RetryPolicy(max_retries=1), operation_id="old-port",
+                                   now=datetime(2035, 1, 1, tzinfo=UTC)),
+        )
+    assert queue.get(task_id).state is TaskState.WAITING_TOOL
+    stored = jobs.get("durable-no-fallback")
+    assert stored is not None and stored.enabled
+    adapter = APSchedulerAdapter(jobs, lambda _: lambda payload: None)
+    adapter.start()
+    try:
+        assert adapter.has_runtime_job(stored.job_id)
+    finally:
+        adapter.shutdown(wait=False)

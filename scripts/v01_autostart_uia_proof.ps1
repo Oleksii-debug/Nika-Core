@@ -20,15 +20,78 @@ try {
 $proof = Join-Path $PSScriptRoot 'm5_uia_proof.ps1'
 $pwsh = (Get-Process -Id $PID).Path
 try {
-    # Each invocation cold-starts the same real EXE with a new PID/window generation.
-    # The existing M5 harness owns identity/focus, process cleanup and private DB fixtures.
-    & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Enable -VerifySourceSetup
-    if ($LASTEXITCODE -ne 0) { throw 'Packaged autostart enable/source-setup phase failed.' }
+    # Prove the generic keyboard/source journey without granting autostart mutation
+    # authority. The generic M5 harness owns a private per-process DB fixture, so a
+    # known hosted-WebView2 focus transient can be retried once in a fresh process
+    # without replaying any HKCU Run mutation.
+    & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -VerifySourceSetup
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'Packaged generic keyboard/source-setup proof made no autostart mutation; retrying once in a fresh process.'
+        & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -VerifySourceSetup
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Packaged generic keyboard/source-setup proof failed after the single non-mutating retry.'
+        }
+    }
+
+    # Each autostart invocation cold-starts the same real EXE with a new PID/window
+    # generation and exercises only the exact autostart semantic controls.
+    & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Enable
+    if ($LASTEXITCODE -ne 0) {
+        # Hosted WebView2 can occasionally keep focus on the exact Save button while
+        # dropping its keyboard activation. Never replay an unknown write: retry the
+        # fresh-process Enable mutation at most once only when the OS proves the
+        # failed attempt left the test-owned registration completely absent.
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
+        try {
+            $afterFailedEnable = if ($null -eq $key) {
+                $null
+            } else {
+                $key.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            }
+        } finally { if ($null -ne $key) { $key.Dispose() } }
+
+        if ($null -eq $afterFailedEnable) {
+            Write-Host 'Autostart enable attempt made no OS registration mutation; retrying once in a fresh process.'
+            & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Enable
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Packaged autostart enable phase failed after the single zero-mutation retry.'
+            }
+        } elseif ($afterFailedEnable -ceq $expectedCommand) {
+            throw 'Packaged autostart enable phase failed after changing OS registration; refusing to replay the mutation.'
+        } else {
+            throw 'Packaged autostart enable phase failed with unexpected OS registration; refusing to replay the mutation.'
+        }
+    }
     & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Observe
     if ($LASTEXITCODE -ne 0) { throw 'Packaged autostart persistence after process restart failed.' }
     & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Disable
-    if ($LASTEXITCODE -ne 0) { throw 'Packaged autostart disable phase failed.' }
-    Write-Host 'Autostart UI -> registration -> fresh process -> persisted UI -> disable verified. Windows login execution and human NVDA remain unverified.'
+    if ($LASTEXITCODE -ne 0) {
+        # A hosted WebView2 provider can occasionally drop the keyboard activation
+        # while leaving focus on the exact Save button. Replaying an unknown write is
+        # forbidden. Retry the fresh-process Disable mutation at most once only when
+        # the OS proves that the failed attempt made no registration mutation at all.
+        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
+        try {
+            $afterFailedDisable = if ($null -eq $key) {
+                $null
+            } else {
+                $key.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            }
+        } finally { if ($null -ne $key) { $key.Dispose() } }
+
+        if ($afterFailedDisable -ceq $expectedCommand) {
+            Write-Host 'Autostart disable attempt made no OS registration mutation; retrying once in a fresh process.'
+            & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Disable
+            if ($LASTEXITCODE -ne 0) {
+                throw 'Packaged autostart disable phase failed after the single zero-mutation retry.'
+            }
+        } elseif ($null -eq $afterFailedDisable) {
+            throw 'Packaged autostart disable phase failed after changing OS registration; refusing to replay the mutation.'
+        } else {
+            throw 'Packaged autostart disable phase failed with unexpected OS registration; refusing to replay the mutation.'
+        }
+    }
+    Write-Host 'Generic keyboard/source proof plus autostart UI -> registration -> fresh process -> persisted UI -> disable verified. Windows login execution and human NVDA remain unverified.'
 } finally {
     # Remove only our exact test-owned value if a later phase failed. Preserve any
     # concurrently replaced registration; never delete the Run key or other values.

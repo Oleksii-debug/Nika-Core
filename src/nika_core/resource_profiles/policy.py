@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import replace
 from math import isfinite
 from types import MappingProxyType
 
@@ -71,17 +72,24 @@ class ResourceProfilePolicy:
         selected = dict(_DEFAULT_PROFILES if profiles is None else profiles)
         if not selected:
             raise ValueError("at least one resource profile is required")
+        detached: dict[ResourceProfileName, ResourceProfileSpec] = {}
         for name, spec in selected.items():
-            _validate_profile(name, spec)
+            if type(name) is not ResourceProfileName:
+                raise ValueError("resource profile key must be a ResourceProfileName")
+            if type(spec) is not ResourceProfileSpec:
+                raise ValueError("resource profile must be an exact ResourceProfileSpec")
+            snapshot = replace(spec)
+            _validate_profile(name, snapshot)
+            detached[name] = snapshot
         self._profiles: Mapping[ResourceProfileName, ResourceProfileSpec] = MappingProxyType(
-            selected
+            detached
         )
 
     def profile_spec(self, profile: ResourceProfileName | str) -> ResourceProfileSpec:
         resolved = _coerce_profile(profile)
         if resolved is None or resolved not in self._profiles:
             raise ValueError(f"unknown resource profile: {profile!r}")
-        return self._profiles[resolved]
+        return replace(self._profiles[resolved])
 
     def evaluate(
         self,
@@ -115,6 +123,8 @@ class ResourceProfilePolicy:
 
         spec = self._profiles[profile_name]
         recommendations = _recommendations(spec)
+        if type(snapshot) is ResourceSnapshot:
+            snapshot = replace(snapshot)
         if not _valid_snapshot(snapshot):
             return ProfileDecision(
                 False,
@@ -192,7 +202,8 @@ def _validate_profile(name: ResourceProfileName, spec: ResourceProfileSpec) -> N
 
 def _valid_snapshot(snapshot: ResourceSnapshot) -> bool:
     return (
-        _is_percentage(snapshot.cpu_percent, allow_zero=True)
+        type(snapshot) is ResourceSnapshot
+        and _is_percentage(snapshot.cpu_percent, allow_zero=True)
         and _is_percentage(snapshot.memory_percent, allow_zero=True)
         and _is_nonnegative_int(snapshot.available_memory_bytes)
     )
