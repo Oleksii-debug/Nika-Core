@@ -84,7 +84,7 @@ use the existing manager injection ports and their own qualified composition.
 ## Qualification and integration boundary
 
 Local isolated materialization of the exact baseline plus owned paths passed
-compileall, owned Ruff and 164 focused tests, including shared-manager concurrency,
+compileall, owned Ruff and 165 focused tests, including shared-manager concurrency,
 FIFO restart, live-owner denial, absent/uncertain probe, manager-ID reuse, corrupt/
 mixed generations, current telemetry, optional metrics and actual desktop
 start/resume/cancel/failure behavior. This is not full locked-repository CI or

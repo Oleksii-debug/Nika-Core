@@ -455,6 +455,10 @@ class DesktopBackend:
             return
         if future.result() is not True:
             self._record_background_failure(task_id, "desktop.runtime_cancel_rejected")
+        else:
+            # A saved session may have been waiting for capacity when cancelled.
+            # Only remove its waiter; an active operation retains its finally-release.
+            self._cancel_resource_wait(task_id)
 
     def _runtime_done(self, task_id: str, future: Future[Any]) -> None:
         with self._active_lock:

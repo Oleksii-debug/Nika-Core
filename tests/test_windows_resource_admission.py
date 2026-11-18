@@ -261,3 +261,28 @@ def test_packaged_builder_injects_shared_store_and_real_owner_probe(tmp_path, mo
     assert first.request(scope=_SCOPE, owner_id=_OWNER, request_id="one").granted
     assert not second.request(scope=_SCOPE, owner_id=_OWNER, request_id="two").granted
     assert first.release(scope=_SCOPE, owner_id=_OWNER, request_id="one")
+
+
+def test_cancelling_saved_resume_removes_its_fifo_waiter(tmp_path) -> None:
+    store = _store(tmp_path)
+    runtime = PausingRuntime()
+    backend, queue, manager = _build(store, runtime)
+    blocker = ResourceManager(store, Observer())
+    try:
+        backend.create_task({"command": "cancel checkpointed waiter"})
+        task_id = queue.list_recent()[0].task_id
+        _wait(lambda: queue.get(task_id).state == TaskState.PAUSED)
+        _wait(lambda: not backend._active_threads)
+        assert blocker.request(scope=_SCOPE, owner_id=_OWNER, request_id="external").granted
+        backend.resume_task({})
+        _wait(lambda: manager.queued(scope=_SCOPE, owner_id=_OWNER) == (task_id,))
+        _wait(lambda: not backend._active_threads)
+        assert backend.stop_agent({}).status == "accepted"
+        _wait(lambda: queue.get(task_id).state == TaskState.CANCELLED)
+        _wait(lambda: manager.queued(scope=_SCOPE, owner_id=_OWNER) == ())
+        assert manager.active_count(scope=_SCOPE, owner_id=_OWNER) == 1
+        assert backend._coordinator.sessions.get(task_id) is None
+        assert runtime.resume_calls == 0
+    finally:
+        blocker.release(scope=_SCOPE, owner_id=_OWNER, request_id="external")
+        backend.close()
