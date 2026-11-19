@@ -81,7 +81,8 @@
       "activation": "optional",
       "requirements": [
         "pywebview>=6.2.1,<7",
-        "psutil>=7,<8"
+        "psutil>=7,<8",
+        "apscheduler>=3.11,<4"
       ],
       "upstream_maintenance": "NOT_INDEPENDENTLY_VERIFIED",
       "license_provenance": "REQUIRES_PER_PACKAGE_RELEASE_REVIEW"

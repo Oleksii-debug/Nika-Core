@@ -18,6 +18,7 @@ ROOT_DISTRIBUTIONS = {
     "_pytest": "pytest",
     "annotated_types": "annotated-types",
     "anyio": "anyio",
+    "apscheduler": "apscheduler",
     "bottle": "bottle",
     "certifi": "certifi",
     "cffi": "cffi",
@@ -45,6 +46,8 @@ ROOT_DISTRIBUTIONS = {
     "setuptools": "setuptools",
     "typing_extensions": "typing-extensions",
     "typing_inspection": "typing-inspection",
+    "tzdata": "tzdata",
+    "tzlocal": "tzlocal",
     "webview": "pywebview",
     "wheel": "wheel",
 }

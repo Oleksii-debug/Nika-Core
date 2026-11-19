@@ -29,6 +29,18 @@ def test_frozen_runtime_inventory_is_independent_of_the_notice_producer() -> Non
     assert module_notice_findings({"psutil._pswindows"}, {"psutil"}) == ()
 
 
+@pytest.mark.parametrize("root,distribution", [
+    ("apscheduler.schedulers.background", "apscheduler"),
+    ("tzlocal.win32", "tzlocal"),
+    ("tzdata.zoneinfo", "tzdata"),
+])
+def test_packaged_scheduler_roots_require_their_own_notices(root, distribution) -> None:
+    assert module_notice_findings({root}, set()) == (
+        f"missing-packaged-distribution-notice:{distribution}",
+    )
+    assert module_notice_findings({root}, {distribution}) == ()
+
+
 def test_exact_package_jobs_prove_module_notice_coverage() -> None:
     workflows = Path(__file__).resolve().parents[1] / ".github" / "workflows"
     command = "python scripts/verify_packaged_notices.py --bundle"

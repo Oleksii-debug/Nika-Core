@@ -49,3 +49,24 @@ scripts/verify.py: 4294 passed, 0 skipped, 11 warnings; pip check/Ruff/compile P
 HUMAN_TESTED=false; NVDA_VERIFIED=false; PRODUCTION_RELEASE_READY=false.
 Секрети, приватні журнали, production DB, browser profiles і model weights не включено.
 Rollback: окрема branch, прийнятий main і старі PR не видаляються.
+
+## Ремонт фактично невдалої M11-збірки
+
+Коміт 2cd95f2ab1e97d4116077007d2f9bbb801da7975 не пройшов M11
+на Verify configuration admission before packaging: import APScheduler був
+відсутній у GUI/packaging profile. Піднято вже зафіксований APScheduler 3.11.3
+з agent до GUI requirements без оновлення будь-якого з 210 resolved versions.
+Повторно експортовано hashes через чинний uv 0.13.6; Core/M12/build exports
+не змінено. Windows transitive tzlocal 5.4.5/tzdata 2026.6 включено у повні
+ліцензійні notices та незалежний module→distribution/missing-notice oracle.
+
+Primary provenance: https://pypi.org/project/APScheduler/3.11.3/ ;
+https://pypi.org/project/tzlocal/5.4.5/ ; https://pypi.org/project/tzdata/2026.6/ .
+Зібрано повні installed LICENSE тексти; MIT для APScheduler/tzlocal,
+Apache-2.0 та upstream data license для tzdata. Джерела/hash залишаються
+у чинному uv.lock. Ремонт не додає LLM/provider stack до детермінованого GUI.
+
+Fresh isolated hashed build+packaging installation пройшла 23 config admission
+тести, які фактично впали у M11. Її реальний source CLI proof також пройшов
+без agent extras. Це Linux package-profile proof; Windows exact-head gates
+після зміни профілю мають бути виконані заново. Старий SHA PASS не переноситься.

@@ -20,10 +20,13 @@ PACKAGED_ADDITIONAL_DISTRIBUTIONS = {"markdown-it-py", "mdurl", "pytest", "wheel
 # Required by the production resource observer. Its actual frozen-module
 # ownership must also pass the exact-candidate Windows package inventory gate.
 PACKAGED_RESOURCE_DISTRIBUTIONS = {"psutil"}
+# Required by the actual packaged task scheduler, including Windows zone data.
+PACKAGED_SCHEDULER_DISTRIBUTIONS = {"apscheduler", "tzlocal", "tzdata"}
 PACKAGED_MISSING_DISTRIBUTIONS = (
     PACKAGED_HTTP_DISTRIBUTIONS
     | PACKAGED_ADDITIONAL_DISTRIBUTIONS
     | PACKAGED_RESOURCE_DISTRIBUTIONS
+    | PACKAGED_SCHEDULER_DISTRIBUTIONS
 )
 
 
