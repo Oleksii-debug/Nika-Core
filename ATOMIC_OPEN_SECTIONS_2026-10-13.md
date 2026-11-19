@@ -30,7 +30,7 @@
 | 6А | Успадкувати повний acceptance scope старого Розділу 6; спочатку перевірити live implementation/tests/PR/evidence і не переписувати вже правильне. | **DONE — 2026-11-18, #846 / #437 / #1233 / #1237 / #880; див. реєстр доказів** |
 | 6Б | Закрити лише missing production gaps, integration, failure/recovery/security/accessibility cases, які належать цьому scope. | **DONE — 2026-11-18, #846 / #437 / #1233 / #1237 / #880; див. реєстр доказів** |
 | 6В | Зафіксувати exact evidence/commit/PR, інтегрувати у canonical lineage та оновити live GitHub multi-plan closure registry. | **DONE — 2026-11-18, #846 / #437 / #1233 / #1237 / #880; див. реєстр доказів** |
-| 7А | Успадкувати повний acceptance scope старого Розділу 7; спочатку перевірити live implementation/tests/PR/evidence і не переписувати вже правильне. | Статус міграції: AUDIT_EXISTING / PARTIAL_EXISTING |
+| 7А | Успадкувати повний acceptance scope старого Розділу 7; спочатку перевірити live implementation/tests/PR/evidence і не переписувати вже правильне. | **DONE — 2026-11-19, аудит/reuse #357 / #994 / #536; production gaps залишаються 7Б; див. реєстр доказів** |
 | 7Б | Закрити лише missing production gaps, integration, failure/recovery/security/accessibility cases, які належать цьому scope. | Статус: AUDIT_EXISTING / PARTIAL_EXISTING |
 | 7В | Зафіксувати exact evidence/commit/PR, інтегрувати у canonical lineage та оновити live GitHub multi-plan closure registry. | Статус: AUDIT_EXISTING / PARTIAL_EXISTING |
 | 8А | Успадкувати повний acceptance scope старого Розділу 8; спочатку перевірити live implementation/tests/PR/evidence і не переписувати вже правильне. | Статус міграції: AUDIT_EXISTING / PARTIAL_EXISTING |
