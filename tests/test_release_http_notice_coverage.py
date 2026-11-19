@@ -17,7 +17,14 @@ from nika_core.packaging import notices
 # would reproduce the original mutually agreeing producer/verifier blind spot.
 PACKAGED_HTTP_DISTRIBUTIONS = {"httpx", "httpcore", "anyio", "h11", "idna", "certifi"}
 PACKAGED_ADDITIONAL_DISTRIBUTIONS = {"markdown-it-py", "mdurl", "pytest", "wheel"}
-PACKAGED_MISSING_DISTRIBUTIONS = PACKAGED_HTTP_DISTRIBUTIONS | PACKAGED_ADDITIONAL_DISTRIBUTIONS
+# Required by the production resource observer. Its actual frozen-module
+# ownership must also pass the exact-candidate Windows package inventory gate.
+PACKAGED_RESOURCE_DISTRIBUTIONS = {"psutil"}
+PACKAGED_MISSING_DISTRIBUTIONS = (
+    PACKAGED_HTTP_DISTRIBUTIONS
+    | PACKAGED_ADDITIONAL_DISTRIBUTIONS
+    | PACKAGED_RESOURCE_DISTRIBUTIONS
+)
 
 
 def test_actual_packaged_http_transport_has_release_notice_coverage() -> None:

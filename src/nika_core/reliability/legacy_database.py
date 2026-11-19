@@ -19,6 +19,10 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VERSION
+from nika_core.data.resource_durability_schema import (
+    RESOURCE_DURABILITY_SCHEMA_VERSION,
+    validate_resource_durability_schema,
+)
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
@@ -30,6 +34,7 @@ _EMPTY_TABLES = {
     "schema_migrations",
     "multi_agent_state_schema_migrations",
     "product_project_schema_migrations",
+    "resource_durability_schema_migrations",
     "sqlite_sequence",
     "audit_events",
     # FTS5 bookkeeping exists even with zero indexed documents. The actual
@@ -121,6 +126,7 @@ def _inspect(
         for name, supported in (
             ("multi_agent_state_schema_migrations", MULTI_AGENT_STATE_SCHEMA_VERSION),
             ("product_project_schema_migrations", PRODUCT_PROJECT_SCHEMA_VERSION),
+            ("resource_durability_schema_migrations", RESOURCE_DURABILITY_SCHEMA_VERSION),
         ):
             if name in tables:
                 history = [
@@ -132,6 +138,14 @@ def _inspect(
                     and (history != list(range(1, history[-1] + 1)) or history[-1] > supported)
                 ):
                     raise LegacyDatabaseConflict(_MESSAGE)
+        try:
+            # The validator uses named rows; restore the inspection row mode afterwards.
+            db.row_factory = sqlite3.Row
+            validate_resource_durability_schema(db)
+        except (RuntimeError, sqlite3.DatabaseError):
+            raise LegacyDatabaseConflict(_MESSAGE) from None
+        finally:
+            db.row_factory = None
         has_data = any(
             name not in _EMPTY_TABLES
             and db.execute(f"SELECT 1 FROM {_quoted(name)} LIMIT 1").fetchone() is not None

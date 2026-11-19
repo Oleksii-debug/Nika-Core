@@ -28,6 +28,7 @@ RUNTIME_DISTRIBUTIONS = (
     "packaging",
     "platformdirs",
     "proxy-tools",
+    "psutil",
     "pycparser",
     "pydantic",
     "pydantic-core",
