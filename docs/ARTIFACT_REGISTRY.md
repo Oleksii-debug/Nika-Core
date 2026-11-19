@@ -118,3 +118,44 @@ The QA-only #547 adversarial file is executed read-only and is not integrated.
 Focused combined result: 203 passed. Full source, independent review and new exact
 hosted/package gates remain required. These facts do not certify a packaged artifact
 browser, human NVDA, physical restart or whole-product readiness.
+
+## 2026-11-19 signed-storage locator admission repair
+
+This bounded successor of canonical #522 repairs a confirmed credential-material
+admission gap. It reuses the existing credential-assignment validator and bounded
+eight-pass percent decoder, adding the signed-storage authority families already
+recognized by canonical AuditLog: AWS/GCS signature, credential and security-token
+parameters, legacy access IDs, and Azure SAS `sig`. The seven direct secret
+families recognized by AuditLog (AWS/GCS signature, credential, security-token
+and SAS `sig`) are also reserved in artifact metadata, preventing trivial
+relocation of authority into that dictionary. Generic public-signature and
+access-ID metadata remain valid; the narrower query-context policy is not
+expanded into an arbitrary metadata ban.
+
+Twenty-seven admission cases exercised the public registry against temporary
+SQLite stores: twenty locator/embedded-URL aliases and seven metadata-key
+relocations. Together with read/retry regressions, the initial unchanged-baseline
+selection produced 29 failures and 6 compatibility passes before repair.
+After repair, rejection occurs before any record or verification publication.
+Case/percent aliases, fragments and nested encoded URLs share the incumbent
+validation path. Ordinary unsigned query parameters and opaque references still
+register, reopen and replay idempotently; safe `credential_id`, `signature`, access-ID and
+`signature_version` metadata remain valid. A denied request does not reserve its
+idempotency key. Previously stored signed locators fail controlled readback without
+silently rewriting or deleting their bytes.
+
+Only synthetic temporary inputs are used by tests; no signed production URL,
+credential or secret value is included in source or evidence. This slice adds no
+registry, URL-fetching, authorization, persistence or dependency engine. It does not
+certify full Section 8, a packaged evidence browser, human NVDA or release readiness.
+Exact-source full verification, independent review and hosted Windows/package
+gates remain required before integration.
+
+Independent review then reproduced relocation of an entire signed URL or
+authority assignment into a metadata key with an otherwise safe locator/value.
+The existing bounded credential-assignment predicate now checks raw keys before
+normalized reserved-name lookup. Six raw/percent-encoded key cases failed before
+this repair and pass after it, publishing no record or receipt. Three ordinary
+unsigned URL-key cases remain usable after reopen; public signature/access-ID
+metadata retains its earlier compatibility boundary. The implementation uses the
+same existing percent-decoding limit and adds no general URL ban.
