@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from typing import Any
@@ -117,6 +118,18 @@ class DesktopBackend:
         self._ensure_defaults()
 
     def create_task(self, payload: Mapping[str, Any]) -> UIResult:
+        record = self.prepare_scheduled_task(payload)
+        command = str(record.payload["command"])
+        self._schedule_start(record.task_id, command)
+        return UIResult(
+            request_id="desktop-handler",
+            status="accepted",
+            message=f"Завдання прийнято до виконання: {command}",
+            focus_id="tasks-heading",
+        )
+
+    def prepare_scheduled_task(self, payload: Mapping[str, Any]) -> TaskRecord:
+        """Prepare the existing ordinary task without starting runtime effects."""
         command = str(payload.get("command", "")).strip()
         if not command:
             raise ValueError("Введіть команду перед створенням завдання.")
@@ -131,12 +144,84 @@ class DesktopBackend:
             payload=task_payload,
         )
         self._queue.transition(record.task_id, TaskState.READY)
-        self._schedule_start(record.task_id, command)
-        return UIResult(
-            request_id="desktop-handler",
-            status="accepted",
-            message=f"Завдання прийнято до виконання: {command}",
-            focus_id="tasks-heading",
+        return self._queue.get(record.task_id)
+
+    def cancel_prepared_task(self, task_id: str) -> bool:
+        """Cancel only a never-started task; active runtime keeps its authority."""
+        record = self._ordinary_scheduled_task(task_id)
+        with self._queue.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            started = conn.execute(
+                "SELECT 1 FROM task_events WHERE task_id = ? AND new_state = ? LIMIT 1",
+                (record.task_id, TaskState.RUNNING.value),
+            ).fetchone()
+            if started is not None:
+                return False
+            state = conn.execute(
+                "SELECT state FROM tasks WHERE task_id = ?", (record.task_id,)
+            ).fetchone()["state"]
+            if state == TaskState.CANCELLED.value:
+                return True
+            if state not in {TaskState.CREATED.value, TaskState.READY.value, TaskState.PAUSED.value}:
+                return False
+            self._queue.transition_with_connection(conn, record.task_id, TaskState.CANCELLED)
+        self._cancel_resource_wait(task_id)
+        return True
+
+    def start_scheduled_task(self, task_id: str) -> bool:
+        """Worker-only admission port; never replays a task with RUNNING history.
+
+        Acknowledgement follows durable runtime admission, not full execution.
+        False means proven pre-effect resource deferral. Uncertainty raises and
+        leaves the scheduler intent available for explicit reconciliation.
+        """
+        record = self._ordinary_scheduled_task(task_id)
+        if not self._never_started(task_id) or record.state in _TERMINAL_STATES:
+            return True
+        if record.state == TaskState.PAUSED:
+            if not self._resource_waiting(task_id):
+                raise ValueError("Завдання призупинено користувачем; запуск за розкладом відхилено.")
+            self._queue.transition(task_id, TaskState.READY)
+        elif record.state != TaskState.READY:
+            raise ValueError("Завдання не готове до безпечного запуску за розкладом.")
+        with self._active_lock:
+            future = self._active_futures.get(task_id)
+        if future is None or future.done():
+            future = self._schedule_start(task_id, str(record.payload["command"]))
+        deadline = time.monotonic() + 10
+        while True:
+            if not self._never_started(task_id):
+                return True
+            current = self._queue.get(task_id)
+            if current.state in _TERMINAL_STATES:
+                return True
+            if future.done():
+                # Exceptions do not prove that retrying an effect is safe.
+                future.result()
+                current = self._queue.get(task_id)
+                if not self._never_started(task_id) or current.state in _TERMINAL_STATES:
+                    return True
+                if current.state == TaskState.PAUSED and self._resource_waiting(task_id):
+                    return False
+                raise RuntimeError("Не підтверджено допуск runtime; розклад не просунуто.")
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Допуск runtime ще не підтверджено; розклад не просунуто.")
+            # The scheduler worker waits; the WebView/UI thread never does.
+            threading.Event().wait(0.01)
+
+    def _ordinary_scheduled_task(self, task_id: str) -> TaskRecord:
+        if type(task_id) is not str or not task_id or task_id != task_id.strip():
+            raise ValueError("Некоректний ідентифікатор запланованого завдання.")
+        record = self._queue.get(task_id)
+        if record.workspace_id != _DEFAULT_WORKSPACE_ID or record.agent_id != _DEFAULT_AGENT_ID:
+            raise ValueError("Розклад не може запускати завдання іншого робочого простору чи агента.")
+        if type(record.payload.get("command")) is not str or not record.payload["command"].strip():
+            raise ValueError("Збережене завдання не містить коректної команди.")
+        return record
+
+    def _resource_waiting(self, task_id: str) -> bool:
+        return self._resources is not None and task_id in self._resources.queued(
+            scope=_RESOURCE_SCOPE, owner_id=_RESOURCE_OWNER
         )
 
     def pause_task(self, _payload: Mapping[str, Any]) -> UIResult:
@@ -334,9 +419,9 @@ class DesktopBackend:
             self._runtime_loop = _DesktopRuntimeLoop()
         return self._runtime_loop
 
-    def _schedule_start(self, task_id: str, command: str) -> None:
+    def _schedule_start(self, task_id: str, command: str) -> Future[Any]:
         thread_id = f"desktop-{task_id}"
-        self._submit_runtime(
+        return self._submit_runtime(
             task_id,
             thread_id,
             self._start_if_ready(
@@ -380,6 +465,17 @@ class DesktopBackend:
             scope=_RESOURCE_SCOPE, owner_id=_RESOURCE_OWNER, request_id=task_id
         )
         if not decision.granted:
+            if decision.reason == "recovery_required":
+                # Another manager may already be admitting this very task.
+                # This loser has no lease and cannot pause the winner's READY
+                # task or interpret unknown ownership as a retryable waiter.
+                self._audit.append(
+                    event_type="desktop.resource_owner_unverified",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={"reason": "recovery_required"},
+                )
+                return None
             current = self._queue.get(task_id)
             if current.state == TaskState.READY:
                 try:
@@ -433,7 +529,7 @@ class DesktopBackend:
         task_id: str,
         thread_id: str,
         coroutine: Coroutine[Any, Any, Any],
-    ) -> None:
+    ) -> Future[Any]:
         with self._active_lock:
             existing = self._active_futures.get(task_id)
             if existing is not None and not existing.done():
@@ -442,6 +538,7 @@ class DesktopBackend:
             future = self._host().submit(coroutine)
             self._active_futures[task_id] = future
         future.add_done_callback(lambda done: self._runtime_done(task_id, done))
+        return future
 
     def _cancel_done(self, task_id: str, future: Future[bool]) -> None:
         with self._active_lock:

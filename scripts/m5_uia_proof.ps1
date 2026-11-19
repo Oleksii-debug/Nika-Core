@@ -40,7 +40,7 @@ public static class NikaUiaNative
 }
 '@
 
-$requiredNames = @('Nika Core', 'Що має зробити Nika?', 'Створити завдання', 'Клавіатура')
+$requiredNames = @('Nika Core', 'Що має зробити Nika?', 'Створити завдання', 'Клавіатура', 'Режим роботи', 'Запланований запуск')
 
 # WebView2 enables renderer accessibility on demand when assistive technology such
 # as a screen reader is detected. GitHub-hosted Windows runners do not run a
@@ -683,6 +683,25 @@ try {
         Wait-FocusName $tasksControl
         [System.Windows.Forms.SendKeys]::SendWait('^+p')
         Wait-FocusName $commandControl
+
+        # New ordinary resource/schedule controls must be real WebView2 semantic
+        # descendants. Focus uses the same generation-bound identity proof as
+        # the existing task/source journey, never coordinates or DOM injection.
+        $profileControl = Wait-DescendantName 'Режим роботи' ([System.Windows.Automation.ControlType]::ComboBox)
+        $profileSaveControl = Wait-DescendantName 'Зберегти профіль ресурсів' ([System.Windows.Automation.ControlType]::Button)
+        $scheduleRetryControl = Wait-DescendantName 'Повторити перевірку ресурсів через, секунд' ([System.Windows.Automation.ControlType]::Spinner)
+        $scheduleButton = Wait-DescendantName 'Запланувати запуск' ([System.Windows.Automation.ControlType]::Button)
+        $schedulePauseButton = Wait-DescendantName 'Призупинити запланований запуск' ([System.Windows.Automation.ControlType]::Button)
+        $scheduleResumeButton = Wait-DescendantName 'Відновити запланований запуск' ([System.Windows.Automation.ControlType]::Button)
+        $scheduleCancelButton = Wait-DescendantName 'Скасувати запланований запуск' ([System.Windows.Automation.ControlType]::Button)
+        Set-BoundControlFocus $profileControl
+        Set-BoundControlFocus $profileSaveControl
+        Set-BoundControlFocus $scheduleRetryControl
+        Set-BoundControlFocus $scheduleButton
+        Set-BoundControlFocus $schedulePauseButton
+        Set-BoundControlFocus $scheduleResumeButton
+        Set-BoundControlFocus $scheduleCancelButton
+        Set-BoundControlFocus $commandControl
     }
 
     if ($AutostartPhase -ne 'None') {

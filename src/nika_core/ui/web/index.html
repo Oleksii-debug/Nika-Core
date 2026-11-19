@@ -23,9 +23,24 @@
     <a href="#product-project-heading">ProductProject</a>
     <a href="#keyboard-heading">Клавіатура</a>
     <a href="#autostart-heading">Автозапуск Windows</a>
+    <a href="#resource-profile-heading">Ресурси</a>
+    <a href="#schedule-heading">Розклад</a>
   </nav>
 
   <main id="main" tabindex="-1">
+    <section aria-labelledby="resource-profile-heading">
+      <h2 id="resource-profile-heading" tabindex="-1">Профіль ресурсів</h2>
+      <p id="resource-profile-help">Профіль обмежує навантаження нових звичайних завдань. Якщо ресурсів недостатньо, завдання очікує. Вибір зберігається після перезапуску.</p>
+      <label for="resource-profile">Режим роботи</label>
+      <select id="resource-profile" aria-describedby="resource-profile-help resource-profile-status" disabled>
+        <option value="normal">Звичайний</option>
+        <option value="economy">Економний</option>
+        <option value="night_batch">Нічна обробка</option>
+        <option value="low_memory">Мало пам’яті</option>
+      </select>
+      <p id="resource-profile-status" role="status">Перевірка збереженого профілю.</p>
+      <button type="button" id="resource-profile-save" data-action-id="settings.resources.configure" data-error-focus-target="resource-profile" disabled>Зберегти профіль ресурсів</button>
+    </section>
     <section aria-labelledby="autostart-heading">
       <h2 id="autostart-heading" tabindex="-1">Автозапуск Windows</h2>
       <p id="autostart-help">Змініть позначку й натисніть «Зберегти автозапуск». Налаштування діє лише для вашого облікового запису. Воно відкриває програму після входу у Windows, але не надає дозволу повторювати незавершені дії.</p>
@@ -62,6 +77,31 @@
         <button type="button" data-action-id="task.pause">Призупинити</button>
         <button type="button" data-action-id="task.resume">Продовжити</button>
         <button type="button" data-action-id="agent.stop">Зупинити агента</button>
+      </div>
+    </section>
+
+    <section aria-labelledby="schedule-heading">
+      <h2 id="schedule-heading" tabindex="-1">Запланований запуск</h2>
+      <p id="schedule-help">Заплануйте один запуск команди з поля «Що має зробити Nika?». Перевірка ресурсів повторюється до допуску або крайнього часу запуску. Виконана дія не повторюється. Скасування розкладу не зупиняє вже запущене завдання; для цього є «Зупинити агента».</p>
+      <label for="schedule-delay">Затримка перед запуском, секунд</label>
+      <input id="schedule-delay" type="number" min="1" max="604800" value="60" step="1" aria-describedby="schedule-help">
+      <label for="schedule-retry">Повторити перевірку ресурсів через, секунд</label>
+      <input id="schedule-retry" type="number" min="1" max="86400" value="60" step="1">
+      <label for="schedule-window">Крайній час запуску — секунд від цього моменту</label>
+      <input id="schedule-window" type="number" min="2" max="1209600" value="3600" step="1">
+      <button type="button" data-action-id="schedule.create" data-error-focus-target="schedule-delay">Запланувати запуск</button>
+      <label for="schedule-task">Збережений запланований запуск</label>
+      <select id="schedule-task" aria-describedby="schedule-status"></select>
+      <p id="schedule-status" role="status">Запланованих запусків ще немає.</p>
+      <p>Показано не більше 50 записів на сторінці. Для інших запусків перейдіть до наступної сторінки.</p>
+      <div class="actions">
+        <button type="button" data-action-id="schedule.page" data-page="first">Перша сторінка розкладу</button>
+        <button type="button" id="schedule-next" data-action-id="schedule.page" data-page="next" disabled>Наступна сторінка розкладу</button>
+      </div>
+      <div class="actions">
+        <button type="button" data-action-id="schedule.pause" data-error-focus-target="schedule-task">Призупинити запланований запуск</button>
+        <button type="button" data-action-id="schedule.resume" data-error-focus-target="schedule-task">Відновити запланований запуск</button>
+        <button type="button" data-action-id="schedule.cancel" data-error-focus-target="schedule-task">Скасувати запланований запуск</button>
       </div>
     </section>
 

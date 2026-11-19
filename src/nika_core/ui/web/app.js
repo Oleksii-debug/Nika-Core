@@ -20,6 +20,19 @@
   let autostartDirty = false;
   let autostartPending = false;
   let autostartGeneration = 0;
+  const resourceProfile = document.getElementById("resource-profile");
+  const resourceProfileSave = document.getElementById("resource-profile-save");
+  const resourceProfileStatus = document.getElementById("resource-profile-status");
+  const profileLabels = Object.freeze({normal: "Звичайний", economy: "Економний", night_batch: "Нічна обробка", low_memory: "Мало пам’яті"});
+  let profileRevision = 0;
+  let profileDirty = false;
+  let profilePending = false;
+  let profileGeneration = 0;
+  const scheduleTask = document.getElementById("schedule-task");
+  const scheduleStatus = document.getElementById("schedule-status");
+  const scheduleNextButton = document.getElementById("schedule-next");
+  let scheduleNextCursor = null;
+  let scheduleGeneration = 0;
   const tasksList = document.getElementById("tasks-list");
   const agentsList = document.getElementById("agents-list");
   const workspacesList = document.getElementById("workspaces-list");
@@ -534,10 +547,101 @@
     if (await refreshState()) announce("Збережені налаштування перечитано.");
   });
 
+  function renderResourceProfile(selection) {
+    if (!resourceProfile || !resourceProfileSave || !resourceProfileStatus || profilePending) return;
+    const valid = selection && Object.hasOwn(profileLabels, selection.profile)
+      && Number.isSafeInteger(selection.revision) && selection.revision >= 1;
+    resourceProfile.disabled = !valid;
+    resourceProfileSave.disabled = !valid;
+    if (!valid) {
+      resourceProfileStatus.textContent = "Профіль ресурсів недоступний. Перечитайте стан програми.";
+      return;
+    }
+    if (!profileDirty) {
+      resourceProfile.value = selection.profile;
+      profileRevision = selection.revision;
+    }
+    resourceProfileStatus.textContent = profileDirty
+      ? "Вибір змінено, але ще не збережено. Натисніть «Зберегти профіль ресурсів»."
+      : `Збережений профіль: ${profileLabels[selection.profile]}.`;
+  }
+
+  resourceProfile?.addEventListener("change", () => {
+    profileDirty = true;
+    profileGeneration += 1;
+    if (resourceProfileStatus) resourceProfileStatus.textContent = "Вибір змінено, але ще не збережено.";
+  });
+
+  function renderSchedules(items, page = null) {
+    if (!scheduleTask || !scheduleStatus) return;
+    const labels = {active: "Очікує запуску", paused: "Призупинено", cancelled: "Скасовано", completed: "Планування завершено"};
+    const valid = Array.isArray(items) && items.length <= 50 && items.every((item) => item
+      && typeof item.task_id === "string" && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(item.task_id)
+      && Object.hasOwn(labels, item.status)
+      && (item.next_due_at === null || (typeof item.next_due_at === "string" && item.next_due_at.length <= 40)));
+    if (!valid) {
+      scheduleTask.replaceChildren();
+      scheduleTask.disabled = true;
+      scheduleNextCursor = null;
+      if (scheduleNextButton) scheduleNextButton.disabled = true;
+      scheduleStatus.textContent = "Стан розкладу недоступний.";
+      return;
+    }
+    const selected = scheduleTask.value;
+    scheduleTask.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Оберіть запланований запуск";
+    scheduleTask.appendChild(placeholder);
+    for (const item of items) {
+      const option = document.createElement("option");
+      option.value = item.task_id;
+      option.textContent = `${item.task_id} — ${labels[item.status]}${item.next_due_at ? ", наступна перевірка: " + item.next_due_at : ""}`;
+      scheduleTask.appendChild(option);
+    }
+    scheduleTask.value = items.some((item) => item.task_id === selected) ? selected : "";
+    scheduleNextCursor = page?.has_more === true && typeof page.next_after_job_id === "string"
+      && /^recurrence-v1:[0-9a-f]{64}$/.test(page.next_after_job_id) ? page.next_after_job_id : null;
+    if (scheduleNextButton) scheduleNextButton.disabled = scheduleNextCursor === null;
+    scheduleTask.disabled = items.length === 0;
+    scheduleStatus.textContent = items.length
+      ? "Для повторної перевірки незавершеного допуску натисніть «Відновити запланований запуск»."
+      : (scheduleNextCursor ? "На цій сторінці немає ваших запусків. Доступна наступна сторінка." : "На цій сторінці запланованих запусків немає.");
+  }
+
+  async function dispatchResourceProfile() {
+    if (profilePending || !resourceProfile || resourceProfile.disabled) return;
+    const selected = resourceProfile.value;
+    const revision = profileRevision;
+    profilePending = true;
+    const generation = ++profileGeneration;
+    resourceProfile.disabled = true;
+    resourceProfileSave.disabled = true;
+    try {
+      const result = await globalThis.pywebview.api.dispatch({request_id: requestId(), action_id: "settings.resources.configure", payload: {profile: selected, revision}});
+      const failed = !["completed", "accepted"].includes(result?.status);
+      if (!failed && generation === profileGeneration) profileDirty = false;
+      announce(result?.message || "Не вдалося зберегти профіль ресурсів.", failed);
+    } catch {
+      announce("Не вдалося зберегти профіль ресурсів. Перечитайте стан і повторіть дію.", true);
+    } finally {
+      profilePending = false;
+      profileGeneration += 1;
+      // Refresh after conflict before accepting another expected revision.
+      profileDirty = false;
+      await refreshState();
+      if (resourceProfile.disabled) focusElementById("resource-profile-heading");
+      else resourceProfile.focus();
+    }
+  }
+
   async function refreshState({ announceTeamTransitions = true } = {}) {
     const autostartReadGeneration = autostartGeneration;
+    const profileReadGeneration = profileGeneration;
+    const scheduleReadGeneration = scheduleGeneration;
     if (!globalThis.pywebview?.api?.get_state) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
+      if (profileReadGeneration === profileGeneration) renderResourceProfile(null);
       reportStateUnavailable();
       return false;
     }
@@ -546,15 +650,21 @@
       response = await globalThis.pywebview.api.get_state();
     } catch {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
+      if (profileReadGeneration === profileGeneration) renderResourceProfile(null);
       reportStateUnavailable();
       return false;
     }
     if (!response?.ok) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
+      if (profileReadGeneration === profileGeneration) renderResourceProfile(null);
       reportStateUnavailable();
       return false;
     }
     const state = response.state || {};
+    if (profileReadGeneration === profileGeneration) renderResourceProfile(state.resource_profile ?? null);
+    if (scheduleReadGeneration === scheduleGeneration) {
+      renderSchedules(Object.hasOwn(state, "schedules") ? state.schedules : [], state.schedule_page ?? null);
+    }
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     renderSourceSetup(state.v01_sources ?? null);
     renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}${item.resource_message ? ". " + item.resource_message : ""}`);
@@ -582,13 +692,44 @@
       await dispatchAutostart(actionId, trigger);
       return;
     }
+    if (actionId === "settings.resources.configure") {
+      await dispatchResourceProfile();
+      return;
+    }
     const payload = {};
     if (actionId === "task.create") payload.command = commandInput.value.trim();
+    if (actionId === "schedule.create") {
+      payload.command = commandInput.value.trim();
+      payload.delay_seconds = Number(document.getElementById("schedule-delay")?.value);
+      payload.retry_interval_seconds = Number(document.getElementById("schedule-retry")?.value);
+      payload.start_window_seconds = Number(document.getElementById("schedule-window")?.value);
+    } else if (["schedule.pause", "schedule.resume", "schedule.cancel"].includes(actionId)) {
+      payload.task_id = scheduleTask?.value ?? "";
+    } else if (actionId === "schedule.page") {
+      payload.after_job_id = trigger?.dataset?.page === "next" ? scheduleNextCursor : null;
+      scheduleGeneration += 1;
+    }
     if (actionId === "team.sources.configure") {
       payload.revision = sourceRevision;
       for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
     }
-    const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
+    let result;
+    try {
+      result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
+    } catch {
+      const message = "Не вдалося отримати підтвердження дії. Перечитайте стан програми перед повторенням.";
+      announce(message, true);
+      appendLog(message);
+      const fallbackFocus = actionId === "task.create" ? "command-input"
+        : (actionId === "team.sources.configure" ? "source-root"
+          : (actionId === "schedule.create" ? "schedule-delay" : "schedule-task"));
+      focusElementById(trigger?.dataset?.errorFocusTarget || fallbackFocus);
+      return;
+    }
+    if (!result || !["accepted", "completed", "rejected", "failed"].includes(result.status)) {
+      announce("Програма повернула непідтверджений результат дії. Перечитайте стан перед повторенням.", true);
+      return;
+    }
     const failed = result.status === "failed" || result.status === "rejected";
     if (actionId === "team.sources.configure" && result.status === "completed") sourceDirty = false;
     announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);

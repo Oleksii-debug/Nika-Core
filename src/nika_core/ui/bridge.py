@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from typing import Any
+from weakref import finalize
 
 from pydantic import ValidationError
 
@@ -26,11 +27,18 @@ class UIActionBridge:
         keymap: Keymap,
         handlers: Mapping[str, ActionHandler] | None = None,
         state_provider: StateProvider | None = None,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         self._actions = actions
         self._keymap = keymap
         self._handlers = dict(handlers or {})
         self._state_provider = state_provider
+        self._finalizer = finalize(self, on_close) if on_close is not None else None
+
+    def _close(self) -> None:
+        """Python host lifecycle only; private methods are not WebView API."""
+        if self._finalizer is not None:
+            self._finalizer()
 
     def dispatch(self, raw: Mapping[str, Any]) -> dict[str, Any]:
         try:

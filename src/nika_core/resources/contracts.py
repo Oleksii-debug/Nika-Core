@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sqlite3
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -85,6 +86,20 @@ class ResourceCapacityStatus:
 
 class ResourceObserverPort(Protocol):
     def snapshot(self) -> ResourceSnapshot: ...
+
+
+class ResourceAdmissionPolicyPort(Protocol):
+    """Optional trusted policy evaluated inside the canonical grant transaction."""
+
+    def denial_reason(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scope: str,
+        owner_id: str,
+        snapshot: ResourceSnapshot,
+        active_count: int,
+    ) -> str | None: ...
 
 
 @runtime_checkable
