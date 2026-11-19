@@ -89,3 +89,32 @@ Automated tests cover:
 - fail-closed handling of a timezone-naive injected clock.
 
 `HUMAN_TESTED` and `NVDA_VERIFIED` are not claimed by this service slice.
+
+## 2026-11-19 bounded integrity repair
+
+Canonical #522 `5bc6f796ffd9e9e1bc29644d5e6edfc36fd7840c` is reused with
+canonical audit inspection #526 `54246efd2fce23c3b7eb515c58ece1417d65c20d`.
+The current base is accepted main `7678261754424de2c24457e76ff139f8e5678404`.
+No second registry, persistence host, telemetry/runtime engine or dependency is added.
+
+Two independently observed gaps have before-failing oracles:
+
+- a valid version1 registry plus a negative/zero migration marker was accepted
+  because only MAX(version) was read. The existing schema transaction now checks
+  every exact ordered version and rejects noncontiguous history without rewriting it;
+- a same-inode two-MiB source rewrite after the first read, with its size and mtime
+  restored, produced a digest of bytes that never formed one stable file snapshot.
+  Hashing now compares descriptor ChangeTime before/after alongside identity,
+  size and mtime. It does not compare pathname ctime with descriptor ctime on
+  Windows, where pathname ctime may represent birthtime.
+
+The registration mutation oracle verifies zero published artifact records. Existing
+stable-file registration, reopen, verification and denied path substitutions remain
+covered. Three locked-Pydantic fixtures now accept the earlier string_unicode
+rejection; one forged UNAVAILABLE receipt fixture expects the existing stronger
+model-state rejection before deterministic identity. No denial is weakened.
+
+The QA-only #547 adversarial file is executed read-only and is not integrated.
+Focused combined result: 203 passed. Full source, independent review and new exact
+hosted/package gates remain required. These facts do not certify a packaged artifact
+browser, human NVDA, physical restart or whole-product readiness.

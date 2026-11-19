@@ -133,7 +133,13 @@ def _hash_open_file(path: Path, allowed_roots: tuple[Path, ...]) -> tuple[str, i
         after_mtime_ns = getattr(after, "st_mtime_ns", None)
         if _file_identity(after) != authorized_identity:
             raise ArtifactRegistryError("artifact file identity changed while it was being hashed")
-        if opened.st_size != after.st_size or before_mtime_ns != after_mtime_ns:
+        # Compare descriptor ChangeTime with descriptor ChangeTime. Windows
+        # pathname ctime can denote birthtime; it is not a mutation oracle here.
+        if (
+            opened.st_size != after.st_size
+            or before_mtime_ns != after_mtime_ns
+            or opened.st_ctime_ns != after.st_ctime_ns
+        ):
             raise ArtifactRegistryError("artifact file changed while it was being hashed")
         if total != after.st_size:
             raise ArtifactRegistryError("artifact file size changed while it was being hashed")

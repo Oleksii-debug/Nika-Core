@@ -557,7 +557,7 @@
     const state = response.state || {};
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     renderSourceSetup(state.v01_sources ?? null);
-    renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}`);
+    renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}${item.resource_message ? ". " + item.resource_message : ""}`);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
     renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
     const productReady = renderProductProject(state.product_project ?? null);

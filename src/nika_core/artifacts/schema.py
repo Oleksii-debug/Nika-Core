@@ -96,7 +96,7 @@ _REQUIRED_VERIFICATION_FOREIGN_KEY = (
 
 
 def _stored_schema_version(value: object) -> int:
-    if isinstance(value, bool) or not isinstance(value, int):
+    if type(value) is not int:
         raise TypeError("artifact registry schema version must be stored as SQLite INTEGER")
     return value
 
@@ -228,6 +228,7 @@ def _validate_owned_schema(conn: sqlite3.Connection) -> None:
 def initialize_artifact_registry_schema(store: SQLiteStore) -> None:
     """Apply Artifact Registry-owned ordered migrations in the canonical SQLite database."""
     with store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS artifact_registry_schema_migrations (
                 version INTEGER PRIMARY KEY,
@@ -239,16 +240,20 @@ def initialize_artifact_registry_schema(store: SQLiteStore) -> None:
             table_name="artifact_registry_schema_migrations",
             expected=_MIGRATION_COLUMNS,
         )
-        row = conn.execute(
-            "SELECT MAX(version) AS version FROM artifact_registry_schema_migrations"
-        ).fetchone()
-        raw_current = row["version"] if row is not None else None
-        current = 0 if raw_current is None else _stored_schema_version(raw_current)
+        versions = [
+            _stored_schema_version(row["version"])
+            for row in conn.execute(
+                "SELECT version FROM artifact_registry_schema_migrations ORDER BY version"
+            )
+        ]
+        current = versions[-1] if versions else 0
         if current > ARTIFACT_REGISTRY_SCHEMA_VERSION:
             raise RuntimeError(
                 "artifact registry schema "
                 f"{current} is newer than supported schema {ARTIFACT_REGISTRY_SCHEMA_VERSION}"
             )
+        if versions != list(range(1, len(versions) + 1)):
+            raise RuntimeError("artifact registry migration history is not contiguous")
         for version in range(current + 1, ARTIFACT_REGISTRY_SCHEMA_VERSION + 1):
             statements = _ARTIFACT_REGISTRY_MIGRATIONS.get(version)
             if statements is None:

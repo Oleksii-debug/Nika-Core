@@ -830,7 +830,7 @@ def test_artifact_record_rejects_non_utf8_durable_text(
     }
     arguments[field] = value
 
-    with pytest.raises(ValidationError, match="UTF-8"):
+    with pytest.raises(ValidationError, match="UTF-8|string_unicode"):
         ArtifactRecord(**arguments)
 
 
@@ -940,7 +940,9 @@ def test_verification_rehydration_rejects_actual_evidence_identity_drift(
             (json.dumps(payload), verification.verification_id),
         )
 
-    with pytest.raises(ArtifactRegistryError, match="deterministic identity"):
+    # The locked model rejects UNAVAILABLE with actual evidence before the
+    # deterministic identity check. Both routes must reject the forged receipt.
+    with pytest.raises(ArtifactRegistryError, match="verification payload is invalid"):
         registry.verification_history(record.artifact_id)
 
 
@@ -1116,3 +1118,28 @@ def test_repository_rejects_verification_expected_metadata_drift_before_write(
 
     assert registry.verification_history(record.artifact_id) == (verification,)
 
+
+
+@pytest.mark.parametrize("invalid_version", (-1, 0))
+def test_schema_rejects_noncontiguous_history_without_rewriting_it(
+    tmp_path: Path, invalid_version: int,
+) -> None:
+    store = SQLiteStore(tmp_path / "Артефакти зі пробілами.sqlite3")
+    initialize_artifact_registry_schema(store)
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO artifact_registry_schema_migrations(version, applied_at) VALUES (?, ?)",
+            (invalid_version, "untrusted historical marker"),
+        )
+        before = tuple(tuple(row) for row in conn.execute(
+            "SELECT version, applied_at FROM artifact_registry_schema_migrations ORDER BY version"
+        ))
+
+    with pytest.raises(RuntimeError, match="migration history"):
+        ArtifactRegistry.from_store(store)
+
+    with store.connection() as conn:
+        after = tuple(tuple(row) for row in conn.execute(
+            "SELECT version, applied_at FROM artifact_registry_schema_migrations ORDER BY version"
+        ))
+    assert after == before
