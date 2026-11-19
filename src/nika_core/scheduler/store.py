@@ -29,6 +29,37 @@ class ScheduledJobStore:
             conn.execute("BEGIN IMMEDIATE")
             self.upsert_with_connection(conn, job)
 
+    def replace_if_current(
+        self,
+        expected_job: ScheduledJob | None,
+        job: ScheduledJob,
+        *,
+        require_terminal_task: bool = False,
+    ) -> bool:
+        """Replace one exact durable snapshot, or insert only while still absent.
+
+        Compare and write share the canonical SQLite writer transaction. Runtime
+        installation remains outside it and must use persisted-only activation.
+        """
+        incoming = _canonical_job(job)
+        expected = _canonical_job(expected_job) if expected_job is not None else None
+        if expected is not None and expected.job_id != incoming.job_id:
+            raise ValueError("conditional scheduled job replacement must retain job_id")
+        if type(require_terminal_task) is not bool:
+            raise TypeError("require_terminal_task must be an exact bool")
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self.get_with_connection(conn, incoming.job_id)
+            if not _same_job_snapshot(current, expected):
+                return False
+            if require_terminal_task:
+                task_id = incoming.payload.get("task_id")
+                task_state = self.task_state_with_connection(conn, task_id)
+                if task_state is not None and task_state not in _TERMINAL_TASK_STATES:
+                    return False
+            self.upsert_with_connection(conn, incoming)
+        return True
+
     def upsert_with_connection(self, conn: sqlite3.Connection, job: ScheduledJob) -> None:
         """Upsert one job inside a caller-owned SQLite transaction."""
         job = _canonical_job(job)
@@ -98,8 +129,46 @@ class ScheduledJobStore:
 
     def list_enabled(self) -> tuple[ScheduledJob, ...]:
         with self._store.connection() as conn:
+            # One snapshot for cheap validation and full-row hydration.
+            # Never materialize corrupt enabled carriers or oversized JSON in Python.
+            conn.execute("BEGIN")
+            invalid_enabled = conn.execute(
+                "SELECT 1 FROM scheduled_jobs "
+                "WHERE enabled IS NOT 0 "
+                "AND (typeof(enabled) != 'integer' OR enabled != 1) LIMIT 1"
+            ).fetchone()
+            if invalid_enabled is not None:
+                raise ValueError("persisted enabled is corrupt")
+            # Fail before SQLite/Python row hydration for corrupt scalar carriers.
+            # The semantic decoder still validates all ordinary text values.
+            invalid_scalar = conn.execute(
+                "SELECT 1 FROM scheduled_jobs WHERE enabled = 1 "
+                "AND (typeof(job_id) != 'text' OR typeof(action_id) != 'text' "
+                "OR typeof(trigger_kind) != 'text' "
+                "OR typeof(coalesce) != 'integer' OR coalesce NOT IN (0, 1) "
+                "OR typeof(max_instances) != 'integer' OR max_instances <= 0 "
+                "OR (misfire_grace_seconds IS NOT NULL AND "
+                "(typeof(misfire_grace_seconds) != 'integer' "
+                "OR misfire_grace_seconds <= 0))) LIMIT 1"
+            ).fetchone()
+            if invalid_scalar is not None:
+                raise ValueError("persisted scheduled job scalar is corrupt")
+            for column, label in (("trigger_json", "trigger"), ("payload_json", "payload")):
+                invalid_json = conn.execute(
+                    "SELECT 1 FROM scheduled_jobs "
+                    "WHERE enabled = 1 AND typeof(enabled) = 'integer' "
+                    f"AND (typeof({column}) != 'text' "
+                    f"OR length(CAST({column} AS BLOB)) > ?) LIMIT 1",
+                    (_MAX_RAW_JSON_BYTES,),
+                ).fetchone()
+                if invalid_json is not None:
+                    raise ValueError(f"persisted {label} is corrupt or exceeds raw size limit")
+            # Disabled rows never cross the SQLite/Python hydration boundary.
             rows = conn.execute(
-                "SELECT * FROM scheduled_jobs ORDER BY job_id"
+                "SELECT job_id, action_id, trigger_kind, trigger_json, "
+                "payload_json, enabled, coalesce, max_instances, "
+                "misfire_grace_seconds FROM scheduled_jobs "
+                "WHERE enabled = 1 AND typeof(enabled) = 'integer' ORDER BY job_id"
             ).fetchall()
         enabled_jobs: list[ScheduledJob] = []
         for row in rows:

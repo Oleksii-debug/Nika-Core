@@ -320,12 +320,16 @@ def test_runtime_sync_retries_type_changed_definition_on_final_read(
             jobs.upsert(replacement)
         return original_get(job_id)
 
-    monkeypatch.setattr(jobs, "get", replace_on_final_read)
     adapter = APSchedulerAdapter(jobs, lambda _action: lambda _payload: None)
+    adapter.start()
+    monkeypatch.setattr(jobs, "get", replace_on_final_read)
     installed: list[ScheduledJob] = []
     monkeypatch.setattr(adapter, "_install", installed.append)
 
-    synced = adapter._sync_runtime_job(stale.job_id)
+    try:
+        synced = adapter._sync_runtime_job(stale.job_id)
+    finally:
+        adapter.shutdown(wait=False)
 
     assert read_count >= 6
     assert synced is not None
