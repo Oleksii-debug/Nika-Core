@@ -178,7 +178,7 @@ def test_duplicate_check_ids_are_rejected() -> None:
                     evidence_ref="actions://core/duplicate",
                 ),
             ),
-            ("core",),
+            REQUIRED,
         )
 
 
@@ -344,4 +344,153 @@ def test_direct_evidence_refs_outer_container_must_be_tuple() -> None:
             SHA_A,
             verification.VerificationState.UNKNOWN,
             "actions://core/example",  # type: ignore[arg-type]
+        )
+
+
+def test_forged_noncanonical_check_state_cannot_fall_through_to_pass() -> None:
+    forged = evidence("core", SHA_A, verification.CheckState.FAIL)
+    object.__setattr__(forged, "state", "pass")
+
+    with pytest.raises(verification.VerificationError, match="check state"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (forged, evidence("factory", SHA_A, verification.CheckState.PASS)),
+            REQUIRED,
+        )
+
+
+def test_forged_noncanonical_evidence_ref_is_revalidated_before_hashing() -> None:
+    class HostileText(str):
+        def strip(self, chars=None):
+            raise AssertionError("caller behavior must not execute")
+
+        def __hash__(self):
+            raise AssertionError("caller behavior must not execute")
+
+    forged = evidence("core", SHA_A, verification.CheckState.PASS)
+    object.__setattr__(forged, "evidence_ref", HostileText("actions://hostile"))
+
+    with pytest.raises(verification.VerificationError, match="identity must be text"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (forged, evidence("factory", SHA_A, verification.CheckState.PASS)),
+            REQUIRED,
+        )
+
+
+def test_behavioral_evidence_tuple_is_rejected_before_iteration() -> None:
+    class HostileTuple(tuple):
+        def __iter__(self):
+            raise AssertionError("caller iteration must not execute")
+
+    hostile = HostileTuple(
+        (
+            evidence("core", SHA_A, verification.CheckState.PASS),
+            evidence("factory", SHA_A, verification.CheckState.PASS),
+        )
+    )
+
+    with pytest.raises(verification.VerificationError, match="evidence must be a tuple"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            hostile,  # type: ignore[arg-type]
+            REQUIRED,
+        )
+
+
+def test_behavioral_required_profile_is_rejected_before_iteration() -> None:
+    class HostileTuple(tuple):
+        def __iter__(self):
+            raise AssertionError("caller iteration must not execute")
+
+    with pytest.raises(verification.VerificationError, match="required check ids must be a tuple"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (),
+            HostileTuple(REQUIRED),  # type: ignore[arg-type]
+        )
+
+
+def test_behavioral_required_check_id_is_rejected_before_text_behavior() -> None:
+    class HostileText(str):
+        def strip(self, chars=None):
+            raise AssertionError("caller text behavior must not execute")
+
+        def __hash__(self):
+            raise AssertionError("caller text behavior must not execute")
+
+    with pytest.raises(verification.VerificationError, match="required check ids"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (),
+            (HostileText("core"), "factory"),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("check_id", "\ud800"),
+        ("evidence_ref", "actions://core/\ud800"),
+    ),
+)
+def test_verification_evidence_requires_strict_utf8(field: str, value: str) -> None:
+    kwargs = {
+        "check_id": "core",
+        "candidate_sha": SHA_A,
+        "state": verification.CheckState.PASS,
+        "evidence_ref": "actions://core/strict",
+    }
+    kwargs[field] = value
+
+    with pytest.raises(verification.VerificationError, match="valid UTF-8"):
+        verification.ExactShaCheckEvidence(**kwargs)
+
+
+def test_required_profile_requires_strict_utf8() -> None:
+    with pytest.raises(verification.VerificationError, match="valid UTF-8"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (),
+            ("core", "\ud800"),
+        )
+
+
+def test_candidate_verification_rejects_behavioral_evidence_ref_without_execution() -> None:
+    class HostileText(str):
+        def strip(self, chars=None):
+            raise AssertionError("caller text behavior must not execute")
+
+    with pytest.raises(verification.VerificationError, match="evidence refs"):
+        verification.CandidateVerification(
+            SHA_A,
+            verification.VerificationState.UNKNOWN,
+            (HostileText("actions://core/example"),),  # type: ignore[arg-type]
+        )
+
+
+def test_incomplete_exact_evidence_is_normalized_to_verification_error() -> None:
+    forged = object.__new__(verification.ExactShaCheckEvidence)
+    object.__setattr__(forged, "check_id", "core")
+
+    with pytest.raises(verification.VerificationError, match="evidence is incomplete"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (forged, evidence("factory", SHA_A, verification.CheckState.PASS)),
+            REQUIRED,
+        )
+
+
+def test_evidence_subclass_is_rejected_before_attribute_behavior() -> None:
+    class HostileEvidence(verification.ExactShaCheckEvidence):
+        def __getattribute__(self, name):
+            raise AssertionError(f"caller attribute behavior executed: {name}")
+
+    hostile = object.__new__(HostileEvidence)
+
+    with pytest.raises(verification.VerificationError, match="must be ExactShaCheckEvidence"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (hostile, evidence("factory", SHA_A, verification.CheckState.PASS)),
+            REQUIRED,
         )
