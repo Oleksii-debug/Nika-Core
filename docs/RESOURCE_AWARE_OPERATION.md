@@ -143,3 +143,30 @@ gates and scoped integration remain required. These are deterministic policy
 and adapter results, not measured power/throughput performance, persisted profile
 selection, cross-workload production enforcement or model-unload authority.
 Section 7 is not marked DONE by this document.
+
+## Desktop profile settings and canonical admission composition candidate
+
+The bounded composition adds ResourceProfileSettings over the canonical SQLiteStore,
+AuditLog and existing five-field resource budget. A private version-1 migration stream
+owns only the profile singleton and its ordered history. Exact history, table shape,
+selection constraints, enum and revision admission fail closed. Defaults initialize
+once; reopening keeps the selected profile and revision. Revision-based updates,
+budget projection and audit append commit in one BEGIN IMMEDIATE transaction, so a
+stale editor or failed audit cannot partly change authority.
+
+ResourceManager accepts an optional trusted admission policy port. It evaluates that
+port inside the existing SQLite grant transaction, after FIFO/concurrency and the
+incumbent budget/telemetry checks, using the same detached validated snapshot and
+actual active grant count. No second grant, lease, ownership, observer or recovery
+engine is added. Read-only capacity views and owned-grant revalidation use the same
+profile decision; pressure never silently releases another owner or replays an effect.
+
+The desktop settings port applies only to desktop_runtime/local_machine. Its
+requested workload is the server-composed GENERAL class; unrelated resource scopes
+are unaffected. In this boundary the named CPU/memory ceilings and available-memory
+floor are enforced by real ResourceManager requests. This does not assert trustworthy
+active browser/model/transcription identities or authorize idle-model unloading.
+
+The packaged builder and semantic Ukrainian settings action remain the composition
+owner's next wiring step. This source slice alone is not a packaged user journey,
+physical benchmark, human NVDA verification, whole Section 7 DONE or release readiness.

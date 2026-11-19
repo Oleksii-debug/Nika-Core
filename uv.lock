@@ -1854,6 +1854,7 @@ embedded-ai = [
     { name = "foundry-local-sdk-winml", marker = "sys_platform == 'win32'" },
 ]
 gui = [
+    { name = "apscheduler" },
     { name = "psutil" },
     { name = "pywebview" },
 ]
@@ -1882,6 +1883,7 @@ requires-dist = [
     { name = "aiosqlite", marker = "extra == 'agent'", specifier = ">=0.20,<1" },
     { name = "ansible-runner", marker = "sys_platform != 'win32' and extra == 'deployment'", specifier = "==2.4.3" },
     { name = "apscheduler", marker = "extra == 'agent'", specifier = ">=3.11,<4" },
+    { name = "apscheduler", marker = "extra == 'gui'", specifier = ">=3.11,<4" },
     { name = "deepagents", marker = "extra == 'agent'", specifier = ">=0.5.2,<1" },
     { name = "defusedxml", specifier = ">=0.7.1,<1" },
     { name = "dspy", marker = "extra == 'learning'", specifier = ">=3,<4" },

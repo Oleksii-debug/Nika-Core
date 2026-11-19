@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Literal
 
 from platformdirs import user_data_path
 from pydantic import AliasChoices, Field, field_validator
@@ -25,6 +26,7 @@ class AppConfig(BaseSettings):
     v01_source_b: Path | None = None
     log_level: str = "INFO"
     model_provider: str = "mock"
+    resource_profile: Literal["normal", "economy", "night_batch", "low_memory"] = "normal"
 
     model_config = SettingsConfigDict(
         env_prefix="NIKA_",

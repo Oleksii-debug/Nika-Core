@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import math
+import sqlite3
 import threading
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.resources.contracts import (
+    ResourceAdmissionPolicyPort,
     ResourceBudget,
     ResourceCapacityStatus,
     ResourceObserverPort,
@@ -40,9 +42,11 @@ class ResourceManager:
         *,
         manager_id: str | None = None,
         owner_probe: ResourceOwnerProbePort | None = None,
+        admission_policy: ResourceAdmissionPolicyPort | None = None,
     ) -> None:
         self._store = store
         self._observer = observer
+        self._admission_policy = admission_policy
         self._manager_id = uuid.uuid4().hex if manager_id is None else manager_id
         if type(self._manager_id) is not str or not self._manager_id.strip():
             raise ValueError("manager_id must not be empty")
@@ -67,7 +71,8 @@ class ResourceManager:
 
     def _read_snapshot(self) -> object:
         try:
-            return self._observer.snapshot()
+            snapshot = self._observer.snapshot()
+            return replace(snapshot) if type(snapshot) is ResourceSnapshot else snapshot
         except Exception:  # noqa: BLE001 - untrusted telemetry adapter boundary
             # Adapter exception text can contain private host/process details.
             return None
@@ -75,8 +80,14 @@ class ResourceManager:
     def set_budget(self, budget: ResourceBudget) -> None:
         _validate_budget(budget)
         with self._store.connection() as conn:
-            conn.execute(
-                """INSERT INTO resource_budgets(
+            self.set_budget_with_connection(conn, budget)
+
+    @staticmethod
+    def set_budget_with_connection(conn: sqlite3.Connection, budget: ResourceBudget) -> None:
+        """Use the same budget writer within a caller-owned settings transaction."""
+        _validate_budget(budget)
+        conn.execute(
+            """INSERT INTO resource_budgets(
                     scope, owner_id, max_concurrent, max_cpu_percent, max_memory_percent, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(scope, owner_id) DO UPDATE SET
@@ -85,15 +96,45 @@ class ResourceManager:
                     max_memory_percent = excluded.max_memory_percent,
                     updated_at = excluded.updated_at
                 """,
-                (
-                    budget.scope,
-                    budget.owner_id,
-                    budget.max_concurrent,
-                    budget.max_cpu_percent,
-                    budget.max_memory_percent,
-                    datetime.now(UTC).isoformat(),
-                ),
+            (
+                budget.scope,
+                budget.owner_id,
+                budget.max_concurrent,
+                budget.max_cpu_percent,
+                budget.max_memory_percent,
+                datetime.now(UTC).isoformat(),
+            ),
+        )
+
+    def _policy_reason(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scope: str,
+        owner_id: str,
+        snapshot: ResourceSnapshot,
+        active_count: int,
+    ) -> str | None:
+        if self._admission_policy is None:
+            return None
+        try:
+            reason = self._admission_policy.denial_reason(
+                conn,
+                scope=scope,
+                owner_id=owner_id,
+                snapshot=snapshot,
+                active_count=active_count,
             )
+        except Exception:  # noqa: BLE001 - failed policy cannot grant or expose private diagnostics
+            return "profile_policy_unavailable"
+        if reason is not None and (
+            type(reason) is not str
+            or not reason
+            or len(reason) > 128
+            or any(not (char.isascii() and (char.isalnum() or char == "_")) for char in reason)
+        ):
+            return "invalid_profile_policy"
+        return reason
 
     def get_budget(self, *, scope: str, owner_id: str) -> ResourceBudget:
         with self._store.connection() as conn:
@@ -101,12 +142,29 @@ class ResourceManager:
 
     def status(self, *, scope: str, owner_id: str) -> ResourceCapacityStatus:
         """Return deterministic read-only capacity telemetry without changing admission state."""
-        budget = self.get_budget(scope=scope, owner_id=owner_id)
-        snapshot = self._read_snapshot()
-        if not _valid_snapshot(snapshot):
-            raise ResourceTelemetryError("resource telemetry invalid")
-        active_count = self.active_count(scope=scope, owner_id=owner_id)
-        queued_count = len(self.queued(scope=scope, owner_id=owner_id))
+        with self._store.connection() as conn:
+            conn.execute("BEGIN")
+            budget = _get_budget_with_connection(conn, scope, owner_id)
+            snapshot = self._read_snapshot()
+            if not _valid_snapshot(snapshot):
+                raise ResourceTelemetryError("resource telemetry invalid")
+            counts = {
+                row["state"]: int(row["count"])
+                for row in conn.execute(
+                    "SELECT state, COUNT(*) AS count FROM resource_requests "
+                    "WHERE scope = ? AND owner_id = ? GROUP BY state",
+                    (scope, owner_id),
+                )
+            }
+            active_count = counts.get("granted", 0)
+            queued_count = counts.get("waiting", 0)
+            policy_reason = self._policy_reason(
+                conn,
+                scope=scope,
+                owner_id=owner_id,
+                snapshot=snapshot,
+                active_count=active_count,
+            )
         pressure_reasons: list[str] = []
 
         if active_count >= budget.max_concurrent:
@@ -118,6 +176,8 @@ class ResourceManager:
             and snapshot.memory_percent > budget.max_memory_percent
         ):
             pressure_reasons.append("memory_limit")
+        if policy_reason is not None:
+            pressure_reasons.append(policy_reason)
 
         return ResourceCapacityStatus(
             budget=budget,
@@ -184,9 +244,7 @@ class ResourceManager:
                     if self._owns_grant(row, request_key):
                         return ResourceDecision(True, "already_granted")
                     return ResourceDecision(False, "recovery_required")
-                if state not in {
-                    "waiting", "released", "cancelled", "released_after_restart"
-                }:
+                if state not in {"waiting", "released", "cancelled", "released_after_restart"}:
                     raise RuntimeError("resource request state is corrupt")
                 if state in {"released", "cancelled", "released_after_restart"}:
                     created_at = row["created_at"]
@@ -238,16 +296,21 @@ class ResourceManager:
             reason = _resource_pressure_reason(budget, snapshot)
             if reason is not None:
                 return ResourceDecision(False, reason, position)
+            reason = self._policy_reason(
+                conn,
+                scope=scope,
+                owner_id=owner_id,
+                snapshot=snapshot,
+                active_count=int(active["count"]),
+            )
+            if reason is not None:
+                return ResourceDecision(False, reason, position)
 
             process_id = (
-                self._process_identity.process_id
-                if self._process_identity is not None
-                else None
+                self._process_identity.process_id if self._process_identity is not None else None
             )
             started_at = (
-                self._process_identity.started_at
-                if self._process_identity is not None
-                else None
+                self._process_identity.started_at if self._process_identity is not None else None
             )
             cursor = conn.execute(
                 """UPDATE resource_requests
@@ -290,7 +353,17 @@ class ResourceManager:
             ).fetchone()
             if int(active["count"]) > budget.max_concurrent:
                 return ResourceDecision(False, "concurrency_limit")
-            reason = _resource_pressure_reason(budget, self._read_snapshot())
+            snapshot = self._read_snapshot()
+            reason = _resource_pressure_reason(budget, snapshot)
+            if reason is not None:
+                return ResourceDecision(False, reason)
+            reason = self._policy_reason(
+                conn,
+                scope=scope,
+                owner_id=owner_id,
+                snapshot=snapshot,
+                active_count=int(active["count"]),
+            )
             if reason is not None:
                 return ResourceDecision(False, reason)
             return ResourceDecision(True, "still_granted")
@@ -497,6 +570,7 @@ def _get_budget_with_connection(conn: Any, scope: str, owner_id: str) -> Resourc
     )
     _validate_budget(budget)
     return budget
+
 
 def _validate_persisted_identity(row: Any, identity: ResourceRequestIdentity) -> None:
     if row["product_project_id"] != identity.product_project_id:

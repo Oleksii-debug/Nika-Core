@@ -19,6 +19,9 @@ on:
       - "scripts/m11_release.py"
       - "scripts/m5_uia_proof.ps1"
       - "scripts/v01_autostart_uia_proof.ps1"
+      - "scripts/verify_resource_schedule_packaged.ps1"
+      - "src/nika_core/packaged_resource_schedule_proof.py"
+      - "tests/test_packaged_resource_schedule_proof.py"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_qa_workflow_lineage.py"
@@ -52,6 +55,9 @@ on:
       - "scripts/m11_release.py"
       - "scripts/m5_uia_proof.ps1"
       - "scripts/v01_autostart_uia_proof.ps1"
+      - "scripts/verify_resource_schedule_packaged.ps1"
+      - "src/nika_core/packaged_resource_schedule_proof.py"
+      - "tests/test_packaged_resource_schedule_proof.py"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_qa_workflow_lineage.py"
@@ -135,6 +141,9 @@ jobs:
       - name: Verify packaged WebView2 UI Automation and keyboard focus
         shell: pwsh
         run: ./scripts/v01_autostart_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
+      - name: Verify frozen ordinary resource and scheduled-task journeys
+        shell: pwsh
+        run: ./scripts/verify_resource_schedule_packaged.ps1 -ExePath ./dist/NikaCore/NikaCore.exe
       - name: Create distributable ZIP
         shell: pwsh
         run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force

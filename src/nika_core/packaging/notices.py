@@ -15,6 +15,7 @@ from urllib.parse import quote
 RUNTIME_DISTRIBUTIONS = (
     "annotated-types",
     "anyio",
+    "apscheduler",
     "bottle",
     "certifi",
     "cffi",
@@ -41,6 +42,8 @@ RUNTIME_DISTRIBUTIONS = (
     "rich",
     "setuptools",
     "tomli",
+    "tzdata",
+    "tzlocal",
     "typing-extensions",
     "typing-inspection",
     "wheel",
