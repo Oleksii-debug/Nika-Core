@@ -40,14 +40,23 @@ _FORBIDDEN_SECRET_KEYS = {
     "refresh_token",
     "secret",
     "secret_key",
+    "sig",
     "token",
     "x_api_key",
+    "x_amz_signature",
+    "x_amz_credential",
+    "x_amz_security_token",
+    "x_goog_signature",
+    "x_goog_credential",
+    "x_goog_security_token",
 }
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?:^|[/?#&;,:\s])"
     r"(?:access[_-]?token|api[_-]?key|api[_-]?token|authorization|"
     r"client[_-]?secret|cookie|password|private[_-]?key|refresh[_-]?token|"
-    r"secret(?:[_-]?key)?|token|x[_-]?api[_-]?key)\s*[:=]",
+    r"secret(?:[_-]?key)?|token|x[_-]?api[_-]?key|sig(?:nature)?|"
+    r"x[_-]?(?:amz|goog)[_-]?(?:signature|credential|security[_-]?token)|"
+    r"awsaccesskeyid|googleaccessid)\s*[:=]",
     re.IGNORECASE,
 )
 
@@ -163,6 +172,8 @@ class ArtifactRecord(FrozenModel):
         for key, item in value.items():
             _require_utf8_text(key, field_name="artifact metadata key")
             _require_utf8_text(item, field_name="artifact metadata value")
+            if _contains_credential_assignment(key):
+                raise ValueError("artifact metadata keys must not contain credential material")
             normalized = _normalize_secret_key(key)
             if normalized in _FORBIDDEN_SECRET_KEYS:
                 raise ValueError(f"artifact metadata key is reserved for secret material: {key}")
