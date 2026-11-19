@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import math
+import sqlite3
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,6 +28,45 @@ class ResourceBudget:
 
 
 @dataclass(frozen=True, slots=True)
+class ResourceRequestIdentity:
+    scope: str
+    owner_id: str
+    request_id: str
+    product_project_id: str | None = None
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("scope", self.scope),
+            ("owner_id", self.owner_id),
+            ("request_id", self.request_id),
+        ):
+            if type(value) is not str or not value.strip():
+                raise ValueError(f"{name} must not be empty")
+        if self.product_project_id is not None and (
+            type(self.product_project_id) is not str or not self.product_project_id.strip()
+        ):
+            raise ValueError("product_project_id must not be empty when provided")
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceProcessIdentity:
+    process_id: int
+    started_at: float
+
+    def __post_init__(self) -> None:
+        if isinstance(self.process_id, bool) or not isinstance(self.process_id, int):
+            raise TypeError("process_id must be an integer")
+        if not 1 <= self.process_id <= (1 << 63) - 1:
+            raise ValueError("process_id must be a positive SQLite-sized integer")
+        if isinstance(self.started_at, bool) or not isinstance(self.started_at, (int, float)):
+            raise TypeError("started_at must be a number")
+        normalized_started_at = float(self.started_at)
+        if not math.isfinite(normalized_started_at) or normalized_started_at <= 0:
+            raise ValueError("started_at must be a positive finite timestamp")
+        object.__setattr__(self, "started_at", normalized_started_at)
+
+
+@dataclass(frozen=True, slots=True)
 class ResourceCapacityStatus:
     """Read-only capacity truth derived from the existing ResourceManager authority."""
 
@@ -45,3 +86,24 @@ class ResourceCapacityStatus:
 
 class ResourceObserverPort(Protocol):
     def snapshot(self) -> ResourceSnapshot: ...
+
+
+class ResourceAdmissionPolicyPort(Protocol):
+    """Optional trusted policy evaluated inside the canonical grant transaction."""
+
+    def denial_reason(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scope: str,
+        owner_id: str,
+        snapshot: ResourceSnapshot,
+        active_count: int,
+    ) -> str | None: ...
+
+
+@runtime_checkable
+class ResourceOwnerProbePort(Protocol):
+    def current_process_identity(self) -> ResourceProcessIdentity: ...
+
+    def is_process_alive(self, identity: ResourceProcessIdentity) -> bool: ...

@@ -3,6 +3,9 @@ name: M12 Pre-Human Release Gate
 on:
   pull_request:
     paths:
+      - "uv.lock"
+      - "requirements/**"
+      - "docs/PLAN1_DEPENDENCY_AUTHORITY.json"
       - "src/**"
       - "scripts/**"
       - "tests/**"
@@ -15,6 +18,9 @@ on:
     branches:
       - "main"
     paths:
+      - "uv.lock"
+      - "requirements/**"
+      - "docs/PLAN1_DEPENDENCY_AUTHORITY.json"
       - "src/**"
       - "scripts/**"
       - "tests/**"
@@ -52,7 +58,25 @@ jobs:
       - name: Verify exact candidate checkout identity
         run: python scripts/qa_assert_checkout_identity.py
       - name: Install core, runtime, planning and browser proof dependencies
-        run: python -m pip install -e ".[dev,agent,planning,browser]"
+        run: python scripts/ci_dependency_environment.py
+      - name: Verify isolated CI interpreter
+        run: python scripts/ci_dependency_environment.py --verify
+      - name: Verify source-bound dependency profiles
+        run: python scripts/plan1_dependency_lock.py
+      - name: Install pinned build environment
+        run: python -m pip install --require-hashes -r requirements/build.txt
+      - name: Install hashed dependency profile
+        run: python -m pip install --require-hashes --no-build-isolation -r requirements/m12-ubuntu.txt
+      - name: Install exact source without dependency resolution
+        run: python -m pip install --no-deps --no-build-isolation -e .
+      - name: Observe installed dependency graph and license texts
+        run: python scripts/plan1_dependency_environment.py --groups base dev agent planning browser build-system --include-transitive --strict --output plan1-dependencies.json
+      - name: Preserve exact installed dependency and license-text evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: plan1-m12-m12-ubuntu-${{ env.NIKA_CANDIDATE_SHA }}
+          path: plan1-dependencies.json
+          if-no-files-found: error
       - name: Run complete source, dependency and test verification
         run: python scripts/verify.py
       - name: Re-run focused cross-subsystem recovery and safety matrix
@@ -74,8 +98,6 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: Re-prove browser semantic interaction on the exact candidate
         run: python scripts/m9_browser_adapter_proof.py
-      - name: Reverify source after integrated Ubuntu proofs
-        run: python scripts/qa_assert_checkout_identity.py
 
   integrated-windows:
     name: M12 integrated system proof (Windows)
@@ -93,7 +115,25 @@ jobs:
       - name: Verify exact candidate checkout identity
         run: python scripts/qa_assert_checkout_identity.py
       - name: Install core, runtime, planning and Windows interaction proof dependencies
-        run: python -m pip install -e ".[dev,agent,planning,windows-interaction]"
+        run: python scripts/ci_dependency_environment.py
+      - name: Verify isolated CI interpreter
+        run: python scripts/ci_dependency_environment.py --verify
+      - name: Verify source-bound dependency profiles
+        run: python scripts/plan1_dependency_lock.py
+      - name: Install pinned build environment
+        run: python -m pip install --require-hashes -r requirements/build.txt
+      - name: Install hashed dependency profile
+        run: python -m pip install --require-hashes --no-build-isolation -r requirements/m12-windows.txt
+      - name: Install exact source without dependency resolution
+        run: python -m pip install --no-deps --no-build-isolation -e .
+      - name: Observe installed dependency graph and license texts
+        run: python scripts/plan1_dependency_environment.py --groups base dev agent planning windows-interaction build-system --include-transitive --strict --output plan1-dependencies.json
+      - name: Preserve exact installed dependency and license-text evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: plan1-m12-m12-windows-${{ env.NIKA_CANDIDATE_SHA }}
+          path: plan1-dependencies.json
+          if-no-files-found: error
       - name: Run complete source, dependency and test verification
         run: python scripts/verify.py
       - name: Re-run focused cross-subsystem recovery and safety matrix
@@ -113,8 +153,6 @@ jobs:
           tests/test_qa_workflow_lineage.py
       - name: Re-prove Windows semantic interaction on the exact candidate
         run: python scripts/m9_windows_uia_proof.py
-      - name: Reverify source after integrated Windows proofs
-        run: python scripts/qa_assert_checkout_identity.py
 
   packaged-windows:
     name: M12 packaged release proof (Windows)
@@ -133,7 +171,25 @@ jobs:
       - name: Verify exact candidate checkout identity
         run: python scripts/qa_assert_checkout_identity.py
       - name: Install GUI, packaging and QA dependencies
-        run: python -m pip install -e ".[gui,voice,qa,dev]"
+        run: python scripts/ci_dependency_environment.py
+      - name: Verify isolated CI interpreter
+        run: python scripts/ci_dependency_environment.py --verify
+      - name: Verify source-bound dependency profiles
+        run: python scripts/plan1_dependency_lock.py
+      - name: Install pinned build environment
+        run: python -m pip install --require-hashes -r requirements/build.txt
+      - name: Install hashed dependency profile
+        run: python -m pip install --require-hashes --no-build-isolation -r requirements/packaging.txt
+      - name: Install exact source without dependency resolution
+        run: python -m pip install --no-deps --no-build-isolation -e .
+      - name: Observe installed dependency graph and license texts
+        run: python scripts/plan1_dependency_environment.py --groups base gui qa dev build-system --include-transitive --strict --output plan1-dependencies.json
+      - name: Preserve exact installed dependency and license-text evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: plan1-m12-packaging-${{ env.NIKA_CANDIDATE_SHA }}
+          path: plan1-dependencies.json
+          if-no-files-found: error
       - name: Resolve canonical project version
         id: release
         shell: pwsh
@@ -145,19 +201,19 @@ jobs:
         run: >-
           python scripts/m11_release.py
           --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
+      - name: Verify packaged module and license notice coverage
+        run: python scripts/verify_packaged_notices.py --bundle dist/NikaCore
       - name: Verify packaged WebView2 UI Automation and keyboard focus
         shell: pwsh
         run: ./scripts/v01_autostart_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
       - name: Run release-gate truth regressions
         run: python -m pytest tests/test_m11_m12_release.py tests/test_qa_workflow_lineage.py -q
-      - name: Create and verify the complete distributable ZIP
+      - name: Verify frozen ordinary resource and scheduled-task journeys
         shell: pwsh
-        run: >-
-          python scripts/package_release_zip.py
-          --bundle './dist/NikaCore'
-          --artifact './dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip'
-          --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
-          --product-version '${{ steps.release.outputs.version }}'
+        run: ./scripts/verify_resource_schedule_packaged.ps1 -ExePath ./dist/NikaCore/NikaCore.exe
+      - name: Create distributable ZIP
+        shell: pwsh
+        run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force
       - name: Hash exact distributable ZIP
         id: distributable
         shell: pwsh
@@ -194,11 +250,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw 'Extracted exact final distributable failed release-manifest verification.'
           }
+          python scripts/verify_packaged_notices.py --bundle $extractRoot
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Exact final distributable failed packaged module/notice coverage.'
+          }
           $extractedExe = Join-Path $extractRoot 'NikaCore.exe'
           if (-not (Test-Path -LiteralPath $extractedExe -PathType Leaf)) {
             throw "Extracted final distributable executable is missing: $extractedExe"
           }
           ./scripts/v01_autostart_uia_proof.ps1 -ExePath $extractedExe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
+          ./scripts/verify_resource_schedule_packaged.ps1 -ExePath $extractedExe
           $exact_final_artifact_runtime_uia = $true
           "exact_final_artifact_runtime_uia=$($exact_final_artifact_runtime_uia.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
       - name: Record automated pre-human evidence
@@ -247,8 +308,6 @@ jobs:
           --evidence ./dist/m12-prehuman-evidence.json
           --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
           --product-version '${{ steps.release.outputs.version }}'
-      - name: Reverify source after final ZIP and evidence checks
-        run: python scripts/qa_assert_checkout_identity.py
       - name: Upload exact pre-human candidate evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -309,8 +368,6 @@ jobs:
             --evidence ./attestation-input/m12-prehuman-evidence.json `
             --source-sha '${{ github.sha }}' `
             --product-version '${{ steps.release.outputs.version }}'
-      - name: Reverify trusted-main source before signing
-        run: python scripts/qa_assert_checkout_identity.py
       - name: Attest exact final distributable
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6

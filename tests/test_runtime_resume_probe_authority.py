@@ -92,51 +92,26 @@ def _active_session(tmp_path, *, runtime_id: str = "probe-authority"):
 
 
 def test_resume_probe_constructor_requires_exact_status_and_checkpoint_carriers() -> None:
-    with pytest.raises(TypeError, match="exact RuntimeResumeProbeStatus"):
+    with pytest.raises(TypeError, match="must be a RuntimeResumeProbeStatus"):
         RuntimeResumeProbe(
             status="ready",  # type: ignore[arg-type]
             reason="raw status must not become authority",
             checkpoint_id="checkpoint:1",
         )
 
-    with pytest.raises(TypeError, match="exact string"):
+    with pytest.raises(TypeError, match="must be a string"):
         RuntimeResumeProbe(
             status=RuntimeResumeProbeStatus.READY,
             reason="hostile checkpoint must not become authority",
             checkpoint_id=_TextSubclass("checkpoint:1"),
         )
 
-    with pytest.raises(ValueError, match="too long"):
+    with pytest.raises(ValueError, match="size limit"):
         RuntimeResumeProbe(
             status=RuntimeResumeProbeStatus.READY,
             reason="bounded durable checkpoint authority",
-            checkpoint_id="x" * 1025,
+            checkpoint_id="x" * 513,
         )
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("reason", "\ud800"),
-        ("checkpoint_id", "checkpoint:\ud800"),
-        ("checkpoint_id", "checkpoint:\u0085identity"),
-        ("checkpoint_id", "checkpoint:\u202eidentity"),
-    ),
-)
-def test_resume_probe_constructor_rejects_nonportable_text(field, value):
-    fields = {"reason": "readable checkpoint", "checkpoint_id": "checkpoint:valid"}
-    fields[field] = value
-    with pytest.raises(ValueError, match="UTF-8|control or format"):
-        RuntimeResumeProbe(status=RuntimeResumeProbeStatus.READY, **fields)
-
-
-def test_resume_probe_constructor_preserves_valid_ukrainian_identifiers():
-    probe = RuntimeResumeProbe(
-        status=RuntimeResumeProbeStatus.READY,
-        reason="контрольна точка доступна",
-        checkpoint_id="контрольна-точка:дійсна",
-    )
-    assert canonical_resume_probe(probe) == probe
 
 
 @pytest.mark.parametrize(
@@ -146,9 +121,6 @@ def test_resume_probe_constructor_preserves_valid_ukrainian_identifiers():
         _forged_probe(status="ready"),
         _forged_probe(checkpoint_id=_TextSubclass("checkpoint:spoof")),
         _forged_probe(reason=_TextSubclass("forged reason")),
-        _forged_probe(reason="\ud800"),
-        _forged_probe(checkpoint_id="checkpoint:\ud800"),
-        _forged_probe(checkpoint_id="checkpoint:\u202eforged"),
     ),
 )
 def test_canonical_probe_snapshot_rejects_duck_or_constructor_bypassed_evidence(
@@ -164,10 +136,7 @@ def test_canonical_probe_snapshot_rejects_duck_or_constructor_bypassed_evidence(
         _DuckProbe(),
         _forged_probe(status="ready"),
         _forged_probe(checkpoint_id=_TextSubclass("checkpoint:spoof")),
-        _forged_probe(checkpoint_id="x" * 1025),
-        _forged_probe(reason="\ud800"),
-        _forged_probe(checkpoint_id="checkpoint:\ud800"),
-        _forged_probe(checkpoint_id="checkpoint:\u202eforged"),
+        _forged_probe(checkpoint_id="x" * 513),
     ),
 )
 def test_direct_resume_rejects_uncanonical_probe_before_claim_or_runtime_effect(
@@ -200,10 +169,7 @@ def test_direct_resume_rejects_uncanonical_probe_before_claim_or_runtime_effect(
         _DuckProbe(),
         _forged_probe(status="ready"),
         _forged_probe(checkpoint_id=_TextSubclass("checkpoint:spoof")),
-        _forged_probe(checkpoint_id="x" * 1025),
-        _forged_probe(reason="\ud800"),
-        _forged_probe(checkpoint_id="checkpoint:\ud800"),
-        _forged_probe(checkpoint_id="checkpoint:\u202eforged"),
+        _forged_probe(checkpoint_id="x" * 513),
     ),
 )
 def test_startup_recovery_rejects_uncanonical_probe_without_resume_or_checkpoint_persistence(

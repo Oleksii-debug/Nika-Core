@@ -50,7 +50,7 @@ class ExactShaCheckEvidence:
         _validate_utf8(self.check_id, "verification check id")
         _validate_utf8(self.evidence_ref, "verification evidence ref")
         _validate_sha(self.candidate_sha)
-        if type(self.state) is not CheckState:
+        if not any(self.state is member for member in CheckState):
             raise VerificationError("verification check state must be a CheckState")
         if type(self.required) is not bool:
             raise VerificationError("verification required flag must be a bool")
@@ -164,6 +164,11 @@ def classify_candidate_verification(
     if any(item.state is CheckState.UNKNOWN for item in required):
         return CandidateVerification(candidate_sha, VerificationState.UNKNOWN, refs)
 
+    # Str-backed Enum subclasses can be allocated without selecting a member.
+    # Only the positive canonical PASS identity can authorize clearance.
+    if not all(item.state is CheckState.PASS for item in required):
+        raise VerificationError("verification check state cannot authorize PASS")
+
     _validate_candidate_verification(candidate_sha, VerificationState.PASS, refs)
     result = object.__new__(CandidateVerification)
     object.__setattr__(result, "candidate_sha", candidate_sha)
@@ -201,7 +206,7 @@ def _validate_candidate_verification(
     evidence_refs: tuple[str, ...],
 ) -> None:
     _validate_sha(candidate_sha)
-    if type(state) is not VerificationState:
+    if not any(state is member for member in VerificationState):
         raise VerificationError("verification state must be a VerificationState")
     if type(evidence_refs) is not tuple:
         raise VerificationError("verification evidence refs must be a tuple")

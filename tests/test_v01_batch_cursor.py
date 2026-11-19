@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.batch_cursor as batch_cursor_module
 from nika_core.batch_cursor import (
     AttemptState,
     BatchCursor,
@@ -84,6 +85,7 @@ def test_restart_after_three_of_five_preserves_exact_next_target(tmp_path: Path)
 
 def test_restart_exactly_between_batches_preserves_durable_next_intent(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     memory, ledger, store = _services(tmp_path)
     task_id = _task(store, "between")
@@ -123,10 +125,16 @@ def test_restart_exactly_between_batches_preserves_durable_next_intent(
     assert intent.target_id == "target-5"
     assert intent.not_before == due.isoformat()
 
+    monkeypatch.setattr(
+        batch_cursor_module,
+        "_utc_now",
+        lambda: due - timedelta(microseconds=1),
+    )
     with pytest.raises(BatchCursorBlockedError, match="deadline"):
-        restarted.release_inter_batch_wait(now=due - timedelta(microseconds=1))
+        restarted.release_inter_batch_wait()
 
-    restarted.release_inter_batch_wait(now=due)
+    monkeypatch.setattr(batch_cursor_module, "_utc_now", lambda: due)
+    restarted.release_inter_batch_wait()
     assert restarted.next_target() is not None
     assert restarted.next_target().target_id == "target-5"
     assert restarted.state.next_scheduled_intent is not None

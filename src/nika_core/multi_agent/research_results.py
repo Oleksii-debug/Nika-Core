@@ -18,8 +18,6 @@ from nika_core.research.models import (
 
 _ASSIGNMENT_SCHEMA = "nika.multi_agent.source-inspection-assignment:v2"
 _RESULT_SCHEMA = "nika.multi_agent.source-inspection-result:v2"
-_MAX_RESULT_JSON_BYTES = 8 * 1024 * 1024
-_MAX_EVIDENCE_PER_ITEM = 128
 
 
 class SourceResultBindingError(ValueError):
@@ -189,33 +187,7 @@ def decode_source_result(
         if actual != expected_value:
             raise SourceResultBindingError(f"{key} does not match declared assignment")
 
-    # Check the item count before hashing worker-controlled evidence. A forged
-    # result cannot demand unbounded serialization work to reach this limit.
-    raw_result = _mapping(data["result_set"], "result_set")
-    _require_exact_keys(
-        raw_result, {"result_set_id", "workspace_id", "query", "created_at", "items"}, "result_set"
-    )
-    raw_items = raw_result["items"]
-    if not isinstance(raw_items, list):
-        raise SourceResultBindingError("result_set items must be a list")
-    if len(raw_items) > assignment.max_items:
-        raise SourceResultBindingError("result exceeds assignment max_items")
-    for raw_item in raw_items:
-        item_data = _mapping(raw_item, "result item")
-        _require_exact_keys(
-            item_data,
-            {"ordinal", "document_id", "title", "snippet", "rank", "why_matched", "evidence"},
-            "result item",
-        )
-        raw_evidence = item_data["evidence"]
-        if not isinstance(raw_evidence, list):
-            raise SourceResultBindingError("result evidence must be a list")
-        if len(raw_evidence) > _MAX_EVIDENCE_PER_ITEM:
-            raise SourceResultBindingError("result evidence exceeds maximum count")
-
     claimed_digest = _text(data["result_digest"], "result_digest")
-    if len(claimed_digest) != 64 or any(ch not in "0123456789abcdef" for ch in claimed_digest):
-        raise SourceResultBindingError("invalid result_digest")
     unsigned = {key: data[key] for key in data if key != "result_digest"}
     actual_digest = _payload_digest(unsigned)
     if not hmac.compare_digest(claimed_digest, actual_digest):
@@ -247,35 +219,17 @@ def _unsigned_result_payload(
 
 
 def _payload_digest(payload: Mapping[str, object]) -> str:
-    # Hash canonical JSON incrementally: worker evidence must not require a
-    # second, unbounded in-memory serialization merely to check its digest.
-    digest = hashlib.sha256()
-    encoded_size = 0
     try:
-        encoder = json.JSONEncoder(
+        encoded = json.dumps(
+            payload,
             ensure_ascii=False,
             allow_nan=False,
             sort_keys=True,
             separators=(",", ":"),
-        )
-        for chunk in encoder.iterencode(payload):
-            # UTF-8 cannot use fewer bytes than the number of code points.
-            # Reject an oversized string without first allocating its bytes.
-            if encoded_size + len(chunk) > _MAX_RESULT_JSON_BYTES:
-                raise SourceResultBindingError("result evidence exceeds maximum JSON size")
-            encoded_chunk = chunk.encode("utf-8")
-            encoded_size += len(encoded_chunk)
-            if encoded_size > _MAX_RESULT_JSON_BYTES:
-                raise SourceResultBindingError("result evidence exceeds maximum JSON size")
-            digest.update(encoded_chunk)
-    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
-        if isinstance(exc, SourceResultBindingError):
-            raise
-        # A small but deeply nested worker value can overflow JSONEncoder's
-        # recursion limit long before reaching the byte cap. Contain it at the
-        # same untrusted-evidence boundary without exposing its contents.
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
         raise SourceResultBindingError("result evidence must be canonical JSON") from exc
-    return digest.hexdigest()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _validate_result_set(
@@ -313,13 +267,12 @@ def _validate_result_set(
         _require_text(item.title, "title")
         _string(item.snippet, "snippet")
         _require_text(item.why_matched, "why_matched")
-        _finite_rank(item.rank)
-        if not isinstance(item.evidence, (tuple, list)):
-            raise SourceResultBindingError("result evidence must be a sequence")
+        if isinstance(item.rank, bool) or not isinstance(item.rank, (int, float)):
+            raise SourceResultBindingError("result rank must be numeric")
+        if not math.isfinite(float(item.rank)):
+            raise SourceResultBindingError("result rank must be finite")
         if not item.evidence:
             raise SourceResultBindingError("result item has no provenance evidence")
-        if len(item.evidence) > _MAX_EVIDENCE_PER_ITEM:
-            raise SourceResultBindingError("result evidence exceeds maximum count")
         for evidence in item.evidence:
             _validate_evidence(assignment.source, evidence)
 
@@ -399,28 +352,18 @@ def _decode_item(value: object) -> ResearchResultItem:
     raw_evidence = data["evidence"]
     if not isinstance(raw_evidence, list):
         raise SourceResultBindingError("result evidence must be a list")
-    rank = _finite_rank(data["rank"])
+    rank = data["rank"]
+    if isinstance(rank, bool) or not isinstance(rank, (int, float)):
+        raise SourceResultBindingError("result rank must be numeric")
     return ResearchResultItem(
         ordinal=_integer(data["ordinal"], "ordinal"),
         document_id=_text(data["document_id"], "document_id"),
         title=_text(data["title"], "title"),
         snippet=_string(data["snippet"], "snippet"),
-        rank=rank,
+        rank=float(rank),
         why_matched=_text(data["why_matched"], "why_matched"),
         evidence=tuple(_decode_evidence(item) for item in raw_evidence),
     )
-
-
-def _finite_rank(value: object) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SourceResultBindingError("result rank must be numeric")
-    try:
-        rank = float(value)
-    except OverflowError as exc:
-        raise SourceResultBindingError("result rank must be finite") from exc
-    if not math.isfinite(rank):
-        raise SourceResultBindingError("result rank must be finite")
-    return rank
 
 
 def _decode_evidence(value: object) -> ResearchEvidence:

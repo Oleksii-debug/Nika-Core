@@ -1,0 +1,38 @@
+{
+  "profiles": {
+    "core": [
+      "dev",
+      "agent",
+      "planning"
+    ],
+    "m12-ubuntu": [
+      "dev",
+      "agent",
+      "planning",
+      "browser"
+    ],
+    "m12-windows": [
+      "dev",
+      "agent",
+      "planning",
+      "windows-interaction"
+    ],
+    "packaging": [
+      "gui",
+      "qa",
+      "dev"
+    ]
+  },
+  "resolver": "uv 0.13.6",
+  "schema_version": 1,
+  "sha256": {
+    "docs/PLAN1_DEPENDENCY_AUTHORITY.json": "6cb78691eb12a2b6825f3884fbf56f63ef156620fe1c92756d0de436a9df82df",
+    "pyproject.toml": "6d1ed391019b87dd53124a5e201395aa1677a8aa400359cf04ac7450ac53d2b4",
+    "requirements/build.txt": "9551d658534e26af7676dba698da594c7356e5bcd30d64eccf3b808ffd343a61",
+    "requirements/core.txt": "055227f8a3fe277d6c6842b78949839bf55a2c061c9002c00b65bfd7de803a7e",
+    "requirements/m12-ubuntu.txt": "e2fcd3bfaeba0448100080291a2679244f4b7f75194afd623775383e251e9d8b",
+    "requirements/m12-windows.txt": "543f6e106eb7aae10859bd28c5d4b2c41bd942d089658763c3168ba4c5a1ac35",
+    "requirements/packaging.txt": "e32074861f76382c53c77d3b47784a904fb4e83bacc630809b6d2b5337fde54f",
+    "uv.lock": "f6fed13bde3146c494425f734a34e250b5f3028ab221d7253f4c2216bd8118b4"
+  }
+}

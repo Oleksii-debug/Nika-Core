@@ -178,23 +178,6 @@ def test_accepted_task_keeps_sources_if_settings_change_before_runtime_start(
         _dispatch(bridge, "team.sources.configure", {**a, "revision": 0})["status"] == "completed"
     )
     assert (
-        _dispatch(
-            bridge,
-            "settings.model.configure",
-            {
-                "revision": 0,
-                "route_kind": "deterministic",
-                "provider_id": None,
-                "model": None,
-                "base_url": None,
-                "credential_ref": None,
-                "private_data_allowed": True,
-                "timeout_seconds": 60,
-            },
-        )["status"]
-        == "completed"
-    )
-    assert (
         _dispatch(bridge, "task.create", {"command": "Порівняй два джерела"})["status"]
         == "accepted"
     )

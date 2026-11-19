@@ -1,76 +1,267 @@
 from __future__ import annotations
 
+import hashlib
+import io
+import os
 import re
+import stat
 import sys
+import tempfile
+import unicodedata
 from importlib import metadata
 from pathlib import Path
+from urllib.parse import quote
 
 RUNTIME_DISTRIBUTIONS = (
     "annotated-types",
+    "anyio",
+    "apscheduler",
     "bottle",
+    "certifi",
     "cffi",
     "clr-loader",
+    "h11",
+    "httpcore",
+    "httpx",
+    "idna",
+    "markdown-it-py",
+    "mdurl",
     "packaging",
-    "numpy",
     "platformdirs",
     "proxy-tools",
+    "psutil",
     "pycparser",
     "pydantic",
     "pydantic-core",
     "pydantic-settings",
     "pygments",
+    "pytest",
     "python-dotenv",
     "pythonnet",
     "pywebview",
-    "sherpa-onnx",
-    "sherpa-onnx-core",
-    "sounddevice",
     "rich",
     "setuptools",
     "tomli",
+    "tzdata",
+    "tzlocal",
     "typing-extensions",
     "typing-inspection",
+    "wheel",
 )
 
 _SECTION_RE = re.compile(r"^===== (?P<title>.+?) =====$")
+_MAX_NOTICES_BYTES = 16 * 1024 * 1024
+_MAX_DISTRIBUTION_PATH_BYTES = 4096
+_MAX_SECTION_IDENTITY_BYTES = 4096
+_MAX_NOTICE_SECTIONS = 256
+_NOTICE_PREAMBLE = "Nika Core third-party notices"
+
+# The 0.1.0 sdist omits LICENSE.txt. Its sole module is byte-identical to
+# this upstream revision and explicitly declares BSD (PyPI metadata says MIT).
+_PROXY_TOOLS_SOURCE_SHA256 = (
+    "d1539d95e1a713c068ca81d42e047b2c76568964cf277596d4e19efb22f476be"
+)
+_PROXY_TOOLS_LICENSE_SOURCE = (
+    "https://github.com/jtushman/proxy_tools/blob/"
+    "db43f1e35d4f90a65c5a4d56d9e9af88212ec6e6/LICENSE.txt"
+)
+_PROXY_TOOLS_LICENSE = (
+    "The BSD License (BSD)\n"
+    "\n"
+    "Copyright (c) 2013 Armin Ronacher\n"
+    "Copyright (c) 2014 Jonathan Tushman\n"
+    "\n"
+    "Redistribution and use in source and binary forms, with or without\n"
+    "modification, are permitted provided that the following conditions are met:\n"
+    "\n"
+    "  * Redistributions of source code must retain the above copyright\n"
+    "    notice, this list of conditions and the following disclaimer.\n"
+    "  * Redistributions in binary form must reproduce the above copyright\n"
+    "    notice, this list of conditions and the following disclaimer in the\n"
+    "    documentation and/or other materials provided with the distribution.\n"
+    "\n"
+    "THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS \"AS IS\"\n"
+    "AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE\n"
+    "IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE\n"
+    "ARE DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY\n"
+    "DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES\n"
+    "(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;\n"
+    "LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND\n"
+    "ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT\n"
+    "(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF\n"
+    "THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.OTHERWISE, ARISIN"
+    "G FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN "
+    "THE SOFTWARE."
+)
+
+
+def _bounded_metadata_value(value: object, *, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        # Runtime metadata corruption is a release-evidence failure, not caller misuse.
+        raise RuntimeError(  # noqa: TRY004
+            f"Runtime distribution {field} metadata is invalid"
+        )
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > _MAX_NOTICES_BYTES:
+        raise RuntimeError(
+            f"Runtime distribution {field} metadata exceeds the release size limit"
+        )
+    try:
+        encoded = text.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise RuntimeError(f"Runtime distribution {field} metadata is invalid") from exc
+    if len(encoded) > _MAX_NOTICES_BYTES:
+        raise RuntimeError(
+            f"Runtime distribution {field} metadata exceeds the release size limit"
+        )
+    return text
+
+
+def _section_identity(value: object, *, field: str) -> str:
+    text = _bounded_metadata_value(value, field=field)
+    if text is None:
+        raise RuntimeError(f"Runtime distribution {field} identity is invalid")
+    if len(text) > _MAX_SECTION_IDENTITY_BYTES:
+        raise RuntimeError(f"Runtime distribution {field} identity is invalid")
+    encoded = text.encode("utf-8")
+    if (
+        len(encoded) > _MAX_SECTION_IDENTITY_BYTES
+        or any(
+            unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+            for char in text
+        )
+    ):
+        raise RuntimeError(f"Runtime distribution {field} identity is invalid")
+    return text
 
 
 def _python_license() -> str:
     license_file = Path(sys.base_prefix) / "LICENSE.txt"
     if not license_file.exists():
         raise RuntimeError(f"Python runtime license not found: {license_file}")
-    return license_file.read_text(encoding="utf-8", errors="replace").strip()
+    text = _read_notices(license_file)
+    if text is None or not text.strip():
+        raise RuntimeError("Python runtime license evidence is invalid")
+    return text.strip()
 
 
 def _metadata_license(dist: metadata.Distribution) -> str | None:
-    expression = dist.metadata.get("License-Expression")
-    if expression and expression.strip():
-        return expression.strip()
-    license_value = dist.metadata.get("License")
-    if license_value and license_value.strip() and license_value.strip().upper() != "UNKNOWN":
-        return license_value.strip()
-    classifiers = [
-        value
-        for value in dist.metadata.get_all("Classifier", [])
-        if value.startswith("License ::")
-    ]
+    expression = _bounded_metadata_value(
+        dist.metadata.get("License-Expression"),
+        field="license",
+    )
+    if expression:
+        if any(_SECTION_RE.fullmatch(line.strip()) for line in expression.splitlines()):
+            raise RuntimeError("Runtime distribution license metadata is ambiguous")
+        return expression
+
+    license_value = _bounded_metadata_value(
+        dist.metadata.get("License"),
+        field="license",
+    )
+    if license_value and license_value.upper() != "UNKNOWN":
+        if any(_SECTION_RE.fullmatch(line.strip()) for line in license_value.splitlines()):
+            raise RuntimeError("Runtime distribution license metadata is ambiguous")
+        return license_value
+
+    classifiers: list[str] = []
+    classifier_bytes = 0
+    for raw_value in dist.metadata.get_all("Classifier", []) or ():
+        value = _bounded_metadata_value(raw_value, field="classifier")
+        if value is None or not value.startswith("License ::"):
+            continue
+        classifier_bytes += len(value.encode("utf-8"))
+        if classifier_bytes > _MAX_NOTICES_BYTES:
+            raise RuntimeError(
+                "Runtime distribution classifier metadata exceeds the release size limit"
+            )
+        classifiers.append(value)
     return "; ".join(classifiers) or None
+
+
+def _canonical_distribution_file(item: object) -> str:
+    relative = str(item).replace("\\", "/")
+    if len(relative) > _MAX_DISTRIBUTION_PATH_BYTES:
+        raise RuntimeError("Runtime distribution license path identity is invalid")
+    try:
+        encoded = relative.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise RuntimeError(
+            "Runtime distribution license path identity is invalid"
+        ) from exc
+    if (
+        not relative
+        or relative != relative.strip()
+        or len(encoded) > _MAX_DISTRIBUTION_PATH_BYTES
+        or relative.startswith("/")
+        or (len(relative) >= 2 and relative[0].isalpha() and relative[1] == ":")
+        or any(
+            unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+            for char in relative
+        )
+    ):
+        raise RuntimeError("Runtime distribution license path identity is invalid")
+    parts = relative.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise RuntimeError("Runtime distribution license path identity is invalid")
+    return relative
+
+
+def _located_distribution_file(
+    dist: metadata.Distribution,
+    relative_path: str,
+) -> Path:
+    try:
+        root = Path(dist.locate_file("")).resolve(strict=True)
+        target = Path(dist.locate_file(relative_path))
+        parent = target.parent.resolve(strict=True)
+        common = os.path.commonpath((os.fspath(root), os.fspath(parent)))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError(
+            "Runtime distribution license path containment is invalid"
+        ) from exc
+    if (
+        not root.is_dir()
+        or os.path.normcase(common) != os.path.normcase(os.fspath(root))
+    ):
+        raise RuntimeError("Runtime distribution license path containment is invalid")
+    return target
 
 
 def _license_texts(dist: metadata.Distribution) -> tuple[tuple[str, str], ...]:
     collected: list[tuple[str, str]] = []
+    evidence_bytes = 0
     for item in dist.files or ():
-        leaf = Path(str(item)).name.casefold()
+        relative_path = str(item).replace("\\", "/")
+        leaf = relative_path.rsplit("/", 1)[-1].casefold()
         if not any(marker in leaf for marker in ("license", "licence", "copying", "notice")):
             continue
+        relative_path = _canonical_distribution_file(relative_path)
         try:
-            path = Path(dist.locate_file(item))
-            if path.is_file():
-                text = path.read_text(encoding="utf-8", errors="replace").strip()
-                if text:
-                    collected.append((str(item).replace("\\", "/"), text))
-        except OSError:
-            continue
+            path = _located_distribution_file(dist, relative_path)
+            diagnostic: list[str] = []
+            text = _read_notices(path, diagnostic=diagnostic)
+            if text is None:
+                reason = diagnostic[-1] if diagnostic else "unavailable"
+                raise RuntimeError(
+                    "Runtime distribution license evidence is invalid "
+                    f"({relative_path}; {reason})"
+                )
+            stripped = text.strip()
+            if stripped:
+                evidence_bytes += len(relative_path.encode("utf-8"))
+                evidence_bytes += len(stripped.encode("utf-8"))
+                if evidence_bytes > _MAX_NOTICES_BYTES:
+                    raise RuntimeError(
+                        "Runtime distribution license evidence exceeds the release size limit"
+                    )
+                collected.append((relative_path, stripped))
+        except OSError as exc:
+            raise RuntimeError("Runtime distribution license evidence is unreadable") from exc
     return tuple(sorted(collected))
 
 
@@ -78,30 +269,72 @@ def _distribution_section(
     distribution_name: str,
     dist: metadata.Distribution,
 ) -> tuple[str, str]:
-    package_name = dist.metadata.get("Name") or distribution_name
+    package_name = _section_identity(
+        dist.metadata.get("Name") or distribution_name,
+        field="name",
+    )
+    version = _section_identity(str(dist.version), field="version")
     declared_license = _metadata_license(dist)
     license_texts = _license_texts(dist)
-    if not declared_license and not license_texts:
+    if not license_texts and distribution_name == "proxy-tools":
+        # Use the existing bounded/no-follow reader; never execute this source.
+        source = _read_notices(_located_distribution_file(dist, "proxy_tools/__init__.py"))
+        if (
+            version != "0.1.0"
+            or source is None
+            or hashlib.sha256(source.encode("utf-8")).hexdigest() != _PROXY_TOOLS_SOURCE_SHA256
+        ):
+            raise RuntimeError("Unreviewed proxy-tools source cannot use the pinned license")
+        license_texts = ((_PROXY_TOOLS_LICENSE_SOURCE, _PROXY_TOOLS_LICENSE),)
+    if not license_texts:
         raise RuntimeError(
-            f"No license evidence found for runtime distribution: {distribution_name}"
+            f"No license text found for runtime distribution: {distribution_name}"
         )
+
     body: list[str] = []
+    body_bytes = 0
+
+    def append_body(value: str) -> None:
+        nonlocal body_bytes
+        encoded_length = len(value.encode("utf-8"))
+        body_bytes += encoded_length + (1 if body else 0)
+        if body_bytes > _MAX_NOTICES_BYTES:
+            raise RuntimeError(
+                "Runtime distribution license evidence exceeds the release size limit"
+            )
+        body.append(value)
+
     if declared_license:
-        body.append(f"Declared license: {declared_license}")
+        append_body(f"Declared license: {declared_license}")
+    if distribution_name == "certifi":
+        append_body(
+            "Unmodified upstream source for this version: "
+            f"https://pypi.org/project/certifi/{quote(version, safe='')}/#files"
+        )
     for relative_path, text in license_texts:
         if body:
-            body.append("")
-        body.extend([f"--- {relative_path} ---", text])
-    return f"{package_name} {dist.version}", "\n".join(body).strip()
+            append_body("")
+        append_body(f"--- {relative_path} ---")
+        append_body(text)
+    return f"{package_name} {version}", "\n".join(body).strip()
 
 
 def build_third_party_notices(bundle_dir: Path) -> Path:
-    sections = [
-        "Nika Core third-party notices",
-        "",
-        "===== Python runtime =====",
-        _python_license(),
-    ]
+    sections: list[str] = []
+    payload_bytes = 0
+
+    def append_section(value: str) -> None:
+        nonlocal payload_bytes
+        encoded_length = len(value.encode("utf-8"))
+        payload_bytes += encoded_length + (1 if sections else 0)
+        if payload_bytes > _MAX_NOTICES_BYTES:
+            raise RuntimeError("Generated third-party notices exceed the release size limit")
+        sections.append(value)
+
+    append_section("Nika Core third-party notices")
+    append_section("")
+    append_section("===== Python runtime =====")
+    append_section(_python_license())
     for distribution_name in RUNTIME_DISTRIBUTIONS:
         try:
             dist = metadata.distribution(distribution_name)
@@ -110,49 +343,252 @@ def build_third_party_notices(bundle_dir: Path) -> Path:
                 f"Required runtime distribution is missing: {distribution_name}"
             ) from exc
         title, body = _distribution_section(distribution_name, dist)
-        sections.extend(["", f"===== {title} =====", body])
+        append_section("")
+        append_section(f"===== {title} =====")
+        append_section(body)
+    payload = ("\n".join(sections).rstrip() + "\n").encode("utf-8")
+    if len(payload) > _MAX_NOTICES_BYTES:
+        raise RuntimeError("Generated third-party notices exceed the release size limit")
     target = bundle_dir / "THIRD_PARTY_NOTICES.txt"
-    target.write_text("\n".join(sections).rstrip() + "\n", encoding="utf-8")
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=".THIRD_PARTY_NOTICES-",
+            suffix=".tmp",
+            dir=bundle_dir,
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return target
 
 
 def _sections(text: str) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Parse the canonical notices grammar without splitlines() amplification."""
+    source = io.StringIO(text)
+    if source.readline().rstrip("\r\n") != _NOTICE_PREAMBLE:
+        raise ValueError("invalid third-party notices preamble")
+    if source.readline().rstrip("\r\n") != "":
+        raise ValueError("invalid third-party notices preamble separator")
+
     parsed: dict[str, str] = {}
     duplicates: list[str] = []
     title: str | None = None
-    body: list[str] = []
+    body = io.StringIO()
+    section_count = 0
 
     def commit() -> None:
         nonlocal body
         if title is None:
             return
+        value = body.getvalue().strip()
         if title in parsed:
             duplicates.append(title)
         else:
-            parsed[title] = "\n".join(body).strip()
-        body = []
+            parsed[title] = value
+        body = io.StringIO()
 
-    for line in text.splitlines():
-        match = _SECTION_RE.fullmatch(line.strip())
+    for raw_line in source:
+        line = raw_line.rstrip("\r\n")
+        match = _SECTION_RE.fullmatch(line)
         if match:
             commit()
+            section_count += 1
+            if section_count > _MAX_NOTICE_SECTIONS:
+                raise ValueError("too many third-party notice sections")
             title = match.group("title").strip()
-            body = []
+            if not title:
+                raise ValueError("empty third-party notice section")
             continue
-        if title is not None:
-            body.append(line)
+        if title is None:
+            raise ValueError("content before first third-party notice section")
+        if body.tell():
+            body.write("\n")
+        body.write(line)
     commit()
+    if section_count == 0:
+        raise ValueError("third-party notices contain no sections")
     return parsed, tuple(duplicates)
+
+
+def _windows_verbatim_path(target: Path) -> str:
+    absolute = os.path.abspath(os.fspath(target))
+    if absolute.startswith("\\\\?\\"):
+        return absolute
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute[2:]
+    return "\\\\?\\" + absolute
+
+
+def _open_notices_descriptor(target: Path) -> int:
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+
+        generic_read = 0x80000000
+        share_read_delete = 0x00000001 | 0x00000004
+        open_existing = 3
+        file_attribute_normal = 0x00000080
+        file_flag_open_reparse_point = 0x00200000
+        handle = create_file(
+            _windows_verbatim_path(target),
+            generic_read,
+            share_read_delete,
+            None,
+            open_existing,
+            file_attribute_normal | file_flag_open_reparse_point,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle == invalid_handle:
+            error = ctypes.get_last_error()
+            raise OSError(error, "unable to open third-party notice evidence", str(target))
+        try:
+            return msvcrt.open_osfhandle(
+                handle,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+        except Exception:
+            close_handle(handle)
+            raise
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    return os.open(target, flags)
+
+
+def _snapshot_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _path_descriptor_identity(
+    value: os.stat_result, *, windows: bool,
+) -> tuple[int, int, int, int, int]:
+    # CPython 3.12 Windows lstat preserves creation-time ctime compatibility,
+    # while fstat reports FILE_BASIC_INFO.ChangeTime. Compare their shared
+    # birthtime here, retaining descriptor ctime in all read-stability checks.
+    identity = _snapshot_identity(value)
+    return (*identity[:4], value.st_birthtime_ns) if windows else identity
+
+
+def _read_notices(target: Path, *, diagnostic: list[str] | None = None) -> str | None:
+    """Admit only bounded, regular, stable UTF-8 license evidence."""
+    def reject(reason: str) -> None:
+        if diagnostic is not None:
+            diagnostic.append(reason)
+
+    descriptor = -1
+    try:
+        before = target.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_NOTICES_BYTES:
+            return reject("not_regular_or_oversize")
+        descriptor = _open_notices_descriptor(target)
+        opened = os.fstat(descriptor)
+        before_identity = _path_descriptor_identity(before, windows=os.name == "nt")
+        opened_path_identity = _path_descriptor_identity(opened, windows=os.name == "nt")
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or opened_path_identity != before_identity
+        ):
+            timestamp = "birthtime_ns" if os.name == "nt" else "ctime_ns"
+            fields = ("device", "inode", "size", "mtime_ns", timestamp)
+            differences = ",".join(
+                field for field, left, right in zip(
+                    fields, before_identity, opened_path_identity, strict=True
+                ) if left != right
+            )
+            return reject(f"descriptor_path_identity:{differences or 'mode'}")
+        with os.fdopen(descriptor, "rb", closefd=True) as source:
+            descriptor = -1
+            data = source.read(_MAX_NOTICES_BYTES + 1)
+            after_first_read = os.fstat(source.fileno())
+            if (
+                len(data) > _MAX_NOTICES_BYTES
+                or len(data) != after_first_read.st_size
+                or _snapshot_identity(after_first_read) != _snapshot_identity(opened)
+            ):
+                return reject("changed_during_first_read")
+            source.seek(0)
+            confirmed = source.read(_MAX_NOTICES_BYTES + 1)
+            after_second_read = os.fstat(source.fileno())
+        current = target.lstat()
+        if (
+            data != confirmed
+            or len(confirmed) > _MAX_NOTICES_BYTES
+            or len(confirmed) != after_second_read.st_size
+            or _snapshot_identity(after_second_read) != _snapshot_identity(opened)
+            or not stat.S_ISREG(current.st_mode)
+            or _path_descriptor_identity(current, windows=os.name == "nt") != opened_path_identity
+        ):
+            return reject("changed_during_second_read_or_path_recheck")
+        # Compare stable raw bytes above, then canonicalize ordinary Windows
+        # line endings for the LF section grammar and upstream-text comparison.
+        return data.decode("utf-8").replace("\r\n", "\n")
+    except OSError as exc:
+        return reject(f"io_error:{getattr(exc, 'winerror', None) or exc.errno}")
+    except UnicodeError:
+        return reject("invalid_utf8")
+    except AttributeError:
+        return reject("timestamp_unavailable")
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
     target = bundle_dir / "THIRD_PARTY_NOTICES.txt"
-    if not target.is_file():
+    try:
+        target.lstat()
+    except FileNotFoundError:
         return ("missing:THIRD_PARTY_NOTICES.txt",)
+    except OSError:
+        return ("notices:unreadable",)
 
-    text = target.read_text(encoding="utf-8", errors="replace")
-    sections, duplicates = _sections(text)
+    text = _read_notices(target)
+    if text is None:
+        return ("notices:unreadable",)
+    structural_error = False
+    try:
+        sections, duplicates = _sections(text)
+    except ValueError:
+        sections = {}
+        duplicates = ()
+        structural_error = True
+
     findings: list[str] = []
+    expected_titles = {"Python runtime"}
     if "Python runtime" in duplicates:
         findings.extend(("notices:pythonruntime", "notices:pythonruntime:duplicate"))
     python_body = sections.get("Python runtime")
@@ -169,6 +605,7 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
         try:
             dist = metadata.distribution(distribution_name)
             title, expected_body = _distribution_section(distribution_name, dist)
+            expected_titles.add(title)
         except (metadata.PackageNotFoundError, RuntimeError):
             findings.extend((base_finding, f"{base_finding}:metadata"))
             continue
@@ -177,4 +614,9 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
             continue
         if sections.get(title) != expected_body:
             findings.append(base_finding)
+
+    if set(sections).difference(expected_titles):
+        findings.append("notices:unexpected-section")
+    if structural_error:
+        findings.append("notices:structure")
     return tuple(dict.fromkeys(findings))

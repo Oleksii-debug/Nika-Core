@@ -1258,7 +1258,7 @@ class TaskRuntimeCoordinator:
             event_type=event.event_type,
             entity_type="task",
             entity_id=task_id,
-            payload={"sequence": event.sequence, **dict(event.payload)},
+            payload={**dict(event.payload), "sequence": event.sequence},
         )
 
     @staticmethod
