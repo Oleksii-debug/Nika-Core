@@ -314,12 +314,14 @@ def test_provider_kind_substitution_fails_closed() -> None:
     gateway.register(compromised)
     router = IntelligenceModeRouter(gateway=gateway)
 
-    with pytest.raises(IntelligenceModeError) as caught:
+    with pytest.raises(ModelGatewayError) as caught:
         asyncio.run(
             router.complete_model(IntelligenceMode.EMBEDDED_LOCAL, _request())
         )
 
-    assert caught.value.code is IntelligenceModeErrorCode.RESPONSE_MISMATCH
+    assert caught.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert caught.value.provider_id == "foundry-local"
+    assert caught.value.failure_effect is ModelFailureEffect.UNKNOWN
 
 
 def test_provider_identity_substitution_fails_closed() -> None:
@@ -338,10 +340,12 @@ def test_provider_identity_substitution_fails_closed() -> None:
         ),
     )
 
-    with pytest.raises(IntelligenceModeError) as caught:
+    with pytest.raises(ModelGatewayError) as caught:
         asyncio.run(router.complete_model(IntelligenceMode.EXTERNAL_API, _request()))
 
-    assert caught.value.code is IntelligenceModeErrorCode.RESPONSE_MISMATCH
+    assert caught.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert caught.value.provider_id == "approved-cloud"
+    assert caught.value.failure_effect is ModelFailureEffect.UNKNOWN
 
 
 def test_response_request_identity_substitution_fails_closed() -> None:
@@ -354,10 +358,12 @@ def test_response_request_identity_substitution_fails_closed() -> None:
     gateway.register(ollama)
     router = IntelligenceModeRouter(gateway=gateway)
 
-    with pytest.raises(IntelligenceModeError) as caught:
+    with pytest.raises(ModelGatewayError) as caught:
         asyncio.run(router.complete_model(IntelligenceMode.EXTERNAL_LOCAL, _request()))
 
-    assert caught.value.code is IntelligenceModeErrorCode.RESPONSE_MISMATCH
+    assert caught.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert caught.value.provider_id == "ollama"
+    assert caught.value.failure_effect is ModelFailureEffect.UNKNOWN
 
 
 def test_statuses_are_secret_free_and_external_is_opt_in() -> None:
