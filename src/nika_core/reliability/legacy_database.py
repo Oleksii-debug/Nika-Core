@@ -18,6 +18,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
+from nika_core.data.experience_ledger_schema import EXPERIENCE_LEDGER_SCHEMA_VERSION
 from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VERSION
 from nika_core.data.resource_durability_schema import (
     RESOURCE_DURABILITY_SCHEMA_VERSION,
@@ -32,6 +33,7 @@ from nika_core.reliability.backup import BackupRecoveryError, SQLiteRecoveryMana
 _RECEIPT_TABLE = "legacy_database_adoption_v1"
 _EMPTY_TABLES = {
     "schema_migrations",
+    "experience_ledger_schema_migrations",
     "multi_agent_state_schema_migrations",
     "product_project_schema_migrations",
     "resource_durability_schema_migrations",
@@ -124,6 +126,7 @@ def _inspect(
             )
         ]
         for name, supported in (
+            ("experience_ledger_schema_migrations", EXPERIENCE_LEDGER_SCHEMA_VERSION),
             ("multi_agent_state_schema_migrations", MULTI_AGENT_STATE_SCHEMA_VERSION),
             ("product_project_schema_migrations", PRODUCT_PROJECT_SCHEMA_VERSION),
             ("resource_durability_schema_migrations", RESOURCE_DURABILITY_SCHEMA_VERSION),
