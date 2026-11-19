@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.kernel.audit import AuditIntegrityError, AuditInspectionQuery, AuditLog
+from nika_core.kernel.audit import AuditInspectionQuery, AuditIntegrityError, AuditLog
 
 
 def _make_log(tmp_path):
@@ -389,22 +389,21 @@ def test_non_object_payload_is_not_silently_converted_to_empty_object(tmp_path):
 
 def test_nonfinite_payload_rolls_back_earlier_audit_in_same_transaction(tmp_path):
     store, log = _make_log(tmp_path)
-    with pytest.raises(ValueError, match="Out of range float"):
-        with store.connection() as conn:
-            log.append_with_connection(
-                conn,
-                event_type="task.started",
-                entity_type="task",
-                entity_id="rollback",
-                payload={"status": "running"},
-            )
-            log.append_with_connection(
-                conn,
-                event_type="task.completed",
-                entity_type="task",
-                entity_id="rollback",
-                payload={"score": float("nan")},
-            )
+    with pytest.raises(ValueError, match="Out of range float"), store.connection() as conn:
+        log.append_with_connection(
+            conn,
+            event_type="task.started",
+            entity_type="task",
+            entity_id="rollback",
+            payload={"status": "running"},
+        )
+        log.append_with_connection(
+            conn,
+            event_type="task.completed",
+            entity_type="task",
+            entity_id="rollback",
+            payload={"score": float("nan")},
+        )
     assert log.list_for(entity_type="task", entity_id="rollback") == ()
 
 

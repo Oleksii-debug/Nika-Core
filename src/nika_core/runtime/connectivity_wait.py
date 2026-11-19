@@ -398,8 +398,14 @@ class ConnectivityWaitService:
         )
 
     def _activate_runtime(self, job: ScheduledJob) -> None:
-        if self._scheduler is not None:
-            self._scheduler.upsert(job)
+        if self._scheduler is None:
+            return
+        # The transaction already committed this intent. Persisting its snapshot
+        # again could overwrite a successor committed by another process.
+        activate_persisted = getattr(self._scheduler, "activate_persisted", None)
+        if not callable(activate_persisted):
+            raise TypeError("scheduler must support persisted-only activation")
+        activate_persisted(job)
 
 
 def _job_from_intent(

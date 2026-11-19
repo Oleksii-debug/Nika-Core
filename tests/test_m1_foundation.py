@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic_settings import SettingsError
 
 from nika_core.config import AppConfig
 from nika_core.data.schema import SCHEMA_VERSION
@@ -31,12 +32,13 @@ def test_config_accepts_explicit_database_path_and_long_env_name(
     assert AppConfig.from_environment().database_path == tmp_path / "long-name.db"
 
 
-def test_legacy_db_path_has_priority_when_both_env_names_exist(
+def test_conflicting_database_aliases_are_rejected_before_opening_data(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("NIKA_DB_PATH", str(tmp_path / "legacy.db"))
     monkeypatch.setenv("NIKA_DATABASE_PATH", str(tmp_path / "long-name.db"))
-    assert AppConfig.from_environment().database_path == tmp_path / "legacy.db"
+    with pytest.raises(SettingsError, match="Суперечливі змінні середовища"):
+        AppConfig.from_environment()
 
 
 def test_invalid_config_fails_closed() -> None:

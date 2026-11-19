@@ -559,9 +559,8 @@ def _redact_encoded_url(match: re.Match[str]) -> str:
         if decoded_next == decoded:
             break
         decoded = decoded_next
-    if decoded.casefold().startswith(("http://", "https://")):
-        if _redact_url(decoded) != decoded:
-            return _REDACTED_URL
+    if decoded.casefold().startswith(("http://", "https://")) and _redact_url(decoded) != decoded:
+        return _REDACTED_URL
     return encoded
 
 
@@ -639,10 +638,12 @@ def _redact_url_parameters(value: str, *, _depth: int) -> str:
             safe_pairs.append((name, _REDACTED))
             changed = True
             continue
-        if decoded.casefold().startswith(("http://", "https://")):
-            if _redact_url(decoded, _depth=_depth + 1) != decoded:
-                safe_pairs.append((name, _REDACTED_URL))
-                changed = True
-                continue
+        if (
+            decoded.casefold().startswith(("http://", "https://"))
+            and _redact_url(decoded, _depth=_depth + 1) != decoded
+        ):
+            safe_pairs.append((name, _REDACTED_URL))
+            changed = True
+            continue
         safe_pairs.append((name, item))
     return urlencode(safe_pairs) if changed else value

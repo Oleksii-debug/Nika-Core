@@ -392,7 +392,7 @@ def test_ready_resume_probe_rejects_noncanonical_checkpoint_identity() -> None:
             reason="invalid whitespace identity",
             checkpoint_id=" ",
         )
-    with pytest.raises(ValueError, match="surrounding whitespace"):
+    with pytest.raises(ValueError, match="checkpoint_id.*canonical text"):
         RuntimeResumeProbe(
             status=RuntimeResumeProbeStatus.READY,
             reason="invalid padded identity",

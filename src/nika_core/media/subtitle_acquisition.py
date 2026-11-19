@@ -455,7 +455,12 @@ class YtDlpSubtitleAcquirer:
                     expected_sha256=source_sha256,
                     max_bytes=active.max_bytes,
                 )
-            except FileExistsError:
+            except (FileExistsError, PermissionError) as error:
+                # Windows can reject replacement while a concurrent winner is
+                # being read. Reuse still requires the existing path/size/hash
+                # proof; a permission failure without a winner must propagate.
+                if isinstance(error, PermissionError) and not final_path.exists():
+                    raise
                 promoted = _reuse_content_addressed_file(
                     final_path,
                     root=root,
